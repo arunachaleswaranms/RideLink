@@ -38,6 +38,27 @@ lexicographically smaller `peer_id`**, fixed at pairing time.
 |---|---|
 | No leader; last-write-wins on timestamps | Requires perfectly synchronised clocks to be deterministic — and clock offset is itself an estimate. Concurrent commands would resolve differently on each device |
 | No leader; Lamport clocks / CRDT queue | Correct but heavy. A CRDT queue cannot express "skip exactly one track" cleanly, which is the actual conflict we have |
-| Elect the initiator of the connection | Ambiguous when both connect simultaneously; changes across reconnects, so `command_seq` continuity breaks |
+| Elect the initiator of the connection | Ambiguous when both connect simultaneously; changes across reconnects, so `command_seq` continuity breaks. Note that *which connection survives* a simultaneous connect is a separate question, answered by [ADR-015](ADR-015-duplicate-connection-resolution.md) with a deliberately different key |
 | Elect by role (rider always leads) | Creates a permanent master, which §9.4 forbids in spirit even if hidden — and makes the pillion's controls second-class if the rider's phone stalls |
 | Full Raft/Paxos | Absurd for two nodes with no durability requirement |
+
+---
+
+## Amendment A1 — 26 August 2026 — leadership is not connection ownership
+
+**Status of the ADR: still Accepted.** The election rule is unchanged: the lexicographically
+smaller `peer_id` leads, fixed at pairing.
+
+Added for clarity, because the two questions are easy to conflate and the original text did not
+separate them explicitly:
+
+Leadership answers *"who assigns `command_seq`?"*. It is decided by `peer_id` alone and has
+nothing to do with which peer called `connect()` or which TCP connection survived a simultaneous
+mutual connect. That second question — which socket lives — is answered by
+[ADR-015](ADR-015-duplicate-connection-resolution.md) using an ephemeral `conn_tiebreak`, chosen
+specifically so it is *not* `peer_id`.
+
+The two rules are deliberately keyed on different values. ADR-015 also picks the direction of its
+comparison so that on the surviving connection the leader is the **acceptor**, not the initiator —
+which means an implementation that quietly assumes "I dialled, therefore I lead" fails the
+`dedup/*.json` vectors immediately rather than working by coincidence.

@@ -1,2 +1,168 @@
-CLAUDE.md
+# RideLink — repository ignore rules
+#
+# CLAUDE.md is deliberately NOT ignored: it is the project's committed development
+# contract and must survive a fresh clone. See docs/STATUS.md.
+
+# ─── macOS / editors / OS cruft ────────────────────────────────────────────────
 .DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+.AppleDouble
+.LSOverride
+Icon?
+ehthumbs.db
+Thumbs.db
+desktop.ini
+*~
+*.swp
+*.swo
+*.orig
+*.rej
+*.bak
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json.example
+.fleet/
+*.code-workspace
+
+# ─── Python (tools/) ──────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# ─── Android / Gradle ─────────────────────────────────────────────────────────
+# Wrapper scripts and wrapper JAR/properties are COMMITTED on purpose — do not add
+# gradle/wrapper/ here. Reproducible builds depend on the pinned wrapper.
+.gradle/
+build/
+*/build/
+**/build/
+captures/
+.cxx/
+local.properties
+.kotlin/
+*.hprof
+lint-results*.html
+lint-results*.xml
+# Local outputs. Release artefacts are sideloaded from a build, never committed.
+*.apk
+*.aab
+*.ap_
+*.dex
+*.class
+# Android Studio / IntelliJ: drop per-developer state, keep shared config.
+# Listed file-by-file rather than as `.idea/**` so that `.idea/codeStyles/` and
+# `.idea/inspectionProfiles/` (shared, committed) are not swallowed by a parent
+# exclusion — git cannot re-include a file whose directory is already excluded.
+.idea/workspace.xml
+.idea/tasks.xml
+.idea/usage.statistics.xml
+.idea/shelf/
+.idea/caches/
+.idea/libraries/
+.idea/modules.xml
+.idea/modules/
+.idea/deploymentTargetSelector.xml
+.idea/deploymentTargetDropDown.xml
+.idea/runConfigurations.xml
+.idea/misc.xml
+.idea/gradle.xml
+.idea/compiler.xml
+.idea/jarRepositories.xml
+.idea/navEditor.xml
+.idea/assetWizardSettings.xml
+.idea/androidTestResultsUserPreferences.xml
+.idea/artifacts/
+.idea/kotlinc.xml
+.idea/dictionaries/
+.idea/httpRequests/
+.idea/sonarlint/
+.idea/*.iml
+*.iml
+
+# ─── iOS / Xcode / Swift ──────────────────────────────────────────────────────
+# The .xcodeproj bundle itself, project.pbxproj, and shared schemes are COMMITTED.
+# Only per-user state and build output are ignored.
+DerivedData/
+build/
+*.xcworkspace/xcuserdata/
+*.xcodeproj/xcuserdata/
+*.xcodeproj/project.xcworkspace/xcuserdata/
+xcuserdata/
+*.xcuserstate
+*.xcuserdatad/
+*.xcscmblueprint
+*.xccheckout
+*.moved-aside
+*.hmap
+*.ipa
+*.dSYM.zip
+*.dSYM
+.swiftpm/xcode/
+.swiftpm/configuration/
+Package.resolved.local
+# Package.resolved IS committed — it is the SPM dependency pin.
+
+# ─── Signing material, keys, credentials, local secrets ───────────────────────
+# Nothing in this block may ever be committed (see docs/ARCHITECTURE.md §11).
+*.keystore
+*.jks
+*.p12
+*.pfx
+*.pem
+*.key
+*.der
+*.cer
+*.crt
+*.csr
+*.mobileprovision
+*.provisionprofile
+*.certSigningRequest
+keystore.properties
+signing.properties
+google-services.json
+GoogleService-Info.plist
+ExportOptions.plist
+.env
+.env.*
+!.env.example
+secrets.properties
+*.secrets.json
+# Example/template config IS committed so a fresh clone knows what to fill in.
+!*.example
+!*.template
+!*.sample
+
+# ─── RideLink-specific: personal and copyrighted content ──────────────────────
+# Real music, real recordings and real transfer state must never enter the repo.
+music/
+Music/
+library/
+personal-media/
+test-media/real/
+test-media/personal/
+incoming/
+*.mp3
+*.m4a
+*.aac
+*.flac
+*.wav
+*.ogg
+*.opus
+*.part
+*.ridelink-part
+# Synthetic fixtures generated for the test suite ARE committed — they are
+# tone/noise files with no copyrighted or personal content.
+!test-media/synthetic/**
+!protocol/vectors/**
+!**/fixtures/synthetic/**
+
+# ─── Local diagnostic output ──────────────────────────────────────────────────
+# Exported diagnostic logs may contain peer handles and ride timing; keep local.
+logs/
+*.log
+diagnostics-export/
+docs/test-results/*.local.md

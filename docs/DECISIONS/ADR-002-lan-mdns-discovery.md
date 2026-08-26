@@ -44,3 +44,48 @@ QR code. Same protocol, different way of locating the peer. Deferred to Phase 1b
 | BLE transport | FR-002 excludes it; far too slow for 10–50 MB tracks |
 | Hardcoded IP, no discovery | Fragile against DHCP changes; poor UX. Kept only as the manual fallback |
 | Cloud rendezvous server | Violates FR-024 and the entire local-first premise |
+
+---
+
+## Amendment A1 — 26 August 2026 — no stable identity in TXT records
+
+**Status of the ADR: still Accepted.** The transport and discovery mechanism are unchanged. What
+changes is the TXT record content.
+
+The original decision said TXT records "carry only non-secret routing hints" and listed, among
+them, `fp6` — the first 6 hex characters of the TLS certificate fingerprint — so that a *known*
+peer could be recognised before a handshake.
+
+That was a mistake, and it undercut the rest of the design. `fp6` is derived from a long-term
+key, so it is **stable for the lifetime of the device identity**. Any passive observer on the
+Wi-Fi — a café AP, another guest, anyone with a laptop — can read mDNS traffic and log it. A
+stable 24-bit value is more than enough to recognise the same phone across days, networks and
+locations. Rotating the peer handle (`pid`) alongside it bought nothing: the rotating value was
+advertised in the same record as the stable one.
+
+**The corrected TXT record set is the complete set:**
+
+| Key | Value | Notes |
+|---|---|---|
+| `v` | protocol major version | |
+| `dh` | 16 CSPRNG bytes as 32 hex | **ephemeral discovery handle.** Regenerated when advertising starts, at least every 15 min while advertising, and after every session. Not derived from `peer_id` or from the identity key. Never persisted |
+| `plat` | `android` \| `ios` | optional, UI labelling only |
+
+Explicitly **absent**: any long-term `peer_id`, any certificate or SPKI fingerprint or prefix
+thereof, any pairing token, any SAS material, any library size or track count, and any user- or
+device-chosen display name. The old `pid` key is renamed `dh` so that nothing in the record even
+*looks* like a peer identity.
+
+**Known-peer recognition moves after the TLS handshake**, where it belongs: the SPKI pin check of
+ADR-012. The UX that `fp6` was buying is recovered without the privacy cost — when exactly one
+trusted peer exists and auto-connect is enabled, discovering or tapping a peer attempts a silent
+trusted connect, which either succeeds with no prompt or falls back to pairing. The user sees the
+same two outcomes; the network sees nothing durable.
+
+What remains observable and cannot be hidden: the service type `_ridelink._tcp` (so, that
+RideLink is running), the IP address, and the port. mDNS requires a service type. This is
+accepted and documented rather than pretended away.
+
+Tests: `docs/TEST_PLAN.md` §4 asserts the advertised key set is a subset of `{v, dh, plat}`, that
+no TXT value equals or prefixes `peer_id` or `identity_spki_sha256`, and that `dh` differs across
+two advertising sessions.

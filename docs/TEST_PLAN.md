@@ -1,6 +1,6 @@
 # RideLink — Test Plan
 
-**Status:** baseline for Phase 1. Derived from REQUIREMENTS §17.
+**Status:** baseline for Phase 1, corrected 26 August 2026. Derived from REQUIREMENTS §17.
 Every phase must satisfy its gate here before `STATUS.md` records it complete.
 
 **Governing rule from the brief:** never report a phase complete because code *looks* correct.
@@ -28,23 +28,34 @@ impressions.
 
 ## 2. L1 — Unit tests (pure logic)
 
-Targets `core:*` / `RideLinkCore`, which contain no platform types precisely so this layer can
-be exhaustive ([ARCHITECTURE §2](ARCHITECTURE.md#2-layering-identical-concepts-on-both-platforms)).
+Targets Android `core` / `RideLinkCore`, which contain no platform types precisely so this layer
+can be exhaustive
+([ARCHITECTURE §2](ARCHITECTURE.md#2-layering-identical-concepts-on-both-platforms),
+[§9](ARCHITECTURE.md#9-module-structure)).
 
 | Area | Cases |
 |---|---|
-| Envelope codec | round-trip all types; unknown field ignored; unknown `type` ignored; missing required field rejected; `v` mismatch rejected; 256 KiB+1 rejected; malformed UTF-8 rejected; `payload: null` rejected |
-| Session FSM | every legal transition; **every illegal transition rejected without crashing**; `RECONNECTING` returns to the state it left; `BYE` suppresses reconnect; `ENDING` is the only path that releases audio |
+| Envelope codec | round-trip all types; unknown field ignored; unknown `type` ignored; missing required field rejected; `v` mismatch rejected; **262 144 + 1 bytes rejected**; length prefix larger than the cap rejected *without reading the body*; malformed UTF-8 rejected; `payload: null` rejected |
+| Session FSM | every legal transition; **every illegal transition rejected without crashing**; `RECONNECTING` returns to the state it left; `BYE` suppresses reconnect; `ENDING` is the only path that releases audio; **closing a duplicate connection produces no transition and no `reconnect_count` increment** |
+| Connection dedup | larger `conn_tiebreak`'s outbound connection survives; both peers compute the same verdict from the same pair; equal tiebreak ⇒ both close and regenerate; inbound connection while `CONNECTED` ⇒ `session_already_active` with no state change; **`HELLO` applied at most once**; the loser never reaches capability exchange |
+| SAS derivation | the ten vectors of [PROTOCOL §4.5.2](PROTOCOL.md#452-sas-golden-vectors); output is **always exactly 6 characters**, all digits; `000000` renders as six zeroes; leading-zero cases; values at and past 999 999; big-endian byte order (a little-endian reading must fail the vectors); bytes 4…31 of the exporter output do not affect the result |
+| SPKI identity | `identity_spki_sha256` formatting (`sha256:` + 64 lowercase hex); pin match; **pin mismatch ⇒ `pin_mismatch`, never auto-re-pair**; certificate re-issued with unchanged SPKI ⇒ still trusted; expired certificate ⇒ `certificate_invalid`, *not* `pin_mismatch`; `HELLO.identity_spki_sha256` disagreeing with the TLS certificate ⇒ `identity_mismatch` |
 | Clock estimator | offset recovery from synthetic samples with known truth; outlier injection (one 500 ms spike in 11); all-samples-bad ⇒ no estimate rather than a wrong one; EWMA convergence; 30 ms step rejected until confirmed twice |
-| Drift ladder | boundary values 24/25/119/120/121/1999/2000/2001 ms; hysteresis (no nudge/restore oscillation); 3-seeks-in-60 s ⇒ sync-failed; rate restored to exactly 1.0 after convergence |
+| Drift ladder | boundary values 24/25/119/120/121/1999/2000/2001 ms; hysteresis (no nudge/restore oscillation); 3-seeks-in-60 s ⇒ sync-failed; rate restored to exactly 1.0 after convergence; **ladder suspended while either peer reports `route_state: "transitioning"`, and a transition does not advance the hard-seek counter** |
 | Command ordering | duplicate `command_seq` dropped; stale dropped; past `effective_at` applied immediately and counted; `stale_revision` rejected |
-| Queue algebra | add/remove/move; sparse `order` renumbering; concurrent adds converge; `queue_item_id` idempotent under retry; snapshot overwrites local |
+| Queue algebra | add/remove/move; sparse `order` renumbering; concurrent adds converge; `queue_item_id` idempotent under retry; snapshot overwrites local; 2 000-item cap enforced at `QUEUE_ADD` |
 | Manifest diff | presence classification for all 6 states; delta correctness; `content_hash: null` entry is displayable but not transferable |
+| **Manifest paging — sizing** | page assembly for **1**, **1 000** and **5 000** entries; every emitted page ≤ the negotiated budget *measured as encoded bytes*; `page_count` and `total_entries` match what was emitted; a 5 000-entry manifest whose single-frame form would exceed 256 KiB is emitted as multiple in-cap pages |
+| **Manifest paging — pathological metadata** | 512-scalar title/artist/album/filename; 4-byte-UTF-8 (emoji, CJK) metadata; metadata full of characters requiring JSON escapes; **every one still produces at least one valid page and no page over the cap**; identity fields never truncated |
+| **Manifest paging — digest** | digest is order-dependent; identical entry sets in a different order produce different digests; `content_hash: null` entries contribute via `quick_id`; both platforms compute byte-identical digests from the same vector |
+| **Manifest paging — failures** | missing page (gap in `page_index`); duplicated page; pages reordered; wrong `manifest_id`; `manifest_revision` changed mid-stream; delta whose `base_revision` ≠ local revision; `MANIFEST_END` count mismatch; `MANIFEST_END` digest mismatch; interrupted stream (no `MANIFEST_END`); page-timeout expiry; malformed page JSON; non-empty `removed[]` on `kind: "full"`. **In every case: the correct error code, staging discarded, and the previously accepted manifest and `manifest_revision` unchanged** |
+| **Manifest paging — concurrency** | a new `MANIFEST_BEGIN` while one is open aborts the first and discards its staging; `MANIFEST_ABORT` discards staging silently and keeps the previous manifest; restart after abort succeeds |
+| Audio state | `AUDIO_STATE` round-trip; `revision` monotonic — a lower revision is dropped; `media_quality` derived correctly from the effective output profile; unrecognised enum value from a peer treated as `unknown`, not rejected; all six representable situations of [PROTOCOL §4.4](PROTOCOL.md#44-audio_state--effective-runtime) encode and decode |
 | Hashing | `quick_id` and `content_hash` against fixed vectors; files smaller than 128 KiB (the quick_id window overlaps — must not double-count); empty file; 0-byte and 1-byte edge cases |
-| Leader election | smaller `peer_id` wins; stable across reconnect; disagreement ⇒ `leader_mismatch` |
-| Redaction | paths → basename; `peer_id` → 6 chars; **SAS / tokens / TLS secrets have no log path at all** (assert by searching the emitted log for a planted secret) |
+| Leader election | smaller `peer_id` wins; stable across reconnect; disagreement ⇒ `leader_mismatch`; **leadership unaffected by which side initiated the surviving connection** |
+| Redaction | paths → basename; `peer_id` → 6 chars; `identity_spki_sha256` → 6 hex; `conn_tiebreak` → 6 hex; **SAS / bulk tokens / TLS secrets have no log path at all** (assert by planting a secret and searching the entire emitted log for it) |
 
-**Coverage intent:** `core:*` / `RideLinkCore` ≥ 85 % line coverage. Coverage is a smoke alarm,
+**Coverage intent:** `core` / `RideLinkCore` ≥ 85 % line coverage. Coverage is a smoke alarm,
 not a goal — the boundary cases above matter more than the number.
 
 ---
@@ -58,6 +69,17 @@ two table-driven runners, identical expected output. Files listed in
 **Gate:** every vector passes on **both** platforms. A vector passing on one platform only is a
 release blocker, not a warning.
 
+Vector directories that exist specifically because of the correction pass:
+
+| Directory | Why it must be shared rather than per-platform |
+|---|---|
+| `sas/` | A big-endian/little-endian or padding disagreement here means two different six-digit codes on the two screens, which is indistinguishable from an attack. Ten fixed exporter outputs, fabricated, with expected `sas6` |
+| `manifest-paging/` | Page boundaries must be computed the same way on both sides, or one peer's pages are rejected by the other. 1 / 1 000 / 5 000 entries plus pathological metadata |
+| `manifest-paging-errors/` | Twelve failure cases; each asserts the error code *and* that the live manifest is unchanged |
+| `identity/` | SPKI formatting and pin semantics, including certificate re-issue with an unchanged key |
+| `dedup/` | `conn_tiebreak` pairs ⇒ which side's initiated connection survives. Catches an implementation that conflates initiator with leader |
+| `audio-state/` | Shared enum vocabulary and derived `media_quality`, so neither platform invents its own audio words |
+
 **Discipline:** every wire bug found on a device gets a vector added *before* the fix.
 
 ---
@@ -68,12 +90,47 @@ release blocker, not a warning.
 |---|---|---|
 | Database | Room migrations; FTS4 search ranking; 5 000-track insert performance | Android |
 | Database | GRDB migrations; FTS5 parity — **same query, same result set as Room** | iOS |
-| Library scan | synthetic MP3/AAC/M4A/FLAC fixtures in `test-media/`; tag extraction; artwork; malformed/truncated file does not crash the scan | both |
+| Library scan | synthetic MP3/AAC/M4A/FLAC fixtures in `test-media/synthetic/`; tag extraction; artwork; malformed/truncated file does not crash the scan | both |
 | Player | scheduled start at a future deadline; seek accuracy; rate change applied and restored | both |
 | Transfer | loopback to self: 1 KiB / 5 MiB / 50 MiB; corrupt a chunk ⇒ rejected; truncate ⇒ rejected; cancel mid-transfer ⇒ `.part` removed; **no `.part` ever promoted** | both |
-| Discovery | advertise + browse on loopback/emulator network; service resolves with expected TXT keys and *no* secret keys | both |
-| Route handling | simulated route change and interruption callbacks fire the right state transitions | both |
-| Background | Android `MediaSessionService` survives Doze simulation; iOS background-audio assertion holds | both |
+| Manifest sync | loopback sync of a 5 000-entry manifest; kill the sender after page 20 ⇒ receiver keeps the previous manifest and reports not-synchronised; retry succeeds | both |
+| Discovery | advertise + browse on loopback/emulator network; service resolves | both |
+| **Discovery privacy** | advertised TXT key set is a **subset of `{v, dh, plat}`**; **no TXT value equals, contains or prefixes `peer_id`, `identity_spki_sha256` or any 6-hex prefix of either**; `dh` differs between two advertising sessions of the same install; `dh` is not persisted across app restarts; no TXT value contains a device or user name | both |
+| Build baseline | `minSdk`/`compileSdk`/`targetSdk` equal 31/36/36; iOS deployment target equals the ADR-011 value — asserted from build configuration so drift fails a check | both |
+| Route handling | simulated route change and interruption callbacks fire the right state transitions and emit an `AUDIO_STATE` with `route_state: "transitioning"` then `"stable"` | both |
+| Background | Android foreground service survives Doze simulation; iOS background-audio assertion holds | both |
+
+### 4.1 Android ride-lifecycle and foreground-service tests
+
+These exist because [ARCHITECTURE §6.4](ARCHITECTURE.md#64-android-ride-lifecycle-and-the-background-microphone-rule)
+is a platform rule the app must obey, not a preference.
+
+| ID | Procedure | Pass condition | Phase |
+|---|---|---|---|
+| AF-01 | START RIDE from a resumed Activity with all permissions granted, intercom enabled | Service starts with types `mediaPlayback\|microphone`; capture opens; no exception | 1/6 |
+| AF-02 | START RIDE with intercom disabled (or Mode E) | Service starts with `mediaPlayback` **only**; microphone never opened — asserted, not assumed | 6 |
+| AF-03 | `RECORD_AUDIO` denied, then START RIDE | Ride starts music-only; amber "intercom unavailable"; **music plays** (FR-025); no crash; no mic FGS type requested | 6 |
+| AF-04 | Attempt to start the ride from a background entry point (debug-only broadcast receiver) | Refused with a clear message; `ForegroundServiceStartNotAllowedException` caught and logged as a state-machine event; **no silent retry** | 6 |
+| AF-05 | Start the ride, then lock the screen for 30 min | Session, playback and capture continue; `reconnect_count` unchanged; notification still present | 2/6 |
+| AF-06 | `POST_NOTIFICATIONS` denied, then START RIDE | Session runs; documented loss of the lock-screen control surface; no crash | 6 |
+| AF-07 | Swipe the task from Recents mid-ride | `onTaskRemoved` → `ENDING`: audio released, sockets closed, **no orphaned foreground service** | 6 |
+| AF-08 | Kill the app process mid-ride | Service does not restart in the background (`START_NOT_STICKY`); on relaunch, state is restored and the ride must be started explicitly again | 6 |
+| AF-09 | Enable the intercom while the app is backgrounded | Not attempted; UI instructs the user to bring RideLink to the front. **No background microphone-FGS start, ever** | 6 |
+| AF-10 | Inspect the merged manifest | `RECORD_AUDIO`, `INTERNET`, `POST_NOTIFICATIONS`, `BLUETOOTH_CONNECT`, `FOREGROUND_SERVICE`, `FOREGROUND_SERVICE_MEDIA_PLAYBACK`, `FOREGROUND_SERVICE_MICROPHONE` present; nothing beyond what §6.4 lists | 1 |
+
+### 4.2 iOS audio-session and route tests
+
+| ID | Procedure | Pass condition | Phase |
+|---|---|---|---|
+| IA-01 | Configure the music-only session (`.playback`) | Route is media-quality stereo; `AUDIO_STATE` reports `media_stereo` / `media_quality: "full"` | 2 |
+| IA-02 | Switch to the intercom session (`.playAndRecord`, `.voiceChat`, `[.allowBluetoothHFP, .allowBluetoothA2DP, .duckOthers]`) | Duplex route activates; `AUDIO_STATE` reports a duplex profile for **both** input and output and `media_quality: "reduced"` — never independent media output plus duplex input | 2 |
+| IA-03 | Media-quality → duplex transition, timed | `route_state: "transitioning"` emitted at the start and `"stable"` at the end; measured duration recorded in `docs/test-results/`; the drift ladder is suspended for the duration | 2/6 |
+| IA-04 | Duplex → media-quality transition (intercom off) | Route returns to media-quality stereo; `AUDIO_STATE` updated with an incremented `revision` | 6 |
+| IA-05 | Disconnect the Bluetooth device mid-session, then reconnect | `routeChangeNotification` handled for both `oldDeviceUnavailable` and `newDeviceAvailable`; route recovers; no crash; `AUDIO_STATE` tracks each step | 6 |
+| IA-06 | Inbound phone call during a session | `interruptionNotification` began/ended handled, `.shouldResume` honoured; session restored | 6 |
+| IA-07 | Force `mediaServicesWereResetNotification` | Engine graph rebuilt and session re-activated from scratch; playback resumes; asserted, not assumed | 6 |
+| IA-08 | Wired headset attached mid-session | `endpoint_class: "wired"`, `duplex_wide_stereo`, `media_quality: "full"` — the model must express this without a Bluetooth-specific special case | 6 |
+| IA-09 | No audio device attached | `endpoint_class: "builtin_speaker"`, profile `builtin` | 6 |
 
 ---
 
@@ -84,9 +141,9 @@ Wi-Fi only, no Bluetooth audio yet. This is where most cross-platform defects wi
 | ID | Procedure | Pass condition | Phase |
 |---|---|---|---|
 | I-01 | Both apps open on the same Wi-Fi → observe discovery | each sees the other within 5 s | 1 |
-| I-02 | Tap peer → compare the 6-digit codes on both screens | codes **identical**; both confirm; session reaches `CONNECTED` | 1 |
+| I-02 | Tap peer → compare the 6-digit codes on both screens | codes **identical** and **exactly six digits**; both confirm; session reaches `CONNECTED` | 1 |
 | I-03 | Kill and reopen both apps | reconnects silently, **no code prompt** | 1 |
-| I-04 | Edit one device's stored pin to a wrong value, reconnect | refused with `pin_mismatch`, surfaced as a security warning, **no auto re-pair** | 1 |
+| I-04 | Edit one device's stored pin to a wrong SPKI value, reconnect | refused with `pin_mismatch`, surfaced as a security warning, **no auto re-pair** | 1 |
 | I-05 | Aeroplane-mode one phone 10 s, restore | `RECONNECTING` → returns to the state it left; `reconnect_count` = 1 | 1 |
 | I-06 | Aeroplane-mode 3 min | `DISCONNECTED`; recovers on manual retry | 1 |
 | I-07 | Repeat I-01…I-03 on an Android hotspot, then an iPhone hotspot | all three topologies work, or the failure is documented with a reason | 1 |
@@ -97,12 +154,29 @@ Wi-Fi only, no Bluetooth audio yet. This is where most cross-platform defects wi
 | I-12 | Play the same track on both, measure drift for 30 min | steady-state < 25 ms; **never** > 150 ms | 5 |
 | I-13 | Voice session up, then break Wi-Fi | music continues (FR-025); voice recovers on reconnect | 6 |
 | I-14 | Wrong protocol version (test build) | clean `version_mismatch`, no crash | 1 |
+| **I-15** | **Simultaneous connect, trusted peers:** both phones tap connect within ~50 ms (or both restart Wi-Fi together) | **exactly one** control connection survives; `HELLO` processed once; one `session_id`; no reconnect loop; `reconnect_count` **not** incremented by the discarded socket; both agree on the leader | 1 |
+| **I-16** | **Simultaneous connect, first-time pairing:** unpair both, then have both users tap the other's peer entry at the same moment | **exactly one SAS code shown, on one connection**; pairing completes once; one trusted-peer record per side | 1 |
+| **I-17** | **Repeated simultaneous reconnect:** toggle Wi-Fi on the AP 10 times so both peers always retry together | converges to one connection every time; no session ever splits; no monotonic growth in connection count or error log volume | 1 |
+| **I-18** | Third connection attempt against an established session (debug build opens an extra socket) | rejected with `session_already_active`; live session unaffected — no state change, no audio glitch | 1 |
+| **I-19** | Regenerate one device's identity **certificate** around the same keypair, reconnect | connects silently; **no SAS prompt**; log shows a certificate re-issue with unchanged SPKI | 1 |
+| **I-20** | Regenerate one device's identity **keypair**, reconnect | refused with `pin_mismatch`; security warning; recovery only via explicit forget-and-re-pair with a fresh SAS | 1 |
+| **I-21** | Set one device's clock far forward so its certificate is outside its validity window | `certificate_invalid`, **not** `pin_mismatch`; message points at the clock, not at an attack | 1 |
+| **I-22** | Capture mDNS traffic with an independent tool (`dns-sd -B`, Wireshark) while both apps advertise | TXT records contain only `{v, dh, plat}`; **no value matches `peer_id`, `identity_spki_sha256` or any 6-hex prefix**; `dh` observed to change across advertising sessions | 1 |
+| **I-23** | Sync a real 1 000+ track manifest between the phones | completes; multiple `MANIFEST_PAGE` frames observed; every frame < 256 KiB; digest validates; catalogue counts match on both sides | 4 |
+| **I-24** | Kill the sender mid-manifest (after ~half the pages) | receiver keeps its **previous** catalogue and reports not-synchronised; retry after reconnect succeeds; no partial catalogue ever displayed | 4 |
+| **I-25** | Open the intercom on one phone while both are playing music | peer's `AUDIO_STATE` shows the duplex profile for output as well as input and `media_quality: "reduced"`; the diagnostics screen shows it; drift ladder suspended during the transition | 6 |
 
 **Drift measurement method (I-12)** — needed because ear-judgement is not a measurement:
 both apps log `POSITION_REPORT` pairs with session timestamps; a script in `tools/` computes
 the drift series and emits min/median/p95/max. Acceptance is read off the p95. *Independent
 cross-check:* record both phones' output on one stereo recorder and cross-correlate the
 channels — this validates the app's own numbers rather than trusting them.
+
+**Simultaneous-connect method (I-15…I-17)** — a human cannot reliably tap two phones within
+50 ms. Use either: (a) a debug-build "connect at session-clock T" trigger armed on both phones,
+or (b) cycle the AP's radio so both peers lose the link at the same instant and retry together.
+Method (b) is preferred because it is the real-world case. Record the number of trials and the
+number of trials that converged; the pass condition is **all of them**.
 
 ---
 
@@ -115,18 +189,26 @@ are regression checks on the built app.
 |---|---|---|---|
 | A-01 | Music to helmet unit; music to TWS | stable, no dropouts, 10 min | 2 |
 | A-02 | Two-way voice, stationary, 10 min | intelligible both ways, no runaway echo | 2 |
-| A-03 | Mic active while music plays; record the observed route/profile | behaviour recorded; a usable mode identified | 6 |
+| A-03 | Mic active while music plays; record the observed profile and sample rate on **both** endpoints | behaviour recorded; `AUDIO_STATE` matches what was measured; `profile_coupling` and `confidence` updated to `measured` in the route layer; a usable mode identified | 6 |
 | A-04 | Lock both screens; continue A-02 for 30 min | session survives; audio continues | 2 |
-| A-05 | Disconnect and reconnect the helmet unit mid-session | route recovers; no crash; state consistent | 6 |
+| A-05 | Disconnect and reconnect the helmet unit mid-session | route recovers; no crash; state consistent; `AUDIO_STATE` tracks each step | 6 |
 | A-06 | Inbound phone call during a session | interruption handled; session restored after the call | 6 |
 | A-07 | Deny microphone permission, then start | clear message; **music still works** (FR-025) | 6 |
 | A-08 | Ducking on/off with speech | smooth 150–250 ms ramp, no step or click | 6 |
 | A-09 | Voice latency measurement | measured and recorded; target < 200 ms | 2 |
+| **A-10** | PTT pressed 50 times over 10 minutes with music playing | **no profile switch per press** — the capture device stays open (ARCHITECTURE §6.3); music quality is constant across all 50 presses; measured, not judged | 6 |
+| **A-11** | Turn the intercom off mid-ride, then on again | one deliberate, announced route change each way; measured duration recorded; music resumes at full quality when off | 6 |
 
 **Voice latency method (A-09):** play a sharp click into the rider mic; record the pillion
 earbud output and the source on one recorder; measure the offset by cross-correlation. Report
 the end-to-end figure *including* both Bluetooth hops, since that is what the humans hear.
 Record it in `docs/test-results/` — one row per run, with app version and hardware.
+
+**Profile-stability method (A-10):** record the helmet unit's output continuously for the full
+10 minutes on an external recorder. A profile switch is audible as a level and bandwidth
+discontinuity; measure the spectral centroid over time and assert it has no steps. This is the
+regression test for the product's single largest risk, so it gets a measurement rather than an
+opinion.
 
 ---
 
@@ -143,7 +225,9 @@ Ordered by risk. Do not skip forward: REQUIREMENTS §17.1 sequences these delibe
 | R-05 | Long ride, 2 h+ | battery drain both phones, thermal, drift, reconnect count | Phase 7 |
 
 Safety: R-01/R-02 with the bike stationary. R-03 in a closed area. All phone configuration
-happens **before** motion — the product rule is also the test rule (NFR-09).
+happens **before** motion — the product rule is also the test rule (NFR-09). Ride Mode is started
+from the visible app before setting off, which is also the only legal way to start it
+(ARCHITECTURE §6.4).
 
 Record per ride: duration, ambient conditions, reconnect count, drift p95, battery start/end,
 subjective intelligibility 1–5, and every anomaly. Template in `docs/test-results/`.
@@ -160,11 +244,17 @@ subjective intelligibility 1–5, and every anomaly. Template in `docs/test-resu
 | Swift style | SwiftLint | zero violations |
 | Swift format | SwiftFormat | `--lint` clean |
 | Swift concurrency | Swift 6 strict mode | zero warnings |
-| Dependency allowlist | script in `tools/` | **no analytics/ads/telemetry/crash-reporter SDK** (NFR-05) |
-| Secret scan | script in `tools/` | no keystores, `.p12`, `.mobileprovision`, personal audio |
-| Log-hygiene scan | script in `tools/` | no raw-audio write path; no SAS/token log path |
+| Domain purity (Android) | `core` is a `kotlin("jvm")` module | `import android.*` in `core` does not compile — enforced by the classpath, not a rule |
+| Domain purity (iOS) | `swift test` for `RideLinkCore` on **macOS** | an iOS-only import fails on the laptop |
+| Platform baseline | script in `tools/` | `minSdk`/`compileSdk`/`targetSdk` = 31/36/36; iOS deployment target = ADR-011 value |
+| Dependency allowlist | script in `tools/` | **no analytics/ads/telemetry/crash-reporter SDK** (NFR-05); no DI framework while ADR-014 stands |
+| Secret scan | script in `tools/` | no keystores, `.jks`, `.p12`, `.pfx`, `.mobileprovision`, private keys, personal audio |
+| Log-hygiene scan | script in `tools/` | no raw-audio write path; **no log path for the SAS, bulk tokens, TLS secrets or exporter output**; `identity_spki_sha256` never logged beyond 6 hex |
+| Discovery-privacy scan | script in `tools/` | no code path writes `peer_id`, `identity_spki_sha256` or any prefix of either into an mDNS TXT record |
+| Retired-vocabulary scan | script in `tools/` | source and docs contain no `cert_fingerprint`, no `fp6`, no bare `.allowBluetooth`, and no `a2dp`/`hfp` string in a wire value |
 
-The last three are privacy requirements expressed as tests, which is the only way they stay true.
+The last six are privacy, security and consistency requirements expressed as tests, which is the
+only way they stay true.
 
 ---
 
@@ -174,12 +264,12 @@ A phase is complete only when **all** of its row passes and `STATUS.md` records 
 
 | Phase | L1/L2 | L3 | L4 | L5 | L6 | Extra |
 |---|---|---|---|---|---|---|
-| 1 Peer session | all | discovery, DB | I-01…I-08, I-14 | — | — | §8 clean |
-| 2 Intercom | + voice state | route sim | I-13 | A-01, A-02, A-04, A-09 | — | latency recorded |
+| 1 Peer session | all, incl. SAS · identity · dedup vectors | discovery + privacy, DB, baseline, AF-01/AF-10 | I-01…I-08, I-14…I-22 | — | — | §8 clean |
+| 2 Intercom | + voice state | route sim, IA-01…IA-03 | I-13 | A-01, A-02, A-04, A-09 | — | latency recorded |
 | 3 Local music | + library, hashing | library, player | — | A-01 | — | 1 000+ real tracks indexed |
-| 4 Shared library | + manifest, transfer | transfer loopback | I-10, I-11 | — | — | 50 MB transfer verified |
+| 4 Shared library | + manifest paging + paging-error vectors | transfer loopback, manifest sync loopback | I-10, I-11, I-23, I-24 | — | — | 50 MB transfer verified; 5 000-entry manifest synced |
 | 5 Sync playback | + drift, queue | player scheduling | I-09, I-12 | — | — | drift p95 recorded |
-| 6 Coexistence | + audio policy | — | I-13 | A-03, A-05…A-08 | R-01, R-02 | mode chosen and recorded |
+| 6 Coexistence | + audio policy, audio-state vectors | AF-02…AF-09, IA-04…IA-09 | I-13, I-25 | A-03, A-05…A-08, A-10, A-11 | R-01, R-02 | mode chosen and recorded; `confidence` = `measured` |
 | 7 Ride Mode | all | all | all | all | R-03…R-05 | battery/thermal recorded |
 | 8 Hardening | all | all | all | all | R-05 | security review, log export, sideload build |
 
@@ -192,15 +282,17 @@ whether V1 exists.
 
 | Acceptance item | Proven by |
 |---|---|
-| Trusted local session, repeatably | I-01, I-02, I-03 |
+| Trusted local session, repeatably | I-01, I-02, I-03, I-15…I-18 |
 | Both Bluetooth devices work | A-01 |
 | 60 min two-way voice, no restart | A-02 extended to 60 min |
-| One acceptable music+intercom mode validated | A-03, R-02 |
+| One acceptable music+intercom mode validated | A-03, A-10, R-02 |
 | Import / index / search local music | L3 library + 1 000-track real run |
 | Missing track transferred, hash-verified, played | I-11 + manual UJ-05 |
+| Shared catalogue survives a real library size | I-23, I-24 |
 | Either user controls queue and playback | I-09 |
 | Drift within target over 30 min | I-12 |
-| Screen lock does not end the session | A-04 |
+| Screen lock does not end the session | A-04, AF-05 |
 | Disconnect/reconnect restores state | I-05, I-06 |
 | No backend/internet required | full run with mobile data **off** on both phones |
 | No raw audio in logs | §8 log-hygiene scan + manual log review |
+| Nothing durable leaks on the local network | I-22 + §8 discovery-privacy scan |

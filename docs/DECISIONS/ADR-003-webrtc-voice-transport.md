@@ -25,7 +25,7 @@ Control messaging, catalogue and file transfer do **not** use WebRTC — see
 
 - Get a production-grade real-time audio pipeline, DTLS-SRTP encryption and Opus without writing any of it. No custom cryptography, per the brief.
 - WebRTC's `AudioDeviceModule` wants to own microphone and speaker. On Android it manages `AudioRecord`/`AudioTrack` itself and prefers `VOICE_COMMUNICATION` mode; on iOS it drives `AVAudioSession` toward `.playAndRecord` + `.voiceChat`. Music playback shares that route, so the interaction between WebRTC's session management and our own is a **known Phase 2/6 risk** to measure, not assume.
-- Large dependency (tens of MB per platform) with community-published artifacts — see the risk register in ARCHITECTURE §12. Isolated behind `net:voice` / `RLVoice` so it is replaceable.
+- Large dependency (tens of MB per platform) with community-published artifacts — see the risk register in ARCHITECTURE §12. Isolated behind `network/voice` / `RideLinkPlatform.Voice` so it is replaceable ([ADR-014](ADR-014-initial-module-structure-and-di.md)).
 - Signalling (SDP/ICE) must ride some other channel — which the control plane already is.
 - WebRTC's own file-recording hooks are deliberately not compiled in: no code path writes voice to disk (REQUIREMENTS §11).
 

@@ -46,8 +46,10 @@ DOCX §20 proposes `docs/requirements/`, `docs/architecture/`, `scripts/`, plus 
 
 **Resolution:** flat files as instructed — fewer, findable documents beat a directory per topic at
 this size. The committed repo already contains `tools/`, so that is kept instead of introducing
-`scripts/`. `docs/test-results/` and `docs/audio-tests/` are adopted from the DOCX because
-per-run result files genuinely need a directory. `SECURITY.md` / `PRIVACY.md` / `CONTRIBUTING.md`
+`scripts/`. `docs/test-results/` is adopted from the DOCX because per-run result
+files genuinely need a directory; the DOCX's separate `docs/audio-tests/` is **not** created —
+audio measurements are per-run results and go in the same place, under the naming convention in
+[`test-results/README.md`](../test-results/README.md). `SECURITY.md` / `PRIVACY.md` / `CONTRIBUTING.md`
 are deferred to Phase 8 (documentation hardening); their content currently lives in
 REQUIREMENTS §11 and ARCHITECTURE §11.
 

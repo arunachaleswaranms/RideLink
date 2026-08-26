@@ -43,6 +43,29 @@
 | Minimum music formats needed for the real library | _TBD_ |
 | Default iPhone cache cap | _TBD_ |
 
+## Audio capability mapping (fills the wire model)
+
+These rows populate `CAPABILITIES.audio` and `AUDIO_STATE` directly
+([PROTOCOL §4.3.1](PROTOCOL.md#431-audio-capability-vocabulary),
+[ADR-016](DECISIONS/ADR-016-effective-audio-capability-model.md)). Until they are filled in,
+both platforms report `confidence: "assumed"` and the values below are the design's guesses, not
+measurements.
+
+| Field | Helmet unit (rider) | TWS (pillion) |
+|---|---|---|
+| `endpoint_class` | `bluetooth` | `bluetooth` |
+| Profile with music only, mic closed | _TBD_ (expected `media_stereo`) | _TBD_ (expected `media_stereo`) |
+| Profile with the mic open | _TBD_ (expected `duplex_wideband` or `duplex_narrowband`) | _TBD_ |
+| **`profile_coupling`** | _TBD_ — did opening the mic move the **output** too? (expected `input_forces_output`) | _TBD_ |
+| `effective_output_sample_rate_hz` with mic open | _TBD_ | _TBD_ |
+| Measured route-transition duration (media ⇄ duplex) | _TBD_ ms | _TBD_ ms |
+| Did repeated mic open/close cause audible profile thrash? | _TBD_ | _TBD_ |
+| `confidence` after recording | `measured` | `measured` |
+
+The `profile_coupling` row is the one that matters most: `independent` would mean the product's
+biggest documented risk does not apply to this hardware, and would change the Phase 6 default
+mode. Do not fill it in from impressions — TEST_PLAN A-03 and A-10 give the measurement method.
+
 ## Go / no-go
 
 **Recorded outcome:** GO (per user).
