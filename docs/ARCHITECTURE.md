@@ -63,7 +63,7 @@ Binding. Recorded in [ADR-011](DECISIONS/ADR-011-platform-baselines.md).
 | | Android | iOS |
 |---|---|---|
 | Minimum | `minSdk = 31` (Android 12) | **iOS 26.0** |
-| Compile against | `compileSdk = 36` | latest installed iOS SDK (Xcode 26.x) |
+| Compile against | `compileSdk = 36` | latest installed iOS SDK (Xcode 27.0 beta, confirmed — ADR-011 Amendment A2) |
 | Target | `targetSdk = 36` | — |
 | Language / toolchain | Kotlin, JVM target 21 (Gradle toolchain pinned; see §10.1) | Swift 6, strict concurrency |
 | Reference device | OnePlus Nord 5 | iPhone 17 Pro Max |
@@ -74,12 +74,23 @@ that introduces `AudioManager.setCommunicationDevice()`, the clean way to route 
 — below it we would be back to the deprecated `startBluetoothSco()` dance in precisely the
 subsystem we least want workarounds in.
 
-**Tooling state, verified 26 Aug 2026 on this machine:** Swift 6.3.2 and the macOS 26.5 SDK are
-present via Command Line Tools; **Xcode is not installed and no iOS SDK is present**, and there
-is no Android SDK or Gradle installation. Both must be installed before Phase 1 scaffolding, and
-the iOS deployment target must be confirmed against the SDK that arrives with Xcode. If that SDK
-turns out to be older than iOS 26, the baseline drops to that SDK's current release and the
-change is recorded as an amendment to ADR-011 — not silently.
+**Tooling state, verified 26 Aug 2026 on this machine:**
+
+| Tool | State | Path |
+|---|---|---|
+| JDK 21 | ✅ installed (Homebrew `openjdk@21`, 21.0.12.1) | `/opt/homebrew/opt/openjdk@21` |
+| Android SDK — platform 36, build-tools 36.1.0, platform-tools 37.0.1 | ✅ installed, licences accepted | `/opt/homebrew/share/android-commandlinetools` |
+| Gradle | ❌ **not installed globally, deliberately** | the project uses its own committed wrapper |
+| Swift / macOS SDK | ✅ Swift 6.3.2, macOS 26.5 SDK (Command Line Tools) | — |
+| **Xcode / iOS SDK** | ✅ Xcode 27.0 beta, iOS SDK 27.0 | `/Applications/Xcode-beta.app` |
+
+JDK 25 (Temurin) is also present and is the default `java` on `PATH`; JDK 21 is keg-only and not
+symlinked into the system JVM directory, so it is reached by explicit path. That is intentional —
+it pins the build's JDK without changing the machine's default.
+
+Xcode is installed and the iOS SDK is confirmed at 27.0 — newer than the 26.0 baseline, which
+stays as the deployment target unchanged (ADR-011 Amendment A2). `swift test` for
+`RideLinkCore` now runs.
 
 ---
 
@@ -224,7 +235,7 @@ Three architectural consequences worth stating here:
 
 - `SessionCoordinator` owns at most one live control connection. Candidate connections that have completed TLS but not yet resolved §4.2 are held by the transport layer, not by the coordinator, so a losing socket can never touch session state.
 - Deduplication completes **before** `PAIRING` proceeds, so exactly one SAS code is ever shown. A simultaneous first meeting cannot put two different codes on the two screens.
-- Connection ownership is independent of leadership (§5). The rule is chosen so that on the surviving connection the leader is the *acceptor*, not the initiator — an implementation that quietly conflates "I called connect()" with "I am the leader" fails the `dedup/*.json` vectors immediately instead of misbehaving on a ride.
+- Connection ownership is independent of leadership (§5). `conn_tiebreak` (§4.2) and `peer_id` (§5) are uncorrelated by construction, so which side's outbound connection survives says nothing about which side leads. **No implementation may assume `initiator == leader`, and none may assume `acceptor == leader`** — either assumption happens to hold by coincidence in some lab runs and fails on a ride when the coincidence breaks ([ADR-015 Amendment A2](DECISIONS/ADR-015-duplicate-connection-resolution.md#amendment-a2--26-august-2026--correction-connection-ownership-does-not-determine-leadership)).
 
 ### 4.3 Identity and pairing
 
@@ -733,7 +744,7 @@ small specialised one. Everything pinned.
 |---|---|---|
 | Build | Gradle KTS + version catalogue | reproducible, one place for pins. No convention plugins at five modules (§9.1) |
 | SDK levels | `minSdk 31`, `compileSdk 36`, `targetSdk 36` | [ADR-011](DECISIONS/ADR-011-platform-baselines.md) |
-| JDK | Gradle toolchain pinned to **JDK 21**; JVM target 21 | The JDK on this machine is Temurin 25, which is ahead of what AGP supports. Pin the toolchain explicitly in `build.gradle.kts` rather than inheriting `JAVA_HOME`, or the first build fails confusingly |
+| JDK | Gradle toolchain pinned to **JDK 21**; JVM target 21 | The machine's default `java` is Temurin 25, ahead of what AGP supports. JDK 21 is installed at `/opt/homebrew/opt/openjdk@21`. Pin it explicitly — `jvmToolchain(21)` plus `org.gradle.java.installations.paths` in `gradle.properties` — rather than inheriting `JAVA_HOME`, or the first build fails confusingly |
 | Language/UI | Kotlin, Jetpack Compose (BOM) | required by brief |
 | Async | kotlinx-coroutines, Flow | required by brief |
 | JSON | kotlinx-serialization-json | compile-time codegen, no reflection, exact-shape control for the envelope |
@@ -797,7 +808,7 @@ Encoded as build- and code-level rules, not just intentions:
 | mDNS blocked on hotspots/enterprise APs | Medium | Phase 1 | Manual `host:port` + QR fallback (Phase 1b) |
 | Phase 0 results not yet recorded | Medium | Phase 6 | Does not block Phases 1–5; default to Mode C until known. `AUDIO_STATE.confidence` stays `assumed` until they are |
 | Bluetooth duplex-profile switch degrades music | **High** | Phase 6 | Product-level: mode policy in §6.3, one-open-capture-device rule in §6.4, and the coupling model in §6.5 all exist for this |
-| No Xcode / Android SDK on the build machine yet | Medium | Phase 1 | Install before scaffolding; confirm the iOS SDK version against the ADR-011 baseline (§1.2) |
+| **Xcode not installed** on the build machine | Medium | Phase 1 | Install before iOS scaffolding, then confirm the iOS SDK version against the ADR-011 baseline (§1.2). The Android side (JDK 21 + SDK 36) is installed and verified |
 | iOS catalogue starts empty (§8.4) | Low | Phase 3–4 | Expected; make import prominent in pre-ride UI |
 
 ---

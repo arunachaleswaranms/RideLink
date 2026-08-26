@@ -65,6 +65,24 @@ list and budget, so both implementations must split identically.
 an implementation that conflates "I called `connect()`" with "I am the leader" fails immediately
 rather than working by coincidence in the lab.
 
+## Frame-size boundary vectors
+
+`vectors/envelope/` includes two size-boundary cases (`max-frame-size-accepted`,
+`frame-too-large-rejected`) that must land at an *exact* encoded byte length (262 144 and
+262 144 + 1). Committing literal ~256 KiB fixtures is wasted repo weight for a value that both
+platforms can reproduce deterministically, so these two vectors instead specify a `pad_to_bytes`
+target and a `template` envelope whose `payload.pad` field is the empty string. Both runners must
+build the fixture the same way:
+
+1. Compact-encode `template` (no extra whitespace — the same style `kotlinx.serialization`'s
+   default `Json` and Swift's default `JSONEncoder` already produce) with `payload.pad` set to
+   `""`. Call this length `base`.
+2. Set `payload.pad` to `pad_to_bytes - base` repetitions of the ASCII character `a` (never
+   multi-byte, so 1 character = 1 byte and the arithmetic is exact).
+3. Re-encode. The result is exactly `pad_to_bytes` bytes, regardless of JSON key ordering — total
+   encoded length of a flat object doesn't depend on key order, only on which keys/values are
+   present and the (fixed, compact) formatting.
+
 ## Rules
 
 1. The spec is `docs/PROTOCOL.md`. This directory encodes it; it does not redefine it.

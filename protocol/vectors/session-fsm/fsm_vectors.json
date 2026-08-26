@@ -1,0 +1,65 @@
+{
+  "_comment": "Golden vectors for the pure session state machine (ARCHITECTURE §3, TEST_PLAN §2). State is represented as {status, returnTo}; returnTo is only meaningful when status=RECONNECTING and records which state the reconnect attempt is trying to return to (ARCHITECTURE §3 rule 1). Events carry no platform types.",
+  "legal_transitions": [
+    { "name": "idle-to-discovering",            "from": { "status": "IDLE" },                                    "event": { "kind": "StartDiscovery" },              "to": { "status": "DISCOVERING" } },
+    { "name": "discovering-cancel-to-idle",     "from": { "status": "DISCOVERING" },                             "event": { "kind": "CancelDiscovery" },             "to": { "status": "IDLE" } },
+    { "name": "discovering-to-pairing",         "from": { "status": "DISCOVERING" },                             "event": { "kind": "PeerSelected" },                "to": { "status": "PAIRING" } },
+    { "name": "pairing-reject-to-discovering",  "from": { "status": "PAIRING" },                                 "event": { "kind": "PairingRejectedOrTimeout" },    "to": { "status": "DISCOVERING" } },
+    { "name": "pairing-succeeded-to-connecting","from": { "status": "PAIRING" },                                 "event": { "kind": "PairingSucceeded" },            "to": { "status": "CONNECTING" } },
+    { "name": "connecting-established-to-connected", "from": { "status": "CONNECTING" },                        "event": { "kind": "ConnectionEstablished" },       "to": { "status": "CONNECTED" } },
+    { "name": "connecting-failed-to-reconnecting",    "from": { "status": "CONNECTING" },                        "event": { "kind": "ConnectionFailed" },            "to": { "status": "RECONNECTING", "returnTo": "CONNECTED" } },
+    { "name": "reconnecting-success-returns-to-connected",   "from": { "status": "RECONNECTING", "returnTo": "CONNECTED" },   "event": { "kind": "ReconnectSucceeded" }, "to": { "status": "CONNECTED" } },
+    { "name": "reconnecting-success-returns-to-ride-active", "from": { "status": "RECONNECTING", "returnTo": "RIDE_ACTIVE" }, "event": { "kind": "ReconnectSucceeded" }, "to": { "status": "RIDE_ACTIVE" } },
+    { "name": "reconnecting-budget-spent-to-disconnected-from-connected",   "from": { "status": "RECONNECTING", "returnTo": "CONNECTED" },   "event": { "kind": "ReconnectBudgetExhausted" }, "to": { "status": "DISCONNECTED" } },
+    { "name": "reconnecting-budget-spent-to-disconnected-from-ride-active", "from": { "status": "RECONNECTING", "returnTo": "RIDE_ACTIVE" }, "event": { "kind": "ReconnectBudgetExhausted" }, "to": { "status": "DISCONNECTED" } },
+    { "name": "disconnected-retry-to-discovering", "from": { "status": "DISCONNECTED" }, "event": { "kind": "RetryRequested" }, "to": { "status": "DISCOVERING" } },
+    { "name": "connected-start-ride-to-ride-active", "from": { "status": "CONNECTED" },   "event": { "kind": "StartRide" }, "to": { "status": "RIDE_ACTIVE" } },
+    { "name": "ride-active-end-ride-to-connected",   "from": { "status": "RIDE_ACTIVE" }, "event": { "kind": "EndRide" },   "to": { "status": "CONNECTED" } },
+    { "name": "connected-link-lost-network-to-reconnecting",   "from": { "status": "CONNECTED" },   "event": { "kind": "LinkLost", "reason": "NETWORK" }, "to": { "status": "RECONNECTING", "returnTo": "CONNECTED" } },
+    { "name": "ride-active-link-lost-network-to-reconnecting", "from": { "status": "RIDE_ACTIVE" }, "event": { "kind": "LinkLost", "reason": "NETWORK" }, "to": { "status": "RECONNECTING", "returnTo": "RIDE_ACTIVE" } },
+    { "name": "connected-user-ended-to-ending",   "from": { "status": "CONNECTED" },   "event": { "kind": "UserEnded" }, "to": { "status": "ENDING" }, "effects": ["RELEASE_AUDIO_AND_STOP_FOREGROUND_SERVICE"] },
+    { "name": "ride-active-user-ended-to-ending", "from": { "status": "RIDE_ACTIVE" }, "event": { "kind": "UserEnded" }, "to": { "status": "ENDING" }, "effects": ["RELEASE_AUDIO_AND_STOP_FOREGROUND_SERVICE"] },
+    { "name": "disconnected-user-ended-to-ending", "from": { "status": "DISCONNECTED" }, "event": { "kind": "UserEnded" }, "to": { "status": "ENDING" }, "effects": ["RELEASE_AUDIO_AND_STOP_FOREGROUND_SERVICE"] },
+    { "name": "reconnecting-user-ended-to-ending", "from": { "status": "RECONNECTING", "returnTo": "RIDE_ACTIVE" }, "event": { "kind": "UserEnded" }, "to": { "status": "ENDING" }, "effects": ["RELEASE_AUDIO_AND_STOP_FOREGROUND_SERVICE"] },
+    { "name": "ending-teardown-complete-to-idle", "from": { "status": "ENDING" }, "event": { "kind": "TeardownComplete" }, "to": { "status": "IDLE" } },
+    { "name": "connected-fatal-error-to-error",   "from": { "status": "CONNECTED" },   "event": { "kind": "FatalError", "reason": "internal" }, "to": { "status": "ERROR" } },
+    { "name": "ride-active-fatal-error-to-error", "from": { "status": "RIDE_ACTIVE" }, "event": { "kind": "FatalError", "reason": "internal" }, "to": { "status": "ERROR" } },
+    { "name": "error-acknowledged-to-ending", "from": { "status": "ERROR" }, "event": { "kind": "ErrorAcknowledged" }, "to": { "status": "ENDING" }, "effects": ["RELEASE_AUDIO_AND_STOP_FOREGROUND_SERVICE"] },
+
+    { "name": "bye-suppresses-reconnect-from-connected",   "from": { "status": "CONNECTED" },   "event": { "kind": "LinkLost", "reason": "BYE" }, "to": { "status": "ENDING" }, "effects": ["RELEASE_AUDIO_AND_STOP_FOREGROUND_SERVICE"], "note": "a deliberate BYE must not trigger RECONNECTING (PROTOCOL §4.6)" },
+    { "name": "bye-suppresses-reconnect-from-ride-active", "from": { "status": "RIDE_ACTIVE" }, "event": { "kind": "LinkLost", "reason": "BYE" }, "to": { "status": "ENDING" }, "effects": ["RELEASE_AUDIO_AND_STOP_FOREGROUND_SERVICE"], "note": "a deliberate BYE must not trigger RECONNECTING (PROTOCOL §4.6)" },
+    { "name": "bye-while-already-reconnecting-goes-to-ending", "from": { "status": "RECONNECTING", "returnTo": "CONNECTED" }, "event": { "kind": "LinkLost", "reason": "BYE" }, "to": { "status": "ENDING" }, "effects": ["RELEASE_AUDIO_AND_STOP_FOREGROUND_SERVICE"], "note": "BYE must stop an in-progress reconnect loop too" }
+  ],
+  "illegal_transitions": [
+    { "name": "idle-cannot-start-ride",              "from": { "status": "IDLE" },        "event": { "kind": "StartRide" } },
+    { "name": "idle-cannot-cancel-discovery",        "from": { "status": "IDLE" },        "event": { "kind": "CancelDiscovery" } },
+    { "name": "discovering-cannot-start-ride",       "from": { "status": "DISCOVERING" }, "event": { "kind": "StartRide" } },
+    { "name": "connected-cannot-select-peer",        "from": { "status": "CONNECTED" },   "event": { "kind": "PeerSelected" } },
+    { "name": "ending-cannot-start-discovery",       "from": { "status": "ENDING" },      "event": { "kind": "StartDiscovery" } },
+    { "name": "ending-cannot-user-end-again",        "from": { "status": "ENDING" },      "event": { "kind": "UserEnded" } },
+    { "name": "pairing-cannot-establish-connection", "from": { "status": "PAIRING" },     "event": { "kind": "ConnectionEstablished" } },
+    { "name": "ride-active-cannot-start-ride-again", "from": { "status": "RIDE_ACTIVE" }, "event": { "kind": "StartRide" } },
+    { "name": "disconnected-cannot-reconnect-succeed", "from": { "status": "DISCONNECTED" }, "event": { "kind": "ReconnectSucceeded" } },
+    { "name": "error-cannot-start-discovery",        "from": { "status": "ERROR" },       "event": { "kind": "StartDiscovery" } }
+  ],
+  "non_fault_non_transition_events": [
+    {
+      "name": "duplicate-connection-closed-is-not-a-fault-in-idle",
+      "from": { "status": "IDLE" },
+      "event": { "kind": "DuplicateConnectionClosed" },
+      "note": "closing a duplicate connection is neither a transition nor a fault (ARCHITECTURE §3 rule 6 / ADR-015): state is unchanged, reconnect_count is not incremented, and this must not be reported through the same path as an illegal-transition rejection"
+    },
+    {
+      "name": "duplicate-connection-closed-is-not-a-fault-during-connecting",
+      "from": { "status": "CONNECTING" },
+      "event": { "kind": "DuplicateConnectionClosed" },
+      "note": "the common case: both peers detect a link loss and both redial, one candidate socket loses the §4.2 tiebreak while the survivor is still completing HELLO"
+    },
+    {
+      "name": "duplicate-connection-closed-is-not-a-fault-while-connected",
+      "from": { "status": "CONNECTED" },
+      "event": { "kind": "DuplicateConnectionClosed" },
+      "note": "an inbound connection arriving while already CONNECTED is session_already_active at the protocol layer, which never reaches the FSM as a transition attempt"
+    }
+  ]
+}

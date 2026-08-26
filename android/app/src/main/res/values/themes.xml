@@ -1,0 +1,4 @@
+<resources>
+    <!-- The window background theme before Compose content loads. Compose owns all real UI. -->
+    <style name="Theme.RideLink" parent="android:Theme.Material.Light.NoActionBar" />
+</resources>

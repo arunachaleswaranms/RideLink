@@ -1,0 +1,54 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ridelink.local/schema/envelope.schema.json",
+  "title": "RideLink control-frame envelope",
+  "description": "Normative shape of every control-plane frame. See docs/PROTOCOL.md §2.",
+  "type": "object",
+  "required": ["v", "type", "session_id", "sender_id", "msg_id", "seq", "sent_at_mono_us", "payload"],
+  "additionalProperties": false,
+  "properties": {
+    "v": {
+      "type": "integer",
+      "description": "Protocol major version. Wire version 1 is the only value this build accepts; a mismatch is ERROR/version_mismatch, not a decode failure.",
+      "minimum": 1
+    },
+    "type": {
+      "type": "string",
+      "description": "Message type. Unknown values MUST be tolerated at the dispatch layer (ignored, logged, not fatal) — this schema only constrains the envelope shape, not the catalogue of known types.",
+      "minLength": 1
+    },
+    "session_id": {
+      "type": "string",
+      "description": "ULID identifying one connected session. Regenerated on fresh CONNECTING, preserved across RECONNECTING.",
+      "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$"
+    },
+    "sender_id": {
+      "type": "string",
+      "description": "Durable peer_id (16 lowercase hex chars), or the sender's provisional peer_id proposal before pairing completes.",
+      "pattern": "^[0-9a-f]{16}$"
+    },
+    "msg_id": {
+      "type": "string",
+      "description": "ULID unique per message, used for ack correlation and duplicate suppression.",
+      "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$"
+    },
+    "seq": {
+      "type": "integer",
+      "description": "Per-sender monotonic counter, starts at 1 per session.",
+      "minimum": 0
+    },
+    "sent_at_mono_us": {
+      "type": "integer",
+      "description": "Sender's monotonic microseconds. Diagnostics/RTT only — never used for scheduling.",
+      "minimum": 0
+    },
+    "requires_ack": {
+      "type": "boolean",
+      "description": "Defaults to false when absent."
+    },
+    "payload": {
+      "type": "object",
+      "description": "Type-specific payload. MUST be an object — {} when empty, never null. Unknown fields inside payload MUST be tolerated by every receiver (forward-compatibility rule, PROTOCOL §2 rule 1)."
+    }
+  }
+}

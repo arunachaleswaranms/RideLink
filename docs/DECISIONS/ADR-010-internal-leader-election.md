@@ -58,7 +58,27 @@ mutual connect. That second question — which socket lives — is answered by
 [ADR-015](ADR-015-duplicate-connection-resolution.md) using an ephemeral `conn_tiebreak`, chosen
 specifically so it is *not* `peer_id`.
 
-The two rules are deliberately keyed on different values. ADR-015 also picks the direction of its
-comparison so that on the surviving connection the leader is the **acceptor**, not the initiator —
-which means an implementation that quietly assumes "I dialled, therefore I lead" fails the
-`dedup/*.json` vectors immediately rather than working by coincidence.
+The two rules are deliberately keyed on different values so that connection ownership and
+leadership cannot be conflated. See
+[Amendment A2](#amendment-a2--26-august-2026--correction-to-amendment-a1) below.
+
+---
+
+## Amendment A2 — 26 August 2026 — correction to Amendment A1
+
+**Status of the ADR: still Accepted.** The election rule is unchanged.
+
+Amendment A1 above additionally claimed that "ADR-015 picks the direction of its comparison so
+that on the surviving connection the leader is the acceptor, not the initiator." That claim is
+**wrong** and is retracted by this amendment; see
+[ADR-015 Amendment A2](ADR-015-duplicate-connection-resolution.md#amendment-a2--26-august-2026--correction-connection-ownership-does-not-determine-leadership)
+for the full correction.
+
+`conn_tiebreak` (ADR-015) and `peer_id` (this ADR) are independent values with no relationship
+to each other. Connection ownership is deliberately independent of leadership in both directions:
+
+- **No implementation may assume `initiator == leader`.**
+- **No implementation may assume `acceptor == leader`.**
+
+The two rules are keyed on different values precisely so that neither correlation can be relied
+upon, not so that one particular correlation is guaranteed.

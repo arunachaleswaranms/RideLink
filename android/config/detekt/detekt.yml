@@ -1,0 +1,20 @@
+# RideLink detekt overrides. buildUponDefaultConfig=true (android/build.gradle.kts), so anything
+# not listed here keeps detekt's default. Adjustments below are deliberate style calibration for
+# this codebase (table-driven vector tests, protocol dispatch functions), not a way to dodge
+# real issues — see docs/TEST_PLAN.md §8.
+style:
+  MaxLineLength:
+    maxLineLength: 140
+
+complexity:
+  LongMethod:
+    threshold: 80
+  CyclomaticComplexMethod:
+    threshold: 20
+  ComplexCondition:
+    threshold: 5
+
+naming:
+  FunctionNaming:
+    # Compose convention names composable functions like types (PascalCase), e.g. MainScreen().
+    ignoreAnnotated: ["Composable"]

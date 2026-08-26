@@ -1,0 +1,7 @@
+<resources>
+    <string name="app_name">RideLink</string>
+    <string name="connection_idle">Idle</string>
+    <string name="start_discovery">Start Discovery</string>
+    <string name="label_device">Device:</string>
+    <string name="label_connection">Connection:</string>
+</resources>

@@ -1,0 +1,291 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 56;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		3AB0CC5ABC0C4289B39D0CF2 /* RideLinkApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 64AC9619678E3FA914955CE0 /* RideLinkApp.swift */; };
+		DC7409DFAD200B422AAB1CE6 /* SessionCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6A7B3DB9D86092FBE9BE657E /* SessionCoordinator.swift */; };
+		463C73AE6E0372402BEDCCA8 /* MainScreen.swift in Sources */ = {isa = PBXBuildFile; fileRef = F57B63A6163CD2391653DC32 /* MainScreen.swift */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXFileReference section */
+		CC3D6A5BAB8DECE8E634B456 /* RideLink.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = RideLink.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		64AC9619678E3FA914955CE0 /* RideLinkApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RideLinkApp.swift; sourceTree = "<group>"; };
+		6A7B3DB9D86092FBE9BE657E /* SessionCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionCoordinator.swift; sourceTree = "<group>"; };
+		F57B63A6163CD2391653DC32 /* MainScreen.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MainScreen.swift; sourceTree = "<group>"; };
+		D98B8F9B15BF0E88C459151B /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		2317F7E6ED492C8911A13400 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		6997999646B7C982C9EEFE4F = {
+			isa = PBXGroup;
+			children = (
+				436745A056AD597CA77EBD74 /* RideLink */,
+				D01B951336D2CEADAA54DF12 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		436745A056AD597CA77EBD74 /* RideLink */ = {
+			isa = PBXGroup;
+			children = (
+				64AC9619678E3FA914955CE0 /* RideLinkApp.swift */,
+				6A7B3DB9D86092FBE9BE657E /* SessionCoordinator.swift */,
+				F57B63A6163CD2391653DC32 /* MainScreen.swift */,
+				D98B8F9B15BF0E88C459151B /* Info.plist */,
+			);
+			path = RideLink;
+			sourceTree = "<group>";
+		};
+		D01B951336D2CEADAA54DF12 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				CC3D6A5BAB8DECE8E634B456 /* RideLink.app */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		94EA6C9CDE011FE67116AB3B /* RideLink */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 23C3765AF4EAEDCF35B0BA83 /* Build configuration list for PBXNativeTarget "RideLink" */;
+			buildPhases = (
+				ADF93B32DD888DB37103CD46 /* Sources */,
+				2317F7E6ED492C8911A13400 /* Frameworks */,
+				060D49248B3C8ADFC97E956C /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = RideLink;
+			packageProductDependencies = (
+				9AF35A1AD8020903DFF306DF /* RideLinkCore */,
+				C780B556EA2D47080BA2D1BD /* RideLinkPlatform */,
+			);
+			productName = RideLink;
+			productReference = CC3D6A5BAB8DECE8E634B456 /* RideLink.app */;
+			productType = "com.apple.product-type.application";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		04C8C20C5749640684FED799 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = 1;
+				LastSwiftUpdateCheck = 1700;
+				LastUpgradeCheck = 1700;
+				TargetAttributes = {
+					94EA6C9CDE011FE67116AB3B = {
+						CreatedOnToolsVersion = 27.0;
+					};
+				};
+			};
+			buildConfigurationList = 65F7C7B407A4DCB015EECF2D /* Build configuration list for PBXProject "RideLink" */;
+			compatibilityVersion = "Xcode 14.0";
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				en,
+				Base,
+			);
+			mainGroup = 6997999646B7C982C9EEFE4F;
+			packageReferences = (
+				D0357EDD608B57F30B1AA2AA /* XCLocalSwiftPackageReference "Packages/RideLinkCore" */,
+				3E7327319B784D8615E68CA3 /* XCLocalSwiftPackageReference "Packages/RideLinkPlatform" */,
+			);
+			productRefGroup = D01B951336D2CEADAA54DF12 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				94EA6C9CDE011FE67116AB3B /* RideLink */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		060D49248B3C8ADFC97E956C /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		ADF93B32DD888DB37103CD46 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				3AB0CC5ABC0C4289B39D0CF2 /* RideLinkApp.swift in Sources */,
+				DC7409DFAD200B422AAB1CE6 /* SessionCoordinator.swift in Sources */,
+				463C73AE6E0372402BEDCCA8 /* MainScreen.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin XCBuildConfiguration section */
+		A7D7EF5E73FACE26A8CA3584 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CODE_SIGN_STYLE = Automatic;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"DEBUG=1",
+					"$(inherited)",
+				);
+				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				ONLY_ACTIVE_ARCH = YES;
+				SDKROOT = iphoneos;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				SWIFT_VERSION = 6.0;
+			};
+			name = Debug;
+		};
+		5D030629350E317CEF77F471 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CODE_SIGN_STYLE = Automatic;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GCC_NO_COMMON_BLOCKS = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				SDKROOT = iphoneos;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_VERSION = 6.0;
+				VALIDATE_PRODUCT = YES;
+			};
+			name = Release;
+		};
+		7988A129F3D4D71E7C444BC7 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = RideLink/Info.plist;
+				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 0.1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.ridelink.app;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 6.0;
+				TARGETED_DEVICE_FAMILY = 1;
+			};
+			name = Debug;
+		};
+		45622F4B4A3366EDE07A5008 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = RideLink/Info.plist;
+				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 0.1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.ridelink.app;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 6.0;
+				TARGETED_DEVICE_FAMILY = 1;
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		65F7C7B407A4DCB015EECF2D /* Build configuration list for PBXProject "RideLink" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				A7D7EF5E73FACE26A8CA3584 /* Debug */,
+				5D030629350E317CEF77F471 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		23C3765AF4EAEDCF35B0BA83 /* Build configuration list for PBXNativeTarget "RideLink" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				7988A129F3D4D71E7C444BC7 /* Debug */,
+				45622F4B4A3366EDE07A5008 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+/* End XCConfigurationList section */
+
+/* Begin XCLocalSwiftPackageReference section */
+		D0357EDD608B57F30B1AA2AA /* XCLocalSwiftPackageReference "Packages/RideLinkCore" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = "Packages/RideLinkCore";
+		};
+		3E7327319B784D8615E68CA3 /* XCLocalSwiftPackageReference "Packages/RideLinkPlatform" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = "Packages/RideLinkPlatform";
+		};
+/* End XCLocalSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		9AF35A1AD8020903DFF306DF /* RideLinkCore */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = D0357EDD608B57F30B1AA2AA /* XCLocalSwiftPackageReference "Packages/RideLinkCore" */;
+			productName = RideLinkCore;
+		};
+		C780B556EA2D47080BA2D1BD /* RideLinkPlatform */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 3E7327319B784D8615E68CA3 /* XCLocalSwiftPackageReference "Packages/RideLinkPlatform" */;
+			productName = RideLinkPlatform;
+		};
+/* End XCSwiftPackageProductDependency section */
+	};
+	rootObject = 04C8C20C5749640684FED799 /* Project object */;
+}

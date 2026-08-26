@@ -1,0 +1,85 @@
+{
+  "_comment": "Golden vectors for PROTOCOL §4.2 / ADR-015. Rule: the surviving connection is the one initiated by the peer with the LARGER conn_tiebreak. Leadership (ADR-010) is a separate, uncorrelated computation over peer_id — see ADR-015 Amendment A2 and ADR-010 Amendment A2, corrected this session: no implementation may assume initiator==leader or acceptor==leader.",
+  "vectors": [
+    {
+      "name": "larger-tiebreak-outbound-survives",
+      "input": {
+        "peer_a": { "peer_id": "b7c1e0d9a4f28356", "conn_tiebreak": "ffffffffffffffffffffffffffffffff" },
+        "peer_b": { "peer_id": "a3f1c2d4e5f60718", "conn_tiebreak": "00000000000000000000000000000001" }
+      },
+      "expected": {
+        "survivor": "a",
+        "surviving_connection_initiator": "a",
+        "loser_bye_reason": "duplicate_connection"
+      },
+      "note": "peer_a's conn_tiebreak is lexicographically larger, so peer_a's outbound (initiated) connection is the survivor"
+    },
+    {
+      "name": "smaller-tiebreak-outbound-loses",
+      "input": {
+        "peer_a": { "peer_id": "b7c1e0d9a4f28356", "conn_tiebreak": "ffffffffffffffffffffffffffffffff" },
+        "peer_b": { "peer_id": "a3f1c2d4e5f60718", "conn_tiebreak": "00000000000000000000000000000001" }
+      },
+      "expected": {
+        "loser": "b",
+        "losers_outbound_connection_closed": true,
+        "loser_reconnect_count_incremented": false,
+        "loser_state_transition_occurred": false
+      },
+      "note": "same data as larger-tiebreak-outbound-survives, restated from the losing side: peer_b's outbound connection is closed and this is neither a fault nor a state transition (ARCHITECTURE §3 rule 6)"
+    },
+    {
+      "name": "both-peers-derive-same-verdict",
+      "input": {
+        "from_peer_a_perspective": { "self_conn_tiebreak": "ffffffffffffffffffffffffffffffff", "remote_conn_tiebreak": "00000000000000000000000000000001" },
+        "from_peer_b_perspective": { "self_conn_tiebreak": "00000000000000000000000000000001", "remote_conn_tiebreak": "ffffffffffffffffffffffffffffffff" }
+      },
+      "expected": {
+        "a_computes_survivor": "self",
+        "b_computes_survivor": "remote"
+      },
+      "note": "both sides observe the same pair of conn_tiebreak values and must reach the same verdict with no extra round trip"
+    },
+    {
+      "name": "equal-tiebreak-both-close-and-regenerate",
+      "input": {
+        "peer_a": { "peer_id": "b7c1e0d9a4f28356", "conn_tiebreak": "5e2a9c40b7f13d86e0a4c95b28f7d613" },
+        "peer_b": { "peer_id": "a3f1c2d4e5f60718", "conn_tiebreak": "5e2a9c40b7f13d86e0a4c95b28f7d613" }
+      },
+      "expected": {
+        "survivor": "tie",
+        "action": "both_close_and_regenerate",
+        "retry_backoff_ms_min": 500,
+        "retry_backoff_ms_max": 1500
+      },
+      "note": "probability 2^-128 in practice; both sides must independently detect the tie identically"
+    },
+    {
+      "name": "initiator-not-assumed-leader",
+      "input": {
+        "peer_a": { "peer_id": "ffffffffffffffff", "conn_tiebreak": "ffffffffffffffffffffffffffffffff" },
+        "peer_b": { "peer_id": "0000000000000000", "conn_tiebreak": "00000000000000000000000000000001" }
+      },
+      "expected": {
+        "surviving_connection_initiator": "a",
+        "leader": "b",
+        "initiator_is_leader": false
+      },
+      "note": "peer_a initiates the surviving connection (larger conn_tiebreak) but peer_b leads (smaller peer_id, ADR-010) — proves initiator != leader is a legal, expected outcome"
+    },
+    {
+      "name": "acceptor-not-assumed-leader",
+      "input": {
+        "peer_a": { "peer_id": "0000000000000000", "conn_tiebreak": "ffffffffffffffffffffffffffffffff" },
+        "peer_b": { "peer_id": "ffffffffffffffff", "conn_tiebreak": "00000000000000000000000000000001" }
+      },
+      "expected": {
+        "surviving_connection_initiator": "a",
+        "surviving_connection_acceptor": "b",
+        "leader": "a",
+        "acceptor_is_leader": false
+      },
+      "note": "peer_a again initiates the surviving connection, and this time peer_a ALSO leads (smaller peer_id) — the acceptor (peer_b) is not the leader here either. Read together with initiator-not-assumed-leader, leadership lands on either side of the surviving connection depending only on peer_id, never on who dialled"
+    }
+  ]
+}

@@ -96,3 +96,57 @@ baseline was chosen to avoid.
 | `targetSdk` below 36 | Would postpone foreground-service-type enforcement rather than design for it. ARCHITECTURE §6.4 exists precisely to design for it |
 | iOS 18 minimum | Would require `#available(iOS 26)` branches around the audio-session options for a device that does not exist in this project |
 | Defer the decision until Xcode is installed | The Android half is decidable now, and leaving the baseline unstated is what created the problem this ADR fixes. The iOS half is decided *with a named confirmation step*, which is stronger than silence |
+
+---
+
+## Amendment A1 — 26 August 2026 — toolchain installed, Android side verified
+
+**Status of the ADR: still Accepted.** No baseline value changes. This records that the toolchain
+state described under *Context* — where nothing but Command Line Tools was present — has been
+acted on, so a later reader does not treat the snapshot as current.
+
+Installed and verified on this machine:
+
+| Tool | Version | Path |
+|---|---|---|
+| OpenJDK 21 (Homebrew `openjdk@21` formula) | 21.0.12.1 | `/opt/homebrew/opt/openjdk@21` |
+| Android SDK Platform 36 | rev 2, `AndroidVersion.ApiLevel=36` | `/opt/homebrew/share/android-commandlinetools/platforms/android-36` |
+| Android SDK Build-Tools | 36.1.0 | …/`build-tools/36.1.0` |
+| Android SDK Platform-Tools (adb 1.0.41) | 37.0.1 | …/`platform-tools` |
+
+All SDK licences are accepted. The `compileSdk 36` / `targetSdk 36` half of this ADR is therefore
+buildable as specified.
+
+Two deliberate choices in how it was installed:
+
+- **The Homebrew `openjdk@21` *formula*, not the `temurin@21` cask.** The cask ships a `.pkg` that requires `sudo` to write into `/Library/Java/JavaVirtualMachines`. The formula installs keg-only under the Homebrew prefix with no elevation, and — because it is *not* symlinked into the system JVM directory — it does not change the machine's default `java`, which remains Temurin 25. The build reaches JDK 21 by explicit path, which is what the JDK-pin paragraph above asks for anyway. Note that `/usr/libexec/java_home -v 21` resolves to the JDK 25 install: it means "at least 21", so it is not a valid check for JDK 21's presence.
+- **No global Gradle.** The project builds through its own committed wrapper, so a machine-wide Gradle would only introduce a second, unpinned version. Bootstrapping the wrapper without a global Gradle is a one-time Phase 1 step: take `gradle-wrapper.jar`, `gradle-wrapper.properties`, `gradlew` and `gradlew.bat` from the pinned official distribution and commit them.
+
+**Still outstanding: Xcode and the iOS SDK.** The iOS 26.0 deployment target remains chosen but
+*unconfirmed against an installed SDK*, exactly as the confirmation step above requires.
+
+---
+
+## Amendment A2 — 26 August 2026 — Xcode installed, iOS SDK confirmed newer than baseline
+
+**Status of the ADR: still Accepted.** The iOS 26.0 **deployment target is unchanged.**
+
+Installed and verified on this machine (user-supplied, not downloaded by an agent — see
+CLAUDE.md "Apple Signing"):
+
+| Tool | Version | Path |
+|---|---|---|
+| Xcode | **27.0 (beta)**, build `27A5252f` | `/Applications/Xcode-beta.app` |
+| iOS SDK | **27.0** | `Contents/Developer/Platforms/iPhoneOS.platform/.../iPhoneOS27.0.sdk` |
+
+This is the case the confirmation step in *Decision → iOS* did not anticipate: the installed SDK
+is **newer** than 26.0, not older. The rule as written only says what happens if it is older
+(baseline drops to match); it says nothing about newer, so this amendment states it explicitly:
+
+- **Deployment target stays iOS 26.0.** Deployment target and compile-SDK are independent knobs — an app can compile against SDK 27.0 while still shipping a `MinimumOSVersion` of 26.0, and the iPhone 17 Pro Max satisfies either floor. There is no reason to move the deployment target up; doing so would gain nothing (no second device, no store release) and would need re-justifying under the same "no availability branches" logic that picked 26.0 in the first place.
+- **"Compile against" updates** from "latest installed iOS SDK (Xcode 26.x)" to **latest installed iOS SDK (Xcode 27.0 beta)** — that phrase in *Decision → iOS* was always meant to track whatever ships, not to hard-pin 26.x.
+- **Xcode 27 is a beta.** Building Phase 1a/1b against beta tooling carries real risk: compiler regressions, SDK API changes before GA, and beta-to-beta behavioural drift are all things a stable Xcode wouldn't have. This project has no store-release timeline forcing early adoption, so if beta instability actually bites (a build that only fails on this toolchain, a beta-only crash), the response is to install the next stable Xcode when available and re-verify — not to work around beta bugs with speculative code.
+- `swift test` for `Packages/RideLinkCore` now runs and passes (16/16) for the first time this session — see `docs/STATUS.md` §3, and problem 10 there is resolved.
+
+**Still outstanding:** `RideLink.xcodeproj` and `Packages/RideLinkPlatform` — Xcode being
+installed unblocks these, they have not been created yet.

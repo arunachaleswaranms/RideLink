@@ -22,10 +22,12 @@ subscription and no telemetry — the app is expected to work with mobile data s
 
 ## Status
 
-**Documentation baseline complete and corrected. No application code yet.** Phase 0 (hardware
-feasibility) is done; Phase 1 (peer session foundation) is next and has not started. A
-pre-implementation correction pass on 26 Aug 2026 fixed several architecture, protocol and
-platform-assumption issues found in review — see [`docs/STATUS.md`](docs/STATUS.md).
+**Phase 0 (hardware feasibility) is done. Phase 1a (control-plane skeleton, no crypto) is in
+progress.** Android is scaffolded across all five modules and builds/tests green. iOS has both
+Swift packages (`RideLinkCore`, `RideLinkPlatform`) and a working `RideLink.xcodeproj` — the app
+builds and runs on the iPhone 17 Pro Max simulator. See [`docs/STATUS.md`](docs/STATUS.md) for
+exactly what is verified versus pending (discovery hasn't found a real peer yet; the control
+channel and clock sync aren't built).
 
 ## Repository layout
 
@@ -34,12 +36,10 @@ protocol/    Wire schemas and golden test vectors shared by both platforms' test
 docs/        Requirements, architecture, protocol, test plan, status, decision records
 tools/       Local helper scripts (no dependencies, no network access)
 
-android/     Kotlin + Jetpack Compose app   — planned, created during Phase 1
-ios/         Swift + SwiftUI app            — planned, created during Phase 1
+android/     Kotlin + Jetpack Compose app — five Gradle modules, builds and tests green
+ios/         Swift + SwiftUI app — RideLinkCore + RideLinkPlatform packages, RideLink.xcodeproj
+             all build; the app runs on-simulator
 ```
-
-`android/` and `ios/` do not exist yet. They are created when Phase 1 scaffolding begins;
-no placeholder files are committed to pretend otherwise.
 
 ## Platform baselines
 

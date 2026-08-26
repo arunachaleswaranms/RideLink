@@ -1,0 +1,162 @@
+{
+  "_comment": "Golden vectors for the envelope codec (docs/PROTOCOL.md §2, TEST_PLAN.md §2/§11). Both platforms' unit suites run this file verbatim.",
+  "vectors": [
+    {
+      "name": "valid-basic-envelope",
+      "input": {
+        "body_json": "{\"v\":1,\"type\":\"PING\",\"session_id\":\"01ARZ3NDEKTSV4RRFFQ69G5FAV\",\"sender_id\":\"b7c1e0d9a4f28356\",\"msg_id\":\"01ARZ3NDEKTSV4RRFFQ69G5FAW\",\"seq\":412,\"sent_at_mono_us\":88123456789,\"requires_ack\":true,\"payload\":{\"t1_mono_us\":88123456789}}"
+      },
+      "expected": {
+        "decodes": true,
+        "version_ok": true,
+        "decoded": {
+          "v": 1,
+          "type": "PING",
+          "session_id": "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+          "sender_id": "b7c1e0d9a4f28356",
+          "msg_id": "01ARZ3NDEKTSV4RRFFQ69G5FAW",
+          "seq": 412,
+          "sent_at_mono_us": 88123456789,
+          "requires_ack": true,
+          "payload": { "t1_mono_us": 88123456789 }
+        }
+      }
+    },
+    {
+      "name": "requires_ack-defaults-false-when-absent",
+      "input": {
+        "body_json": "{\"v\":1,\"type\":\"PING\",\"session_id\":\"01ARZ3NDEKTSV4RRFFQ69G5FAV\",\"sender_id\":\"b7c1e0d9a4f28356\",\"msg_id\":\"01ARZ3NDEKTSV4RRFFQ69G5FAW\",\"seq\":1,\"sent_at_mono_us\":1,\"payload\":{}}"
+      },
+      "expected": {
+        "decodes": true,
+        "version_ok": true,
+        "decoded": { "requires_ack": false, "payload": {} }
+      }
+    },
+    {
+      "name": "unknown-payload-field-is-ignored",
+      "input": {
+        "body_json": "{\"v\":1,\"type\":\"HELLO\",\"session_id\":\"01ARZ3NDEKTSV4RRFFQ69G5FAV\",\"sender_id\":\"b7c1e0d9a4f28356\",\"msg_id\":\"01ARZ3NDEKTSV4RRFFQ69G5FAW\",\"seq\":1,\"sent_at_mono_us\":1,\"payload\":{\"peer_id\":\"b7c1e0d9a4f28356\",\"from_a_future_app_version\":\"the receiver must not choke on this\"}}"
+      },
+      "expected": {
+        "decodes": true,
+        "version_ok": true,
+        "decoded": {
+          "type": "HELLO",
+          "payload": { "peer_id": "b7c1e0d9a4f28356" }
+        },
+        "note": "the unrecognised payload field must not cause a decode failure; it is simply not surfaced by the typed accessor"
+      }
+    },
+    {
+      "name": "unknown-message-type-is-tolerated",
+      "input": {
+        "body_json": "{\"v\":1,\"type\":\"FUTURE_MESSAGE_TYPE_V99\",\"session_id\":\"01ARZ3NDEKTSV4RRFFQ69G5FAV\",\"sender_id\":\"b7c1e0d9a4f28356\",\"msg_id\":\"01ARZ3NDEKTSV4RRFFQ69G5FAW\",\"seq\":1,\"sent_at_mono_us\":1,\"payload\":{}}"
+      },
+      "expected": {
+        "decodes": true,
+        "version_ok": true,
+        "decoded": { "type": "FUTURE_MESSAGE_TYPE_V99" },
+        "note": "unknown type values must decode at the envelope layer; dispatch ignores them (PROTOCOL §2 rule 2), it is not a codec-level rejection"
+      }
+    },
+    {
+      "name": "missing-required-field-rejected",
+      "input": {
+        "body_json": "{\"v\":1,\"type\":\"PING\",\"session_id\":\"01ARZ3NDEKTSV4RRFFQ69G5FAV\",\"sender_id\":\"b7c1e0d9a4f28356\",\"msg_id\":\"01ARZ3NDEKTSV4RRFFQ69G5FAW\",\"sent_at_mono_us\":1,\"payload\":{}}"
+      },
+      "expected": {
+        "decodes": false,
+        "error_code": "malformed_frame",
+        "note": "seq is omitted entirely"
+      }
+    },
+    {
+      "name": "payload-null-rejected",
+      "input": {
+        "body_json": "{\"v\":1,\"type\":\"PING\",\"session_id\":\"01ARZ3NDEKTSV4RRFFQ69G5FAV\",\"sender_id\":\"b7c1e0d9a4f28356\",\"msg_id\":\"01ARZ3NDEKTSV4RRFFQ69G5FAW\",\"seq\":1,\"sent_at_mono_us\":1,\"payload\":null}"
+      },
+      "expected": {
+        "decodes": false,
+        "error_code": "malformed_frame",
+        "note": "payload must be {} when empty, never null (PROTOCOL §2)"
+      }
+    },
+    {
+      "name": "malformed-value-type-rejected",
+      "input": {
+        "body_json": "{\"v\":1,\"type\":\"PING\",\"session_id\":\"01ARZ3NDEKTSV4RRFFQ69G5FAV\",\"sender_id\":\"b7c1e0d9a4f28356\",\"msg_id\":\"01ARZ3NDEKTSV4RRFFQ69G5FAW\",\"seq\":\"not-a-number\",\"sent_at_mono_us\":1,\"payload\":{}}"
+      },
+      "expected": {
+        "decodes": false,
+        "error_code": "malformed_frame",
+        "note": "seq must be an unsigned integer, not a string"
+      }
+    },
+    {
+      "name": "malformed-json-syntax-rejected",
+      "input": {
+        "body_json": "{\"v\":1,\"type\":\"PING\", this is not valid json }"
+      },
+      "expected": {
+        "decodes": false,
+        "error_code": "malformed_frame"
+      }
+    },
+    {
+      "name": "version-mismatch-decodes-but-fails-validation",
+      "input": {
+        "body_json": "{\"v\":2,\"type\":\"PING\",\"session_id\":\"01ARZ3NDEKTSV4RRFFQ69G5FAV\",\"sender_id\":\"b7c1e0d9a4f28356\",\"msg_id\":\"01ARZ3NDEKTSV4RRFFQ69G5FAW\",\"seq\":1,\"sent_at_mono_us\":1,\"payload\":{}}"
+      },
+      "expected": {
+        "decodes": true,
+        "version_ok": false,
+        "error_code": "version_mismatch",
+        "note": "v=2 is syntactically a fine envelope; the rejection is a semantic version check, not a decode failure — this build's supported major version is 1"
+      }
+    },
+    {
+      "name": "max-frame-size-accepted",
+      "input": {
+        "pad_to_bytes": 262144,
+        "template": {
+          "v": 1,
+          "type": "MANIFEST_PAGE",
+          "session_id": "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+          "sender_id": "b7c1e0d9a4f28356",
+          "msg_id": "01ARZ3NDEKTSV4RRFFQ69G5FAW",
+          "seq": 1,
+          "sent_at_mono_us": 1,
+          "payload": { "pad": "" }
+        }
+      },
+      "expected": {
+        "decodes": true,
+        "encoded_byte_length": 262144,
+        "note": "MAX_CONTROL_FRAME_BYTES itself must be accepted; the cap is inclusive"
+      }
+    },
+    {
+      "name": "frame-too-large-rejected",
+      "input": {
+        "pad_to_bytes": 262145,
+        "template": {
+          "v": 1,
+          "type": "MANIFEST_PAGE",
+          "session_id": "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+          "sender_id": "b7c1e0d9a4f28356",
+          "msg_id": "01ARZ3NDEKTSV4RRFFQ69G5FAW",
+          "seq": 1,
+          "sent_at_mono_us": 1,
+          "payload": { "pad": "" }
+        }
+      },
+      "expected": {
+        "decodes": false,
+        "error_code": "frame_too_large",
+        "encoded_byte_length": 262145,
+        "note": "one byte over MAX_CONTROL_FRAME_BYTES must be rejected without attempting to parse the body"
+      }
+    }
+  ]
+}

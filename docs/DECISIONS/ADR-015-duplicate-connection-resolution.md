@@ -71,10 +71,11 @@ importance:
 3. **It is durable.** `conn_tiebreak` is ephemeral, so it leaks nothing lasting to an observer,
    which matters given ADR-002 Amendment A1 just removed the last durable value from discovery.
 
-The direction of the comparison — *larger* tiebreak's outbound connection survives — is chosen so
-that on the surviving connection the leader is the **acceptor**, not the initiator. That is
-deliberate: it means any code that quietly assumes "initiator ⇒ leader" fails the `dedup/*.json`
-vectors immediately, instead of working by coincidence in the lab and breaking on a ride.
+The direction of the comparison — *larger* tiebreak's outbound connection survives — is arbitrary
+with respect to leadership: `conn_tiebreak` is generated independently of `peer_id` (ADR-010), so
+which side's outbound connection survives has **no bearing** on which side leads. See
+[Amendment A2](#amendment-a2--26-august-2026--correction-connection-ownership-does-not-determine-leadership)
+below, which corrects an earlier draft of this rationale that claimed otherwise.
 
 ### Behaviour
 
@@ -114,3 +115,38 @@ retry — which is what prevents the loop.
 | Accept both connections, use one for control and one for bulk | Confuses two planes with different lifetimes and authorisation models. The bulk plane is authorised per transfer by a `bulk_token` (PROTOCOL §8.2) and must not inherit a control connection's role |
 | Lock-step handshake with an explicit tie-break round | An extra round trip on every single reconnect to handle a case a stateless comparison already handles |
 | Ignore it and let TCP sort itself out | It does not. TCP has no opinion about which of two independent connections is the application's session |
+
+---
+
+## Amendment A2 — 26 August 2026 — correction: connection ownership does not determine leadership
+
+**Status of the ADR: still Accepted.** The dedup algorithm and comparison rule are unchanged —
+this corrects rationale text only.
+
+The original text above claimed that the tiebreak direction was "chosen so that on the surviving
+connection the leader is the acceptor, not the initiator." That claim is **wrong** and is
+superseded by this amendment. `conn_tiebreak` (this ADR) and `peer_id` (ADR-010) are independent,
+uncorrelated random values chosen for different reasons and at different times. Nothing ties them
+together, so the outcome of the §4.2 comparison says nothing about which side of the surviving
+connection turns out to be the leader:
+
+- Leadership is decided **solely** by which side has the lexicographically smaller `peer_id`
+  ([ADR-010](ADR-010-internal-leader-election.md)).
+- Connection survival is decided **solely** by which side has the larger `conn_tiebreak`
+  (this ADR).
+- Across many pairings, the leader is the acceptor on the surviving connection roughly half the
+  time and the initiator the other half, purely by chance — never as a guaranteed consequence of
+  either rule.
+
+**No implementation may assume `initiator == leader`. No implementation may assume
+`acceptor == leader`.** Both are unsafe shortcuts that happen to work in whatever the developer's
+lab topology was that day and fail on a ride when the coincidence breaks. The two concerns are
+deliberately keyed on different, independent values (§"Why `conn_tiebreak` and not `peer_id`"
+above) *specifically so that* they cannot be conflated — the intended guarantee was always
+independence, not a hidden correlation. Any test relying on the retired "leader is the acceptor"
+framing should assert independence instead: that leadership is unchanged by which side happens to
+have initiated the surviving connection.
+
+[ADR-010 Amendment A2](ADR-010-internal-leader-election.md#amendment-a2--26-august-2026--correction-to-amendment-a1) and
+[ARCHITECTURE §4.2](../ARCHITECTURE.md#42-duplicate-and-simultaneous-connections) carry the same
+correction.

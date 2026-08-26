@@ -110,8 +110,9 @@ than picking one.
 ## Build / test commands
 
 **Neither app is scaffolded yet — see `docs/STATUS.md`. These are the intended commands.**
-There is currently no Android SDK, no Gradle and no Xcode on this machine; install them before
-Phase 1 scaffolding.
+Toolchain: JDK 21 (`/opt/homebrew/opt/openjdk@21`) and Android SDK 36
+(`/opt/homebrew/share/android-commandlinetools`) are installed. **Xcode is not** — install it
+before iOS scaffolding. There is deliberately **no global Gradle**: use the project's wrapper.
 
 ```sh
 # Android  (from android/)
@@ -159,6 +160,7 @@ resume are deferred, but the chunk and page framing keep both possible.
 
 ## Current phase
 
-**Phase 1 — Peer session foundation.** Phase 0 (hardware feasibility) is complete; do **not**
-repeat it. Documentation baseline is done and has been through a correction pass; **no
-application code exists yet.** Read `docs/STATUS.md` for the exact next task.
+**Phase 1a — control-plane skeleton, no crypto.** Phase 0 (hardware feasibility) is complete; do
+**not** repeat it. Android is scaffolded (five modules, `core` fully implemented and green) and
+iOS has both Swift packages plus a working Xcode project that runs on-simulator. Read
+`docs/STATUS.md` for exactly what is verified versus pending, and for the exact next task.

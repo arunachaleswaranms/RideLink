@@ -1,0 +1,37 @@
+{
+  "_comment": "All exporter_output_hex values below are FABRICATED test-only bytes, per PROTOCOL §4.5.2 and CLAUDE.md's rule that vectors/sas/ never contains real secret material. Algorithm: PROTOCOL §4.5.1 — first 4 bytes big-endian -> n; sas6 = zero-padded 6-digit decimal of (n mod 1000000).",
+  "value_vectors": [
+    { "name": "all-zero-first-word",        "input": { "exporter_output_hex": "00000000f9194e73f9e9459e3450ea10a179cdf77aafa695beecd3b9344a98d1" }, "expected": { "n": 0,          "sas6": "000000" } },
+    { "name": "exactly-one-million",        "input": { "exporter_output_hex": "000f4240013827398306cf2abe6f7dd4c975c570b198b8be2891abe0917074df" }, "expected": { "n": 1000000,    "sas6": "000000" } },
+    { "name": "large-multiple-of-modulus",  "input": { "exporter_output_hex": "0bebc2000d679bc68326dea934ef01c33165fb98423adf7996cae630ad1356f1" }, "expected": { "n": 200000000,  "sas6": "000000" } },
+    { "name": "smallest-nonzero",           "input": { "exporter_output_hex": "000000017692c3ad3540bb803c020b3aee66cd8887123234ea0c6e7143c0add7" }, "expected": { "n": 1,          "sas6": "000001" } },
+    { "name": "two-leading-zeroes",         "input": { "exporter_output_hex": "0000002a5cc47001f7c1334db3c568ddbb1c8ee51812aa8e75582ca616b1ec31" }, "expected": { "n": 42,         "sas6": "000042" } },
+    { "name": "one-leading-zero",           "input": { "exporter_output_hex": "0001869ffd5f56b40a79a385708428e7b32ab996a681080a166a2206e750eb48" }, "expected": { "n": 99999,      "sas6": "099999" } },
+    { "name": "first-six-digit-value",      "input": { "exporter_output_hex": "000186a03bb78535cc9555ff19fe3556aaa41c78a0a45c64d49ba2bc56450764" }, "expected": { "n": 100000,     "sas6": "100000" } },
+    { "name": "maximum-value",              "input": { "exporter_output_hex": "000f423f937377f056160fc4b15e0b770c67136a5f03c15205b4d3bf918268fe" }, "expected": { "n": 999999,     "sas6": "999999" } },
+    { "name": "maximum-value-wrapped",      "input": { "exporter_output_hex": "001e847f2c5f84023b4c3c6d6124b8441ea4dc9c7e46ef7cf6d31a9ce73ccb29" }, "expected": { "n": 1999999,    "sas6": "999999" } },
+    { "name": "all-ones",                   "input": { "exporter_output_hex": "ffffffff32d3acdf6fdf507db2f523b9d98f97d3a998ea5107dce0dc4e24ecf1" }, "expected": { "n": 4294967295, "sas6": "967295" } }
+  ],
+  "property_vectors": [
+    {
+      "name": "tail-bytes-ignored",
+      "input": {
+        "exporter_output_hex_a": "0001869ffd5f56b40a79a385708428e7b32ab996a681080a166a2206e750eb48",
+        "exporter_output_hex_b": "0001869fdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+      },
+      "expected": {
+        "sas6_equal": true,
+        "note": "bytes 4..31 differ between _a and _b but the first 4 bytes (and therefore sas6) are identical"
+      }
+    },
+    {
+      "name": "output-is-six-characters",
+      "input": { "applies_to": "value_vectors" },
+      "expected": {
+        "length": 6,
+        "charset": "0-9",
+        "note": "every value_vectors[*].expected.sas6 above must be exactly 6 ASCII digit characters, including leading zeroes"
+      }
+    }
+  ]
+}

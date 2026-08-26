@@ -40,6 +40,9 @@ venv/
 build/
 */build/
 **/build/
+bin/
+*/bin/
+**/bin/
 captures/
 .cxx/
 local.properties
@@ -88,6 +91,10 @@ lint-results*.xml
 # Only per-user state and build output are ignored.
 DerivedData/
 build/
+# SwiftPM's own build output (per package, e.g. Packages/RideLinkCore/.build/).
+.build/
+*/.build/
+**/.build/
 *.xcworkspace/xcuserdata/
 *.xcodeproj/xcuserdata/
 *.xcodeproj/project.xcworkspace/xcuserdata/

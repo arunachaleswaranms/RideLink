@@ -1,0 +1,32 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!--
+        Phase 1a only requests INTERNET, for local-network discovery and the plain-TCP control
+        channel skeleton. RECORD_AUDIO, POST_NOTIFICATIONS, BLUETOOTH_CONNECT and the foreground
+        service permissions (ARCHITECTURE §6.4) are added when Ride Mode is actually implemented,
+        not before — CLAUDE.md's "smallest coherent increment" rule.
+
+        Whether NsdManager discovery additionally requires NEARBY_WIFI_DEVICES on API 33+ is an
+        open question that must be settled on a real device (ARCHITECTURE §6.4), not assumed here.
+    -->
+    <uses-permission android:name="android.permission.INTERNET" />
+
+    <application
+        android:name=".RideLinkApplication"
+        android:allowBackup="false"
+        android:icon="@mipmap/ic_launcher"
+        android:label="@string/app_name"
+        android:theme="@style/Theme.RideLink">
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:label="@string/app_name"
+            android:theme="@style/Theme.RideLink">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>
