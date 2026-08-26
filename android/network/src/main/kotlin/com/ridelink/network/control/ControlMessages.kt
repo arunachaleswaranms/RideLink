@@ -1,0 +1,230 @@
+package com.ridelink.network.control
+
+import com.ridelink.core.model.ConnTiebreak
+import com.ridelink.core.model.PeerId
+import com.ridelink.core.model.SessionId
+import com.ridelink.core.model.SpkiHash
+import com.ridelink.core.protocol.Envelope
+import com.ridelink.core.protocol.ProtocolVersion
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
+import kotlinx.serialization.json.putJsonArray
+import java.security.SecureRandom
+import java.util.UUID
+import java.util.concurrent.atomic.AtomicLong
+
+/**
+ * **Non-security-bearing.** Phase 1a has no TLS, no device keypair and no trusted-peer store
+ * (CLAUDE.md rule 28 / this session's brief §9). [ProvisionalIdentity.spkiHash] is a fixed
+ * sentinel, never a real key hash — it exists only so `HELLO.identity_spki_sha256` satisfies the
+ * wire shape ([SpkiHash]'s format) while this transport is active. It must never be treated as a
+ * trust anchor, logged as if it were real, or compared for pin matching: there is no pinning in
+ * Phase 1a.
+ */
+object ProvisionalIdentity {
+    /** Generated once per process start. Not persisted, not a durable Phase 1b `peer_id`. */
+    val peerId: PeerId by lazy { PeerId(randomHex(HEX_16_BYTES)) }
+
+    /** `sha256:` + 64 zero hex characters — structurally valid, semantically meaningless. */
+    val insecureSentinelSpkiHash: SpkiHash = SpkiHash("sha256:" + "0".repeat(SPKI_HEX_LEN))
+
+    private const val HEX_16_BYTES = 8
+    private const val SPKI_HEX_LEN = 64
+    private val random = SecureRandom()
+
+    private fun randomHex(byteCount: Int): String {
+        val bytes = ByteArray(byteCount)
+        random.nextBytes(bytes)
+        return bytes.joinToString("") { "%02x".format(it) }
+    }
+}
+
+/**
+ * ADR-015: 16 CSPRNG bytes as 32 lowercase hex characters, generated once per app process per
+ * discovery session, stable across every connection opened or accepted in that session. A
+ * distinct value from [ProvisionalIdentity.peerId] and from the mDNS discovery handle — reusing
+ * one random value for two jobs is the exact mistake ADR-015 warns against.
+ */
+object ConnTiebreakGenerator {
+    private const val BYTES = 16
+    private val random = SecureRandom()
+
+    fun generate(): ConnTiebreak {
+        val bytes = ByteArray(BYTES)
+        random.nextBytes(bytes)
+        return ConnTiebreak(bytes.joinToString("") { "%02x".format(it) })
+    }
+}
+
+/** Per-connection monotonic `seq` counter, starting at 1 per session (PROTOCOL §2). */
+class SeqCounter {
+    private val next = AtomicLong(1)
+
+    fun nextSeq(): Long = next.getAndIncrement()
+}
+
+fun newMsgId(): String = UUID.randomUUID().toString()
+
+/** Builds the fixed envelope + type-specific payload for every Phase 1a session message. */
+object ControlMessages {
+    // PROTOCOL §4.1 HELLO has 9 wire fields plus the local peer_id; one param each is clearer
+    // than a wrapper object for something this small and this stable.
+    @Suppress("LongParameterList")
+    fun hello(
+        localPeerId: PeerId,
+        sessionId: SessionId,
+        seq: Long,
+        sentAtMonoUs: Long,
+        displayName: String,
+        platform: String,
+        osVersion: String,
+        appVersion: String,
+        sessionIdProposal: SessionId,
+        connTiebreak: ConnTiebreak,
+    ): Envelope =
+        envelope(
+            localPeerId = localPeerId,
+            type = "HELLO",
+            sessionId = sessionId,
+            seq = seq,
+            sentAtMonoUs = sentAtMonoUs,
+            payload =
+                buildJsonObject {
+                    put("peer_id", localPeerId.value)
+                    put("display_name", displayName)
+                    put("platform", platform)
+                    put("os_version", osVersion)
+                    put("app_version", appVersion)
+                    putJsonArray("protocol_versions") { add(JsonPrimitive(ProtocolVersion.CURRENT)) }
+                    put("session_id_proposal", sessionIdProposal.value)
+                    put("identity_spki_sha256", ProvisionalIdentity.insecureSentinelSpkiHash.value)
+                    put("conn_tiebreak", connTiebreak.value)
+                },
+        )
+
+    fun helloAck(
+        localPeerId: PeerId,
+        sessionId: SessionId,
+        seq: Long,
+        sentAtMonoUs: Long,
+        acceptedSessionId: SessionId,
+        connTiebreak: ConnTiebreak,
+        leaderPeerId: PeerId,
+    ): Envelope =
+        envelope(
+            localPeerId = localPeerId,
+            type = "HELLO_ACK",
+            sessionId = sessionId,
+            seq = seq,
+            sentAtMonoUs = sentAtMonoUs,
+            payload =
+                buildJsonObject {
+                    put("peer_id", localPeerId.value)
+                    put("accepted_session_id", acceptedSessionId.value)
+                    put("protocol_version", ProtocolVersion.CURRENT)
+                    put("identity_spki_sha256", ProvisionalIdentity.insecureSentinelSpkiHash.value)
+                    put("conn_tiebreak", connTiebreak.value)
+                    put("leader_peer_id", leaderPeerId.value)
+                },
+        )
+
+    fun ping(
+        localPeerId: PeerId,
+        sessionId: SessionId,
+        seq: Long,
+        sentAtMonoUs: Long,
+        t1MonoUs: Long,
+    ): Envelope = envelope(localPeerId, "PING", sessionId, seq, sentAtMonoUs, buildJsonObject { put("t1_mono_us", t1MonoUs) })
+
+    fun pong(
+        localPeerId: PeerId,
+        sessionId: SessionId,
+        seq: Long,
+        sentAtMonoUs: Long,
+        t1MonoUs: Long,
+        t2MonoUs: Long,
+        t3MonoUs: Long,
+    ): Envelope =
+        envelope(
+            localPeerId,
+            "PONG",
+            sessionId,
+            seq,
+            sentAtMonoUs,
+            buildJsonObject {
+                put("t1_mono_us", t1MonoUs)
+                put("t2_mono_us", t2MonoUs)
+                put("t3_mono_us", t3MonoUs)
+            },
+        )
+
+    fun ack(
+        localPeerId: PeerId,
+        sessionId: SessionId,
+        seq: Long,
+        sentAtMonoUs: Long,
+        ackedMsgId: String,
+    ): Envelope = envelope(localPeerId, "ACK", sessionId, seq, sentAtMonoUs, buildJsonObject { put("acked_msg_id", ackedMsgId) })
+
+    fun error(
+        localPeerId: PeerId,
+        sessionId: SessionId,
+        seq: Long,
+        sentAtMonoUs: Long,
+        code: String,
+        message: String,
+        fatal: Boolean,
+    ): Envelope =
+        envelope(
+            localPeerId,
+            "ERROR",
+            sessionId,
+            seq,
+            sentAtMonoUs,
+            buildJsonObject {
+                put("code", code)
+                put("message", message)
+                put("fatal", fatal)
+            },
+        )
+
+    fun bye(
+        localPeerId: PeerId,
+        sessionId: SessionId,
+        seq: Long,
+        sentAtMonoUs: Long,
+        reason: String,
+    ): Envelope = envelope(localPeerId, "BYE", sessionId, seq, sentAtMonoUs, buildJsonObject { put("reason", reason) })
+
+    private fun envelope(
+        localPeerId: PeerId,
+        type: String,
+        sessionId: SessionId,
+        seq: Long,
+        sentAtMonoUs: Long,
+        payload: JsonObject,
+    ): Envelope =
+        Envelope(
+            v = ProtocolVersion.CURRENT,
+            type = type,
+            sessionId = sessionId.value,
+            senderId = localPeerId.value,
+            msgId = newMsgId(),
+            seq = seq,
+            sentAtMonoUs = sentAtMonoUs,
+            requiresAck = false,
+            payload = payload,
+        )
+}
+
+/** `duplicate_connection` BYE reason (PROTOCOL §4.2 / ADR-015). */
+const val BYE_REASON_DUPLICATE_CONNECTION = "duplicate_connection"
+const val BYE_REASON_USER_ENDED = "user_ended"
+const val BYE_REASON_SHUTDOWN = "shutdown"
+const val ERROR_CODE_SESSION_ALREADY_ACTIVE = "session_already_active"
+const val ERROR_CODE_LEADER_MISMATCH = "leader_mismatch"
+const val ERROR_CODE_VERSION_MISMATCH = "version_mismatch"
+const val ERROR_CODE_FRAME_TOO_LARGE = "frame_too_large"
+const val ERROR_CODE_MALFORMED_FRAME = "malformed_frame"

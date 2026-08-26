@@ -13,6 +13,18 @@ complexity:
     threshold: 20
   ComplexCondition:
     threshold: 5
+  # PROTOCOL §2's envelope has 8 fixed fields; a HELLO builder taking one parameter per wire
+  # field (this session's brief §9, network.control) is more readable than a payload-object
+  # wrapper for something this small and this stable.
+  LongParameterList:
+    functionThreshold: 10
+    constructorThreshold: 10
+  # ControlSessionManager (network.control) is a single-session Phase 1a orchestrator —
+  # listener lifecycle, handshake, dedup, keepalive, clock sync, reconnect — deliberately kept as
+  # one cohesive owner rather than split across collaborator classes with no independent reason
+  # to exist (same style calibration as the table-driven vector tests above).
+  TooManyFunctions:
+    thresholdInClasses: 20
 
 naming:
   FunctionNaming:

@@ -22,12 +22,12 @@ subscription and no telemetry — the app is expected to work with mobile data s
 
 ## Status
 
-**Phase 0 (hardware feasibility) is done. Phase 1a (control-plane skeleton, no crypto) is in
-progress.** Android is scaffolded across all five modules and builds/tests green. iOS has both
-Swift packages (`RideLinkCore`, `RideLinkPlatform`) and a working `RideLink.xcodeproj` — the app
-builds and runs on the iPhone 17 Pro Max simulator. See [`docs/STATUS.md`](docs/STATUS.md) for
-exactly what is verified versus pending (discovery hasn't found a real peer yet; the control
-channel and clock sync aren't built).
+**Phase 0 (hardware feasibility) is done. Phase 1a (control-plane skeleton, no crypto) is
+implementation-complete; the real-device gate is pending.** Discovery, the plaintext Phase 1a
+control transport, clock sync and a diagnostics UI are all implemented and unit/integration-tested
+on both platforms — see [`docs/STATUS.md`](docs/STATUS.md) for exactly what that covers and what
+it doesn't: none of it has run on the two real phones yet, since this environment has no Android
+device/emulator and only an iOS simulator, not a physical iPhone.
 
 ## Repository layout
 

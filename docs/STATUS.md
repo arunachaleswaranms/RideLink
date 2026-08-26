@@ -1,18 +1,26 @@
 # RideLink — Status
 
-**Updated:** 26 August 2026 (Phase 1a scaffolding session)
+**Updated:** 27 August 2026 (Phase 1a control-transport session)
 **Current milestone:** M1 (Private voice link) — not started
-**Current phase:** Phase 1a — control-plane skeleton, no crypto. **In progress.**
-**Repository state:** protocol vectors + schema exist; Android scaffolded across all five modules
-with `core` (model, protocol codec, SAS, dedup, leadership, session FSM, logging/redaction) fully
-implemented and green (build, tests, ktlint, detekt); Android `network.discovery` (NsdManager)
-implemented; a minimal Compose UI is wired end-to-end. iOS is now equally scaffolded: `RideLinkCore`
-(same domain logic ported 1:1, 16/16 tests pass), `RideLinkPlatform` (Bonjour discovery via
-`Network.framework`, 2/2 tests pass), and — new this session — a real `RideLink.xcodeproj` app
-target that **builds for the iPhone 17 Pro Max simulator and runs**, showing the same minimal UI
-as Android (verified with a screenshot, not just a successful build). Cross-platform vector parity
-is confirmed by execution for envelope, SAS, dedup and session-FSM. `network.control` (TCP
-framing + dedup wiring) and clock-sync are not yet started. See §7.
+**Current phase:** Phase 1a — control-plane skeleton, no crypto.
+**Phase 1a status: IMPLEMENTATION COMPLETE, REAL-DEVICE GATE PENDING.** Every Phase 1a
+deliverable in `docs/PROTOCOL.md` / `docs/ARCHITECTURE.md` §1–§7 is implemented and unit/
+integration-tested on **both** platforms — discovery lifecycle (advertise+browse, Found/Updated/
+Lost, self-filtering, dh rotation), `PlainControlTransportPhase1a` (framing, HELLO/HELLO_ACK,
+socket-level duplicate-connection dedup, TCP_NODELAY+keepalive, reconnect/backoff), `core.sync` /
+`RideLinkCore.Sync` clock estimation (shared vectors, byte-identical on both platforms), and a
+Phase 1a diagnostics UI. What is **not** done is running any of this on the two real phones — this
+machine has no Android device/emulator (no `adb`, no AVD) and only the iOS *simulator* (not a
+physical iPhone) was available this session. See §2d and §7 for exactly what that gate still needs.
+
+**Repository state:** protocol vectors + schema exist (now including `vectors/clock/`, new this
+session). Android's five modules all build/test/lint clean; `core` unchanged from last session,
+`network` now has real `discovery` and `control` implementations with unit/integration tests
+(56 network-module tests, all passing, including two real-loopback-socket simultaneous-connect
+dedup tests). iOS mirrors this: `RideLinkCore` (17/17 tests) and `RideLinkPlatform` (17/17 tests,
+including the same real-socket dedup test over `Network.framework` loopback) both build and test
+clean under Swift 6 strict concurrency with zero warnings; `RideLink.xcodeproj` builds and the
+Phase 1a diagnostics UI renders correctly on-simulator (screenshot-verified). See §2d.
 
 ---
 
@@ -115,7 +123,7 @@ application code added.
 
 ---
 
-## 2b. ADR-015 / ADR-010 correction (this session)
+## 2b. ADR-015 / ADR-010 correction (26 August 2026 session)
 
 Before any implementation, corrected an inaccurate rationale in ADR-015 that claimed the
 `conn_tiebreak` comparison direction was "chosen so that on the surviving connection the leader is
@@ -134,7 +142,7 @@ of the surviving connection by chance, never as a guaranteed consequence of the 
   dedup mechanics but opposite leader assignment, so an implementation cannot pass both while
   assuming either correlation.
 
-## 2c. Phase 1a scaffolding (this session)
+## 2c. Phase 1a scaffolding (26 August 2026 session)
 
 **Protocol (`protocol/`):**
 `schema/envelope.schema.json` (JSON Schema, informational/normative reference) and four vector
@@ -185,43 +193,165 @@ only — no Phase 2+ logic added early.
 
 ---
 
+## 2d. Phase 1a control transport, discovery lifecycle and diagnostics UI (27 August 2026 session)
+
+Completes steps 8–10 of §7's ordered list from the previous session, plus fixes to step 7
+(discovery) that the previous session had left unverified. No Phase 1b work (TLS, identity,
+pairing) was started — see the explicit non-goals at the end of this section.
+
+**`core.sync` / `RideLinkCore.Sync` (step 9):** a pure clock-offset estimator matching
+ARCHITECTURE §7.1 — `rtt`/`offset` from the four PING/PONG timestamps, outlier rejection (discard
+any sample whose rtt exceeds 2× the window minimum), minimum-RTT sample selection, EWMA smoothing
+(α = 0.2), and the 30 ms step-rejection-with-two-window-confirmation rule. All arithmetic is
+exact-rational integer math (no floating point) so Kotlin `Long` and Swift `Int64` divide
+identically. Two implementation parameters ARCHITECTURE §7.1 leaves as prose — the jitter formula
+and the step-confirmation tolerance — are pinned by `protocol/vectors/clock/clock_vectors.json`
+(16 vectors: ideal symmetric RTT, low-RTT sample selection, a high-latency outlier, jitter under
+varying RTT, an asymmetric-path example documenting the known NTP-style limitation, positive/
+negative offsets, an integer-overflow-boundary sanity check, two "no valid samples" cases, a
+rejected-then-confirmed 50 ms step, and four EWMA convergence steps). **Both platforms pass all 16
+byte-for-byte** (`./gradlew :core:test`, `swift test --package-path ios/Packages/RideLinkCore`).
+
+**`network.control` / `RideLinkPlatform.Control` (step 8) — `PlainControlTransportPhase1a`,
+explicitly named and documented as plaintext/debug-only, never to be mistaken for the Phase 1b
+transport:**
+
+- Framing: `uint32` BE length prefix + JSON body, 262144-byte cap. The length is validated
+  **before** any payload buffer/receive is requested — proven by a test that declares an
+  oversized length with no body and asserts the read returns `frameTooLarge` promptly rather than
+  hanging or allocating (both platforms).
+- HELLO/HELLO_ACK per PROTOCOL §4.1, using the existing `EnvelopeCodec`/`Envelope` — no second
+  JSON protocol. Phase 1a has no real identity yet: `identity_spki_sha256` is a fixed,
+  documented, non-security-bearing sentinel (`ProvisionalIdentity` / ADR-012's field populated
+  with a structurally-valid placeholder), and `peer_id` is a random value generated once per
+  process start, not persisted, not a Phase 1b durable identity.
+- **Real-socket duplicate-connection resolution** (PROTOCOL §4.2 / ADR-015), wired end to end:
+  `DuplicateConnectionArbiter` holds candidate sockets until both `conn_tiebreak` values are
+  known, applies `core.protocol.Dedup`, and — because a rival can complete its handshake a moment
+  after this one does — a lone candidate is held 300 ms (documented, tunable implementation
+  constant, not a protocol value) before being declared the survivor. Tested with **two
+  independent `ControlSessionManager`/`ControlSessionManager`(actor) instances dialling each
+  other over real loopback TCP at once** on both platforms: exactly one survivor, the loser
+  closes cleanly with `BYE{duplicate_connection}`, `reconnect_count` is untouched, and both sides
+  independently agree on the leader (ADR-010) with no correlation to which side's connection
+  survived (ADR-015 Amendment A2) — asserted directly in the test.
+- `TCP_NODELAY` set on every socket; OS-level `SO_KEEPALIVE` best-effort; the PROTOCOL §1
+  application PING/PONG (2 s / 6 s-lost) remains authoritative for session health, as specified.
+- Reconnect: the exact PROTOCOL §10 ladder (0.5, 1, 2, 4, 8, 8, 8… s, ±20 % jitter, 120 s budget),
+  pure and tested with an injected delay recorder — no `Thread.sleep`/real `Task.sleep` in the
+  test, and a separate test proves the 120 s budget is honoured before `DISCONNECTED`.
+- Clock sync wired to the wire: an 11-sample, ~50 ms-spaced burst runs at `CONNECTED` and every
+  10 s thereafter (ARCHITECTURE §7.1's two cadences), each burst run through `ClockSync` to update
+  `offset_us`/`jitter_us`/`rtt_ms` in the diagnostics snapshot.
+
+**Discovery lifecycle fixes (step 7, both platforms):**
+
+- Android: **`NsdManager.ServiceInfoCallback` (API 34+)** used for resolution/live-update
+  tracking; **API 31–33** falls back to legacy `resolveService`, now with a **fresh
+  `ResolveListener` per call** (the previous session's implementation reused one listener across
+  concurrent resolutions, which is unsafe). iOS: `NWBrowser.Result.Change` (`.added`/`.changed`/
+  `.removed`) drives Found/Updated/Lost directly — `.removed` recovers the discovery handle from
+  the browser's own cached TXT metadata, no extra resolve needed.
+- Platform-neutral `Found`/`Updated`/`Lost` event model on both platforms (`DiscoveryEvent`),
+  extracted into pure, unit-tested logic (`DiscoveryLifecycleTracker` on Android; `NWBrowser`'s
+  own change set on iOS) — repeated discovery of the same peer never re-emits `Found`, losing a
+  peer removes it, and a subsequent rediscovery is `Found` again.
+- Self-filtering by discovery handle, not IP/hostname/peer_id, on both platforms.
+- `dh` rotation: regenerated on advertise start and at least every 15 minutes thereafter
+  (`DiscoveryHandleRotationPolicy`, identical constant/logic on both platforms, unit-tested
+  against an injected clock — no real 15-minute wait in any test). Rotation re-registers the
+  Android `NsdServiceInfo` / re-assigns the iOS `NWListener.service` in place; neither touches the
+  TCP listener socket or any live control connection.
+- **Advertising now shares the control listener's socket** on both platforms — no second, unused
+  TCP port. Android: `NsdDiscoveryController.advertise(name, port)` takes the real port from
+  `ControlSessionManager.startListening()`. iOS: `BonjourDiscovery.startAdvertising(on: listener)`
+  takes the already-bound `NWListener` from the control layer directly and attaches the Bonjour
+  service registration + TXT rotation to it in place.
+- TXT record content is exactly `{v, dh, plat}` on both platforms, asserted by a dedicated
+  privacy test run against the **same function** (`buildTxtRecord` / `buildTxtRecord`) the real
+  advertise path calls — an accidental future field addition fails this test, not a manual review.
+
+**Diagnostics UI (step 10, both platforms):** device identity, FSM connection state, discovered-
+peer count (current + cumulative), and a Phase 1a diagnostics card — control state, peer,
+`is_local_leader`, RTT, clock offset, clock jitter, reconnect count — plus a highly visible
+`TRANSPORT: PLAIN / PHASE 1A / NOT SECURE` banner (yellow/amber on both platforms). Verified on
+iOS by installing and screenshotting on the iPhone 17 Pro Max **simulator** (not a physical
+device) — renders correctly, matches the spec. Android has no emulator/device available in this
+environment (no `adb`, no AVD configured) — verified by `./gradlew assembleDebug` only, **not**
+run or screenshotted. See §7 for exactly what that leaves pending.
+
+**`SessionCoordinator` end-to-end wiring (both platforms):** `Start Discovery` → bind the control
+listener → advertise + browse concurrently → first discovered peer auto-selected (`PeerSelected`
+then `PairingSucceeded` applied immediately — Phase 1a has no pairing UI to tap into yet, see the
+explicit non-goal below; this is a Phase 1a simplification of *when* those two already-legal FSM
+transitions fire, not a new transition) → outbound `connectTo` → duplicate resolution → HELLO
+exchange → `ConnectionEstablished`/`ReconnectSucceeded` on `ControlEvent.Connected`,
+`ConnectionFailed`/`LinkLost(NETWORK)` (state-dependent) on a failed/lost link,
+`DuplicateConnectionClosed` and `ReconnectBudgetExhausted` mapped straight through → `CONNECTED`.
+`ENDING`'s existing `ReleaseAudioAndStopForegroundService` effect now also tears down the control
+session and discovery (no separate rule needed — one owner, one teardown path, per ARCHITECTURE
+§3 rule 4).
+
+**Explicitly not started, per CLAUDE.md rule 28 / this session's brief §28:** production TLS,
+self-signed X.509, Android Keystore / iOS Keychain identity, SPKI pin *runtime* checking, TLS
+exporter, real pairing SAS, pairing trust persistence, QR fallback, WebRTC, audio, music. The
+`ProvisionalIdentity` sentinel values exist solely to satisfy Phase 1a's wire shape and are never
+treated as security-bearing anywhere in the new code.
+
+---
+
 ## 3. Tests passed / pending
 
-**Passed and verified this session, by actually running the commands:**
+**Passed and verified 27 August 2026 session, by actually running the commands:**
 
-- `./gradlew :core:test` (Android) — **all tests pass**, consuming
-  `protocol/vectors/{envelope,sas,dedup,session-fsm}/*.json` directly (no vector data duplicated
-  as Kotlin literals, per CLAUDE.md).
-- `./gradlew test ktlintCheck detekt` across all five Android modules — clean.
-- `./gradlew assembleDebug` — succeeds, produces `app/build/outputs/apk/debug/app-debug.apk`.
-- `swift test --package-path ios/Packages/RideLinkCore` — **16/16 tests pass**, once Xcode 27.0
-  beta was installed mid-session (§4 problem 10 resolved, ADR-011 Amendment A2). Same four shared
-  vector files as Android, executed independently on the Swift side. **Cross-platform vector
-  parity for envelope, SAS, dedup and session-FSM is now confirmed by execution, not just by
-  code-parity review.**
-- `swift test --package-path ios/Packages/RideLinkPlatform` — **2/2 tests pass** (pure
-  `DiscoveryHandle` format checks).
+- `./gradlew clean test ktlintCheck detekt assembleDebug` — **all green**, all five Android
+  modules. `:core:test` still runs `protocol/vectors/{envelope,sas,dedup,session-fsm}/*.json`
+  directly; `:network:test` now additionally runs 56 tests including `protocol/vectors/clock/`
+  (16 vectors), the socket-level dedup/reconnect/framing/discovery-lifecycle/privacy suites
+  described in §2d, all against real JVM sockets — no Robolectric, no emulator needed for any of
+  it. `ktlintCheck`/`detekt` clean across all five modules (two small `config/detekt/detekt.yml`
+  threshold adjustments made and documented in the config file itself, same style-calibration
+  precedent as the existing table-driven-test adjustments).
+- `swift test --package-path ios/Packages/RideLinkCore` — **17/17 tests pass** (16 previous +
+  `ClockSyncVectorTests`, same `clock_vectors.json` as Android, byte-identical results).
+- `swift test --package-path ios/Packages/RideLinkPlatform` — **17/17 tests pass** (2 previous +
+  15 new: framing cap enforcement, real-socket simultaneous-connect dedup ×2, reconnect policy
+  ×4, discovery privacy ×3, discovery-handle rotation ×4), **zero Swift 6 strict-concurrency
+  warnings**. Run 4+ times consecutively with no flakes.
 - `xcodebuild -project ios/RideLink.xcodeproj -scheme RideLink -destination 'platform=iOS Simulator,name=iPhone 17 Pro Max' build`
-  — **succeeds.** Installed and launched on that simulator via `xcrun simctl`; a screenshot
-  confirms the UI renders exactly as specified (device name, "Idle", Start Discovery button).
+  — succeeds, zero warnings. Installed and launched on the iPhone 17 Pro Max **simulator**; a
+  screenshot confirms the Phase 1a diagnostics UI (§2d) renders correctly, including the
+  `TRANSPORT: PLAIN / PHASE 1A / NOT SECURE` banner.
 
-**Not passed / not run, stated plainly:**
+**Not passed / not run this session, stated plainly — this is the entire real-device gate:**
 
-- No two-device (L4) tests — no second physical device/simulator pair exercising real discovery
-  was run. AF-01…AF-10, IA-01…IA-09, I-01…I-25 all remain pending exactly as before.
-- The "Start Discovery" button was not interactively tapped on the simulator (no reliable
-  synthetic-tap mechanism via `simctl` without a full XCUITest target, which wasn't built this
-  session) — the FSM transition it triggers is covered by `SessionFsmVectorTests` on both
-  platforms, but the SwiftUI/Compose button-to-coordinator wiring itself is only build-verified,
-  not interaction-verified.
-- Neither `NsdDiscoveryController` (Android) nor `BonjourDiscovery` (iOS) has run against a live
-  peer — both compile and follow the documented API, but neither is otherwise verified.
-- SwiftLint / SwiftFormat (ARCHITECTURE §10.2) are not installed on this machine and were not
-  run against the new Swift code. Not installed without asking first, per this session's practice
-  of asking before adding new tooling.
+- **No physical Android device or emulator was available in this environment** — no `adb`, no
+  AVD. `NsdDiscoveryController` and `PlainControlTransportPhase1a` on Android are therefore
+  verified only by unit/integration tests against real *local* sockets, never against Android's
+  actual `NsdManager`/`ConnectivityManager` stack or a real Wi-Fi radio. This is the single
+  biggest gap before Phase 1a can be called complete rather than implementation-complete.
+- **No physical iPhone was available** — only the iOS 17 Pro Max *simulator*. The simulator run
+  confirms the UI and build; it does not exercise real mDNS multicast on a physical Wi-Fi radio,
+  and `Network.framework` Bonjour behaviour between a simulator and a real device is not the same
+  as between two real phones.
+- **No two-device (L4) test was run at all** — I-01 through I-25, all of them, remain exactly as
+  pending as last session. In particular I-08 (5-minute clock-offset-stability observation) and
+  I-15…I-17 (real simultaneous-connect trials, not the loopback-simulated version this session's
+  tests cover) need the real phones. §16's TCP-jitter question is therefore still **unmeasured**,
+  not resolved — no UDP path was added pre-emptively, per instruction.
+- AF-01…AF-10 (Android foreground-service/microphone lifecycle) and IA-01…IA-09 (iOS audio
+  session/route) remain untouched — correctly out of scope for Phase 1a (they are Phase 2/6).
+- The "Start Discovery" button was not interactively tapped on either platform's UI this session
+  either (same synthetic-tap limitation as last session) — the FSM transitions it triggers are
+  vector-tested, and this session additionally exercises the *entire* `startDiscovery()` →
+  `CONNECTED` path via the loopback dedup tests, but the SwiftUI/Compose button tap itself is
+  build/render-verified only.
+- SwiftLint / SwiftFormat remain not installed (unchanged from last session — still not installed
+  without asking first).
 
 Test debt remaining, all specified in `docs/PROTOCOL.md` §11 / `docs/TEST_PLAN.md` but not yet
-written (these are Phase 1b/4/5/6 concerns, not Phase 1a's):
+written (Phase 1b/4/5/6 concerns, not Phase 1a's — `vectors/clock/` is now done, moved out of
+this list):
 
 | Vector set | Covers |
 |---|---|
@@ -229,7 +359,7 @@ written (these are Phase 1b/4/5/6 concerns, not Phase 1a's):
 | `vectors/manifest-paging-errors/` | 12 failure cases; each asserts the live manifest is unchanged |
 | `vectors/identity/` | SPKI formatting, pin match/mismatch, certificate re-issue with unchanged key |
 | `vectors/audio-state/` | enum vocabulary, `revision` monotonicity, derived `media_quality` |
-| `vectors/clock/`, `vectors/drift/`, `vectors/queue/`, `vectors/manifest/`, `vectors/ordering/` | Phases 1a(clock)/5/8 |
+| `vectors/drift/`, `vectors/queue/`, `vectors/manifest/`, `vectors/ordering/` | Phases 5/8 |
 
 Plus: Android AF-01…AF-10 (foreground service / microphone lifecycle), iOS IA-01…IA-09 (audio
 session and route), and integration tests I-01…I-25. Full list in `docs/TEST_PLAN.md`.
@@ -250,12 +380,14 @@ session and route), and integration tests I-01…I-25. Full list in `docs/TEST_P
 | 8 | Removing `fp6` means a discovered peer cannot be labelled "known" before connecting | Low | Accepted trade (ADR-002 A1). Mitigated by an auto-attempt silent connect when exactly one trusted peer exists. Watch whether the pre-ride UX suffers in real use |
 | 9 | `minSdk 31` is assumed to be the level where a public TLS exporter is available | Medium | Assumption, not verified — folded into problem 2. Raising `minSdk` is cheap if needed; both devices are far above it |
 | 10 | ~~`swift test` cannot execute on this machine~~ **Resolved 26 Aug 2026 (this session).** Root cause was Command Line Tools alone not carrying a runnable `XCTest.framework`/Swift Testing runtime. User installed full Xcode 27.0 beta; `swift test` now runs, 16/16 pass | — | Tests use XCTest (not Swift Testing) — this was a deliberate Phase 1a choice made while blocked and is fine to keep, but revisit if the team later wants Swift Testing's nicer parameterization |
-| 11 | Neither `NsdDiscoveryController` (Android) nor `BonjourDiscovery` (iOS) has run against a real second peer — no two-device/two-simulator discovery test was run this session | Medium | First real run is the Phase 1a gate (I-01, discovery privacy scan). Whether `NEARBY_WIFI_DEVICES` is actually required on API 33+ is also unverified — ARCHITECTURE §6.4 already flags this as "settle on-device, don't assume" |
+| 11 | ~~Neither discovery controller has run against a real second peer~~ **Partially resolved 27 Aug 2026 (this session).** Discovery lifecycle logic (Found/Updated/Lost, self-filtering, dh rotation, TXT privacy) is now unit/integration-tested against real local sockets/`NWBrowser` change sets on both platforms — see §2d. **Still open:** neither has run against `NsdManager`/`Network.framework`'s real mDNS stack on a real Wi-Fi radio, because no second device was available (problems 15/16). Whether `NEARBY_WIFI_DEVICES` is required on API 33+ is still unverified — ARCHITECTURE §6.4 already flags this as "settle on-device, don't assume" | Medium | Needs the real-device gate (§7) |
 | 12 | AGP 9.x dropped the separate `org.jetbrains.kotlin.android` Gradle plugin; Compose BOM / `androidx.core` / `androidx.lifecycle` versions newer than the ones pinned this session require `compileSdk 37` | Low, but easy to regress | Documented in §1. Don't bump these three dependency versions without checking the compileSdk requirement first |
 | 13 | `RideLink.xcodeproj`'s `project.pbxproj` was hand-authored (no Apple CLI creates one, and `xcodegen`/`tuist` weren't installed without asking). It resolves, builds, and runs on-simulator, but has not been opened in the Xcode GUI to confirm it looks/behaves like a normal project (no Assets.xcassets/app icon, minimal build settings) | Low | Open it in Xcode once to sanity-check; add an app icon when one exists. Not urgent — sideloaded personal builds don't need a store-quality icon |
-| 14 | SwiftLint / SwiftFormat (ARCHITECTURE §10.2) are not installed on this machine | Low | Install when convenient; not blocking — ktlint/detekt (Android) are clean, Swift code has had no static-analysis pass yet |
+| 14 | SwiftLint / SwiftFormat (ARCHITECTURE §10.2) are not installed on this machine | Low | Install when convenient; not blocking — ktlint/detekt (Android) are clean, Swift Xcode builds show zero compiler warnings |
+| 15 | **No Android device or emulator available in this development environment** — no `adb` on `PATH`, no AVD configured. `PlainControlTransportPhase1a` and `NsdDiscoveryController` are therefore unverified against Android's real network stack | **High (blocks the Phase 1a gate)** | Needs either a physical OnePlus Nord 5 with USB debugging, or an AVD image + emulator installed via `sdkmanager`. Neither was set up this session — not attempted without asking, since it changes the toolchain |
+| 16 | **No physical iPhone available this session** — only the iOS 17 Pro Max simulator, which does not exercise real mDNS multicast or real `Network.framework` Bonjour behaviour between two independent radios | **High (blocks the Phase 1a gate)** | Needs a physical iPhone 17 Pro Max with a Personal Team signing identity (CLAUDE.md "Apple Signing") — a user decision, not made here |
 
-Resolved by this session: `CLAUDE.md` in `.gitignore` (was problem 1); `.DS_Store` tracking
+Resolved 26 Aug 2026 session: `CLAUDE.md` in `.gitignore` (was problem 1); `.DS_Store` tracking
 (was problem 7 — the claim was incorrect; the files are untracked and now ignored); the ADR-015/
 ADR-010 leadership-independence rationale error (§2b).
 
@@ -284,33 +416,46 @@ Not blocking Phase 1. Answers needed before Phase 6.
 
 ## 7. Next exact task
 
-**Phase 1a — control-plane skeleton, no crypto yet.** In progress; steps 0–7 are now done on both
-platforms (7 built but unverified against a live peer on either side — see below). 8 and 9 remain
-before the diagnostics UI in 10.
-
-Order matters: the pure layers come first because they are testable without a device, and they
-define the interfaces the platform layers implement.
+**Phase 1a — control-plane skeleton, no crypto yet. IMPLEMENTATION COMPLETE, REAL-DEVICE GATE
+PENDING.** Every step below is done and verified by the automatable tests available on this
+machine. What remains is entirely the two-device gate, which needs hardware this session did not
+have — it is not a code task.
 
 0. ✅ **Toolchains** — JDK 21, Android SDK 36, and Xcode 27.0 beta all installed and verified (§1, ADR-011 Amendments A1 and A2). No global Gradle — deliberately.
-1. ✅ **`protocol/`** — `schema/envelope.schema.json` + `vectors/{envelope,sas,dedup,session-fsm}/`. Done this session (§2c).
-2. ✅ **Android scaffold** — five modules, wrapper committed (Gradle 9.7.1, SHA-256-verified). `./gradlew assembleDebug` and `./gradlew :core:test` both succeed (§2c, §3).
-3. ✅ **iOS scaffold, all three pieces** — `Packages/RideLinkCore` (16/16 tests), `Packages/RideLinkPlatform` (2/2 tests), and `RideLink.xcodeproj` (builds + runs on the iPhone 17 Pro Max simulator, screenshot-verified) all exist and build (§2c, §3).
-4. ✅ **`core.model` / `RideLinkCore.Model`** — done and verified on both platforms (§2c, §3).
-5. ✅ **`core.protocol` / `RideLinkCore.Protocol`** — done and verified on both platforms against the same shared vectors (§2c, §3).
-6. ✅ **`core.sessionfsm` / `RideLinkCore.SessionFSM`** — done and verified on both platforms against the same shared vectors (§2c, §3).
-7. 🔶 **Discovery** — implemented on both platforms now: Android `network.discovery.NsdDiscoveryController` and iOS `RideLinkPlatform.Discovery.BonjourDiscovery`, both advertise+browse with TXT limited to `{v, dh, plat}`. **Neither has run against a real second peer** (§4 problem 11) — that requires two devices/simulators actually finding each other, which is the next real milestone, not a code task.
-8. ⬜ **`network.control` / `RideLinkPlatform.Control`** — length-prefixed framing over **plain TCP**, `TCP_NODELAY`, keepalive, reconnect with jittered backoff, and wiring the already-implemented, already-tested `core.protocol.Dedup`/`Leadership` (both platforms) into real socket handling. **Not started.**
-9. ⬜ **`core.sync` / `RideLinkCore.Sync`** — offset estimator with outlier rejection, against `clock/*.json` vectors (which also don't exist yet — write them alongside this step). **Not started.**
-10. ⬜ **Minimal diagnostics UI** on both — state, peer, RTT, offset, jitter, reconnect count (the FR-023 subset available once step 9 exists). **Not started**; the current UI (state + discovered-peer count + Start/Stop Discovery) is step 2/3/7's UI, not this one.
+1. ✅ **`protocol/`** — `schema/envelope.schema.json` + `vectors/{envelope,sas,dedup,session-fsm,clock}/`. `clock/` added this session (§2d).
+2. ✅ **Android scaffold** — five modules, wrapper committed. `./gradlew clean test ktlintCheck detekt assembleDebug` all succeed (§2d, §3).
+3. ✅ **iOS scaffold, all three pieces** — `RideLinkCore` (17/17), `RideLinkPlatform` (17/17), `RideLink.xcodeproj` (builds + runs on-simulator, screenshot-verified), zero warnings (§2d, §3).
+4. ✅ **`core.model` / `RideLinkCore.Model`** — done and verified on both platforms.
+5. ✅ **`core.protocol` / `RideLinkCore.Protocol`** — done and verified on both platforms against the same shared vectors.
+6. ✅ **`core.sessionfsm` / `RideLinkCore.SessionFSM`** — done and verified on both platforms against the same shared vectors.
+7. ✅ **Discovery** — Found/Updated/Lost lifecycle, self-filtering, dh rotation, shared-listener advertising, TXT privacy, API-tiered Android resolution (§2d). Unit/integration-tested on both platforms; **not yet run against either platform's real mDNS stack on real hardware** (§4 problems 11, 15, 16).
+8. ✅ **`network.control` / `RideLinkPlatform.Control`** — `PlainControlTransportPhase1a`: framing (cap enforced pre-allocation), HELLO/HELLO_ACK, real-socket duplicate-connection dedup, `TCP_NODELAY`+keepalive, PROTOCOL §10 reconnect ladder. Done this session (§2d), tested with real loopback sockets on both platforms including simultaneous mutual connect.
+9. ✅ **`core.sync` / `RideLinkCore.Sync`** — offset/RTT/jitter estimator with outlier rejection, EWMA, step-confirmation, against 16 shared `clock/*.json` vectors, byte-identical on both platforms. Done this session (§2d).
+10. ✅ **Diagnostics UI** on both — state, peer, RTT, offset, jitter, reconnect count, discovery count, and an explicit `PLAIN / PHASE 1A / NOT SECURE` transport banner. Done this session (§2d); screenshot-verified on iOS simulator, build-verified on Android (no emulator to run it on).
 
-**Immediately actionable next steps, in order:** (a) run the Android app on a device/emulator and
-the iOS app on a real iPhone or two simulators to verify discovery finds a real peer and close
-problem 11 — this is the actual Phase 1a gate item, not more code; (b) `network.control` (step 8);
-(c) clock sync (step 9).
+**Immediately actionable next steps, in order, and they are now all the same kind of task:**
+
+1. **Get two real devices into this loop.** Concretely: (a) enable USB debugging on the OnePlus
+   Nord 5 and get `adb devices` seeing it (or install an AVD via `sdkmanager` + `avdmanager` as a
+   fallback, though a real device is what the gate actually needs), and (b) get a development-
+   team signing identity set up for the iPhone 17 Pro Max (CLAUDE.md "Apple Signing" — the user's
+   call, Xcode → Signing & Capabilities → Personal Team) and install the debug build via Xcode or
+   `xcodebuild -destination 'platform=iOS,id=<udid>'`.
+2. Run I-01 (discovery finds the peer within 5 s), I-14 (protocol version mismatch handled
+   cleanly — can be forced with a debug build), I-15/I-16/I-17 (simultaneous connect/pairing/
+   repeated-reconnect trials — the real hardware version of this session's loopback tests), I-22
+   (capture mDNS traffic with an independent tool and confirm the TXT record really is
+   `{v, dh, plat}` on the wire, not just in the code path this session's tests exercised), I-05/
+   I-06 (aeroplane-mode reconnect), I-07 (repeat on both hotspot topologies), I-08 (5-minute
+   clock-offset stability — this is the number that answers §16's open TCP-jitter question).
+3. Record every result — pass, fail, and measured numbers (discovery time, RTT, offset stddev) —
+   in `docs/test-results/`, per the brief's "measurements, not impressions" rule.
 
 **Gate for 1a:** integration tests I-01, I-05, I-06, I-07, I-08, I-14, I-15, I-17, I-22 pass on
 the two real phones; AF-10 (manifest inspection) passes; static analysis clean, including the
-retired-vocabulary and discovery-privacy scans of TEST_PLAN §8.
+retired-vocabulary and discovery-privacy scans of TEST_PLAN §8 (the latter is now automated —
+§2d — but I-22's independent capture is still required, since a unit test proving the *code path*
+is correct is not the same as an outside observer confirming what actually goes on the wire).
 
 > Phase 1a's plaintext control channel is **debug-build only and must never be the default**.
 > `NFR-06` is satisfied by Phase 1b, not 1a. Sequenced this way so discovery, framing, the FSM,

@@ -1,0 +1,1393 @@
+{
+  "_comment": "Golden vectors for ARCHITECTURE Section7.1 clock offset estimation, core.sync / RideLinkCore.Sync. rtt_us = (t4-t1)-(t3-t2); offset_us = ((t2-t1)+(t3-t4))/2 (integer division truncating toward zero). Outlier rule: discard any sample whose rtt exceeds 2x the window's minimum rtt. The retained minimum-RTT sample's offset is the window's raw estimate; jitter_us = (max_rtt-min_rtt)/2 among retained samples. Smoothing: EWMA alpha=0.2 applied as exact-rational integer arithmetic (delta * 2 / 10, truncating toward zero) rather than floating point, so both platforms produce byte-identical integers. Step-reject rule: a candidate offset differing from the previous accepted offset by more than 30000us (30ms) is rejected and remembered as a pending candidate rather than applied; it is applied (with EWMA smoothing) only if a later window's candidate agrees with the pending one within 10000us (10ms) -- the confirmation tolerance is an implementation parameter of this pure estimator (not a wire value), chosen and pinned by these vectors so both platforms use one number.",
+  "algorithm": {
+    "rtt_us": "(t4 - t1) - (t3 - t2)",
+    "offset_us": "((t2 - t1) + (t3 - t4)) / 2, integer division truncating toward zero",
+    "outlier_rule": "keep samples with rtt_us <= 2 * min(rtt_us) in the window",
+    "best_sample": "the kept sample with the smallest rtt_us; first occurrence wins ties",
+    "jitter_us": "(max(kept rtt_us) - min(kept rtt_us)) / 2, integer division truncating toward zero",
+    "ewma_alpha": "0.2, applied as previous + (candidate - previous) * 2 / 10 with integer division truncating toward zero",
+    "step_reject_threshold_us": 30000,
+    "step_confirm_tolerance_us": 10000
+  },
+  "vectors": [
+    {
+      "name": "ideal-symmetric-rtt",
+      "input": {
+        "previous_state": null,
+        "samples": [
+          {
+            "t1": 1000000,
+            "t2": 1006000,
+            "t3": 1006200,
+            "t4": 1002200
+          },
+          {
+            "t1": 1100000,
+            "t2": 1106000,
+            "t3": 1106200,
+            "t4": 1102200
+          },
+          {
+            "t1": 1200000,
+            "t2": 1206000,
+            "t3": 1206200,
+            "t4": 1202200
+          },
+          {
+            "t1": 1300000,
+            "t2": 1306000,
+            "t3": 1306200,
+            "t4": 1302200
+          },
+          {
+            "t1": 1400000,
+            "t2": 1406000,
+            "t3": 1406200,
+            "t4": 1402200
+          },
+          {
+            "t1": 1500000,
+            "t2": 1506000,
+            "t3": 1506200,
+            "t4": 1502200
+          },
+          {
+            "t1": 1600000,
+            "t2": 1606000,
+            "t3": 1606200,
+            "t4": 1602200
+          },
+          {
+            "t1": 1700000,
+            "t2": 1706000,
+            "t3": 1706200,
+            "t4": 1702200
+          },
+          {
+            "t1": 1800000,
+            "t2": 1806000,
+            "t3": 1806200,
+            "t4": 1802200
+          },
+          {
+            "t1": 1900000,
+            "t2": 1906000,
+            "t3": 1906200,
+            "t4": 1902200
+          },
+          {
+            "t1": 2000000,
+            "t2": 2006000,
+            "t3": 2006200,
+            "t4": 2002200
+          }
+        ]
+      },
+      "expected": {
+        "status": "accepted",
+        "offset_us": 5000,
+        "rtt_us": 2000,
+        "jitter_us": 0,
+        "new_state": {
+          "offsetUs": 5000,
+          "pendingOffsetUs": null
+        }
+      },
+      "note": "first window, 11 identical symmetric samples, offset resolves to exactly the true offset"
+    },
+    {
+      "name": "low-rtt-sample-selection",
+      "input": {
+        "previous_state": null,
+        "samples": [
+          {
+            "t1": 2000000,
+            "t2": 2005700,
+            "t3": 2005750,
+            "t4": 2001450
+          },
+          {
+            "t1": 2100000,
+            "t2": 2105700,
+            "t3": 2105750,
+            "t4": 2101450
+          },
+          {
+            "t1": 2200000,
+            "t2": 2205700,
+            "t3": 2205750,
+            "t4": 2201450
+          },
+          {
+            "t1": 2300000,
+            "t2": 2305700,
+            "t3": 2305750,
+            "t4": 2301450
+          },
+          {
+            "t1": 2400000,
+            "t2": 2405700,
+            "t3": 2405750,
+            "t4": 2401450
+          },
+          {
+            "t1": 2500000,
+            "t2": 2505700,
+            "t3": 2505750,
+            "t4": 2501450
+          },
+          {
+            "t1": 2600000,
+            "t2": 2605700,
+            "t3": 2605750,
+            "t4": 2601450
+          },
+          {
+            "t1": 2700000,
+            "t2": 2705700,
+            "t3": 2705750,
+            "t4": 2701450
+          },
+          {
+            "t1": 2800000,
+            "t2": 2805700,
+            "t3": 2805750,
+            "t4": 2801450
+          },
+          {
+            "t1": 2900000,
+            "t2": 2905700,
+            "t3": 2905750,
+            "t4": 2901450
+          },
+          {
+            "t1": 3000000,
+            "t2": 3005400,
+            "t3": 3005450,
+            "t4": 3001050
+          }
+        ]
+      },
+      "expected": {
+        "status": "accepted",
+        "offset_us": 4900,
+        "rtt_us": 1000,
+        "jitter_us": 200,
+        "new_state": {
+          "offsetUs": 4900,
+          "pendingOffsetUs": null
+        }
+      },
+      "note": "the minimum-RTT sample (rtt=1000us, asymmetric path) is chosen over ten higher-RTT symmetric samples; the window offset is the min-RTT sample offset (4900), not an average"
+    },
+    {
+      "name": "high-latency-outlier",
+      "input": {
+        "previous_state": null,
+        "samples": [
+          {
+            "t1": 3000000,
+            "t2": 3018000,
+            "t3": 3018500,
+            "t4": 3020500
+          },
+          {
+            "t1": 3100000,
+            "t2": 3118000,
+            "t3": 3118500,
+            "t4": 3120500
+          },
+          {
+            "t1": 3200000,
+            "t2": 3218000,
+            "t3": 3218500,
+            "t4": 3220500
+          },
+          {
+            "t1": 3300000,
+            "t2": 3318000,
+            "t3": 3318500,
+            "t4": 3320500
+          },
+          {
+            "t1": 3400000,
+            "t2": 3418000,
+            "t3": 3418500,
+            "t4": 3420500
+          },
+          {
+            "t1": 3500000,
+            "t2": 3518000,
+            "t3": 3518500,
+            "t4": 3520500
+          },
+          {
+            "t1": 3600000,
+            "t2": 3618000,
+            "t3": 3618500,
+            "t4": 3620500
+          },
+          {
+            "t1": 3700000,
+            "t2": 3718000,
+            "t3": 3718500,
+            "t4": 3720500
+          },
+          {
+            "t1": 3800000,
+            "t2": 3818000,
+            "t3": 3818500,
+            "t4": 3820500
+          },
+          {
+            "t1": 3900000,
+            "t2": 3918000,
+            "t3": 3918500,
+            "t4": 3920500
+          },
+          {
+            "t1": 4000000,
+            "t2": 4258000,
+            "t3": 4258500,
+            "t4": 4500500
+          }
+        ]
+      },
+      "expected": {
+        "status": "accepted",
+        "offset_us": 8000,
+        "rtt_us": 20000,
+        "jitter_us": 0,
+        "new_state": {
+          "offsetUs": 8000,
+          "pendingOffsetUs": null
+        }
+      },
+      "note": "one sample with a 500ms RTT spike among ten 20ms samples is discarded by the 2x-min-RTT outlier rule; the spike never influences the offset"
+    },
+    {
+      "name": "jitter-across-varying-rtt",
+      "input": {
+        "previous_state": null,
+        "samples": [
+          {
+            "t1": 4000000,
+            "t2": 4003500,
+            "t3": 4003550,
+            "t4": 4001050
+          },
+          {
+            "t1": 4100000,
+            "t2": 4103520,
+            "t3": 4103570,
+            "t4": 4101090
+          },
+          {
+            "t1": 4200000,
+            "t2": 4203540,
+            "t3": 4203590,
+            "t4": 4201130
+          },
+          {
+            "t1": 4300000,
+            "t2": 4303560,
+            "t3": 4303610,
+            "t4": 4301170
+          },
+          {
+            "t1": 4400000,
+            "t2": 4403580,
+            "t3": 4403630,
+            "t4": 4401210
+          },
+          {
+            "t1": 4500000,
+            "t2": 4503600,
+            "t3": 4503650,
+            "t4": 4501250
+          },
+          {
+            "t1": 4600000,
+            "t2": 4603620,
+            "t3": 4603670,
+            "t4": 4601290
+          },
+          {
+            "t1": 4700000,
+            "t2": 4703640,
+            "t3": 4703690,
+            "t4": 4701330
+          },
+          {
+            "t1": 4800000,
+            "t2": 4803660,
+            "t3": 4803710,
+            "t4": 4801370
+          },
+          {
+            "t1": 4900000,
+            "t2": 4903680,
+            "t3": 4903730,
+            "t4": 4901410
+          },
+          {
+            "t1": 5000000,
+            "t2": 5003700,
+            "t3": 5003750,
+            "t4": 5001450
+          }
+        ]
+      },
+      "expected": {
+        "status": "accepted",
+        "offset_us": 3000,
+        "rtt_us": 1000,
+        "jitter_us": 200,
+        "new_state": {
+          "offsetUs": 3000,
+          "pendingOffsetUs": null
+        }
+      },
+      "note": "eleven samples with RTT spread 1000-1400us (all within the 2x-min-RTT keep window) produce jitter_us = (max-min)/2 = 200 while every sample individually reports the same exact offset"
+    },
+    {
+      "name": "asymmetric-path-example",
+      "input": {
+        "previous_state": null,
+        "samples": [
+          {
+            "t1": 5000000,
+            "t2": 5010200,
+            "t3": 5010500,
+            "t4": 5002300
+          },
+          {
+            "t1": 5100000,
+            "t2": 5110200,
+            "t3": 5110500,
+            "t4": 5102300
+          },
+          {
+            "t1": 5200000,
+            "t2": 5210200,
+            "t3": 5210500,
+            "t4": 5202300
+          },
+          {
+            "t1": 5300000,
+            "t2": 5310200,
+            "t3": 5310500,
+            "t4": 5302300
+          },
+          {
+            "t1": 5400000,
+            "t2": 5410200,
+            "t3": 5410500,
+            "t4": 5402300
+          },
+          {
+            "t1": 5500000,
+            "t2": 5510200,
+            "t3": 5510500,
+            "t4": 5502300
+          },
+          {
+            "t1": 5600000,
+            "t2": 5610200,
+            "t3": 5610500,
+            "t4": 5602300
+          },
+          {
+            "t1": 5700000,
+            "t2": 5710200,
+            "t3": 5710500,
+            "t4": 5702300
+          },
+          {
+            "t1": 5800000,
+            "t2": 5810200,
+            "t3": 5810500,
+            "t4": 5802300
+          },
+          {
+            "t1": 5900000,
+            "t2": 5910200,
+            "t3": 5910500,
+            "t4": 5902300
+          },
+          {
+            "t1": 6000000,
+            "t2": 6010200,
+            "t3": 6010500,
+            "t4": 6002300
+          }
+        ]
+      },
+      "expected": {
+        "status": "accepted",
+        "offset_us": 9200,
+        "rtt_us": 2000,
+        "jitter_us": 0,
+        "new_state": {
+          "offsetUs": 9200,
+          "pendingOffsetUs": null
+        }
+      },
+      "note": "known NTP-style asymmetry: d1=200us, d2=1800us one-way delays make the estimator report offset = O + (d1-d2)/2 = 9200, not the true 10000 -- documents the structural limitation rather than hiding it"
+    },
+    {
+      "name": "negative-offset",
+      "input": {
+        "previous_state": null,
+        "samples": [
+          {
+            "t1": 6000000,
+            "t2": 5993500,
+            "t3": 5993600,
+            "t4": 6001100
+          },
+          {
+            "t1": 6100000,
+            "t2": 6093500,
+            "t3": 6093600,
+            "t4": 6101100
+          },
+          {
+            "t1": 6200000,
+            "t2": 6193500,
+            "t3": 6193600,
+            "t4": 6201100
+          },
+          {
+            "t1": 6300000,
+            "t2": 6293500,
+            "t3": 6293600,
+            "t4": 6301100
+          },
+          {
+            "t1": 6400000,
+            "t2": 6393500,
+            "t3": 6393600,
+            "t4": 6401100
+          },
+          {
+            "t1": 6500000,
+            "t2": 6493500,
+            "t3": 6493600,
+            "t4": 6501100
+          },
+          {
+            "t1": 6600000,
+            "t2": 6593500,
+            "t3": 6593600,
+            "t4": 6601100
+          },
+          {
+            "t1": 6700000,
+            "t2": 6693500,
+            "t3": 6693600,
+            "t4": 6701100
+          },
+          {
+            "t1": 6800000,
+            "t2": 6793500,
+            "t3": 6793600,
+            "t4": 6801100
+          },
+          {
+            "t1": 6900000,
+            "t2": 6893500,
+            "t3": 6893600,
+            "t4": 6901100
+          },
+          {
+            "t1": 7000000,
+            "t2": 6993500,
+            "t3": 6993600,
+            "t4": 7001100
+          }
+        ]
+      },
+      "expected": {
+        "status": "accepted",
+        "offset_us": -7000,
+        "rtt_us": 1000,
+        "jitter_us": 0,
+        "new_state": {
+          "offsetUs": -7000,
+          "pendingOffsetUs": null
+        }
+      },
+      "note": "A's clock ahead of B's: negative offset carried through exactly"
+    },
+    {
+      "name": "positive-offset",
+      "input": {
+        "previous_state": null,
+        "samples": [
+          {
+            "t1": 7000000,
+            "t2": 7007500,
+            "t3": 7007600,
+            "t4": 7001100
+          },
+          {
+            "t1": 7100000,
+            "t2": 7107500,
+            "t3": 7107600,
+            "t4": 7101100
+          },
+          {
+            "t1": 7200000,
+            "t2": 7207500,
+            "t3": 7207600,
+            "t4": 7201100
+          },
+          {
+            "t1": 7300000,
+            "t2": 7307500,
+            "t3": 7307600,
+            "t4": 7301100
+          },
+          {
+            "t1": 7400000,
+            "t2": 7407500,
+            "t3": 7407600,
+            "t4": 7401100
+          },
+          {
+            "t1": 7500000,
+            "t2": 7507500,
+            "t3": 7507600,
+            "t4": 7501100
+          },
+          {
+            "t1": 7600000,
+            "t2": 7607500,
+            "t3": 7607600,
+            "t4": 7601100
+          },
+          {
+            "t1": 7700000,
+            "t2": 7707500,
+            "t3": 7707600,
+            "t4": 7701100
+          },
+          {
+            "t1": 7800000,
+            "t2": 7807500,
+            "t3": 7807600,
+            "t4": 7801100
+          },
+          {
+            "t1": 7900000,
+            "t2": 7907500,
+            "t3": 7907600,
+            "t4": 7901100
+          },
+          {
+            "t1": 8000000,
+            "t2": 8007500,
+            "t3": 8007600,
+            "t4": 8001100
+          }
+        ]
+      },
+      "expected": {
+        "status": "accepted",
+        "offset_us": 7000,
+        "rtt_us": 1000,
+        "jitter_us": 0,
+        "new_state": {
+          "offsetUs": 7000,
+          "pendingOffsetUs": null
+        }
+      },
+      "note": "B's clock ahead of A's: positive offset carried through exactly"
+    },
+    {
+      "name": "integer-overflow-boundary-sanity",
+      "input": {
+        "previous_state": null,
+        "samples": [
+          {
+            "t1": 100000000000000,
+            "t2": 100000000001734,
+            "t3": 100000000001834,
+            "t4": 100000000001100
+          },
+          {
+            "t1": 100000000100000,
+            "t2": 100000000101734,
+            "t3": 100000000101834,
+            "t4": 100000000101100
+          },
+          {
+            "t1": 100000000200000,
+            "t2": 100000000201734,
+            "t3": 100000000201834,
+            "t4": 100000000201100
+          },
+          {
+            "t1": 100000000300000,
+            "t2": 100000000301734,
+            "t3": 100000000301834,
+            "t4": 100000000301100
+          },
+          {
+            "t1": 100000000400000,
+            "t2": 100000000401734,
+            "t3": 100000000401834,
+            "t4": 100000000401100
+          },
+          {
+            "t1": 100000000500000,
+            "t2": 100000000501734,
+            "t3": 100000000501834,
+            "t4": 100000000501100
+          },
+          {
+            "t1": 100000000600000,
+            "t2": 100000000601734,
+            "t3": 100000000601834,
+            "t4": 100000000601100
+          },
+          {
+            "t1": 100000000700000,
+            "t2": 100000000701734,
+            "t3": 100000000701834,
+            "t4": 100000000701100
+          },
+          {
+            "t1": 100000000800000,
+            "t2": 100000000801734,
+            "t3": 100000000801834,
+            "t4": 100000000801100
+          },
+          {
+            "t1": 100000000900000,
+            "t2": 100000000901734,
+            "t3": 100000000901834,
+            "t4": 100000000901100
+          },
+          {
+            "t1": 100000001000000,
+            "t2": 100000001001734,
+            "t3": 100000001001834,
+            "t4": 100000001001100
+          }
+        ]
+      },
+      "expected": {
+        "status": "accepted",
+        "offset_us": 1234,
+        "rtt_us": 1000,
+        "jitter_us": 0,
+        "new_state": {
+          "offsetUs": 1234,
+          "pendingOffsetUs": null
+        }
+      },
+      "note": "large monotonic base timestamps (~3.17 years of continuous uptime in microseconds) produce the same result as small ones -- no overflow in 64-bit microsecond arithmetic at realistic uptime scales"
+    },
+    {
+      "name": "all-samples-invalid-no-estimate",
+      "input": {
+        "previous_state": null,
+        "samples": [
+          {
+            "t1": 8000000,
+            "t2": 8000500,
+            "t3": 8000600,
+            "t4": 7999900
+          },
+          {
+            "t1": 8100000,
+            "t2": 8100500,
+            "t3": 8100600,
+            "t4": 8099900
+          },
+          {
+            "t1": 8200000,
+            "t2": 8200500,
+            "t3": 8200600,
+            "t4": 8199900
+          },
+          {
+            "t1": 8300000,
+            "t2": 8300500,
+            "t3": 8300600,
+            "t4": 8299900
+          },
+          {
+            "t1": 8400000,
+            "t2": 8400500,
+            "t3": 8400600,
+            "t4": 8399900
+          },
+          {
+            "t1": 8500000,
+            "t2": 8500500,
+            "t3": 8500600,
+            "t4": 8499900
+          },
+          {
+            "t1": 8600000,
+            "t2": 8600500,
+            "t3": 8600600,
+            "t4": 8599900
+          },
+          {
+            "t1": 8700000,
+            "t2": 8700500,
+            "t3": 8700600,
+            "t4": 8699900
+          },
+          {
+            "t1": 8800000,
+            "t2": 8800500,
+            "t3": 8800600,
+            "t4": 8799900
+          },
+          {
+            "t1": 8900000,
+            "t2": 8900500,
+            "t3": 8900600,
+            "t4": 8899900
+          },
+          {
+            "t1": 9000000,
+            "t2": 9000500,
+            "t3": 9000600,
+            "t4": 8999900
+          }
+        ]
+      },
+      "expected": {
+        "status": "no_estimate",
+        "offset_us": null,
+        "rtt_us": null,
+        "jitter_us": null,
+        "new_state": null
+      },
+      "note": "every sample in the window has rtt <= 0 (corrupt/impossible timestamps); the estimator reports no_estimate rather than a wrong offset, and with no previous state offset_us is null"
+    },
+    {
+      "name": "all-samples-invalid-holds-previous-estimate",
+      "input": {
+        "previous_state": {
+          "offsetUs": 4200,
+          "pendingOffsetUs": null
+        },
+        "samples": [
+          {
+            "t1": 8000000,
+            "t2": 8000500,
+            "t3": 8000600,
+            "t4": 7999900
+          },
+          {
+            "t1": 8100000,
+            "t2": 8100500,
+            "t3": 8100600,
+            "t4": 8099900
+          },
+          {
+            "t1": 8200000,
+            "t2": 8200500,
+            "t3": 8200600,
+            "t4": 8199900
+          },
+          {
+            "t1": 8300000,
+            "t2": 8300500,
+            "t3": 8300600,
+            "t4": 8299900
+          },
+          {
+            "t1": 8400000,
+            "t2": 8400500,
+            "t3": 8400600,
+            "t4": 8399900
+          },
+          {
+            "t1": 8500000,
+            "t2": 8500500,
+            "t3": 8500600,
+            "t4": 8499900
+          },
+          {
+            "t1": 8600000,
+            "t2": 8600500,
+            "t3": 8600600,
+            "t4": 8599900
+          },
+          {
+            "t1": 8700000,
+            "t2": 8700500,
+            "t3": 8700600,
+            "t4": 8699900
+          },
+          {
+            "t1": 8800000,
+            "t2": 8800500,
+            "t3": 8800600,
+            "t4": 8799900
+          },
+          {
+            "t1": 8900000,
+            "t2": 8900500,
+            "t3": 8900600,
+            "t4": 8899900
+          },
+          {
+            "t1": 9000000,
+            "t2": 9000500,
+            "t3": 9000600,
+            "t4": 8999900
+          }
+        ]
+      },
+      "expected": {
+        "status": "no_estimate",
+        "offset_us": 4200,
+        "rtt_us": null,
+        "jitter_us": null,
+        "new_state": {
+          "offsetUs": 4200,
+          "pendingOffsetUs": null
+        }
+      },
+      "note": "a window with no valid samples holds the previous accepted offset rather than discarding it"
+    },
+    {
+      "name": "suspicious-offset-shift-rejected-first-time",
+      "input": {
+        "previous_state": {
+          "offsetUs": 0,
+          "pendingOffsetUs": null
+        },
+        "samples": [
+          {
+            "t1": 9000000,
+            "t2": 9050500,
+            "t3": 9050600,
+            "t4": 9001100
+          },
+          {
+            "t1": 9100000,
+            "t2": 9150500,
+            "t3": 9150600,
+            "t4": 9101100
+          },
+          {
+            "t1": 9200000,
+            "t2": 9250500,
+            "t3": 9250600,
+            "t4": 9201100
+          },
+          {
+            "t1": 9300000,
+            "t2": 9350500,
+            "t3": 9350600,
+            "t4": 9301100
+          },
+          {
+            "t1": 9400000,
+            "t2": 9450500,
+            "t3": 9450600,
+            "t4": 9401100
+          },
+          {
+            "t1": 9500000,
+            "t2": 9550500,
+            "t3": 9550600,
+            "t4": 9501100
+          },
+          {
+            "t1": 9600000,
+            "t2": 9650500,
+            "t3": 9650600,
+            "t4": 9601100
+          },
+          {
+            "t1": 9700000,
+            "t2": 9750500,
+            "t3": 9750600,
+            "t4": 9701100
+          },
+          {
+            "t1": 9800000,
+            "t2": 9850500,
+            "t3": 9850600,
+            "t4": 9801100
+          },
+          {
+            "t1": 9900000,
+            "t2": 9950500,
+            "t3": 9950600,
+            "t4": 9901100
+          },
+          {
+            "t1": 10000000,
+            "t2": 10050500,
+            "t3": 10050600,
+            "t4": 10001100
+          }
+        ]
+      },
+      "expected": {
+        "status": "rejected_pending_confirmation",
+        "offset_us": 0,
+        "rtt_us": 1000,
+        "jitter_us": 0,
+        "new_state": {
+          "offsetUs": 0,
+          "pendingOffsetUs": 50000
+        }
+      },
+      "note": "a 50ms jump from the previous accepted offset (0) exceeds the 30ms step-reject threshold; rejected on first sight, remembered as a pending candidate, previous offset held"
+    },
+    {
+      "name": "suspicious-offset-shift-confirmed-second-time",
+      "input": {
+        "previous_state": {
+          "offsetUs": 0,
+          "pendingOffsetUs": 50000
+        },
+        "samples": [
+          {
+            "t1": 10000000,
+            "t2": 10049500,
+            "t3": 10049600,
+            "t4": 10001100
+          },
+          {
+            "t1": 10100000,
+            "t2": 10149500,
+            "t3": 10149600,
+            "t4": 10101100
+          },
+          {
+            "t1": 10200000,
+            "t2": 10249500,
+            "t3": 10249600,
+            "t4": 10201100
+          },
+          {
+            "t1": 10300000,
+            "t2": 10349500,
+            "t3": 10349600,
+            "t4": 10301100
+          },
+          {
+            "t1": 10400000,
+            "t2": 10449500,
+            "t3": 10449600,
+            "t4": 10401100
+          },
+          {
+            "t1": 10500000,
+            "t2": 10549500,
+            "t3": 10549600,
+            "t4": 10501100
+          },
+          {
+            "t1": 10600000,
+            "t2": 10649500,
+            "t3": 10649600,
+            "t4": 10601100
+          },
+          {
+            "t1": 10700000,
+            "t2": 10749500,
+            "t3": 10749600,
+            "t4": 10701100
+          },
+          {
+            "t1": 10800000,
+            "t2": 10849500,
+            "t3": 10849600,
+            "t4": 10801100
+          },
+          {
+            "t1": 10900000,
+            "t2": 10949500,
+            "t3": 10949600,
+            "t4": 10901100
+          },
+          {
+            "t1": 11000000,
+            "t2": 11049500,
+            "t3": 11049600,
+            "t4": 11001100
+          }
+        ]
+      },
+      "expected": {
+        "status": "confirmed",
+        "offset_us": 9800,
+        "rtt_us": 1000,
+        "jitter_us": 0,
+        "new_state": {
+          "offsetUs": 9800,
+          "pendingOffsetUs": null
+        }
+      },
+      "note": "a second window proposing 49000 (within the 10ms confirmation tolerance of the 50000 pending candidate) confirms the step; EWMA is then applied from the pre-jump baseline"
+    },
+    {
+      "name": "convergence-step-1",
+      "input": {
+        "previous_state": {
+          "offsetUs": 0,
+          "pendingOffsetUs": null
+        },
+        "samples": [
+          {
+            "t1": 12000000,
+            "t2": 12010500,
+            "t3": 12010550,
+            "t4": 12001050
+          },
+          {
+            "t1": 12100000,
+            "t2": 12110500,
+            "t3": 12110550,
+            "t4": 12101050
+          },
+          {
+            "t1": 12200000,
+            "t2": 12210500,
+            "t3": 12210550,
+            "t4": 12201050
+          },
+          {
+            "t1": 12300000,
+            "t2": 12310500,
+            "t3": 12310550,
+            "t4": 12301050
+          },
+          {
+            "t1": 12400000,
+            "t2": 12410500,
+            "t3": 12410550,
+            "t4": 12401050
+          },
+          {
+            "t1": 12500000,
+            "t2": 12510500,
+            "t3": 12510550,
+            "t4": 12501050
+          },
+          {
+            "t1": 12600000,
+            "t2": 12610500,
+            "t3": 12610550,
+            "t4": 12601050
+          },
+          {
+            "t1": 12700000,
+            "t2": 12710500,
+            "t3": 12710550,
+            "t4": 12701050
+          },
+          {
+            "t1": 12800000,
+            "t2": 12810500,
+            "t3": 12810550,
+            "t4": 12801050
+          },
+          {
+            "t1": 12900000,
+            "t2": 12910500,
+            "t3": 12910550,
+            "t4": 12901050
+          },
+          {
+            "t1": 13000000,
+            "t2": 13010500,
+            "t3": 13010550,
+            "t4": 13001050
+          }
+        ]
+      },
+      "expected": {
+        "status": "accepted",
+        "offset_us": 2000,
+        "rtt_us": 1000,
+        "jitter_us": 0,
+        "new_state": {
+          "offsetUs": 2000,
+          "pendingOffsetUs": null
+        }
+      },
+      "note": "EWMA convergence step 1 of 4 toward a constant true offset of 10000us, alpha=0.2 applied as exact-rational integer arithmetic"
+    },
+    {
+      "name": "convergence-step-2",
+      "input": {
+        "previous_state": {
+          "offsetUs": 2000,
+          "pendingOffsetUs": null
+        },
+        "samples": [
+          {
+            "t1": 13000000,
+            "t2": 13010500,
+            "t3": 13010550,
+            "t4": 13001050
+          },
+          {
+            "t1": 13100000,
+            "t2": 13110500,
+            "t3": 13110550,
+            "t4": 13101050
+          },
+          {
+            "t1": 13200000,
+            "t2": 13210500,
+            "t3": 13210550,
+            "t4": 13201050
+          },
+          {
+            "t1": 13300000,
+            "t2": 13310500,
+            "t3": 13310550,
+            "t4": 13301050
+          },
+          {
+            "t1": 13400000,
+            "t2": 13410500,
+            "t3": 13410550,
+            "t4": 13401050
+          },
+          {
+            "t1": 13500000,
+            "t2": 13510500,
+            "t3": 13510550,
+            "t4": 13501050
+          },
+          {
+            "t1": 13600000,
+            "t2": 13610500,
+            "t3": 13610550,
+            "t4": 13601050
+          },
+          {
+            "t1": 13700000,
+            "t2": 13710500,
+            "t3": 13710550,
+            "t4": 13701050
+          },
+          {
+            "t1": 13800000,
+            "t2": 13810500,
+            "t3": 13810550,
+            "t4": 13801050
+          },
+          {
+            "t1": 13900000,
+            "t2": 13910500,
+            "t3": 13910550,
+            "t4": 13901050
+          },
+          {
+            "t1": 14000000,
+            "t2": 14010500,
+            "t3": 14010550,
+            "t4": 14001050
+          }
+        ]
+      },
+      "expected": {
+        "status": "accepted",
+        "offset_us": 3600,
+        "rtt_us": 1000,
+        "jitter_us": 0,
+        "new_state": {
+          "offsetUs": 3600,
+          "pendingOffsetUs": null
+        }
+      },
+      "note": "EWMA convergence step 2 of 4 toward a constant true offset of 10000us, alpha=0.2 applied as exact-rational integer arithmetic"
+    },
+    {
+      "name": "convergence-step-3",
+      "input": {
+        "previous_state": {
+          "offsetUs": 3600,
+          "pendingOffsetUs": null
+        },
+        "samples": [
+          {
+            "t1": 14000000,
+            "t2": 14010500,
+            "t3": 14010550,
+            "t4": 14001050
+          },
+          {
+            "t1": 14100000,
+            "t2": 14110500,
+            "t3": 14110550,
+            "t4": 14101050
+          },
+          {
+            "t1": 14200000,
+            "t2": 14210500,
+            "t3": 14210550,
+            "t4": 14201050
+          },
+          {
+            "t1": 14300000,
+            "t2": 14310500,
+            "t3": 14310550,
+            "t4": 14301050
+          },
+          {
+            "t1": 14400000,
+            "t2": 14410500,
+            "t3": 14410550,
+            "t4": 14401050
+          },
+          {
+            "t1": 14500000,
+            "t2": 14510500,
+            "t3": 14510550,
+            "t4": 14501050
+          },
+          {
+            "t1": 14600000,
+            "t2": 14610500,
+            "t3": 14610550,
+            "t4": 14601050
+          },
+          {
+            "t1": 14700000,
+            "t2": 14710500,
+            "t3": 14710550,
+            "t4": 14701050
+          },
+          {
+            "t1": 14800000,
+            "t2": 14810500,
+            "t3": 14810550,
+            "t4": 14801050
+          },
+          {
+            "t1": 14900000,
+            "t2": 14910500,
+            "t3": 14910550,
+            "t4": 14901050
+          },
+          {
+            "t1": 15000000,
+            "t2": 15010500,
+            "t3": 15010550,
+            "t4": 15001050
+          }
+        ]
+      },
+      "expected": {
+        "status": "accepted",
+        "offset_us": 4880,
+        "rtt_us": 1000,
+        "jitter_us": 0,
+        "new_state": {
+          "offsetUs": 4880,
+          "pendingOffsetUs": null
+        }
+      },
+      "note": "EWMA convergence step 3 of 4 toward a constant true offset of 10000us, alpha=0.2 applied as exact-rational integer arithmetic"
+    },
+    {
+      "name": "convergence-step-4",
+      "input": {
+        "previous_state": {
+          "offsetUs": 4880,
+          "pendingOffsetUs": null
+        },
+        "samples": [
+          {
+            "t1": 15000000,
+            "t2": 15010500,
+            "t3": 15010550,
+            "t4": 15001050
+          },
+          {
+            "t1": 15100000,
+            "t2": 15110500,
+            "t3": 15110550,
+            "t4": 15101050
+          },
+          {
+            "t1": 15200000,
+            "t2": 15210500,
+            "t3": 15210550,
+            "t4": 15201050
+          },
+          {
+            "t1": 15300000,
+            "t2": 15310500,
+            "t3": 15310550,
+            "t4": 15301050
+          },
+          {
+            "t1": 15400000,
+            "t2": 15410500,
+            "t3": 15410550,
+            "t4": 15401050
+          },
+          {
+            "t1": 15500000,
+            "t2": 15510500,
+            "t3": 15510550,
+            "t4": 15501050
+          },
+          {
+            "t1": 15600000,
+            "t2": 15610500,
+            "t3": 15610550,
+            "t4": 15601050
+          },
+          {
+            "t1": 15700000,
+            "t2": 15710500,
+            "t3": 15710550,
+            "t4": 15701050
+          },
+          {
+            "t1": 15800000,
+            "t2": 15810500,
+            "t3": 15810550,
+            "t4": 15801050
+          },
+          {
+            "t1": 15900000,
+            "t2": 15910500,
+            "t3": 15910550,
+            "t4": 15901050
+          },
+          {
+            "t1": 16000000,
+            "t2": 16010500,
+            "t3": 16010550,
+            "t4": 16001050
+          }
+        ]
+      },
+      "expected": {
+        "status": "accepted",
+        "offset_us": 5904,
+        "rtt_us": 1000,
+        "jitter_us": 0,
+        "new_state": {
+          "offsetUs": 5904,
+          "pendingOffsetUs": null
+        }
+      },
+      "note": "EWMA convergence step 4 of 4 toward a constant true offset of 10000us, alpha=0.2 applied as exact-rational integer arithmetic"
+    }
+  ]
+}
