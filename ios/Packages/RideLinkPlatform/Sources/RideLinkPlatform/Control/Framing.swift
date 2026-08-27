@@ -2,22 +2,15 @@ import Foundation
 import Network
 import RideLinkCore
 
-/// PHASE 1a PLAINTEXT CONTROL TRANSPORT.
-///
-/// **`PlainControlTransportPhase1a` — not secure, debug/development builds only.** PROTOCOL §1
-/// specifies TCP over **TLS 1.3**; Phase 1b has not started (CLAUDE.md rule 28), so this
-/// transport carries the same length-prefixed JSON framing over **plain TCP** via
-/// `Network.framework`. Every type in this file is named or documented so a reviewer cannot
-/// mistake it for the production transport; callers must gate its use behind a debug-build check
-/// (wired in the app target — release builds must not construct a `ControlListener` or
-/// `ControlConnection` at all).
-///
-/// Framing (PROTOCOL §1): `uint32` big-endian byte length, then that many UTF-8 JSON bytes.
-/// `FrameLimits.maxControlFrameBytes` is 262144. The length prefix is read and validated
-/// **before** the payload is requested from `Network.framework` — `readFrame()` returns
+/// Control-plane framing (PROTOCOL §1): `uint32` big-endian byte length, then that many UTF-8 JSON
+/// bytes. `FrameLimits.maxControlFrameBytes` is 262144, and the length prefix is read and
+/// validated **before** the payload is requested from `Network.framework` — `readFrame()` returns
 /// `.frameTooLarge` without ever calling `receive(minimumIncompleteLength: length, ...)` for an
 /// oversized or negative length.
-public enum PlainControlTransportPhase1a {}
+///
+/// Transport-neutral by design. Whether the bytes underneath are TLS records (production, the only
+/// option — see `ControlChannel`) or plaintext (a test fixture) is decided by the `ControlChannel`
+/// that produced the connection, and nothing in this file knows or cares.
 
 public enum FrameReadResult: Sendable {
     case frame(Envelope, versionOk: Bool)
@@ -65,7 +58,8 @@ private final class SingleResumeContinuation<T: Sendable>: @unchecked Sendable {
     }
 }
 
-/// One control-plane TCP connection, plain (Phase 1a), framed per `PlainControlTransportPhase1a`.
+/// One control-plane connection, framed per the rules above and protected by whatever transport
+/// the `ControlChannel` that produced it established — TLS 1.3 in production.
 ///
 /// `NWConnection` delivers every callback on `queue`, a single serial `DispatchQueue` this type
 /// owns exclusively — that serialization is what makes `@unchecked Sendable` correct here rather
@@ -76,6 +70,30 @@ public final class ControlConnection: @unchecked Sendable {
     private let connection: NWConnection
     public let isInitiator: Bool
     private let queue: DispatchQueue
+    private let securityLock = NSLock()
+    private var attachedSecurity: (any ChannelSecurity)?
+
+    /// Non-nil on every production connection. Nil only on the test-only plaintext fixture.
+    /// Populated by the `ControlChannel` once the transport handshake has completed, which is the
+    /// earliest moment the peer's certificate and the exporter exist.
+    public var security: (any ChannelSecurity)? {
+        securityLock.lock()
+        defer { securityLock.unlock() }
+        return attachedSecurity
+    }
+
+    public func attachSecurity(_ security: any ChannelSecurity) {
+        securityLock.lock()
+        defer { securityLock.unlock() }
+        attachedSecurity = security
+    }
+
+    /// The TLS metadata for this connection, so a `ControlChannel` can read the peer certificate
+    /// and the keying-material exporter. Nil on a plaintext connection.
+    public var securityProtocolMetadata: sec_protocol_metadata_t? {
+        (connection.metadata(definition: NWProtocolTLS.definition) as? NWProtocolTLS.Metadata)?
+            .securityProtocolMetadata
+    }
 
     private init(connection: NWConnection, isInitiator: Bool, queue: DispatchQueue) {
         self.connection = connection
@@ -91,17 +109,21 @@ public final class ControlConnection: @unchecked Sendable {
     /// and never surfaces it as `.failed` on its own. Left unbounded, a single unreachable-peer
     /// reconnect attempt would hang forever, stalling the whole ladder on attempt one (this
     /// session's brief §2/§9 — a reconnect attempt must fail within a bounded time, not hang).
-    public static func connect(host: String, port: UInt16, connectTimeoutMs: Int64 = 5000) async throws -> ControlConnection {
+    public static func connect(
+        host: String,
+        port: UInt16,
+        parameters: NWParameters,
+        connectTimeoutMs: Int64 = 5000
+    ) async throws -> ControlConnection {
         let queue = DispatchQueue(label: "com.ridelink.platform.control.connection")
         guard let nwPort = NWEndpoint.Port(rawValue: port) else {
             throw ControlTransportError.connectFailed("invalid port \(port)")
         }
-        let params = NWParameters.tcp
-        if let tcpOptions = params.defaultProtocolStack.transportProtocol as? NWProtocolTCP.Options {
+        if let tcpOptions = parameters.defaultProtocolStack.transportProtocol as? NWProtocolTCP.Options {
             tcpOptions.noDelay = true // CLAUDE.md rule 10 / PROTOCOL §1: TCP_NODELAY
         }
 
-        let nwConnection = NWConnection(host: NWEndpoint.Host(host), port: nwPort, using: params)
+        let nwConnection = NWConnection(host: NWEndpoint.Host(host), port: nwPort, using: parameters)
         let control = ControlConnection(connection: nwConnection, isInitiator: true, queue: queue)
         try await control.waitUntilReady(timeoutMs: connectTimeoutMs)
         return control
@@ -124,10 +146,22 @@ public final class ControlConnection: @unchecked Sendable {
     /// the state handler *or* the timer can resume (whichever comes first; the loser is a no-op)
     /// is what actually bounds this call. On either path losing, `connection.cancel()` releases
     /// the underlying socket so a timed-out attempt does not linger.
+    /// Waits until the connection is usable. Public because a `ControlChannel` with a transport
+    /// handshake of its own — TLS — has to wait for `.ready` on an *accepted* connection too
+    /// before the peer certificate and the exporter exist.
+    public func awaitReady(timeoutMs: Int64 = 5000) async throws {
+        try await waitUntilReady(timeoutMs: timeoutMs)
+    }
+
     private func waitUntilReady(timeoutMs: Int64) async throws {
         do {
             try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
                 let box = SingleResumeContinuation(continuation)
+                // Checked before the handler is installed: a connection can already be `.ready` by
+                // the time this is called (an accepted one usually is), and a state handler only
+                // fires on *subsequent* changes — so without this the wait would hang forever on
+                // exactly the common case.
+                if case .ready = connection.state { box.resume(returning: ()) }
                 connection.stateUpdateHandler = { state in
                     switch state {
                     case .ready:
@@ -231,22 +265,34 @@ public final class ControlListener: @unchecked Sendable {
     private var pendingConnections: [NWConnection] = []
     private var waitingContinuations: [CheckedContinuation<ControlConnection, Error>] = []
     private var isCancelled = false
+    private let onAccepted: @Sendable (ControlConnection) async throws -> Void
 
     public private(set) var localPort: UInt16 = 0
 
-    private init(listener: NWListener, queue: DispatchQueue) {
+    private init(
+        listener: NWListener,
+        queue: DispatchQueue,
+        onAccepted: @escaping @Sendable (ControlConnection) async throws -> Void
+    ) {
         self.listener = listener
         self.queue = queue
+        self.onAccepted = onAccepted
     }
 
-    public static func bind() async throws -> ControlListener {
+    /// - Parameter onAccepted: run on each accepted connection before `accept()` returns it. This
+    ///   is where a TLS channel waits for the handshake and attaches `ChannelSecurity`, so that
+    ///   neither this type nor `ControlSessionManager` has to know a transport exists. A throw
+    ///   closes the connection and fails that `accept()` only.
+    public static func bind(
+        parameters: NWParameters,
+        onAccepted: @escaping @Sendable (ControlConnection) async throws -> Void = { _ in }
+    ) async throws -> ControlListener {
         let queue = DispatchQueue(label: "com.ridelink.platform.control.listener")
-        let params = NWParameters.tcp
-        if let tcpOptions = params.defaultProtocolStack.transportProtocol as? NWProtocolTCP.Options {
+        if let tcpOptions = parameters.defaultProtocolStack.transportProtocol as? NWProtocolTCP.Options {
             tcpOptions.noDelay = true
         }
-        let nwListener = try NWListener(using: params) // port 0: OS-selected dynamic port
-        let control = ControlListener(listener: nwListener, queue: queue)
+        let nwListener = try NWListener(using: parameters) // port 0: OS-selected dynamic port
+        let control = ControlListener(listener: nwListener, queue: queue, onAccepted: onAccepted)
 
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
             let box = SingleResumeContinuation(continuation)
@@ -286,6 +332,17 @@ public final class ControlListener: @unchecked Sendable {
     }
 
     public func accept() async throws -> ControlConnection {
+        let connection = try await acceptRaw()
+        do {
+            try await onAccepted(connection)
+        } catch {
+            connection.close()
+            throw error
+        }
+        return connection
+    }
+
+    private func acceptRaw() async throws -> ControlConnection {
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<ControlConnection, Error>) in
             queue.async { [weak self] in
                 guard let self else {

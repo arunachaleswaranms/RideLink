@@ -16,36 +16,14 @@ import java.util.UUID
 import java.util.concurrent.atomic.AtomicLong
 
 /**
- * **Non-security-bearing.** Phase 1a has no TLS, no device keypair and no trusted-peer store
- * (CLAUDE.md rule 28 / this session's brief §9). [ProvisionalIdentity.spkiHash] is a fixed
- * sentinel, never a real key hash — it exists only so `HELLO.identity_spki_sha256` satisfies the
- * wire shape ([SpkiHash]'s format) while this transport is active. It must never be treated as a
- * trust anchor, logged as if it were real, or compared for pin matching: there is no pinning in
- * Phase 1a.
- */
-object ProvisionalIdentity {
-    /** Generated once per process start. Not persisted, not a durable Phase 1b `peer_id`. */
-    val peerId: PeerId by lazy { PeerId(randomHex(HEX_16_BYTES)) }
-
-    /** `sha256:` + 64 zero hex characters — structurally valid, semantically meaningless. */
-    val insecureSentinelSpkiHash: SpkiHash = SpkiHash("sha256:" + "0".repeat(SPKI_HEX_LEN))
-
-    private const val HEX_16_BYTES = 8
-    private const val SPKI_HEX_LEN = 64
-    private val random = SecureRandom()
-
-    private fun randomHex(byteCount: Int): String {
-        val bytes = ByteArray(byteCount)
-        random.nextBytes(bytes)
-        return bytes.joinToString("") { "%02x".format(it) }
-    }
-}
-
-/**
  * ADR-015: 16 CSPRNG bytes as 32 lowercase hex characters, generated once per app process per
  * discovery session, stable across every connection opened or accepted in that session. A
- * distinct value from [ProvisionalIdentity.peerId] and from the mDNS discovery handle — reusing
+ * distinct value from the device's durable `peer_id` and from the mDNS discovery handle — reusing
  * one random value for two jobs is the exact mistake ADR-015 warns against.
+ *
+ * (Phase 1a's `ProvisionalIdentity` — a per-process random `peer_id` and a zero-filled sentinel
+ * `identity_spki_sha256` — is gone. Both are real now: the `peer_id` is persisted by
+ * `data.trustedpeers.LocalPeerIdStore`, and the SPKI hash comes from the Keystore identity key.)
  */
 object ConnTiebreakGenerator {
     private const val BYTES = 16

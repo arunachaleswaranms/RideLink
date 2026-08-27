@@ -84,9 +84,18 @@ class FramingTest {
             }
         }
 
+    /**
+     * Framing is transport-neutral, and these tests are about the `uint32` length prefix and the
+     * 256 KiB cap alone — no handshake, no identity, nothing a TLS session would contribute. The
+     * plaintext fixture (test sources only; see [PlaintextControlChannelFixture]) keeps them fast
+     * and keeps what they assert unambiguous.
+     */
+    private val plaintext = PlaintextControlChannelFixture()
+
     private suspend fun withListenerAndConnection(block: suspend (ControlSocket, ControlSocket) -> Unit) {
-        val listener = ControlListener.bind()
-        val clientDeferred = kotlinx.coroutines.GlobalScope.async(Dispatchers.IO) { ControlSocket.connect("127.0.0.1", listener.localPort) }
+        val listener = plaintext.bind()
+        val clientDeferred =
+            kotlinx.coroutines.GlobalScope.async(Dispatchers.IO) { plaintext.connect("127.0.0.1", listener.localPort) }
         val server = listener.accept()
         val client = clientDeferred.await()
         try {
@@ -99,7 +108,7 @@ class FramingTest {
     }
 
     private suspend fun withRawLoopback(block: suspend (java.io.OutputStream, ControlSocket) -> Unit) {
-        val listener = ControlListener.bind()
+        val listener = plaintext.bind()
         val rawClient = Socket()
         rawClient.connect(java.net.InetSocketAddress("127.0.0.1", listener.localPort))
         val server = listener.accept()

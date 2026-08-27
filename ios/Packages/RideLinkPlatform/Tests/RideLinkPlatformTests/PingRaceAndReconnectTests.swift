@@ -29,10 +29,6 @@ final class PingRaceAndReconnectTests: XCTestCase {
     /// stuck (not just slow) still fails this test rather than hanging silently.
     private let clockBurstConvergenceTimeoutSeconds: Double = 4.0
 
-    private func localIdentity(_ name: String) -> LocalHandshakeIdentity {
-        LocalHandshakeIdentity(displayName: name, platform: "ios", osVersion: "test", appVersion: "test", connTiebreak: ConnTiebreakGenerator.generate())
-    }
-
     private func clock() -> @Sendable () -> Int64 {
         let counter = LockedCounter(1_000_000)
         return { counter.incrementAndGet(by: 1_000) }
@@ -49,14 +45,15 @@ final class PingRaceAndReconnectTests: XCTestCase {
     /// `clockBurstConvergenceTimeoutSeconds`'s doc comment for exactly what the deadline below is
     /// measured against.
     func testClockBurstCompletesQuicklyWithNoDroppedPongs() async throws {
-        let peerA = ControlSessionManager(localPeerId: PeerId("1111111111111111"), monotonicNowUs: clock())
-        let peerB = ControlSessionManager(localPeerId: PeerId("2222222222222222"), monotonicNowUs: clock())
+        let (a, b) = try TestSessions.pairedPeers("1111111111111111", "2222222222222222")
+        let peerA = a.manager(monotonicNowUs: clock())
+        let peerB = b.manager(monotonicNowUs: clock())
 
-        let portA = try await peerA.startListening(local: localIdentity("A"))
-        let portB = try await peerB.startListening(local: localIdentity("B"))
+        let portA = try await peerA.startListening(local: a.local)
+        let portB = try await peerB.startListening(local: b.local)
 
-        await peerA.connectTo(host: "127.0.0.1", port: portB, local: localIdentity("A"))
-        await peerB.connectTo(host: "127.0.0.1", port: portA, local: localIdentity("B"))
+        await peerA.connectTo(host: "127.0.0.1", port: portB, local: a.local)
+        await peerB.connectTo(host: "127.0.0.1", port: portA, local: b.local)
 
         try await waitUntil(timeoutSeconds: 5) { await peerA.diagnostics.controlState == .connected }
 
@@ -83,15 +80,16 @@ final class PingRaceAndReconnectTests: XCTestCase {
     /// from the failure message alone instead of a bare error name.
     func testRepeatedClockBurstsAllCompleteQuickly() async throws {
         for i in 0..<5 {
-            let peerA = ControlSessionManager(localPeerId: PeerId("aaaaaaaaaaaaaaa\(i)"), monotonicNowUs: clock())
-            let peerB = ControlSessionManager(localPeerId: PeerId("bbbbbbbbbbbbbbb\(i)"), monotonicNowUs: clock())
+            let (a, b) = try TestSessions.pairedPeers("aaaaaaaaaaaaaaa\(i)", "bbbbbbbbbbbbbbb\(i)")
+            let peerA = a.manager(monotonicNowUs: clock())
+            let peerB = b.manager(monotonicNowUs: clock())
             let iterationStart = Date()
 
-            let portA = try await peerA.startListening(local: localIdentity("A"))
-            let portB = try await peerB.startListening(local: localIdentity("B"))
+            let portA = try await peerA.startListening(local: a.local)
+            let portB = try await peerB.startListening(local: b.local)
 
-            await peerA.connectTo(host: "127.0.0.1", port: portB, local: localIdentity("A"))
-            await peerB.connectTo(host: "127.0.0.1", port: portA, local: localIdentity("B"))
+            await peerA.connectTo(host: "127.0.0.1", port: portB, local: a.local)
+            await peerB.connectTo(host: "127.0.0.1", port: portA, local: b.local)
 
             do {
                 try await waitUntil(timeoutSeconds: 5) { await peerA.diagnostics.controlState == .connected }
@@ -135,14 +133,15 @@ final class PingRaceAndReconnectTests: XCTestCase {
     /// fatal trap, so simply not crashing is a real assertion) and must not leave the next
     /// session's identically-timestamped PING colliding with a stale waiter.
     func testShutdownDuringAnInFlightBurstDoesNotCrashAndLeavesNoStaleWaiter() async throws {
-        let peerA = ControlSessionManager(localPeerId: PeerId("3333333333333333"), monotonicNowUs: clock())
-        let peerB = ControlSessionManager(localPeerId: PeerId("4444444444444444"), monotonicNowUs: clock())
+        let (a, b) = try TestSessions.pairedPeers("3333333333333333", "4444444444444444")
+        let peerA = a.manager(monotonicNowUs: clock())
+        let peerB = b.manager(monotonicNowUs: clock())
 
-        let portA = try await peerA.startListening(local: localIdentity("A"))
-        let portB = try await peerB.startListening(local: localIdentity("B"))
+        let portA = try await peerA.startListening(local: a.local)
+        let portB = try await peerB.startListening(local: b.local)
 
-        await peerA.connectTo(host: "127.0.0.1", port: portB, local: localIdentity("A"))
-        await peerB.connectTo(host: "127.0.0.1", port: portA, local: localIdentity("B"))
+        await peerA.connectTo(host: "127.0.0.1", port: portB, local: a.local)
+        await peerB.connectTo(host: "127.0.0.1", port: portA, local: b.local)
 
         try await waitUntil(timeoutSeconds: 5) { await peerA.diagnostics.controlState == .connected }
         // Tear down immediately, while the first 11-sample burst is very likely still mid-flight.
@@ -152,12 +151,16 @@ final class PingRaceAndReconnectTests: XCTestCase {
         // A fresh session, reusing the same clock (so `t1` values can collide with the old
         // session's), must still converge cleanly — proving the old session's pending waiters
         // were cleared, not left to intercept a same-valued PONG later.
-        let peerA2 = ControlSessionManager(localPeerId: PeerId("3333333333333333"), monotonicNowUs: clock())
-        let peerB2 = ControlSessionManager(localPeerId: PeerId("4444444444444444"), monotonicNowUs: clock())
-        let portA2 = try await peerA2.startListening(local: localIdentity("A"))
-        let portB2 = try await peerB2.startListening(local: localIdentity("B"))
-        await peerA2.connectTo(host: "127.0.0.1", port: portB2, local: localIdentity("A"))
-        await peerB2.connectTo(host: "127.0.0.1", port: portA2, local: localIdentity("B"))
+        let (a2, b2) = try TestSessions.pairedPeers("3333333333333333", "4444444444444444")
+        let peerA2 = a2.manager(monotonicNowUs: clock())
+        let peerB2 = b2.manager(monotonicNowUs: clock())
+        // a2/b2, not a/b: the second session has fresh identities, and advertising the first
+        // session's `identity_spki_sha256` alongside the new certificate is exactly the
+        // ERROR/identity_mismatch case PROTOCOL §4.1 refuses.
+        let portA2 = try await peerA2.startListening(local: a2.local)
+        let portB2 = try await peerB2.startListening(local: b2.local)
+        await peerA2.connectTo(host: "127.0.0.1", port: portB2, local: a2.local)
+        await peerB2.connectTo(host: "127.0.0.1", port: portA2, local: b2.local)
         try await waitUntil(timeoutSeconds: 5) { await peerA2.diagnostics.controlState == .connected }
         try await waitUntil(timeoutSeconds: clockBurstConvergenceTimeoutSeconds) { await peerA2.diagnostics.clockOffsetUs != nil }
 
@@ -173,7 +176,8 @@ final class PingRaceAndReconnectTests: XCTestCase {
     /// `beginReconnect` against an address nothing listens on and recording every emitted event
     /// proves the fix directly: a failed *attempt* must never itself produce a `ControlEvent`.
     func testFailedReconnectAttemptsNeverEmitAnEvent() async throws {
-        let peer = ControlSessionManager(localPeerId: PeerId("5555555555555555"), monotonicNowUs: clock(), connectTimeoutMs: 200)
+        let solo = try TestSessions.unpairedPeer("5555555555555555", name: "A")
+        let peer = solo.manager(monotonicNowUs: clock(), connectTimeoutMs: 200)
         let events = EventRecorder()
         await peer.setOnEvent { event in Task { await events.record(event) } }
 
@@ -181,11 +185,9 @@ final class PingRaceAndReconnectTests: XCTestCase {
         // treats a refused connection as `.waiting`, not `.failed` (it can retry indefinitely on
         // its own), so `connectTimeoutMs` is what actually bounds the attempt — see
         // `ControlConnection.connect`'s doc comment.
-        let deadListener = try await ControlListener.bind()
-        let deadPort = deadListener.localPort
-        deadListener.close()
+        let deadPort = try await TestSessions.deadPort()
 
-        await peer.beginReconnect(local: localIdentity("A"), host: "127.0.0.1", port: deadPort)
+        await peer.beginReconnect(local: solo.local, host: "127.0.0.1", port: deadPort)
 
         // Ladder: attempt 1 at ~0.4-0.6s, attempt 2 at ~1.2-1.8s cumulative. 3s leaves comfortable
         // margin for connect-refused overhead on a loaded CI machine while still guaranteeing at
@@ -204,12 +206,11 @@ final class PingRaceAndReconnectTests: XCTestCase {
     /// `reconnectCount` must increase by exactly one per attempt, monotonically, with no reset
     /// back to a lower value mid-ladder (the visible symptom of a second, nested loop starting).
     func testReconnectCountGrowsMonotonicallyAndNeverResets() async throws {
-        let peer = ControlSessionManager(localPeerId: PeerId("6666666666666666"), monotonicNowUs: clock(), connectTimeoutMs: 200)
-        let deadListener = try await ControlListener.bind()
-        let deadPort = deadListener.localPort
-        deadListener.close()
+        let solo = try TestSessions.unpairedPeer("6666666666666666", name: "A")
+        let peer = solo.manager(monotonicNowUs: clock(), connectTimeoutMs: 200)
+        let deadPort = try await TestSessions.deadPort()
 
-        await peer.beginReconnect(local: localIdentity("A"), host: "127.0.0.1", port: deadPort)
+        await peer.beginReconnect(local: solo.local, host: "127.0.0.1", port: deadPort)
 
         var samples: [Int] = []
         for _ in 0..<6 {
@@ -228,14 +229,15 @@ final class PingRaceAndReconnectTests: XCTestCase {
     /// A successful reconnect must stop the ladder: once the peer is reachable, no further
     /// attempts (and no further `reconnectCount` growth) happen.
     func testSuccessfulReconnectStopsFurtherAttempts() async throws {
-        let peerA = ControlSessionManager(localPeerId: PeerId("7777777777777777"), monotonicNowUs: clock())
-        let peerB = ControlSessionManager(localPeerId: PeerId("8888888888888888"), monotonicNowUs: clock())
+        let (a, b) = try TestSessions.pairedPeers("7777777777777777", "8888888888888888")
+        let peerA = a.manager(monotonicNowUs: clock())
+        let peerB = b.manager(monotonicNowUs: clock())
         let events = EventRecorder()
         await peerA.setOnEvent { event in Task { await events.record(event) } }
 
-        let portB = try await peerB.startListening(local: localIdentity("B"))
+        let portB = try await peerB.startListening(local: b.local)
 
-        await peerA.beginReconnect(local: localIdentity("A"), host: "127.0.0.1", port: portB)
+        await peerA.beginReconnect(local: a.local, host: "127.0.0.1", port: portB)
 
         try await waitUntil(timeoutSeconds: 5) { await events.all().contains { if case .connected = $0 { return true }; return false } }
 

@@ -92,21 +92,23 @@ object ControlHandshake {
         }
 
         val proposal = freshSessionId()
-        socket.writeFrame(
-            ControlMessages.hello(
-                localPeerId = localPeerId,
-                sessionId = proposal,
-                seq = seqCounter.nextSeq(),
-                sentAtMonoUs = monotonicNowUs(),
-                displayName = local.displayName,
-                platform = local.platform,
-                osVersion = local.osVersion,
-                appVersion = local.appVersion,
-                sessionIdProposal = proposal,
-                connTiebreak = local.connTiebreak,
-                identitySpkiSha256 = local.identitySpkiSha256,
-            ),
-        )
+        val sent =
+            socket.writeOrClosed(
+                ControlMessages.hello(
+                    localPeerId = localPeerId,
+                    sessionId = proposal,
+                    seq = seqCounter.nextSeq(),
+                    sentAtMonoUs = monotonicNowUs(),
+                    displayName = local.displayName,
+                    platform = local.platform,
+                    osVersion = local.osVersion,
+                    appVersion = local.appVersion,
+                    sessionIdProposal = proposal,
+                    connTiebreak = local.connTiebreak,
+                    identitySpkiSha256 = local.identitySpkiSha256,
+                ),
+            )
+        if (!sent) return HandshakeOutcome.ConnectionClosed
 
         val frame = socket.readFrame()
         if (frame !is FrameReadResult.Frame || frame.envelope.type != "HELLO_ACK") return mapFailure(frame)
@@ -148,23 +150,26 @@ object ControlHandshake {
         val leader = computeLeaderId(localPeerId, remotePeerId)
         val acceptedSessionId = if (leader == localPeerId) freshSessionId() else initiatorProposal
 
-        socket.writeFrame(
-            ControlMessages.helloAck(
-                localPeerId = localPeerId,
-                sessionId = acceptedSessionId,
-                seq = seqCounter.nextSeq(),
-                sentAtMonoUs = monotonicNowUs(),
-                acceptedSessionId = acceptedSessionId,
-                connTiebreak = local.connTiebreak,
-                leaderPeerId = leader,
-                identitySpkiSha256 = local.identitySpkiSha256,
-            ),
-        )
+        val sent =
+            socket.writeOrClosed(
+                ControlMessages.helloAck(
+                    localPeerId = localPeerId,
+                    sessionId = acceptedSessionId,
+                    seq = seqCounter.nextSeq(),
+                    sentAtMonoUs = monotonicNowUs(),
+                    acceptedSessionId = acceptedSessionId,
+                    connTiebreak = local.connTiebreak,
+                    leaderPeerId = leader,
+                    identitySpkiSha256 = local.identitySpkiSha256,
+                ),
+            )
+        if (!sent) return HandshakeOutcome.ConnectionClosed
 
         return finish(payload, security, remotePeerId, remoteConnTiebreak, acceptedSessionId, leader, trustedPeers)
     }
 
-    @Suppress("LongParameterList") // one handshake's worth of already-validated fields; grouping them buys nothing
+    // One handshake's worth of already-validated fields, and one return per outcome.
+    @Suppress("LongParameterList", "ReturnCount")
     private fun finish(
         payload: JsonObject,
         security: ChannelSecurity,
@@ -199,6 +204,22 @@ object ControlHandshake {
             pinDecision = decision,
         )
     }
+
+    /**
+     * A handshake write can fail for a reason that is not this side's fault and is not an error:
+     * the peer refused the certificate and closed, or the session was torn down mid-handshake. An
+     * `IOException` escaping here would leave the socket unclosed and produce no outcome at all,
+     * so a failed write is reported the same way a failed read already is — as
+     * [HandshakeOutcome.ConnectionClosed], which the caller closes and moves on from.
+     */
+    @Suppress("SwallowedException") // the reason is exactly "the peer went away", which is the return value
+    private suspend fun ControlSocket.writeOrClosed(envelope: com.ridelink.core.protocol.Envelope): Boolean =
+        try {
+            writeFrame(envelope)
+            true
+        } catch (io: java.io.IOException) {
+            false
+        }
 
     private fun malformed(): HandshakeOutcome = HandshakeOutcome.Rejected(ERROR_CODE_MALFORMED_FRAME)
 

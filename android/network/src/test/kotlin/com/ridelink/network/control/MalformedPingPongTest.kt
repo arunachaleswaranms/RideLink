@@ -1,6 +1,5 @@
 package com.ridelink.network.control
 
-import com.ridelink.core.model.PeerId
 import com.ridelink.core.model.SessionId
 import com.ridelink.core.protocol.Envelope
 import kotlinx.coroutines.CoroutineScope
@@ -30,15 +29,6 @@ import kotlin.test.assertIs
 class MalformedPingPongTest {
     private val clock = AtomicLong(1_000_000L)
     private val monotonicNowUs: () -> Long = { clock.addAndGet(1_000) }
-
-    private fun localIdentity(name: String) =
-        LocalHandshakeIdentity(
-            displayName = name,
-            platform = "android",
-            osVersion = "test",
-            appVersion = "test",
-            connTiebreak = ConnTiebreakGenerator.generate(),
-        )
 
     /** Every payload shape the brief calls out, plus a couple of adjacent malformed cases. */
     private fun malformedPingPayloads() =
@@ -173,15 +163,25 @@ class MalformedPingPongTest {
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
         var fakeSocket: ControlSocket? = null
         try {
-            val sut = ControlSessionManager(scope, monotonicNowUs, localPeerId = PeerId("9999999999999999"))
-            val port = sut.startListening(localIdentity("SUT"))
+            // The "fake peer" is a real, correctly-behaved TLS peer that then sends deliberately
+            // malformed PING/PONG payloads — which is the point: a peer that got through the
+            // handshake is exactly the one whose later frames must not be able to kill a coroutine.
+            val (sutPeer, fakePeer) = TestSessions.pairedPeers("9999999999999999", "1111111111111111", "SUT", "fake")
+            val sut = sutPeer.manager(scope, monotonicNowUs)
+            val port = sut.startListening(sutPeer.local)
 
-            val fakePeerId = PeerId("1111111111111111")
             val fakeSeq = SeqCounter()
-            val fake = ControlSocket.connect("127.0.0.1", port)
+            val fake = fakePeer.channel().connect("127.0.0.1", port)
             fakeSocket = fake
             val outcome =
-                ControlHandshake.performAsInitiator(fake, fakePeerId, fakeSeq, monotonicNowUs, localIdentity("fake"))
+                ControlHandshake.performAsInitiator(
+                    fake,
+                    fakePeer.peerId,
+                    fakeSeq,
+                    monotonicNowUs,
+                    fakePeer.local,
+                    fakePeer.trustedPeers,
+                )
             check(outcome is HandshakeOutcome.Success) { "fake peer handshake must succeed: $outcome" }
 
             withTimeout(5_000) { sut.diagnostics.first { it.controlState == ControlState.CONNECTED } }

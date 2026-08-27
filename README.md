@@ -22,12 +22,23 @@ subscription and no telemetry — the app is expected to work with mobile data s
 
 ## Status
 
-**Phase 0 (hardware feasibility) is done. Phase 1a (control-plane skeleton, no crypto) is
-implementation-complete; the real-device gate is pending.** Discovery, the plaintext Phase 1a
-control transport, clock sync and a diagnostics UI are all implemented and unit/integration-tested
-on both platforms — see [`docs/STATUS.md`](docs/STATUS.md) for exactly what that covers and what
-it doesn't: none of it has run on the two real phones yet, since this environment has no Android
-device/emulator and only an iOS simulator, not a physical iPhone.
+**Phase 0 (hardware feasibility) is done. Phases 1a and 1b are implementation-complete; the
+real-device gate is pending for both.**
+
+Phase 1b's two open security risks are closed with measurements rather than argument: a
+hand-encoded self-signed X.509 certificate that Apple's parser, BoringSSL and OpenSSL all accept,
+and a TLS 1.3 keying-material exporter that produces **byte-identical** output on an Apple endpoint
+and a Conscrypt/BoringSSL endpoint for the same connection — which is what makes the six-digit
+pairing code a real check. Evidence:
+[`docs/test-results/phase1b-security-spike-20260827.md`](docs/test-results/phase1b-security-spike-20260827.md).
+
+The control plane is now TLS 1.3 with mutual authentication, `identity_spki_sha256` pinning, and
+first-meeting SAS pairing with persisted trust. **There is no plaintext transport left in any
+production source set.**
+
+None of it has run on the two real phones yet — this environment has no Android device or emulator
+and only an iOS simulator. See [`docs/STATUS.md`](docs/STATUS.md) for exactly what is verified and
+what is not.
 
 ## Repository layout
 
@@ -44,6 +55,8 @@ ios/         Swift + SwiftUI app — RideLinkCore + RideLinkPlatform packages, R
 ## Platform baselines
 
 Android `minSdk 31` / `compileSdk 36` / `targetSdk 36`; iOS deployment target 26.0, Swift 6.
+`minSdk 31` is also, measured rather than assumed, exactly the level at which Android's public TLS
+keying-material exporter appears.
 Rationale in [`docs/DECISIONS/ADR-011`](docs/DECISIONS/ADR-011-platform-baselines.md) — two known
 modern devices, no store release, so legacy compatibility branches buy nothing.
 
@@ -57,6 +70,7 @@ modern devices, no store release, so legacy compatibility branches buy nothing.
 | How it's verified | [`docs/TEST_PLAN.md`](docs/TEST_PLAN.md) |
 | Where it stands, what's next | [`docs/STATUS.md`](docs/STATUS.md) |
 | Why decisions were made | [`docs/DECISIONS/`](docs/DECISIONS/) |
+| What the security spike measured | [`docs/test-results/`](docs/test-results/) |
 | The development contract | [`CLAUDE.md`](CLAUDE.md) — committed deliberately, so a fresh clone keeps it |
 
 `docs/RideLink_Requirements_and_Implementation_Plan.docx` is the source of truth and is

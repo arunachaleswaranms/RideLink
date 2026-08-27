@@ -185,7 +185,10 @@ class IdentityVectorTest {
                 val notAfter = requireNotNull(UtcTime.parse(vector.str("not_after_utc")))
                 val now = requireNotNull(UtcTime.parse(vector.str("now_utc")))
                 assertEquals(
-                    vector["expected"]!!.jsonObject["valid"]!!.jsonPrimitive.content.toBoolean(),
+                    vector["expected"]!!
+                        .jsonObject["valid"]!!
+                        .jsonPrimitive.content
+                        .toBoolean(),
                     now.isWithin(notBefore, notAfter),
                 )
             }

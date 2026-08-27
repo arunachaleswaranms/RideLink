@@ -9,6 +9,11 @@ import XCTest
 /// (this session's brief §8) — proven here by declaring a huge length with no body and
 /// confirming `.frameTooLarge` returns promptly instead of hanging.
 final class FramingTests: XCTestCase {
+    /// Framing is transport-neutral, and these tests are about the `uint32` length prefix and the
+    /// 256 KiB cap alone — no handshake, no identity, nothing a TLS session would contribute. The
+    /// plaintext fixture (test target only) keeps them fast and keeps what they assert unambiguous.
+    private let plaintext = PlaintextControlChannelFixture()
+
     private func envelope(pad: String) -> Envelope {
         Envelope(
             v: 1, type: "PING", sessionId: "s1", senderId: "0123456789abcdef", msgId: "m1",
@@ -17,9 +22,9 @@ final class FramingTests: XCTestCase {
     }
 
     func testFrameAtExactlyTheCapRoundTrips() async throws {
-        let listener = try await ControlListener.bind()
+        let listener = try await plaintext.bind()
         async let acceptedFuture = listener.accept()
-        let client = try await ControlConnection.connect(host: "127.0.0.1", port: listener.localPort)
+        let client = try await plaintext.connect(host: "127.0.0.1", port: listener.localPort)
         let server = try await acceptedFuture
 
         let base = envelope(pad: "")
@@ -43,7 +48,7 @@ final class FramingTests: XCTestCase {
     }
 
     func testDeclaredLengthOverTheCapIsRejectedWithoutReadingOrHanging() async throws {
-        let listener = try await ControlListener.bind()
+        let listener = try await plaintext.bind()
         async let acceptedFuture = listener.accept()
         let rawClient = try makeRawLoopbackConnection(port: listener.localPort)
         let server = try await acceptedFuture

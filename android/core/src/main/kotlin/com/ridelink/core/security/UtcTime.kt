@@ -13,7 +13,14 @@ package com.ridelink.core.security
  * Kotlin and Swift run the *same* arithmetic and cannot drift apart over a locale, a calendar or
  * a time zone. The algorithm is Howard Hinnant's `days_from_civil` / `civil_from_days`, which is
  * exact for the proleptic Gregorian calendar. `RideLinkCore.Security.UtcTime` mirrors it.
+ *
+ * `MagicNumber` is suppressed for the whole type deliberately. Its literals are not tunable
+ * quantities: `12` is how many months a year has, `substring(2, 4)` is where the month sits in
+ * `YYMMDDHHMMSSZ`, and `146097` is a term of a published algorithm. Naming them would put a layer
+ * of indirection between the code and the specification it implements, which is the opposite of
+ * what makes this reviewable.
  */
+@Suppress("MagicNumber")
 @JvmInline
 value class UtcTime(
     val epochSeconds: Long,

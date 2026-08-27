@@ -45,17 +45,18 @@ class AndroidKeystoreIdentityStore(
      * PROTOCOL §4.5.3). This is exactly the operation Android's auto-issued certificate cannot
      * perform, and the reason RideLink encodes its own (ADR-017 §3).
      */
+    @Suppress("ReturnCount") // three distinct outcomes: existing-and-valid, existing-but-reissued, fresh
     fun loadOrCreate(now: UtcTime): DeviceIdentity {
         val keyStore = KeyStore.getInstance(ANDROID_KEYSTORE).apply { load(null) }
         val existing = keyStore.getEntry(alias, null) as? KeyStore.PrivateKeyEntry
         if (existing != null) {
             val certificate = existing.certificate as X509Certificate
             if (isWithinValidity(certificate, now)) {
-                return DeviceIdentity(certificate, keyStore, alias, null)
+                return DeviceIdentity(certificate, keyStore, null)
             }
-            return DeviceIdentity(reissue(keyStore, existing, now), keyStore, alias, null)
+            return DeviceIdentity(reissue(keyStore, existing, now), keyStore, null)
         }
-        return DeviceIdentity(generate(keyStore, now), keyStore, alias, null)
+        return DeviceIdentity(generate(keyStore, now), keyStore, null)
     }
 
     /**

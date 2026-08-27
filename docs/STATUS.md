@@ -1,40 +1,40 @@
 # RideLink — Status
 
-**Updated:** 27 August 2026 (Phase 1a cleanup/hardening session)
+**Updated:** 27 August 2026 (Phase 1b — secure control channel)
 **Current milestone:** M1 (Private voice link) — not started
-**Current phase:** Phase 1a — control-plane skeleton, no crypto.
-**Phase 1a status: IMPLEMENTATION COMPLETE — REAL-DEVICE GATE PENDING.** Every Phase 1a
-deliverable in `docs/PROTOCOL.md` / `docs/ARCHITECTURE.md` §1–§7 is implemented and unit/
-integration-tested on **both** platforms — discovery lifecycle (advertise+browse, Found/Updated/
-Lost, self-filtering, dh rotation), `PlainControlTransportPhase1a` (framing, HELLO/HELLO_ACK,
-socket-level duplicate-connection dedup, TCP_NODELAY+keepalive, reconnect/backoff), `core.sync` /
-`RideLinkCore.Sync` clock estimation (shared vectors, byte-identical on both platforms), and a
-Phase 1a diagnostics UI. This session (§2e) reviewed the whole control/discovery lifecycle
-end-to-end, found and fixed ten real implementation defects (an iOS PING/PONG race, a reconnect
-re-entrancy bug on both platforms plus a genuine "the ladder never actually stops" bug the fix for
-that exposed, an unbounded-hang bug in iOS's TCP connect path, a release-build plaintext-transport
-guard, an Android NSD callback leak, mDNS instance-name privacy leaks on both platforms, unsafe
-malformed-message parsing on both platforms (including a wire-triggerable crash on iOS), a
-discovery-handle rotation self-discovery race on both platforms, real `@unchecked Sendable`
-invariant violations on iOS, control-task teardown leaks on both platforms, and a live-wire
-clock-sample overflow/crash risk on both platforms), each with regression tests. What is **still
-not** done is running any of this on the two real phones — this machine has no Android
-device/emulator (no `adb`, no AVD) and only the iOS *simulator* (not a physical iPhone) was
-available this session. See §2d, §2e and §7 for exactly what that gate still needs.
+**Current phase:** Phase 1b — secure control channel.
+**Phase 1b status: SPIKES PASSED, IMPLEMENTATION COMPLETE — REAL-DEVICE GATE PENDING.**
 
-**Repository state:** protocol vectors + schema exist (`vectors/clock/` since the prior session).
-Android's five modules all build/test/lint/detekt clean, **including `assembleRelease`, new this
-session** — `network` now has 52 tests (measured, not the prior session's claimed count carried
-forward), including this session's new regression coverage: NSD callback lifecycle, mDNS
-instance-name privacy, reconnect re-entrancy, the iOS PING race, malformed PING/PONG handling,
-dh-rotation self-race, and teardown. `app` has 3 tests for the new release-transport gate. iOS
-mirrors this: `RideLinkCore` (17/17 tests, unchanged) and `RideLinkPlatform` (40/40 tests, up from
-17 — 23 new regression tests this session) both build and test clean under Swift 6 strict
-concurrency with zero warnings; `RideLink.xcodeproj` builds in
-**both Debug and Release** configurations (Release build now new/required, this session — proves
-the plaintext transport compiles out) and the Phase 1a diagnostics UI renders correctly
-on-simulator (screenshot-verified in the prior session; not re-screenshotted this session, since
-no UI changed). See §2d, §2e.
+The two open risks that governed this phase are **closed with measurements, not argument**
+([ADR-007 Amendment A1](DECISIONS/ADR-007-control-channel-over-tcp-tls.md#amendment-a1--26-august-2026--secure-transport-contingency)
+required both to be spiked before anything was built on them):
+
+1. **Self-signed X.509 on iOS.** A ~150-line DER encoder plus `SecKeyCreateSignature` produces a certificate that Apple's own parser, BoringSSL **and** OpenSSL all accept, and `SecIdentityCreate` turns it into a `Network.framework` TLS identity with **no PKCS#12 and no key export**.
+2. **TLS keying-material exporter.** Both platforms expose one from public API — `android.net.ssl.SSLSockets.exportKeyingMaterial` (API **31**, exactly the ADR-011 `minSdk`, verified against `api-versions.xml`) and `sec_protocol_metadata_create_secret` (iOS 12). For the **same TLS 1.3 connection** an Apple endpoint and a Conscrypt/BoringSSL endpoint produce **byte-identical** exporter output, cross-checked against OpenSSL 3.6.3 as a third stack.
+
+Evidence: [`docs/test-results/phase1b-security-spike-20260827.md`](test-results/phase1b-security-spike-20260827.md),
+re-runnable via [`tools/spikes/phase1b-tls-exporter/run.sh`](../tools/spikes/phase1b-tls-exporter/).
+Decisions: [ADR-017](DECISIONS/ADR-017-identity-key-and-certificate.md) (P-256 identity key, shared
+certificate encoder) and [ADR-018](DECISIONS/ADR-018-tls-exporter-channel-binding.md) (the SAS
+channel binding). **No design review was triggered and nothing weaker was substituted.**
+
+On top of that, the whole secure control channel is implemented and tested on both platforms:
+per-device identity in Android Keystore / the iOS Keychain, self-signed X.509 identity
+certificates with ADR-012 re-issuance semantics, TLS 1.3 with mutual authentication,
+`identity_spki_sha256` pinning that fails closed on mismatch, PROTOCOL §4.5 first-pair SAS
+verification with persisted trust, and a pairing/security UI on both. **The Phase 1a plaintext
+transport is gone from every production source set** — not gated, deleted — and a mechanical test
+fails if a raw socket reappears there.
+
+**What is still not done is running any of it on the two real phones.** That gate was already
+open for Phase 1a and this phase does not close it: this machine has no Android device or
+emulator, and only the iOS *simulator*. Everything below is a laptop measurement. See §4 and §7.
+
+**Repository state:** Android — 230 unit tests across five modules, `clean test ktlintCheck detekt
+lint assembleDebug assembleRelease` all green. iOS — `RideLinkCore` 27 tests, `RideLinkPlatform`
+68 tests, `RideLink.xcodeproj` builds in **both** Debug and Release for the simulator, zero
+warnings. Shared vectors now include `protocol/vectors/identity/` (52 assertions on Android, 10
+test methods on iOS, same file).
 
 ---
 
@@ -46,8 +46,9 @@ no UI changed). See §2d, §2e.
 | Docs baseline | ✅ Complete (earlier session) | Requirements transcribed, architecture/protocol/test plan/ADR-001…010 written |
 | **Architecture correction pass** | ✅ Complete | 15 corrections applied before implementation. Details in §2 |
 | **ADR-015/ADR-010 leadership-independence correction** | ✅ **Complete this session** | See §2b |
-| **Phase 1a — control-plane skeleton** | ✅ **IMPLEMENTATION COMPLETE — REAL-DEVICE GATE PENDING** | Protocol vectors, Android + iOS discovery, plaintext control transport, clock sync, diagnostics UI, and this session's hardening pass (§2e). Real-device gate is the only remaining work — see §7 |
-| Phases 1b–8 | ⬜ Not started | |
+| **Phase 1a — control-plane skeleton** | ✅ **IMPLEMENTATION COMPLETE — REAL-DEVICE GATE PENDING** | Protocol vectors, Android + iOS discovery, plaintext control transport, clock sync, diagnostics UI, hardening pass (§2e). Real-device gate still open — see §7. Its plaintext transport has since been **deleted** (§2f) |
+| **Phase 1b — secure control channel** | ✅ **SPIKES PASSED, IMPLEMENTATION COMPLETE — REAL-DEVICE GATE PENDING** | Both ADR-007 A1 spikes closed with measurements; identity, TLS 1.3, pinning, SAS pairing, trust persistence and UI on both platforms. See §2f |
+| Phases 2–8 | ⬜ Not started | |
 
 `protocol/schema/` and `protocol/vectors/` now exist (§2c). `android/` is a real five-module
 Gradle project that builds. `ios/` now has all three pieces ARCHITECTURE §9.2 describes:
@@ -70,6 +71,11 @@ from `ios/`.
 | Gradle | ❌ **not installed globally, on purpose** | the project uses its own committed wrapper |
 | Swift / macOS SDK | ✅ Swift 6.3.2, macOS 26.5 SDK | Command Line Tools |
 | **Xcode / iOS SDK** | ✅ Xcode 27.0 beta, iOS SDK 27.0 (user-supplied) | `/Applications/Xcode-beta.app` |
+
+**Two toolchain corrections made in the Phase 1b session, both pre-existing and both local-only:**
+
+- `android/gradle.properties`'s `org.gradle.java.installations.paths` pointed at Homebrew's **keg root** (`/opt/homebrew/opt/openjdk@21`) rather than the JDK *home* (`…/libexec/openjdk.jdk/Contents/Home`). The keg root has `bin/java`, so Gradle's toolchain detection accepted it, but it has no `lib/modules`, so the Kotlin compiler failed with `No class roots are found in the JDK path` **the moment it actually had to compile something**. Up-to-date and cached builds never resolve the JDK home at all, which is why it survived earlier sessions as an intermittent failure. Now corrected in the committed file.
+- **`detekt` cannot run on this machine without an explicit daemon JVM.** The Gradle daemon inherits the machine's default `java` (Temurin 25); detekt 1.23.8 is handed `25.0.3` as a JVM target, cannot parse it, and every detekt task fails with a bare version string for a message. CI is unaffected — `actions/setup-java` makes the daemon JDK 21 — which is why this was never seen before. `jvmTarget`/`jdkHome` on the task do **not** fix it (verified). The workaround, and the way every detekt result in §3 was produced, is to run Gradle with `-Dorg.gradle.java.home=/opt/homebrew/opt/openjdk@21/libexec/openjdk.jdk/Contents/Home`. Recorded in §4 as an open, low-severity problem rather than papered over.
 
 JDK 21 is keg-only and deliberately *not* symlinked into the system JVM directory, so the
 machine's default `java` remains Temurin 25 and the build reaches JDK 21 by explicit path. Set
@@ -424,9 +430,120 @@ the config file itself with the same style-calibration precedent as prior sessio
 
 ---
 
+## 2f. Phase 1b — secure control channel (27 August 2026 session, third)
+
+### The two spikes, run first
+
+ADR-007 Amendment A1 required both to be answered before anything depended on them, and named the
+response to either failing: stop and run a focused design review, never substitute something
+weaker. **Both passed.** Full method, raw numbers and caveats:
+[`test-results/phase1b-security-spike-20260827.md`](test-results/phase1b-security-spike-20260827.md);
+harness: [`tools/spikes/phase1b-tls-exporter/`](../tools/spikes/phase1b-tls-exporter/).
+
+Findings that changed what got built:
+
+1. **Apple cannot supply a zero-length exporter context.** `sec_protocol_metadata_create_secret_with_context(…, context_len: 0, …)` returns nil — tested with a valid pointer, so the nil could not be blamed on a bad one. PROTOCOL §4.5.1 said `context = zero-length, but PRESENT`, which is an RFC 5705 distinction that **does not exist in TLS 1.3** (RFC 8446 §7.5 always hashes a context value). Measured `null == empty` on the one stack that can express both. §4.5.1 is reworded and each platform's concrete call is now named in the spec; **`protocol/vectors/sas/` is untouched**, because it starts from exporter *output*. [ADR-018](DECISIONS/ADR-018-tls-exporter-channel-binding.md).
+2. **Conscrypt's server-side `SSLSession.getProtocol()` misreports TLS 1.3 as `TLSv1.2`** on a connection where only TLS 1.3 was ever enabled and a TLS-1.3-only cipher suite was negotiated. So the "no silent 1.2 fallback" check is **not** an assertion on `getProtocol()` — that would reject good sessions. It is enforced structurally (`setEnabledProtocols(["TLSv1.3"])` / `set_{min,max}_tls_protocol_version(.TLSv13)` on both ends) plus an assertion on the negotiated **cipher suite**.
+3. **Android does not use `KeyGenParameterSpec`'s auto-issued certificate** — the expected path. It issues that certificate *at key-generation time* and offers no way to issue a new one around an existing Keystore key, which makes ADR-012's whole re-issuance model unreachable. Both platforms therefore encode their own certificate with a shared DER encoder. [ADR-017 §3](DECISIONS/ADR-017-identity-key-and-certificate.md).
+4. **`SecIdentityCreateWithCertificate` is macOS-only** (`SEC_OS_OSX` / `__IPHONE_NA`) and is the function most iOS examples reach for. `SecIdentityCreate(nil, cert, key)` is the iOS-available one, takes the key directly, and needs no PKCS#12 — so the private key is never exported.
+
+### What was built
+
+**Shared, pure, vector-pinned** (`core.security` / `RideLinkCore.Security`, mirrored line for line):
+`Der` (a minimal DER **encoder**, no parser, no ASN.1 framework), `IdentityCertificate` (P-256
+SubjectPublicKeyInfo, `identity_spki_sha256`, the TBSCertificate, the ADR-012 validity window),
+`UtcTime` (**the project's only wall-clock type**, with Howard Hinnant's exact civil-date
+algorithm rather than `java.time`/`DateFormatter`, so the two platforms cannot drift over a locale
+or a calendar), `PeerTrust` (the pin decision as a pure function) and `TrustedPeerStore`.
+
+New shared vectors: **`protocol/vectors/identity/`** — DER length and INTEGER encodings at their
+boundaries, the 91-byte P-256 SPKI, `identity_spki_sha256` formatting (uppercase rejected), an
+exact TBSCertificate, the eight pin decisions, and certificate-validity boundaries. Generated by
+`tools/generate_identity_vectors.py`, an independent third implementation, and cross-checked: the
+generated certificate parses correctly under `openssl x509`, and the generated SPKI hash matches
+what OpenSSL computes for the same key.
+
+**Android** (`network.security`, `data.trustedpeers`): `AndroidKeystoreIdentityStore` (P-256 in
+Android Keystore, non-exportable, `AfterFirstUnlock`-equivalent so it works with the screen
+locked), `IdentityIssuer` (kept free of `android.*` so the encoding, signing and point extraction
+are JVM-testable), `TlsControlChannel` (TLS 1.3 only, `needClientAuth`, a deferring trust manager
+because trust is the pin one layer up), `FileTrustedPeerStore` and `LocalPeerIdStore` (atomic
+writes, corrupt-file tolerance, pin-replacement refusal).
+
+**iOS** (`RideLinkPlatform.Security`): `DeviceIdentityStore` (Keychain P-256; an `.ephemeral`
+storage mode exists **only** so an unsigned `swift test` binary can exercise the rest),
+`PeerCertificateInspector` (SPKI via `SecCertificateCopyKey`, structural validity via
+`SecTrustEvaluateWithError` against the certificate as its own anchor — not a chain or hostname
+check), `TlsControlChannel`, `FileTrustedPeerStore`, `LocalPeerIdStore`.
+
+**Both:** a `ControlChannel`/`ChannelSecurity` seam so `ControlSessionManager` never imports a TLS
+type and `PeerTrust` never imports a socket type; the SPKI pin check wired into
+`ControlHandshake`; `PairingExchange` (PROTOCOL §4.5, with the SAS never leaving the device);
+persisted trust; and a pairing card + security-warning card in both UIs. The transport banner is
+now **green when the link really is TLS 1.3** — a banner that keeps crying wolf after the
+transport is secure trains the user to ignore it.
+
+### The plaintext transport is deleted, not gated
+
+Phase 1a shipped `PlainControlTransportPhase1a` in the production source set and used
+`BuildConfig.DEBUG` / `#if DEBUG` to avoid *constructing* it. Phase 1b removes it from `main`
+entirely: the only plaintext `ControlChannel` in the repository is a fixture in
+`network/src/test` / `RideLinkPlatformTests`, so it is not compiled into either library and no app
+build — debug or release — contains those bytes. The old gate (`TransportGate.kt`,
+`PlaintextTransportGate.swift`) is gone, replaced by `SecureTransportPolicy` (a composition-root
+assertion) and by **`PlaintextTransportAbsenceTest`**, which reads `network/src/main` and fails if
+a raw socket, a reference to the fixture, or a second `ControlChannel` implementation ever appears
+there. That is the part that keeps being true after this session.
+
+### Bugs found and fixed while building it
+
+Each was reproduced before being fixed, and each has a regression test.
+
+1. **`ControlHandshake` could be crashed by a malformed HELLO, on both platforms.** It built `PeerId`/`ConnTiebreak` straight from wire strings with constructors that `require`/`precondition` — so `"peer_id": "NOTHEX"` threw out of the handshake coroutine (Android) or trapped the process (iOS). This is the same class the §2e hardening pass fixed for PING/PONG; HELLO was not covered then because Phase 1a had no security-bearing field in it. Fixed with non-throwing `parse` constructors on `PeerId`, `ConnTiebreak` and `SpkiHash`, used for every wire-sourced value.
+2. **A handshake write racing a close threw instead of reporting a closed connection.** When one side refuses a certificate before replying, production closes the socket — and the peer's in-flight `writeFrame` then threw an `IOException` out of `performAsInitiator`, leaving the socket unclosed and producing no outcome at all. Surfaced by the expired-certificate test. Fixed by reporting a failed write as `ConnectionClosed`, exactly as a failed read already was.
+3. **`gradle.properties` pointed at a non-JDK** (§1). Intermittent by nature; now correct.
+4. **`detekt` has never actually run on this machine** (§1, §4 problem 17). CI was green throughout, which is precisely why nobody noticed.
+
+### Explicitly not started
+
+WebRTC, microphone capture, the Opus pipeline, Bluetooth routing, intercom UX, music playback,
+music sync, local music transfer, manifest transfer, Ride Mode, navigation announcements, group
+sessions, cloud/backend, accounts, streaming services. Also deliberately **not** built: the manual
+`host:port` / QR fallback for blocked mDNS — it is Phase 1b scope in ARCHITECTURE §4.4 but is a
+*discovery* feature with no security content, and it is listed in §7 as the first follow-up.
+
+---
+
 ## 3. Tests passed / pending
 
-**Passed and verified 27 August 2026 session, by actually running the commands:**
+**Passed and verified in the Phase 1b session (27 August 2026, third), by actually running the
+commands.** Every Gradle command below was run with
+`-Dorg.gradle.java.home=/opt/homebrew/opt/openjdk@21/libexec/openjdk.jdk/Contents/Home`, without
+which `detekt` cannot run on this machine at all (§1, §4 problem 17):
+
+- `./gradlew clean test ktlintCheck detekt lint assembleDebug assembleRelease` — **all green**, all five modules. **230 unit tests, 0 failures**: `core` 145 (up from 93 — 52 new `identity/` vector assertions), `network` 74 (up from 52 — the TLS channel, pairing and plaintext-absence suites), `data` 9 (new — trusted-peer and peer-id persistence), `app` 2 (`SecureTransportPolicyTest`, replacing `TransportGateTest`). `detekt` thresholds touched and documented in `config/detekt/detekt.yml`: `thresholdInObjects` 11 → 16, and `thresholdInClasses` 24 → 34 — the second raise for `ControlSessionManager`, recorded as tech debt in §4 rather than pretended away.
+- `swift test --package-path ios/Packages/RideLinkCore` — **27/27 pass** (up from 17; +10 `IdentityVectorTests` running the same `identity/` file as Android).
+- `swift test --package-path ios/Packages/RideLinkPlatform` — **68/68 pass** (up from 40; +10 `TlsControlChannelTests`, +9 `PairingExchangeTests`, plus the existing suites re-pointed at the real TLS channel), zero Swift 6 strict-concurrency warnings.
+- `xcodebuild … -configuration Debug` and `-configuration Release`, simulator, `CODE_SIGNING_ALLOWED=NO` — both **succeed**, zero warnings beyond the pre-existing benign "no AppIntents.framework dependency" notice.
+- `./tools/spikes/phase1b-tls-exporter/run.sh` — **10/10 PASS**, including the cross-stack Apple ↔ Conscrypt exporter equality that this whole phase rests on.
+
+**The security tests are real handshakes, not mocks.** `TlsControlChannelTest[s]` on both platforms
+open real loopback TCP, complete a real mutually authenticated TLS 1.3 handshake with certificates
+this codebase encoded and signed, and assert that both ends derive the *same* six-digit SAS. The
+two substitutions that make that possible on a laptop — where the private key lives, and which
+call frame reaches the exporter — are named in TEST_PLAN §3.1 and in
+`test-results/phase1b-security-spike-20260827.md` §5.
+
+**Not run this session, stated plainly:** nothing on a physical device, on either platform. The
+Phase 1a real-device gate remains exactly as open as it was, and Phase 1b adds its own device-only
+items (Android Keystore, the iOS Keychain, and the assumption that device-Conscrypt behaves like
+Conscrypt-on-JVM). See §4 and §7.
+
+---
+
+### Earlier sessions, kept for history
+
+**Passed and verified 27 August 2026 session (first), by actually running the commands:**
 
 - `./gradlew clean test ktlintCheck detekt assembleDebug` — **all green**, all five Android
   modules. `:core:test` still runs `protocol/vectors/{envelope,sas,dedup,session-fsm}/*.json`
@@ -521,22 +638,25 @@ session and route), and integration tests I-01…I-25. Full list in `docs/TEST_P
 
 | # | Problem | Severity | Action |
 |---|---|---|---|
-| 1 | **iOS self-signed X.509 generation has no first-party API** (`SecKey` cannot build certificates) | **High** | Highest-risk Phase 1b item. Needs a small hand-written DER encoder. **There is no validated fallback** — ADR-007 Amendment A1 governs the response. Spike it early |
-| 2 | **TLS keying-material exporter availability is unconfirmed on both platforms** | **High** | The six-digit SAS depends on it. Second Phase 1b spike, same governing amendment. If absent, redesign the channel binding deliberately — do not weaken it |
+| 1 | ~~**iOS self-signed X.509 generation has no first-party API**~~ **Resolved 27 Aug 2026 (Phase 1b spike).** A minimal DER encoder + `SecKeyCreateSignature` + `SecCertificateCreateWithData` + `SecIdentityCreate` works, with no PKCS#12 and no key export; the result is accepted by Apple's parser, BoringSSL and OpenSSL. [ADR-017](DECISIONS/ADR-017-identity-key-and-certificate.md) | ~~High~~ — | **Residual:** none of it has run against the iOS *Keychain* on a device — the tests use a transient key. Folded into problem 16 |
+| 2 | ~~**TLS keying-material exporter availability is unconfirmed**~~ **Resolved 27 Aug 2026 (Phase 1b spike).** Public on both (`SSLSockets.exportKeyingMaterial` API 31; `sec_protocol_metadata_create_secret` iOS 12), byte-identical across Apple ↔ Conscrypt for one TLS 1.3 connection, cross-checked against OpenSSL. [ADR-018](DECISIONS/ADR-018-tls-exporter-channel-binding.md) | ~~High~~ — | **Residual:** the Android side was measured on Conscrypt-on-JVM, not on the phone. Folded into problem 15 |
 | 3 | Phase 0 measured results not recorded (mode, helmet model, topology, latency) | Medium | Blocks **Phase 6 only**. Template ready at `docs/PHASE0_RESULTS.md`. Until filled, `AUDIO_STATE.confidence` stays `assumed` and Phase 6 defaults to Mode C |
 | 4 | ~~Xcode not installed~~ **Resolved 26 Aug 2026 (this session).** User installed Xcode 27.0 beta; SDK confirmed newer than baseline (ADR-011 Amendment A2), deployment target unchanged; `RideLink.xcodeproj` and `RideLinkPlatform` now built and verified (§7) | — | Xcode 27 being a beta remains a residual, lower risk — see the amendment |
 | 5 | WebRTC artifacts are community-published on both platforms | Medium | Pin exact versions in Phase 2; isolated behind `network/voice` / `RideLinkPlatform.Voice` |
 | 6 | TCP jitter may floor clock-offset precision | Low | Measure in Phase 1 (I-08). Only if it exceeds ~5 ms, add a UDP `PING`/`PONG` path. Do not pre-build it |
 | 7 | mDNS may be blocked on hotspots / enterprise APs | Medium | Manual `host:port` + QR fallback in Phase 1b |
 | 8 | Removing `fp6` means a discovered peer cannot be labelled "known" before connecting | Low | Accepted trade (ADR-002 A1). Mitigated by an auto-attempt silent connect when exactly one trusted peer exists. Watch whether the pre-ride UX suffers in real use |
-| 9 | `minSdk 31` is assumed to be the level where a public TLS exporter is available | Medium | Assumption, not verified — folded into problem 2. Raising `minSdk` is cheap if needed; both devices are far above it |
+| 9 | ~~`minSdk 31` is assumed to be the level where a public TLS exporter is available~~ **Resolved 27 Aug 2026.** Measured against `android.jar`'s `api-versions.xml`: `SSLSockets.exportKeyingMaterial` is `since="31"` — exactly the baseline. The assumption was correct and `minSdk` does not move | — | — |
 | 10 | ~~`swift test` cannot execute on this machine~~ **Resolved 26 Aug 2026 (this session).** Root cause was Command Line Tools alone not carrying a runnable `XCTest.framework`/Swift Testing runtime. User installed full Xcode 27.0 beta; `swift test` now runs, 16/16 pass | — | Tests use XCTest (not Swift Testing) — this was a deliberate Phase 1a choice made while blocked and is fine to keep, but revisit if the team later wants Swift Testing's nicer parameterization |
 | 11 | ~~Neither discovery controller has run against a real second peer~~ **Partially resolved 27 Aug 2026 (this session).** Discovery lifecycle logic (Found/Updated/Lost, self-filtering, dh rotation, TXT privacy) is now unit/integration-tested against real local sockets/`NWBrowser` change sets on both platforms — see §2d. **Still open:** neither has run against `NsdManager`/`Network.framework`'s real mDNS stack on a real Wi-Fi radio, because no second device was available (problems 15/16). Whether `NEARBY_WIFI_DEVICES` is required on API 33+ is still unverified — ARCHITECTURE §6.4 already flags this as "settle on-device, don't assume" | Medium | Needs the real-device gate (§7) |
 | 12 | AGP 9.x dropped the separate `org.jetbrains.kotlin.android` Gradle plugin; Compose BOM / `androidx.core` / `androidx.lifecycle` versions newer than the ones pinned this session require `compileSdk 37` | Low, but easy to regress | Documented in §1. Don't bump these three dependency versions without checking the compileSdk requirement first |
 | 13 | `RideLink.xcodeproj`'s `project.pbxproj` was hand-authored (no Apple CLI creates one, and `xcodegen`/`tuist` weren't installed without asking). It resolves, builds, and runs on-simulator, but has not been opened in the Xcode GUI to confirm it looks/behaves like a normal project (no Assets.xcassets/app icon, minimal build settings) | Low | Open it in Xcode once to sanity-check; add an app icon when one exists. Not urgent — sideloaded personal builds don't need a store-quality icon |
 | 14 | SwiftLint / SwiftFormat (ARCHITECTURE §10.2) are not installed on this machine | Low | Install when convenient; not blocking — ktlint/detekt (Android) are clean, Swift Xcode builds show zero compiler warnings |
 | 15 | **No Android device or emulator available in this development environment** — no `adb` on `PATH`, no AVD configured. `PlainControlTransportPhase1a` and `NsdDiscoveryController` are therefore unverified against Android's real network stack | **High (blocks the Phase 1a gate)** | Needs either a physical OnePlus Nord 5 with USB debugging, or an AVD image + emulator installed via `sdkmanager`. Neither was set up this session — not attempted without asking, since it changes the toolchain |
-| 16 | **No physical iPhone available this session** — only the iOS 17 Pro Max simulator, which does not exercise real mDNS multicast or real `Network.framework` Bonjour behaviour between two independent radios | **High (blocks the Phase 1a gate)** | Needs a physical iPhone 17 Pro Max with a Personal Team signing identity (CLAUDE.md "Apple Signing") — a user decision, not made here |
+| 16 | **No physical iPhone available** — only the simulator, which does not exercise real mDNS multicast or real `Network.framework` Bonjour behaviour between two independent radios. Phase 1b adds to this: the iOS **Keychain** path (a permanent key, `SecIdentityCreate` over a Keychain-resident key, survival across restart/upgrade) is exercised only with a *transient* key, because an unsigned `swift test` binary has no keychain entitlement | **High (blocks the Phase 1a and 1b gates)** | Needs a physical iPhone 17 Pro Max with a Personal Team signing identity (CLAUDE.md "Apple Signing") — a user decision, not made here |
+| 17 | **`detekt` cannot run on this machine without `-Dorg.gradle.java.home=…`** — the Gradle daemon inherits Temurin 25, detekt 1.23.8 is handed `25.0.3` as a JVM target and fails with a bare version string. Pre-existing, local-only (CI's daemon is JDK 21, so CI has always been green), and **not** fixable by setting `jvmTarget`/`jdkHome` on the task — both were tried and neither helped | Low | Use the flag (it is in every §3 command), or set `org.gradle.java.home` in `~/.gradle/gradle.properties`. A committed daemon-JVM criterion (`gradle/gradle-daemon-jvm.properties`) would fix it portably but risks breaking CI if the criterion cannot be satisfied there, so it was not done blind |
+| 18 | **`ControlSessionManager` is at 32 functions on Android** and needed a second `detekt` threshold raise (24 → 34) after absorbing the PROTOCOL §4.5 pairing wiring. That is a real signal, not a false positive | Low, but it will get worse | Extract a `PairingController` owning the socket-facing half (`beginPairing`, `sendPairRequest`, `applyPairingStep`, `succeedPairing`, `failPairing`, `handlePairingFrame`). Not done in the Phase 1b session because the class is under live test coverage for dedup/reconnect/teardown and a structural refactor of it belongs in a change that is *only* that refactor |
+| 19 | **The manual `host:port` / QR fallback for blocked mDNS is not implemented.** ARCHITECTURE §4.4 scopes it to Phase 1b | Medium | It is a *discovery* feature with no security content, so it was deliberately left until after the security work. First item in §7. Problem 7 is the reason it matters |
 
 Resolved 26 Aug 2026 session: `CLAUDE.md` in `.gitignore` (was problem 1); `.DS_Store` tracking
 (was problem 7 — the claim was incorrect; the files are untracked and now ignored); the ADR-015/
@@ -548,7 +668,7 @@ ADR-010 leadership-independence rationale error (§2b).
 
 Only these. Everything else is a known task with a known shape.
 
-1. **Secure transport (problems 1 + 2).** The whole Phase 1b security design rests on two platform capabilities that nobody has yet demonstrated working together on these two devices. Both are spikes to run *first*, and both have an explicit "stop and review" response rather than a fallback.
+1. **Secure transport — mostly closed, one thread left.** Both platform capabilities are now demonstrated working *together* (ADR-017, ADR-018), so the "stop and review" trigger did not fire. What is left is narrower and specific: the Android half of the exporter equality was measured against **Conscrypt-on-a-laptop**, not against the phone's own TLS stack, and neither Android Keystore nor the iOS Keychain has been exercised on a device. Integration tests I-02/I-19/I-20/I-21 close it. Until they run, "the two phones show the same six digits" is a well-supported expectation, not a measurement.
 2. **Bluetooth duplex-profile coupling.** Now modelled honestly rather than wrongly, but modelling it does not fix it. Whether *any* of Modes A–E is genuinely pleasant with the real helmet unit is still unknown until Phase 0's results are recorded or Phase 6 measures it. The product's viability sits here.
 3. **iOS `AVAudioEngine` scheduling precision** against the <100 ms sync target on real hardware. Measured in Phase 5, not assumable.
 4. **Hotspot behaviour on a moving motorcycle** — an idle iPhone hotspot may sleep its interface; Android hotspot behaviour is vendor-dependent. Phase 1 test I-07 is the first real data.
@@ -567,66 +687,44 @@ Not blocking Phase 1. Answers needed before Phase 6.
 
 ## 7. Next exact task
 
-**Phase 1a — control-plane skeleton, no crypto yet. IMPLEMENTATION COMPLETE, REAL-DEVICE GATE
-PENDING.** Every step below is done and verified by the automatable tests available on this
-machine. What remains is entirely the two-device gate, which needs hardware this session did not
-have — it is not a code task.
+**Phase 1b — secure control channel. SPIKES PASSED, IMPLEMENTATION COMPLETE, REAL-DEVICE GATE
+PENDING.** Everything below is done and verified by the automatable tests this machine can run.
+What remains is hardware, plus one deliberately deferred feature.
 
-0. ✅ **Toolchains** — JDK 21, Android SDK 36, and Xcode 27.0 beta all installed and verified (§1, ADR-011 Amendments A1 and A2). No global Gradle — deliberately.
-1. ✅ **`protocol/`** — `schema/envelope.schema.json` + `vectors/{envelope,sas,dedup,session-fsm,clock}/`. `clock/` added this session (§2d).
-2. ✅ **Android scaffold** — five modules, wrapper committed. `./gradlew clean test ktlintCheck detekt assembleDebug` all succeed (§2d, §3).
-3. ✅ **iOS scaffold, all three pieces** — `RideLinkCore` (17/17), `RideLinkPlatform` (17/17), `RideLink.xcodeproj` (builds + runs on-simulator, screenshot-verified), zero warnings (§2d, §3).
-4. ✅ **`core.model` / `RideLinkCore.Model`** — done and verified on both platforms.
-5. ✅ **`core.protocol` / `RideLinkCore.Protocol`** — done and verified on both platforms against the same shared vectors.
-6. ✅ **`core.sessionfsm` / `RideLinkCore.SessionFSM`** — done and verified on both platforms against the same shared vectors.
-7. ✅ **Discovery** — Found/Updated/Lost lifecycle, self-filtering, dh rotation, shared-listener advertising, TXT privacy, API-tiered Android resolution (§2d). Unit/integration-tested on both platforms; **not yet run against either platform's real mDNS stack on real hardware** (§4 problems 11, 15, 16).
-8. ✅ **`network.control` / `RideLinkPlatform.Control`** — `PlainControlTransportPhase1a`: framing (cap enforced pre-allocation), HELLO/HELLO_ACK, real-socket duplicate-connection dedup, `TCP_NODELAY`+keepalive, PROTOCOL §10 reconnect ladder. Done in the first session (§2d), tested with real loopback sockets on both platforms including simultaneous mutual connect. **Hardened in the follow-up session (§2e):** PING race, reconnect re-entrancy, malformed-message safety, teardown leaks, clock-sample overflow, and — ahead of the Phase 1b gate below — the plaintext transport is now actually compiled out of release builds on both platforms, not just documented as debug-only.
-9. ✅ **`core.sync` / `RideLinkCore.Sync`** — offset/RTT/jitter estimator with outlier rejection, EWMA, step-confirmation, against 16 shared `clock/*.json` vectors, byte-identical on both platforms. Done this session (§2d).
-10. ✅ **Diagnostics UI** on both — state, peer, RTT, offset, jitter, reconnect count, discovery count, and an explicit `PLAIN / PHASE 1A / NOT SECURE` transport banner. Done this session (§2d); screenshot-verified on iOS simulator, build-verified on Android (no emulator to run it on).
+1. ✅ **Both ADR-007 A1 spikes** — self-signed X.509 from a platform-held keypair, and a public TLS exporter producing identical bytes across stacks. Measured, recorded, ADR'd (§2f).
+2. ✅ **Per-device identity** — P-256 in Android Keystore / the iOS Keychain, non-exportable, usable with the screen locked (ADR-017).
+3. ✅ **Self-signed X.509 identity certificates** — shared DER encoder, platform signing, ADR-012 re-issuance semantics that Android's auto-issued certificate could not have provided.
+4. ✅ **TLS 1.3 control channel** — mutual authentication, 1.3 pinned as the only enabled version, no plaintext path anywhere in production sources.
+5. ✅ **SPKI-based peer identity** — `identity_spki_sha256` derived identically on both platforms, pinned by shared vectors.
+6. ✅ **First-pair SAS verification** — PROTOCOL §4.5 exchange, code derived from the exporter for *this* handshake, never sent, never logged, never persisted; a missing exporter fails closed.
+7. ✅ **Persisted peer trust** — atomic file-backed store on both, corrupt-file tolerant, pin replacement refused without an explicit forget.
+8. ✅ **Pin mismatch rejection** — fails closed with `pin_mismatch`, surfaced as a security warning, never auto-re-paired.
+9. ✅ **Exporter interoperability** — proven across three TLS 1.3 implementations.
+10. ✅ **Plaintext removed from production paths** — deleted from `main` on both platforms, with a mechanical test that fails if it returns.
+11. ✅ **Security-focused tests and documentation** — real-handshake suites on both platforms, `protocol/vectors/identity/`, ADR-017, ADR-018, a results file, and a re-runnable spike harness.
 
-**Immediately actionable next steps, in order, and they are now all the same kind of task:**
+**Immediately actionable next steps, in order:**
 
-1. **Get two real devices into this loop.** Concretely: (a) enable USB debugging on the OnePlus
-   Nord 5 and get `adb devices` seeing it (or install an AVD via `sdkmanager` + `avdmanager` as a
-   fallback, though a real device is what the gate actually needs), and (b) get a development-
-   team signing identity set up for the iPhone 17 Pro Max (CLAUDE.md "Apple Signing" — the user's
-   call, Xcode → Signing & Capabilities → Personal Team) and install the debug build via Xcode or
-   `xcodebuild -destination 'platform=iOS,id=<udid>'`.
-2. Run I-01 (discovery finds the peer within 5 s), I-14 (protocol version mismatch handled
-   cleanly — can be forced with a debug build), I-15/I-16/I-17 (simultaneous connect/pairing/
-   repeated-reconnect trials — the real hardware version of this session's loopback tests), I-22
-   (capture mDNS traffic with an independent tool and confirm the TXT record really is
-   `{v, dh, plat}` on the wire, not just in the code path this session's tests exercised), I-05/
-   I-06 (aeroplane-mode reconnect), I-07 (repeat on both hotspot topologies), I-08 (5-minute
-   clock-offset stability — this is the number that answers §16's open TCP-jitter question).
-3. Record every result — pass, fail, and measured numbers (discovery time, RTT, offset stddev) —
-   in `docs/test-results/`, per the brief's "measurements, not impressions" rule.
+1. **Get two real devices into this loop.** Unchanged from Phase 1a and now blocking two gates: (a) enable USB debugging on the OnePlus Nord 5 so `adb devices` sees it; (b) set up a development-team signing identity for the iPhone 17 Pro Max (Xcode → Signing & Capabilities → Personal Team — the user's call, not made here) and install via Xcode or `xcodebuild -destination 'platform=iOS,id=<udid>'`.
+2. **Run the Phase 1a gate**: I-01, I-05, I-06, I-07, I-08, I-14, I-15, I-17, I-22.
+3. **Run the Phase 1b gate**: I-02 (the two codes match, are six digits, and pairing completes), I-03 (reconnect is silent, no code), I-04 (a doctored pin is refused), I-16 (simultaneous first meeting shows exactly one code), I-19 (certificate re-issued around the same key ⇒ silent), I-20 (key changed ⇒ `pin_mismatch`), I-21 (wrong clock ⇒ `certificate_invalid`, not an attack warning). I-19/I-20/I-21 are the ones that exercise what a laptop cannot: Android Keystore, the iOS Keychain, and device-Conscrypt's exporter.
+4. **Record every result** — pass, fail and measured numbers — in `docs/test-results/`, per the "measurements, not impressions" rule.
+5. **Then the deferred feature:** the manual `host:port` / QR fallback for blocked mDNS (ARCHITECTURE §4.4, §4 problem 19). It is Phase 1b scope, has no security content, and was left until after the security work deliberately.
+6. **Then the recorded tech debt:** extract a `PairingController` from `ControlSessionManager` (§4 problem 18), as a change that is only that refactor.
 
-**Gate for 1a:** integration tests I-01, I-05, I-06, I-07, I-08, I-14, I-15, I-17, I-22 pass on
-the two real phones; AF-10 (manifest inspection) passes; static analysis clean, including the
-retired-vocabulary and discovery-privacy scans of TEST_PLAN §8 (the latter is now automated —
-§2d — but I-22's independent capture is still required, since a unit test proving the *code path*
-is correct is not the same as an outside observer confirming what actually goes on the wire).
+**Gate for 1b:** I-02, I-03, I-04, I-16, I-19, I-20, I-21 pass on the two real phones;
+`vectors/sas/` and `vectors/identity/` pass on both platforms (✅ **already true**); the plaintext
+path is absent from release builds (✅ **already true, and now stronger than the gate asked for** —
+it is absent from *all* builds).
 
-> Phase 1a's plaintext control channel is **debug-build only and must never be the default**.
-> `NFR-06` is satisfied by Phase 1b, not 1a. Sequenced this way so discovery, framing, the FSM,
-> reconnect and connection deduplication are validated *before* the two security spikes (§4
-> problems 1 and 2) are tackled.
+> **Do not treat Phase 1b as complete because the laptop tests are green.** The exporter equality
+> that the entire pairing design rests on was measured between Apple and *Conscrypt-on-a-laptop*,
+> not between an iPhone and a OnePlus. That substitution is the single most important thing for the
+> next session to close, and it is closed by I-02, not by more unit tests.
 
-**Then Phase 1b — security.** Run the two spikes first and record their outcome before building
-on them: (a) self-signed X.509 from a Keystore/Keychain keypair, TLS 1.3 completing
-Android↔iOS, identical SPKI hash on both sides; (b) a public TLS keying-material exporter on both
-platforms producing identical output for one handshake. Then: device keypair in
-Keystore/Keychain, TLS 1.3 both ends, `identity_spki_sha256` pinning with the re-issue semantics
-of PROTOCOL §4.5.3, SAS derivation + pairing UI, manual `host:port`/QR fallback.
-**Gate for 1b:** I-02, I-03, I-04, I-16, I-19, I-20, I-21 pass; `vectors/sas/` and
-`vectors/identity/` pass on both platforms; the plaintext path is compiled out of release builds
-(✅ **already true**, done in the §2e cleanup session, ahead of when this gate needed it).
-
-**Recommended next coding session, once the real-device Phase 1a gate above passes:** Opus 5 /
-xhigh reasoning effort, for the Phase 1b secure-transport spike (ADR-007 Amendment A1's two
-open-risk items — iOS self-signed X.509 generation and TLS keying-material exporter availability
-on both platforms). Do not start that work before the real-device gate passes.
+**Then Phase 2 — voice.** WebRTC/DTLS-SRTP behind `network/voice` / `RideLinkPlatform.Voice`,
+negotiated over the control channel this phase just secured. Pin the community WebRTC artifacts
+(§4 problem 5) before depending on them.
 
 ---
 

@@ -64,8 +64,12 @@ jobs:
       - name: assembleDebug
         run: ./gradlew assembleDebug
 
-      # Proves the release-transport guard (CLAUDE.md's plaintext-transport-is-debug-only rule):
-      # a release build must succeed without PlainControlTransportPhase1a ever being reachable.
+      # NFR-06 / PROTOCOL §1: production control traffic is TLS 1.3 and there is no plaintext
+      # fallback. Phase 1b enforces that structurally — the plaintext channel lives only in
+      # `network/src/test`, so it is not compiled into the library at all — and
+      # `PlaintextTransportAbsenceTest` (run by the unit-test step above) fails if a raw socket
+      # ever reappears in production sources. A release build succeeding is the second half of
+      # that: it proves the app assembles with no plaintext transport available to it.
       - name: assembleRelease
         run: ./gradlew assembleRelease
 
@@ -98,10 +102,9 @@ jobs:
             CODE_SIGNING_ALLOWED=NO \
             build
 
-      # Proves the release-transport guard (CLAUDE.md's plaintext-transport-is-debug-only rule):
-      # PlaintextTransportGate.makeSessionCoordinator() compiles out SessionCoordinator() entirely
-      # under Release (SWIFT_ACTIVE_COMPILATION_CONDITIONS has no DEBUG there), so a Release build
-      # succeeding here is proof the plaintext transport was never reachable, not just unused.
+      # As on Android: the plaintext channel is a fixture in RideLinkPlatform's *test target*, so
+      # it cannot be linked into the app in any configuration. A Release build succeeding proves
+      # the app assembles against the TLS channel alone.
       - name: Build unsigned Release simulator target
         run: |
           xcodebuild \

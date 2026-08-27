@@ -96,8 +96,10 @@ object AndroidTlsProvider : TlsProvider {
         context: ByteArray,
         length: Int,
     ): ByteArray? =
-        runCatching { android.net.ssl.SSLSockets.exportKeyingMaterial(socket, label, context, length) }
-            .getOrNull()
+        runCatching {
+            android.net.ssl.SSLSockets
+                .exportKeyingMaterial(socket, label, context, length)
+        }.getOrNull()
 }
 
 /**
@@ -236,7 +238,12 @@ class TlsControlChannel(
                         provider = provider,
                     ),
             )
-        } catch (failure: Throwable) {
+        } catch (
+            // Deliberately broad: whatever went wrong — a handshake failure, a timeout, a failed
+            // assertion above — this socket must not be left open, and the failure must still
+            // reach the caller unchanged. Narrowing it would leak a socket for the cases it missed.
+            @Suppress("TooGenericExceptionCaught") failure: Throwable,
+        ) {
             runCatching { socket.close() }
             throw failure
         }
@@ -266,17 +273,39 @@ class TlsControlChannel(
      * silently not be consulted.
      */
     private class PinningTrustManager : X509ExtendedTrustManager() {
-        override fun checkClientTrusted(chain: Array<out X509Certificate>?, authType: String?) = Unit
+        override fun checkClientTrusted(
+            chain: Array<out X509Certificate>?,
+            authType: String?,
+        ) = Unit
 
-        override fun checkServerTrusted(chain: Array<out X509Certificate>?, authType: String?) = Unit
+        override fun checkServerTrusted(
+            chain: Array<out X509Certificate>?,
+            authType: String?,
+        ) = Unit
 
-        override fun checkClientTrusted(chain: Array<out X509Certificate>?, authType: String?, socket: Socket?) = Unit
+        override fun checkClientTrusted(
+            chain: Array<out X509Certificate>?,
+            authType: String?,
+            socket: Socket?,
+        ) = Unit
 
-        override fun checkServerTrusted(chain: Array<out X509Certificate>?, authType: String?, socket: Socket?) = Unit
+        override fun checkServerTrusted(
+            chain: Array<out X509Certificate>?,
+            authType: String?,
+            socket: Socket?,
+        ) = Unit
 
-        override fun checkClientTrusted(chain: Array<out X509Certificate>?, authType: String?, engine: SSLEngine?) = Unit
+        override fun checkClientTrusted(
+            chain: Array<out X509Certificate>?,
+            authType: String?,
+            engine: SSLEngine?,
+        ) = Unit
 
-        override fun checkServerTrusted(chain: Array<out X509Certificate>?, authType: String?, engine: SSLEngine?) = Unit
+        override fun checkServerTrusted(
+            chain: Array<out X509Certificate>?,
+            authType: String?,
+            engine: SSLEngine?,
+        ) = Unit
 
         override fun getAcceptedIssuers(): Array<X509Certificate> = emptyArray()
     }

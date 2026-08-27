@@ -10,29 +10,26 @@ import XCTest
 /// stand in for the two phones, both listening and both dialling each other at once — the
 /// "normal case on every reconnect" PROTOCOL §4.2 describes, not an exotic race.
 final class DuplicateConnectionResolutionTests: XCTestCase {
-    private func localIdentity(_ name: String) -> LocalHandshakeIdentity {
-        LocalHandshakeIdentity(displayName: name, platform: "ios", osVersion: "test", appVersion: "test", connTiebreak: ConnTiebreakGenerator.generate())
-    }
-
     private func clock() -> @Sendable () -> Int64 {
         let counter = LockedCounter(1_000_000)
         return { counter.incrementAndGet(by: 1_000) }
     }
 
     func testSimultaneousMutualConnectLeavesExactlyOneSurvivorOnBothSides() async throws {
-        let peerA = ControlSessionManager(localPeerId: PeerId("aaaaaaaaaaaaaaaa"), monotonicNowUs: clock())
-        let peerB = ControlSessionManager(localPeerId: PeerId("bbbbbbbbbbbbbbbb"), monotonicNowUs: clock())
+        let (a, b) = try TestSessions.pairedPeers("aaaaaaaaaaaaaaaa", "bbbbbbbbbbbbbbbb")
+        let peerA = a.manager(monotonicNowUs: clock())
+        let peerB = b.manager(monotonicNowUs: clock())
 
         let eventsA = EventCollector()
         let eventsB = EventCollector()
         await peerA.setOnEvent { event in Task { await eventsA.record(event) } }
         await peerB.setOnEvent { event in Task { await eventsB.record(event) } }
 
-        let portA = try await peerA.startListening(local: localIdentity("A"))
-        let portB = try await peerB.startListening(local: localIdentity("B"))
+        let portA = try await peerA.startListening(local: a.local)
+        let portB = try await peerB.startListening(local: b.local)
 
-        await peerA.connectTo(host: "127.0.0.1", port: portB, local: localIdentity("A"))
-        await peerB.connectTo(host: "127.0.0.1", port: portA, local: localIdentity("B"))
+        await peerA.connectTo(host: "127.0.0.1", port: portB, local: a.local)
+        await peerB.connectTo(host: "127.0.0.1", port: portA, local: b.local)
 
         let eventA = try await eventsA.waitForConnected(timeoutSeconds: 5)
         let eventB = try await eventsB.waitForConnected(timeoutSeconds: 5)
@@ -58,17 +55,18 @@ final class DuplicateConnectionResolutionTests: XCTestCase {
     }
 
     func testDuplicateCloseDoesNotIncrementReconnectCount() async throws {
-        let peerA = ControlSessionManager(localPeerId: PeerId("cccccccccccccccc"), monotonicNowUs: clock())
-        let peerB = ControlSessionManager(localPeerId: PeerId("dddddddddddddddd"), monotonicNowUs: clock())
+        let (a, b) = try TestSessions.pairedPeers("cccccccccccccccc", "dddddddddddddddd")
+        let peerA = a.manager(monotonicNowUs: clock())
+        let peerB = b.manager(monotonicNowUs: clock())
 
         let eventsA = EventCollector()
         await peerA.setOnEvent { event in Task { await eventsA.record(event) } }
 
-        let portA = try await peerA.startListening(local: localIdentity("A"))
-        let portB = try await peerB.startListening(local: localIdentity("B"))
+        let portA = try await peerA.startListening(local: a.local)
+        let portB = try await peerB.startListening(local: b.local)
 
-        await peerA.connectTo(host: "127.0.0.1", port: portB, local: localIdentity("A"))
-        await peerB.connectTo(host: "127.0.0.1", port: portA, local: localIdentity("B"))
+        await peerA.connectTo(host: "127.0.0.1", port: portB, local: a.local)
+        await peerB.connectTo(host: "127.0.0.1", port: portA, local: b.local)
 
         _ = try await eventsA.waitForConnected(timeoutSeconds: 5)
         try await eventsA.waitForDuplicateClosed(timeoutSeconds: 5)

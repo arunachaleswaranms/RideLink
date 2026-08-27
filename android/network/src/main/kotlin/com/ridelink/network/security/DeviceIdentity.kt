@@ -24,7 +24,6 @@ import javax.net.ssl.KeyManagerFactory
 class DeviceIdentity internal constructor(
     val certificate: X509Certificate,
     private val keyStore: KeyStore,
-    private val alias: String,
     private val keyPassword: CharArray?,
 ) {
     /**
@@ -93,13 +92,14 @@ object IdentityIssuer {
     fun freshSerial(random: SecureRandom = SecureRandom()): ByteArray {
         val serial = ByteArray(IdentityCertificate.SERIAL_BYTES)
         random.nextBytes(serial)
-        serial[0] = (serial[0].toInt() and 0x7F).toByte()
+        serial[0] = (serial[0].toInt() and CLEAR_SIGN_BIT).toByte()
         return serial
     }
 
     /** Round-trips our own DER through the platform's X.509 parser, so a malformed encoding fails here. */
     fun parseCertificate(der: ByteArray): X509Certificate =
-        CertificateFactory.getInstance("X.509")
+        CertificateFactory
+            .getInstance("X.509")
             .generateCertificate(ByteArrayInputStream(der)) as X509Certificate
 
     /**
@@ -122,6 +122,9 @@ object IdentityIssuer {
         }
         return point
     }
+
+    /** Masks off the top bit, so the 16-byte serial always encodes as a positive DER INTEGER. */
+    private const val CLEAR_SIGN_BIT = 0x7F
 
     private const val UNCOMPRESSED_TAG: Byte = 0x04
     private const val COORDINATE_BYTES = 32

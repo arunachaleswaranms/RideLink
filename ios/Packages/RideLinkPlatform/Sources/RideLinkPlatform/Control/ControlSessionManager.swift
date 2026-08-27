@@ -11,9 +11,9 @@ public enum ControlState: Sendable, Equatable {
     case ended
 }
 
-/// FR-023 diagnostics surface (this session's brief §17). Never claims security it doesn't have.
+/// FR-023 diagnostics surface. Never claims security it doesn't have.
 public struct ControlDiagnostics: Sendable, Equatable {
-    public var transportLabel = "PLAIN / PHASE 1A / NOT SECURE"
+    public var transportLabel = "NOT CONNECTED"
     public var controlState: ControlState = .idle
     public var remotePeerId: String?
     public var isLocalLeader: Bool?
@@ -21,8 +21,27 @@ public struct ControlDiagnostics: Sendable, Equatable {
     public var clockOffsetUs: Int64?
     public var clockJitterUs: Int64?
     public var reconnectCount = 0
+    /// First 6 hex of the peer's `identity_spki_sha256`, per the ARCHITECTURE §11 redaction rule.
+    public var peerIdentityPrefix: String?
+    /// Negotiated TLS version, so the UI can show what actually protects the link.
+    public var negotiatedProtocol: String?
 
     public init() {}
+}
+
+/// What the pairing screen shows. `sas6` is the six digits the user compares with the other phone
+/// — displayed and then discarded. It is never logged, never persisted and never sent
+/// (PROTOCOL §4.5.1, ARCHITECTURE §11), so this value must not outlive the prompt.
+public struct PairingPrompt: Sendable, Equatable {
+    public let sas6: String
+    public let remotePeerId: PeerId
+    public var peerDisplayName: String
+
+    public init(sas6: String, remotePeerId: PeerId, peerDisplayName: String) {
+        self.sas6 = sas6
+        self.remotePeerId = remotePeerId
+        self.peerDisplayName = peerDisplayName
+    }
 }
 
 public enum ControlEvent: Sendable {
@@ -30,14 +49,24 @@ public enum ControlEvent: Sendable {
     case linkLost(reason: LinkLossReason)
     case duplicateConnectionClosed
     case reconnectBudgetExhausted
+    /// The peer is unknown and PROTOCOL §4.5 pairing is required. Raised only on the **surviving**
+    /// connection (§4.2), so exactly one six-digit code is ever shown.
+    case pairingRequired(remotePeerId: PeerId)
+    /// Both users confirmed the six digits and the trusted-peer record is written (PROTOCOL §4.5).
+    case pairingSucceeded(peer: TrustedPeer)
+    /// Pairing ended without a pin being written. The value is a PROTOCOL §4.6 code.
+    case pairingFailed(code: String)
+    /// The handshake was refused. `pin_mismatch` is the serious one (ADR-012).
+    case handshakeRefused(code: String)
 }
 
-/// Top-level Phase 1a control-plane orchestrator: binds the listener, accepts inbound and dials
-/// outbound candidates, resolves duplicates (`DuplicateConnectionArbiter`), runs the surviving
-/// connection's read loop, keepalive and clock-sync bursts (`ClockSync`), and reconnect
-/// (`ReconnectController`). One instance per ride session attempt.
+/// Top-level control-plane orchestrator: binds the listener, accepts inbound and dials outbound
+/// candidates, resolves duplicates (`DuplicateConnectionArbiter`), applies the SPKI pin decision,
+/// runs the surviving connection's read loop, keepalive and clock-sync bursts (`ClockSync`), and
+/// reconnect (`ReconnectController`). One instance per ride session attempt.
 ///
-/// **`PlainControlTransportPhase1a` — plaintext, debug/development builds only.**
+/// It knows nothing about TLS. The `channel` it is given decides how bytes are protected, and the
+/// only channel a shipped build can construct is `TlsControlChannel`.
 public actor ControlSessionManager {
     private static let keepaliveIntervalNs: UInt64 = 2_000_000_000 // PROTOCOL §1
     private static let keepaliveLostThresholdUs: Int64 = 6_000_000 // PROTOCOL §1
@@ -47,6 +76,11 @@ public actor ControlSessionManager {
     private static let clockResyncIntervalNs: UInt64 = 10_000_000_000 // ARCHITECTURE §7.1 "every 10s thereafter"
 
     private let localPeerId: PeerId
+    private let channel: any ControlChannel
+    private let trustedPeers: any TrustedPeerStore
+    private let nowEpochSeconds: @Sendable () -> Int64
+    private var pairing: PairingExchange?
+    private var localIdentity: LocalHandshakeIdentity?
     private let monotonicNowUs: @Sendable () -> Int64
     private let seqCounter = SeqCounter()
     private let arbiter: DuplicateConnectionArbiter
@@ -72,6 +106,12 @@ public actor ControlSessionManager {
     private let pingRequests = PingRequestRegistry()
 
     public private(set) var diagnostics = ControlDiagnostics()
+
+    /// Non-nil exactly while a first-meeting pairing is awaiting the two users. Cleared as soon as
+    /// the exchange settles either way, so the six digits do not linger after they stop meaning
+    /// anything.
+    public private(set) var pairingPrompt: PairingPrompt?
+    public var onPairingPromptChanged: (@Sendable (PairingPrompt?) -> Void)?
     public var onEvent: (@Sendable (ControlEvent) -> Void)?
     public var onDiagnosticsChanged: (@Sendable (ControlDiagnostics) -> Void)?
 
@@ -87,20 +127,25 @@ public actor ControlSessionManager {
     /// `notReady` to go on.
     public var pendingPingCount: Int { pingRequests.count }
 
-    private let connectTimeoutMs: Int64
-
-    /// - Parameter connectTimeoutMs: bounds `ControlConnection.connect`, matching Android's
-    ///   `ControlSocket.connect(..., connectTimeoutMs = 5000)`. Injectable so tests can exercise
-    ///   an unreachable-peer reconnect attempt without waiting out a real 5s timeout per attempt.
+    /// How long a dial may take before it is abandoned now belongs to the `ControlChannel`, which
+    /// is the thing that actually opens the socket — see `TlsControlChannel(connectTimeoutMs:)`.
     public init(
-        localPeerId: PeerId = ProvisionalIdentity.peerId,
+        localPeerId: PeerId,
+        channel: any ControlChannel,
+        trustedPeers: any TrustedPeerStore,
         monotonicNowUs: @escaping @Sendable () -> Int64,
-        randomFraction: @escaping @Sendable () -> Double = { Double.random(in: -1...1) },
-        connectTimeoutMs: Int64 = 5000
+        /// Wall clock, for the `pairedAt`/`lastSeenAt` fields of a trusted-peer record only. Those
+        /// are human-facing timestamps in a stored record, never used for scheduling, so CLAUDE.md's
+        /// monotonic-clocks rule does not apply — and a monotonic value would be meaningless across
+        /// reboots, which is exactly what a persisted record has to survive.
+        nowEpochSeconds: @escaping @Sendable () -> Int64 = { Int64(Date().timeIntervalSince1970) },
+        randomFraction: @escaping @Sendable () -> Double = { Double.random(in: -1...1) }
     ) {
         self.localPeerId = localPeerId
+        self.channel = channel
+        self.trustedPeers = trustedPeers
+        self.nowEpochSeconds = nowEpochSeconds
         self.monotonicNowUs = monotonicNowUs
-        self.connectTimeoutMs = connectTimeoutMs
         self.arbiter = DuplicateConnectionArbiter(localPeerId: localPeerId, initialConnTiebreak: ConnTiebreakGenerator.generate())
         self.reconnectController = ReconnectController(randomFraction: randomFraction) { ms in
             try? await Task.sleep(nanoseconds: UInt64(max(0, ms)) * 1_000_000)
@@ -124,7 +169,9 @@ public actor ControlSessionManager {
     /// `promote` would keep refusing every connection this new session ever completes.
     public func startListening(local: LocalHandshakeIdentity) async throws -> UInt16 {
         isShutDown = false
-        let bound = try await ControlListener.bind()
+        localIdentity = local
+        updateDiagnostics { $0.transportLabel = self.channel.transportLabel }
+        let bound = try await channel.bind()
         listener = bound
         acceptTask = Task {
             while !Task.isCancelled {
@@ -160,7 +207,7 @@ public actor ControlSessionManager {
     /// (`beginReconnect` below), so a failed attempt simply advances the same ladder rather than
     /// triggering another `.linkLost` -> `beginReconnect` cycle.
     private func attemptConnection(host: String, port: UInt16, local: LocalHandshakeIdentity) async -> Bool {
-        guard let socket = try? await ControlConnection.connect(host: host, port: port, connectTimeoutMs: connectTimeoutMs) else {
+        guard let socket = try? await channel.connect(host: host, port: port) else {
             return false
         }
         await handleCandidate(socket: socket, local: local)
@@ -168,6 +215,7 @@ public actor ControlSessionManager {
     }
 
     private func handleCandidate(socket: ControlConnection, local: LocalHandshakeIdentity) async {
+        localIdentity = local
         if activeSocket != nil {
             await rejectAsAlreadyActive(socket)
             return
@@ -178,8 +226,12 @@ public actor ControlSessionManager {
         do {
             outcome =
                 socket.isInitiator
-                ? try await ControlHandshake.performAsInitiator(socket: socket, localPeerId: localPeerId, seqCounter: seqCounter, monotonicNowUs: monotonicNowUs, local: localWithTiebreak)
-                : try await ControlHandshake.performAsAcceptor(socket: socket, localPeerId: localPeerId, seqCounter: seqCounter, monotonicNowUs: monotonicNowUs, local: localWithTiebreak)
+                ? try await ControlHandshake.performAsInitiator(
+                    socket: socket, localPeerId: localPeerId, seqCounter: seqCounter,
+                    monotonicNowUs: monotonicNowUs, local: localWithTiebreak, trustedPeers: trustedPeers)
+                : try await ControlHandshake.performAsAcceptor(
+                    socket: socket, localPeerId: localPeerId, seqCounter: seqCounter,
+                    monotonicNowUs: monotonicNowUs, local: localWithTiebreak, trustedPeers: trustedPeers)
         } catch {
             socket.close()
             return
@@ -188,9 +240,30 @@ public actor ControlSessionManager {
         switch outcome {
         case .success:
             await resolveCandidate(DuplicateConnectionArbiter.Candidate(socket: socket, outcome: outcome))
-        case .rejected, .connectionClosed:
+        case .rejected(let code):
+            await refuse(socket, code: code)
+        case .connectionClosed:
             socket.close()
         }
+    }
+
+    /// Tells the peer why before closing, then surfaces it. `pin_mismatch` in particular must reach
+    /// the user as a security warning rather than vanishing into a reconnect loop (ADR-012), which
+    /// is why this emits an event instead of only closing the connection.
+    private func refuse(_ socket: ControlConnection, code: String) async {
+        try? await socket.writeFrame(
+            ControlMessages.error(
+                localPeerId: localPeerId,
+                sessionId: SessionId("n/a"),
+                seq: seqCounter.nextSeq(),
+                sentAtMonoUs: monotonicNowUs(),
+                code: code,
+                message: "handshake refused",
+                fatal: true
+            )
+        )
+        socket.close()
+        emit(.handshakeRefused(code: code))
     }
 
     private func resolveCandidate(_ candidate: DuplicateConnectionArbiter.Candidate) async {
@@ -224,7 +297,7 @@ public actor ControlSessionManager {
     }
 
     private func closeLoser(_ candidate: DuplicateConnectionArbiter.Candidate) {
-        guard case .success(_, _, let sessionId, _) = candidate.outcome else { return }
+        guard case .success(_, _, let sessionId, _, _, _) = candidate.outcome else { return }
         Task {
             try? await candidate.socket.writeFrame(
                 ControlMessages.bye(localPeerId: self.localPeerId, sessionId: sessionId, seq: self.seqCounter.nextSeq(), sentAtMonoUs: self.monotonicNowUs(), reason: byeReasonDuplicateConnection)
@@ -236,7 +309,8 @@ public actor ControlSessionManager {
     }
 
     private func promote(_ candidate: DuplicateConnectionArbiter.Candidate) async {
-        guard case .success(let remotePeerId, _, let sessionId, let leaderPeerId) = candidate.outcome else { return }
+        guard case .success(let remotePeerId, _, let sessionId, let leaderPeerId, let peerSpki, let pinDecision) =
+            candidate.outcome else { return }
         guard !isShutDown else {
             candidate.socket.close()
             return
@@ -254,15 +328,156 @@ public actor ControlSessionManager {
 
         let isLeader = leaderPeerId.value == localPeerId.value
         updateDiagnostics {
+            $0.transportLabel = self.channel.transportLabel
             $0.controlState = .connected
             $0.remotePeerId = remotePeerId.description
             $0.isLocalLeader = isLeader
+            $0.peerIdentityPrefix = peerSpki.description
+            $0.negotiatedProtocol = candidate.socket.security?.negotiatedProtocolDescription
         }
         emit(.connected(remotePeerId: remotePeerId, sessionId: sessionId, isLocalLeader: isLeader))
+        // PROTOCOL §4.5: pairing runs only on the surviving connection, so this happens here —
+        // after duplicate resolution — and never in the handshake itself. That is what guarantees
+        // exactly one six-digit code is ever displayed, even on a simultaneous first meeting.
+        if case .pairingRequired = pinDecision {
+            await beginPairing(socket: candidate.socket, remotePeerId: remotePeerId, peerSpki: peerSpki)
+        }
 
         readLoopTask = Task { await self.readLoop(socket: candidate.socket, sessionId: sessionId) }
         keepaliveTask = Task { await self.keepaliveLoop(socket: candidate.socket) }
         clockSyncTask = Task { await self.clockSyncLoop(socket: candidate.socket) }
+    }
+
+    // MARK: - PROTOCOL §4.5 pairing
+
+    private func updatePairingPrompt(_ prompt: PairingPrompt?) {
+        pairingPrompt = prompt
+        onPairingPromptChanged?(prompt)
+    }
+
+    public func setOnPairingPromptChanged(_ handler: @escaping @Sendable (PairingPrompt?) -> Void) {
+        onPairingPromptChanged = handler
+    }
+
+    /// Starts PROTOCOL §4.5 pairing on the surviving connection. The six digits come from the TLS
+    /// exporter for **this** handshake (§4.5.1), which is what makes the comparison a real
+    /// channel-binding check rather than decoration.
+    private func beginPairing(socket: ControlConnection, remotePeerId: PeerId, peerSpki: SpkiHash) async {
+        let exchange = PairingExchange(
+            remotePeerId: remotePeerId,
+            peerIdentitySpkiSha256: peerSpki,
+            isInitiator: socket.isInitiator,
+            trustedPeers: trustedPeers,
+            nowEpochSeconds: nowEpochSeconds
+        )
+        pairing = exchange
+        switch exchange.begin(derivedSas6: socket.security?.deriveSas6()) {
+        case .failed(let code):
+            await failPairing(socket: socket, code: code)
+        default:
+            guard let sas6 = exchange.sas6 else { return }
+            updatePairingPrompt(PairingPrompt(sas6: sas6, remotePeerId: remotePeerId, peerDisplayName: exchange.peerDisplayName))
+            emit(.pairingRequired(remotePeerId: remotePeerId))
+            if socket.isInitiator, let local = localIdentity {
+                try? await socket.writeFrame(
+                    ControlMessages.pairRequest(
+                        localPeerId: localPeerId,
+                        sessionId: activeSessionId,
+                        seq: seqCounter.nextSeq(),
+                        sentAtMonoUs: monotonicNowUs(),
+                        displayName: local.displayName,
+                        platform: local.platform,
+                        identitySpkiSha256: local.identitySpkiSha256
+                    )
+                )
+            }
+        }
+    }
+
+    /// The user's answer on **this** device. Both users must confirm before any pin is written —
+    /// one screen's "yes" is only half of the check PROTOCOL §4.5 describes.
+    public func confirmPairing(accepted: Bool) async {
+        guard let exchange = pairing, let socket = activeSocket else { return }
+        await applyPairingStep(socket: socket, exchange: exchange, step: exchange.onLocalDecision(accepted: accepted))
+    }
+
+    private func applyPairingStep(socket: ControlConnection, exchange: PairingExchange, step: PairingExchange.Step) async {
+        switch step {
+        case .wait:
+            break
+        case .sendPairConfirm:
+            try? await socket.writeFrame(
+                ControlMessages.pairConfirm(
+                    localPeerId: localPeerId, sessionId: activeSessionId,
+                    seq: seqCounter.nextSeq(), sentAtMonoUs: monotonicNowUs(), accepted: true))
+        case .sendPairResultAccepted:
+            if let local = localIdentity {
+                try? await socket.writeFrame(
+                    ControlMessages.pairResult(
+                        localPeerId: localPeerId, sessionId: activeSessionId,
+                        seq: seqCounter.nextSeq(), sentAtMonoUs: monotonicNowUs(),
+                        accepted: true, identitySpkiSha256: local.identitySpkiSha256))
+            }
+            if let peer = exchange.completedPeer() { succeedPairing(peer) }
+        case .succeeded(let peer):
+            succeedPairing(peer)
+        case .failed(let code):
+            await failPairing(socket: socket, code: code)
+        }
+    }
+
+    private func succeedPairing(_ peer: TrustedPeer) {
+        pairing = nil
+        updatePairingPrompt(nil) // the six digits stop meaning anything the moment this settles
+        emit(.pairingSucceeded(peer: peer))
+    }
+
+    private func failPairing(socket: ControlConnection, code: String) async {
+        pairing = nil
+        updatePairingPrompt(nil)
+        emit(.pairingFailed(code: code))
+        // PROTOCOL §4.5: "on failure, close the connection." A half-paired session is not a state
+        // worth having — the peer is still untrusted, so nothing may be done over it.
+        await refuse(socket, code: code)
+    }
+
+    /// Pairing frames arrive on the same read loop as everything else. Every field is peer-chosen,
+    /// so each is read through a non-trapping accessor and a malformed one ends the exchange rather
+    /// than the process — the same rule the handshake follows.
+    ///
+    /// A pairing frame with no exchange in progress is dropped, not treated as an error: it is what
+    /// a duplicated or late frame looks like after the exchange has already settled.
+    private func handlePairingFrame(socket: ControlConnection, type: String, payload: [String: JSONValue]) async {
+        guard let exchange = pairing else { return }
+        let step: PairingExchange.Step
+        switch type {
+        case "PAIR_REQUEST":
+            guard let spki = payload["identity_spki_sha256"]?.stringValue.flatMap(SpkiHash.parse) else {
+                return await failPairing(socket: socket, code: errorCodeMalformedFrame)
+            }
+            step = exchange.onPairRequest(
+                displayName: payload["display_name"]?.stringValue ?? "",
+                advertisedSpki: spki)
+            // The peer's name only becomes known here, and the prompt is already on screen by then
+            // — refresh it rather than showing a blank name.
+            if var prompt = pairingPrompt {
+                prompt.peerDisplayName = exchange.peerDisplayName
+                updatePairingPrompt(prompt)
+            }
+        case "PAIR_CONFIRM":
+            guard let accepted = payload["sas6_accepted"]?.boolValue else {
+                return await failPairing(socket: socket, code: errorCodeMalformedFrame)
+            }
+            step = exchange.onPairConfirm(accepted: accepted)
+        default:
+            guard let accepted = payload["accepted"]?.boolValue,
+                  let spki = payload["identity_spki_sha256"]?.stringValue.flatMap(SpkiHash.parse)
+            else {
+                return await failPairing(socket: socket, code: errorCodeMalformedFrame)
+            }
+            step = exchange.onPairResult(accepted: accepted, advertisedSpki: spki)
+        }
+        await applyPairingStep(socket: socket, exchange: exchange, step: step)
     }
 
     private func readLoop(socket: ControlConnection, sessionId: SessionId) async {
@@ -312,6 +527,8 @@ public actor ControlSessionManager {
             lastPongAtMonoUs = t4
             pingRequests.succeed(id: t1, with: ClockSync.Sample(t1MonoUs: t1, t2MonoUs: t2, t3MonoUs: t3, t4MonoUs: t4))
             updateDiagnostics { $0.rttMs = Double((t4 - t1) - (t3 - t2)) / 1000.0 }
+        case "PAIR_REQUEST", "PAIR_CONFIRM", "PAIR_RESULT":
+            await handlePairingFrame(socket: socket, type: envelope.type, payload: envelope.payload)
         case "BYE":
             await endConnection(socket, reason: .bye)
         case "ERROR":
@@ -498,6 +715,8 @@ public actor ControlSessionManager {
 
     public func shutdown(reason: String = byeReasonShutdown) async {
         isShutDown = true
+        pairing = nil
+        updatePairingPrompt(nil)
         endedDeliberately = true
         await reconnectController.cancel()
         acceptTask?.cancel()

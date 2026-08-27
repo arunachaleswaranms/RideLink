@@ -21,10 +21,13 @@ import javax.net.ssl.TrustManager
  * Both substitutions are narrow and named, and each is the *only* part of the Phase 1b security
  * path that a laptop cannot run for real:
  *
- * | Production | Here | What is still real |
- * |---|---|---|
- * | Android Keystore holds a non-exportable P-256 key | An in-memory `KeyStore` holds a JCE P-256 key | The certificate encoding, the signing call, the `KeyManager` wiring, the SPKI derivation |
- * | Conscrypt via `android.net.ssl.SSLSockets` | Conscrypt directly | The TLS 1.3 handshake, the certificates, the mutual auth, the exporter computation |
+ * | Production | Here |
+ * |---|---|
+ * | Android Keystore holds a non-exportable P-256 key | An in-memory `KeyStore` holds a JCE key |
+ * | Conscrypt via `android.net.ssl.SSLSockets` | Conscrypt directly |
+ *
+ * Still real either way: the certificate encoding, the signing call, the `KeyManager` wiring, the
+ * SPKI derivation, the TLS 1.3 handshake, mutual authentication and the exporter computation.
  *
  * So what these doubles remove is *where the private key lives* and *which call frame reaches the
  * exporter* — not the cryptography, the wire format or the protocol. What they cannot prove is
@@ -46,8 +49,7 @@ object TestTlsSupport {
             keyManagers: Array<KeyManager>,
             trustManagers: Array<TrustManager>,
             random: SecureRandom,
-        ): SSLContext =
-            SSLContext.getInstance("TLSv1.3", conscryptProvider).apply { init(keyManagers, trustManagers, random) }
+        ): SSLContext = SSLContext.getInstance("TLSv1.3", conscryptProvider).apply { init(keyManagers, trustManagers, random) }
 
         override fun exportKeyingMaterial(
             socket: SSLSocket,
@@ -96,7 +98,8 @@ object TestTlsSupport {
         generator.initialize(ECGenParameterSpec(DeviceIdentity.CURVE))
         val keyPair = generator.generateKeyPair()
         val signer = Signature.getInstance(DeviceIdentity.SIGNATURE_ALGORITHM).apply { initSign(keyPair.private) }
-        return TestIdentity(wrap(IdentityIssuer.issue(keyPair.public, signer, now), keyPair.private), keyPair.private)
+        val certificate = IdentityIssuer.issue(keyPair.public, signer, now)
+        return TestIdentity(wrap(certificate, keyPair.private), keyPair.private)
     }
 
     /**
@@ -106,7 +109,11 @@ object TestTlsSupport {
      */
     fun reissue(
         existing: TestIdentity,
-        now: UtcTime = UtcTime(NOW_EPOCH_SECONDS + ONE_YEAR_SECONDS),
+        // An hour later, not a year: the certificate must still be *currently valid* against the
+        // real clock the TLS stack checks against, or this stops testing re-issuance and starts
+        // testing not-yet-valid certificates. An hour is enough to give it a different validity
+        // window, and the serial is fresh regardless.
+        now: UtcTime = UtcTime(NOW_EPOCH_SECONDS + ONE_HOUR_SECONDS),
     ): TestIdentity {
         val signer = Signature.getInstance(DeviceIdentity.SIGNATURE_ALGORITHM).apply { initSign(existing.privateKey) }
         val certificate = IdentityIssuer.issue(existing.identity.certificate.publicKey, signer, now)
@@ -122,10 +129,10 @@ object TestTlsSupport {
                 load(null)
                 setKeyEntry(ALIAS, privateKey, KEY_PASSWORD, arrayOf(certificate))
             }
-        return DeviceIdentity(certificate, keyStore, ALIAS, KEY_PASSWORD)
+        return DeviceIdentity(certificate, keyStore, KEY_PASSWORD)
     }
 
     /** 27 August 2026, 12:00 UTC — a fixed instant, so no test depends on when it is run. */
     const val NOW_EPOCH_SECONDS: Long = 1_787_832_000
-    const val ONE_YEAR_SECONDS: Long = 365L * 24 * 60 * 60
+    const val ONE_HOUR_SECONDS: Long = 60 * 60
 }

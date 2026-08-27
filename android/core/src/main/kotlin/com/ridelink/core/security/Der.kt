@@ -12,12 +12,14 @@ package com.ridelink.core.security
  * every structure it emits is pinned by `protocol/vectors/identity/`.
  *
  * Rules, all of which the vectors check:
- * - definite lengths only, always in **minimal** form (short form below 128, else the shortest long form);
- * - INTEGERs are non-negative, minimally encoded, with a single 0x00 pad added only when the top bit would otherwise make the value negative;
+ * - definite lengths only, always in **minimal** form (short form below 128, else the shortest
+ *   long form);
+ * - INTEGERs are non-negative and minimally encoded, with a single `0x00` pad added only when the
+ *   top bit would otherwise make the value read as negative;
  * - no indefinite lengths, no BER, no re-ordering, no optional-field cleverness.
  *
- * Cryptographic signing is never done here — it is always the platform's (`Signature` over an
- * Android Keystore key, `SecKeyCreateSignature` over a Keychain key). This file only arranges
+ * Cryptographic signing is never done here — it is always the platform's: `Signature` over an
+ * Android Keystore key, or `SecKeyCreateSignature` over a Keychain key. This file only arranges
  * bytes.
  */
 object Der {
@@ -26,6 +28,9 @@ object Der {
     private const val BYTE_MASK = 0xFF
     private const val BITS_PER_BYTE = 8
     private const val HIGH_BIT = 0x80
+
+    /** Context-specific tags above this need the multi-byte tag form, which this encoder omits. */
+    private const val MAX_LOW_TAG_NUMBER = 0x1E
 
     const val TAG_BOOLEAN: Int = 0x01
     const val TAG_INTEGER: Int = 0x02
@@ -83,7 +88,7 @@ object Der {
         tagNumber: Int,
         body: ByteArray,
     ): ByteArray {
-        require(tagNumber in 0..0x1E) { "only low-tag-number context tags are supported" }
+        require(tagNumber in 0..MAX_LOW_TAG_NUMBER) { "only low-tag-number context tags are supported" }
         return tlv(TAG_CONTEXT_CONSTRUCTED or tagNumber, body)
     }
 
@@ -94,7 +99,8 @@ object Der {
      */
     fun integer(magnitude: ByteArray): ByteArray {
         var start = 0
-        while (start + 1 < magnitude.size && magnitude[start] == 0x00.toByte() &&
+        while (start + 1 < magnitude.size &&
+            magnitude[start] == 0x00.toByte() &&
             (magnitude[start + 1].toInt() and HIGH_BIT) == 0
         ) {
             start++
@@ -129,7 +135,14 @@ object Der {
     private val UTC_TIME_FORMAT = Regex("^[0-9]{12}Z$")
 }
 
-/** The DER object identifiers this certificate uses, and only those. */
+/**
+ * The DER object identifiers this certificate uses, and only those.
+ *
+ * Every byte below is one byte of a published OID's DER encoding, so `MagicNumber` has nothing to
+ * name here: `0x2A` is not a quantity, it is the first byte of `1.2.840.10045`. The decoded value
+ * is in each constant's doc comment, which is the readable form.
+ */
+@Suppress("MagicNumber")
 object Oid {
     /** 1.2.840.10045.2.1 — id-ecPublicKey. */
     val EC_PUBLIC_KEY: ByteArray = byteArrayOf(0x2A, 0x86.toByte(), 0x48, 0xCE.toByte(), 0x3D, 0x02, 0x01)

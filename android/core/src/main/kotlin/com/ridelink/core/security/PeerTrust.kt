@@ -66,6 +66,7 @@ object PeerTrust {
      * @param helloAdvertisedSpki `HELLO.identity_spki_sha256` — advisory, chosen by the peer, cross-checked here.
      * @param certificateStructurallyValid the platform's verdict on DER, self-signature and validity window.
      */
+    @Suppress("ReturnCount") // one early return per PROTOCOL §4.1 outcome; the ORDER is the point
     fun decide(
         storedPin: SpkiHash?,
         presentedSpki: SpkiHash,

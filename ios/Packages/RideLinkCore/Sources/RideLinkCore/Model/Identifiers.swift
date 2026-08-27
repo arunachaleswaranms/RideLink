@@ -18,6 +18,11 @@ public struct PeerId: Hashable, Sendable, CustomStringConvertible {
 
     public var description: String { "peer:\(value.prefix(redactedPrefixLen))…" }
 
+    /// Non-trapping constructor for a value that arrives **off the wire**. `init(_:)`'s
+    /// `precondition` is right for our own values, where a malformed one is a bug — but a peer
+    /// chooses what it sends, and a `precondition` on wire input is a remotely triggerable crash.
+    public static func parse(_ value: String) -> PeerId? { isValid(value) ? PeerId(value) : nil }
+
     private static func isValid(_ s: String) -> Bool {
         s.count == 16 && s.allSatisfy { $0.isHexDigit && !$0.isUppercase }
     }
@@ -64,6 +69,11 @@ public struct SpkiHash: Hashable, Sendable, CustomStringConvertible {
 /// `SpkiHash` (see ADR-015 "Why conn_tiebreak and not peer_id").
 public struct ConnTiebreak: Hashable, Sendable, CustomStringConvertible {
     public let value: String
+
+    /// Non-trapping constructor for a value that arrives off the wire — see `PeerId.parse`.
+    public static func parse(_ value: String) -> ConnTiebreak? {
+        isValid(value) ? ConnTiebreak(value) : nil
+    }
 
     public init(_ value: String) {
         precondition(ConnTiebreak.isValid(value), "ConnTiebreak must be 32 lowercase hex characters")

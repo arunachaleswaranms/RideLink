@@ -28,9 +28,6 @@ android {
 
     buildFeatures {
         compose = true
-        // Generates BuildConfig.DEBUG, the composition-root switch that gates
-        // PlainControlTransportPhase1a — see AppContainer's doc comment (this session's brief §4).
-        buildConfig = true
     }
 }
 

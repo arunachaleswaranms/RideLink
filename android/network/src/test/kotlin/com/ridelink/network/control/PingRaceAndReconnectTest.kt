@@ -1,6 +1,5 @@
 package com.ridelink.network.control
 
-import com.ridelink.core.model.PeerId
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -26,14 +25,17 @@ class PingRaceAndReconnectTest {
     private val clock = AtomicLong(1_000_000L)
     private val monotonicNowUs: () -> Long = { clock.addAndGet(1_000) }
 
-    private fun localIdentity(name: String) =
-        LocalHandshakeIdentity(
-            displayName = name,
-            platform = "android",
-            osVersion = "test",
-            appVersion = "test",
-            connTiebreak = ConnTiebreakGenerator.generate(),
-        )
+    /**
+     * A port that is bound and immediately released, so a connect to it is refused. Uses the
+     * plaintext fixture deliberately: nothing here ever completes a handshake, and a TLS listener
+     * would only add setup cost to a socket whose whole purpose is to not answer.
+     */
+    private suspend fun deadPort(): Int =
+        PlaintextControlChannelFixture().bind().let { listener ->
+            val port = listener.localPort
+            listener.close()
+            port
+        }
 
     // MARK: - §2 clock burst / PING-PONG
 
@@ -42,14 +44,15 @@ class PingRaceAndReconnectTest {
         runBlocking {
             val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
             try {
-                val peerA = ControlSessionManager(scope, monotonicNowUs, localPeerId = PeerId("1111111111111111"))
-                val peerB = ControlSessionManager(scope, monotonicNowUs, localPeerId = PeerId("2222222222222222"))
+                val (a, b) = TestSessions.pairedPeers("1111111111111111", "2222222222222222")
+                val peerA = a.manager(scope, monotonicNowUs)
+                val peerB = b.manager(scope, monotonicNowUs)
 
-                val portA = peerA.startListening(localIdentity("A"))
-                val portB = peerB.startListening(localIdentity("B"))
+                val portA = peerA.startListening(a.local)
+                val portB = peerB.startListening(b.local)
 
-                peerA.connectTo("127.0.0.1", portB, localIdentity("A"))
-                peerB.connectTo("127.0.0.1", portA, localIdentity("B"))
+                peerA.connectTo("127.0.0.1", portB, a.local)
+                peerB.connectTo("127.0.0.1", portA, b.local)
 
                 withTimeout(5_000) {
                     peerA.diagnostics.first { it.controlState == ControlState.CONNECTED }
@@ -76,16 +79,12 @@ class PingRaceAndReconnectTest {
         runBlocking {
             val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
             try {
-                val peer = ControlSessionManager(scope, monotonicNowUs, localPeerId = PeerId("5555555555555555"))
+                val a = TestSessions.unpairedPeer("5555555555555555", "A")
+                val peer = a.manager(scope, monotonicNowUs)
                 val recorded = mutableListOf<ControlEvent>()
                 val collectJob = launch { peer.events.collect { recorded.add(it) } }
 
-                // Bind and immediately release a port so nothing is listening there.
-                val deadListener = ControlListener.bind()
-                val deadPort = deadListener.localPort
-                deadListener.close()
-
-                peer.beginReconnect(localIdentity("A"), "127.0.0.1", deadPort)
+                peer.beginReconnect(a.local, "127.0.0.1", deadPort())
 
                 // Ladder: attempt 1 at ~0.4-0.6s, attempt 2 at ~1.2-1.8s cumulative. 3s leaves
                 // comfortable margin for connect-refused overhead on a loaded CI machine.
@@ -109,12 +108,10 @@ class PingRaceAndReconnectTest {
         runBlocking {
             val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
             try {
-                val peer = ControlSessionManager(scope, monotonicNowUs, localPeerId = PeerId("6666666666666666"))
-                val deadListener = ControlListener.bind()
-                val deadPort = deadListener.localPort
-                deadListener.close()
+                val a = TestSessions.unpairedPeer("6666666666666666", "A")
+                val peer = a.manager(scope, monotonicNowUs)
 
-                peer.beginReconnect(localIdentity("A"), "127.0.0.1", deadPort)
+                peer.beginReconnect(a.local, "127.0.0.1", deadPort())
 
                 val samples = mutableListOf<Int>()
                 repeat(6) {
@@ -138,17 +135,18 @@ class PingRaceAndReconnectTest {
         runBlocking {
             val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
             try {
-                val peerA = ControlSessionManager(scope, monotonicNowUs, localPeerId = PeerId("7777777777777777"))
-                val peerB = ControlSessionManager(scope, monotonicNowUs, localPeerId = PeerId("8888888888888888"))
+                val (a, b) = TestSessions.pairedPeers("7777777777777777", "8888888888888888")
+                val peerA = a.manager(scope, monotonicNowUs)
+                val peerB = b.manager(scope, monotonicNowUs)
 
-                val portB = peerB.startListening(localIdentity("B"))
+                val portB = peerB.startListening(b.local)
 
                 val awaitConnected =
                     async(start = kotlinx.coroutines.CoroutineStart.UNDISPATCHED) {
                         peerA.events.first { it is ControlEvent.Connected }
                     }
 
-                peerA.beginReconnect(localIdentity("A"), "127.0.0.1", portB)
+                peerA.beginReconnect(a.local, "127.0.0.1", portB)
 
                 withTimeout(5_000) { awaitConnected.await() }
 

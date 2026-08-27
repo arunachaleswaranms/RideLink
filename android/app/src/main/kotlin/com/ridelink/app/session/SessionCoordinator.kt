@@ -3,14 +3,14 @@ package com.ridelink.app.session
 import com.ridelink.core.logging.LogSink
 import com.ridelink.core.logging.StructuredLogger
 import com.ridelink.core.model.DiscoveredPeer
+import com.ridelink.core.security.TrustedPeer
+import com.ridelink.core.security.TrustedPeerStore
 import com.ridelink.core.sessionfsm.Effect
 import com.ridelink.core.sessionfsm.FsmResult
 import com.ridelink.core.sessionfsm.FsmState
 import com.ridelink.core.sessionfsm.SessionEvent
 import com.ridelink.core.sessionfsm.SessionFsm
 import com.ridelink.core.sessionfsm.SessionStatus
-import com.ridelink.core.security.TrustedPeer
-import com.ridelink.core.security.TrustedPeerStore
 import com.ridelink.network.control.ControlDiagnostics
 import com.ridelink.network.control.ControlEvent
 import com.ridelink.network.control.ControlSessionManager
@@ -65,6 +65,9 @@ class SessionCoordinator(
 
     /** Non-null only while two users are being asked to compare six digits (PROTOCOL §4.5). */
     val pairingPrompt: StateFlow<PairingPrompt?> = controlSessionManager.pairingPrompt
+
+    /** This device's own `identity_spki_sha256`, redacted to 6 hex for display (ARCHITECTURE §11). */
+    val localIdentityPrefix: String = localIdentity.identitySpkiSha256.toString()
 
     private val _securityAlert = MutableStateFlow<String?>(null)
 

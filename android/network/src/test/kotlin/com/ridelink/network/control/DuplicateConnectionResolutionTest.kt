@@ -27,25 +27,17 @@ class DuplicateConnectionResolutionTest {
     private val clock = AtomicLong(1_000_000L)
     private val monotonicNowUs: () -> Long = { clock.addAndGet(1_000) }
 
-    private fun localIdentity(name: String) =
-        LocalHandshakeIdentity(
-            displayName = name,
-            platform = "android",
-            osVersion = "test",
-            appVersion = "test",
-            connTiebreak = ConnTiebreakGenerator.generate(),
-        )
-
     @Test
     fun `simultaneous mutual connect leaves exactly one survivor on both sides`() =
         runBlocking {
             val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
             try {
-                val peerA = ControlSessionManager(scope, monotonicNowUs, localPeerId = PeerId("aaaaaaaaaaaaaaaa"))
-                val peerB = ControlSessionManager(scope, monotonicNowUs, localPeerId = PeerId("bbbbbbbbbbbbbbbb"))
+                val (a, b) = TestSessions.pairedPeers("aaaaaaaaaaaaaaaa", "bbbbbbbbbbbbbbbb")
+                val peerA = a.manager(scope, monotonicNowUs)
+                val peerB = b.manager(scope, monotonicNowUs)
 
-                val portA = peerA.startListening(localIdentity("A"))
-                val portB = peerB.startListening(localIdentity("B"))
+                val portA = peerA.startListening(a.local)
+                val portB = peerB.startListening(b.local)
 
                 // Subscribe BEFORE triggering the connects: `events` is a zero-replay hot
                 // SharedFlow, so a `.first{}` started after the race resolves would wait forever
@@ -63,8 +55,8 @@ class DuplicateConnectionResolutionTest {
                 // instant — the simultaneous-connect race PROTOCOL §4.2 exists to resolve.
                 val connectJobs =
                     listOf(
-                        async(Dispatchers.IO) { peerA.connectTo("127.0.0.1", portB, localIdentity("A")) },
-                        async(Dispatchers.IO) { peerB.connectTo("127.0.0.1", portA, localIdentity("B")) },
+                        async(Dispatchers.IO) { peerA.connectTo("127.0.0.1", portB, a.local) },
+                        async(Dispatchers.IO) { peerB.connectTo("127.0.0.1", portA, b.local) },
                     )
                 connectJobs.awaitAll()
 
@@ -100,11 +92,12 @@ class DuplicateConnectionResolutionTest {
         runBlocking {
             val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
             try {
-                val peerA = ControlSessionManager(scope, monotonicNowUs, localPeerId = PeerId("cccccccccccccccc"))
-                val peerB = ControlSessionManager(scope, monotonicNowUs, localPeerId = PeerId("dddddddddddddddd"))
+                val (a, b) = TestSessions.pairedPeers("cccccccccccccccc", "dddddddddddddddd")
+                val peerA = a.manager(scope, monotonicNowUs)
+                val peerB = b.manager(scope, monotonicNowUs)
 
-                val portA = peerA.startListening(localIdentity("A"))
-                val portB = peerB.startListening(localIdentity("B"))
+                val portA = peerA.startListening(a.local)
+                val portB = peerB.startListening(b.local)
 
                 // Subscribe before triggering the connects (zero-replay hot SharedFlow — see the
                 // sibling test's comment).
@@ -118,8 +111,8 @@ class DuplicateConnectionResolutionTest {
                     }
 
                 listOf(
-                    async(Dispatchers.IO) { peerA.connectTo("127.0.0.1", portB, localIdentity("A")) },
-                    async(Dispatchers.IO) { peerB.connectTo("127.0.0.1", portA, localIdentity("B")) },
+                    async(Dispatchers.IO) { peerA.connectTo("127.0.0.1", portB, a.local) },
+                    async(Dispatchers.IO) { peerB.connectTo("127.0.0.1", portA, b.local) },
                 ).awaitAll()
 
                 withTimeout(5_000) { awaitConnected.await() }

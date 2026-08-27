@@ -27,10 +27,6 @@ final class MalformedPingPongTests: XCTestCase {
 
     // MARK: - End-to-end: the real read loop survives malformed PING/PONG
 
-    private func localIdentity(_ name: String) -> LocalHandshakeIdentity {
-        LocalHandshakeIdentity(displayName: name, platform: "ios", osVersion: "test", appVersion: "test", connTiebreak: ConnTiebreakGenerator.generate())
-    }
-
     private func clock() -> @Sendable () -> Int64 {
         let counter = LockedCounter(1_000_000)
         return { counter.incrementAndGet(by: 1_000) }
@@ -138,16 +134,20 @@ final class MalformedPingPongTests: XCTestCase {
     private func withConnectedFakePeer(
         _ block: (ControlSessionManager, ControlConnection, SessionId, SeqCounter) async throws -> Void
     ) async throws {
-        let sut = ControlSessionManager(localPeerId: PeerId("9999999999999999"), monotonicNowUs: clock())
-        let port = try await sut.startListening(local: localIdentity("SUT"))
+        // The "fake peer" is a real, correctly-behaved TLS peer that then sends deliberately
+        // malformed PING/PONG payloads — which is the point: a peer that got through the handshake
+        // is exactly the one whose later frames must not be able to kill the read loop.
+        let (sutPeer, fakePeer) = try TestSessions.pairedPeers("9999999999999999", "1111111111111111", aName: "SUT", bName: "fake")
+        let sut = sutPeer.manager(monotonicNowUs: clock())
+        let port = try await sut.startListening(local: sutPeer.local)
 
-        let fakePeerId = PeerId("1111111111111111")
         let fakeSeq = SeqCounter()
-        let fake = try await ControlConnection.connect(host: "127.0.0.1", port: port)
+        let fake = try await fakePeer.channel().connect(host: "127.0.0.1", port: port)
         let outcome = try await ControlHandshake.performAsInitiator(
-            socket: fake, localPeerId: fakePeerId, seqCounter: fakeSeq, monotonicNowUs: clock(), local: localIdentity("fake")
+            socket: fake, localPeerId: fakePeer.peerId, seqCounter: fakeSeq, monotonicNowUs: clock(),
+            local: fakePeer.local, trustedPeers: fakePeer.trustedPeers
         )
-        guard case .success(_, _, let sessionId, _) = outcome else {
+        guard case .success(_, _, let sessionId, _, _, _) = outcome else {
             XCTFail("fake peer handshake must succeed: \(outcome)")
             fake.close()
             return

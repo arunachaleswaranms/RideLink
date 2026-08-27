@@ -39,7 +39,11 @@ can be exhaustive
 | Session FSM | every legal transition; **every illegal transition rejected without crashing**; `RECONNECTING` returns to the state it left; `BYE` suppresses reconnect; `ENDING` is the only path that releases audio; **closing a duplicate connection produces no transition and no `reconnect_count` increment** |
 | Connection dedup | larger `conn_tiebreak`'s outbound connection survives; both peers compute the same verdict from the same pair; equal tiebreak ⇒ both close and regenerate; inbound connection while `CONNECTED` ⇒ `session_already_active` with no state change; **`HELLO` applied at most once**; the loser never reaches capability exchange |
 | SAS derivation | the ten vectors of [PROTOCOL §4.5.2](PROTOCOL.md#452-sas-golden-vectors); output is **always exactly 6 characters**, all digits; `000000` renders as six zeroes; leading-zero cases; values at and past 999 999; big-endian byte order (a little-endian reading must fail the vectors); bytes 4…31 of the exporter output do not affect the result |
-| SPKI identity | `identity_spki_sha256` formatting (`sha256:` + 64 lowercase hex); pin match; **pin mismatch ⇒ `pin_mismatch`, never auto-re-pair**; certificate re-issued with unchanged SPKI ⇒ still trusted; expired certificate ⇒ `certificate_invalid`, *not* `pin_mismatch`; `HELLO.identity_spki_sha256` disagreeing with the TLS certificate ⇒ `identity_mismatch` |
+| SPKI identity | `identity_spki_sha256` formatting (`sha256:` + 64 lowercase hex, uppercase **rejected**); pin match; **pin mismatch ⇒ `pin_mismatch`, never auto-re-pair**; certificate re-issued with unchanged SPKI ⇒ still trusted; expired certificate ⇒ `certificate_invalid`, *not* `pin_mismatch`, and it outranks a pin mismatch; `HELLO.identity_spki_sha256` disagreeing with the TLS certificate ⇒ `identity_mismatch`, checked **before** pairing is offered |
+| **DER encoding** (ADR-017) | definite length in minimal form at the 127/128, 255/256, 65 535/65 536 boundaries; non-negative INTEGER minimal two's-complement (redundant leading zero stripped, necessary one kept); the 91-byte P-256 SubjectPublicKeyInfo; a fixed TBSCertificate byte-for-byte from fixed inputs; **a compressed or wrong-length public-key point is rejected before it can be hashed into an identity** |
+| **Certificate validity** | inclusive window boundaries; one second either side; UTCTime round-trip across the epoch, a pre-1970 instant (floor vs truncating division), leap days, and the RFC 5280 2049/1950 pivot; `plusYears` clamps 29 Feb rather than rolling into 1 March |
+| **Pairing state machine** (PROTOCOL §4.5) | no pin is written until **both** sides confirm, in either arrival order; either side rejecting writes nothing; a `PAIR_REQUEST`/`PAIR_RESULT` whose advertised identity contradicts the certificate ⇒ `identity_mismatch`; a replayed `PAIR_RESULT` cannot pair twice; **a missing exporter fails the exchange rather than displaying an unbound code**; an existing pin for the same `peer_id` is never overwritten |
+| **Trusted-peer persistence** | survives a new store instance; `last_seen_at` refresh allowed, pin replacement refused; `forget` then re-pair allowed; a corrupt store reads as empty rather than crashing at launch; a record with a malformed identifier is dropped, not adopted; writes are atomic; the local `peer_id` is generated once and then stable |
 | Clock estimator | offset recovery from synthetic samples with known truth; outlier injection (one 500 ms spike in 11); all-samples-bad ⇒ no estimate rather than a wrong one; EWMA convergence; 30 ms step rejected until confirmed twice |
 | Drift ladder | boundary values 24/25/119/120/121/1999/2000/2001 ms; hysteresis (no nudge/restore oscillation); 3-seeks-in-60 s ⇒ sync-failed; rate restored to exactly 1.0 after convergence; **ladder suspended while either peer reports `route_state: "transitioning"`, and a transition does not advance the hard-seek counter** |
 | Command ordering | duplicate `command_seq` dropped; stale dropped; past `effective_at` applied immediately and counted; `stale_revision` rejected |
@@ -76,11 +80,33 @@ Vector directories that exist specifically because of the correction pass:
 | `sas/` | A big-endian/little-endian or padding disagreement here means two different six-digit codes on the two screens, which is indistinguishable from an attack. Ten fixed exporter outputs, fabricated, with expected `sas6` |
 | `manifest-paging/` | Page boundaries must be computed the same way on both sides, or one peer's pages are rejected by the other. 1 / 1 000 / 5 000 entries plus pathological metadata |
 | `manifest-paging-errors/` | Twelve failure cases; each asserts the error code *and* that the live manifest is unchanged |
-| `identity/` | SPKI formatting and pin semantics, including certificate re-issue with an unchanged key |
+| `identity/` | SPKI formatting and pin semantics, including certificate re-issue with an unchanged key; the DER length/INTEGER encodings and the exact TBSCertificate bytes. A one-byte difference here produces a different `identity_spki_sha256` on one phone than the other, which presents to the user as an unexplained `pin_mismatch` mid-ride — i.e. exactly what a real attack looks like |
 | `dedup/` | `conn_tiebreak` pairs ⇒ which side's initiated connection survives. Catches an implementation that conflates initiator with leader |
 | `audio-state/` | Shared enum vocabulary and derived `media_quality`, so neither platform invents its own audio words |
 
 **Discipline:** every wire bug found on a device gets a vector added *before* the fix.
+
+### 3.1 The secure control channel — what is proven on a laptop, and what is not
+
+Phase 1b's security path is exercised end to end by `TlsControlChannelTest` (Android) and
+`TlsControlChannelTests` (iOS), over **real loopback TCP with a real TLS 1.3 handshake**: both
+ends complete a mutually authenticated handshake with certificates this codebase encoded and
+signed, each derives the other's `identity_spki_sha256`, both derive the **same** six-digit SAS
+from the exporter, and the pin decision is asserted for trusted / unknown / changed-key /
+expired-certificate / lying-`HELLO` peers.
+
+Two substitutions make that possible on a laptop, and neither is hidden:
+
+| Production | In the suite | Still real |
+|---|---|---|
+| Android Keystore holds a non-exportable P-256 key | An in-memory `KeyStore` holds a JCE P-256 key | the certificate encoding, the signing call, the `KeyManager` wiring, the SPKI derivation |
+| `android.net.ssl.SSLSockets.exportKeyingMaterial` | `Conscrypt.exportKeyingMaterial` — the method the platform class delegates to | the TLS 1.3 handshake, mutual auth, the exporter computation |
+| iOS Keychain holds the identity key | `SecKeyCreateRandomKey` with `kSecAttrIsPermanent: false` | everything else: Apple's shipping `Network.framework` and `Security.framework` |
+
+So what the substitutions remove is *where the private key lives* and *which call frame reaches
+the exporter* — not the cryptography, the wire format or the protocol. What they leave unproven is
+listed in [`test-results/phase1b-security-spike-20260827.md` §5](test-results/phase1b-security-spike-20260827.md)
+and is closed by I-02/I-03/I-04/I-19/I-20/I-21 on the two real phones, not by any laptop test.
 
 ---
 

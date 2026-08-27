@@ -26,7 +26,7 @@ public actor DuplicateConnectionArbiter {
         }
 
         fileprivate var success: (remotePeerId: PeerId, remoteConnTiebreak: ConnTiebreak, sessionId: SessionId, leaderPeerId: PeerId) {
-            guard case .success(let remotePeerId, let remoteConnTiebreak, let sessionId, let leaderPeerId) = outcome else {
+            guard case .success(let remotePeerId, let remoteConnTiebreak, let sessionId, let leaderPeerId, _, _) = outcome else {
                 preconditionFailure("Candidate must wrap a successful handshake outcome")
             }
             return (remotePeerId, remoteConnTiebreak, sessionId, leaderPeerId)

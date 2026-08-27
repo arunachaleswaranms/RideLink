@@ -8,22 +8,17 @@ import XCTest
 /// `ControlSessionManager` instance must work cleanly, with nothing left over from the torn-down
 /// one. Mirrors Android's `TeardownTest`.
 final class TeardownTests: XCTestCase {
-    private func localIdentity(_ name: String) -> LocalHandshakeIdentity {
-        LocalHandshakeIdentity(displayName: name, platform: "ios", osVersion: "test", appVersion: "test", connTiebreak: ConnTiebreakGenerator.generate())
-    }
-
     private func clock() -> @Sendable () -> Int64 {
         let counter = LockedCounter(1_000_000)
         return { counter.incrementAndGet(by: 1_000) }
     }
 
     func testShutdownStopsTheReconnectLadderNoFurtherAttemptsAfterward() async throws {
-        let peer = ControlSessionManager(localPeerId: PeerId("1010101010101010"), monotonicNowUs: clock(), connectTimeoutMs: 200)
-        let deadListener = try await ControlListener.bind()
-        let deadPort = deadListener.localPort
-        deadListener.close()
+        let solo = try TestSessions.unpairedPeer("1010101010101010", name: "A")
+        let peer = solo.manager(monotonicNowUs: clock(), connectTimeoutMs: 200)
+        let deadPort = try await TestSessions.deadPort()
 
-        await peer.beginReconnect(local: localIdentity("A"), host: "127.0.0.1", port: deadPort)
+        await peer.beginReconnect(local: solo.local, host: "127.0.0.1", port: deadPort)
         try await Task.sleep(nanoseconds: 200_000_000) // let the ladder get going
         await peer.shutdown()
 
@@ -34,13 +29,14 @@ final class TeardownTests: XCTestCase {
     }
 
     func testShutdownClosesTheActiveSocketThePeerObservesConnectionClosed() async throws {
-        let sut = ControlSessionManager(localPeerId: PeerId("2020202020202020"), monotonicNowUs: clock())
-        let port = try await sut.startListening(local: localIdentity("SUT"))
+        let (sutPeer, fakePeer) = try TestSessions.pairedPeers("2020202020202020", "3030303030303030", aName: "SUT", bName: "fake")
+        let sut = sutPeer.manager(monotonicNowUs: clock())
+        let port = try await sut.startListening(local: sutPeer.local)
 
-        let fakePeerId = PeerId("3030303030303030")
-        let fake = try await ControlConnection.connect(host: "127.0.0.1", port: port)
+        let fake = try await fakePeer.channel().connect(host: "127.0.0.1", port: port)
         let outcome = try await ControlHandshake.performAsInitiator(
-            socket: fake, localPeerId: fakePeerId, seqCounter: SeqCounter(), monotonicNowUs: clock(), local: localIdentity("fake")
+            socket: fake, localPeerId: fakePeer.peerId, seqCounter: SeqCounter(), monotonicNowUs: clock(),
+            local: fakePeer.local, trustedPeers: fakePeer.trustedPeers
         )
         guard case .success = outcome else { XCTFail("handshake must succeed: \(outcome)"); return }
 
@@ -68,13 +64,22 @@ final class TeardownTests: XCTestCase {
     }
 
     func testANewSessionOnTheSameReusedManagerStartsCleanlyAfterShutdown() async throws {
-        let sut = ControlSessionManager(localPeerId: PeerId("4040404040404040"), monotonicNowUs: clock())
-        let peerB1 = ControlSessionManager(localPeerId: PeerId("5050505050505050"), monotonicNowUs: clock())
+        let sutPeer = try TestSessions.unpairedPeer("4040404040404040", name: "SUT")
+        let b1Peer = try TestSessions.unpairedPeer("5050505050505050", name: "B1")
+        let b2Peer = try TestSessions.unpairedPeer("6060606060606060", name: "B2")
+        // The SUT already knows both partners, so each session is a trusted silent connect and this
+        // test stays about teardown/reuse rather than about pairing.
+        for partner in [b1Peer, b2Peer] {
+            try sutPeer.trust(partner)
+            try partner.trust(sutPeer)
+        }
+        let sut = sutPeer.manager(monotonicNowUs: clock())
+        let peerB1 = b1Peer.manager(monotonicNowUs: clock())
 
-        let portB1 = try await peerB1.startListening(local: localIdentity("B1"))
-        let portSut1 = try await sut.startListening(local: localIdentity("SUT"))
-        await sut.connectTo(host: "127.0.0.1", port: portB1, local: localIdentity("SUT"))
-        await peerB1.connectTo(host: "127.0.0.1", port: portSut1, local: localIdentity("B1"))
+        let portB1 = try await peerB1.startListening(local: b1Peer.local)
+        let portSut1 = try await sut.startListening(local: sutPeer.local)
+        await sut.connectTo(host: "127.0.0.1", port: portB1, local: sutPeer.local)
+        await peerB1.connectTo(host: "127.0.0.1", port: portSut1, local: b1Peer.local)
         try await waitUntil(timeoutSeconds: 5) { await sut.diagnostics.controlState == .connected }
 
         await sut.shutdown()
@@ -84,11 +89,11 @@ final class TeardownTests: XCTestCase {
 
         // Reuse the SAME sut instance for a fresh session, matching how SessionCoordinator holds
         // one ControlSessionManager for the app's lifetime.
-        let peerB2 = ControlSessionManager(localPeerId: PeerId("6060606060606060"), monotonicNowUs: clock())
-        let portB2 = try await peerB2.startListening(local: localIdentity("B2"))
-        let portSut2 = try await sut.startListening(local: localIdentity("SUT"))
-        await sut.connectTo(host: "127.0.0.1", port: portB2, local: localIdentity("SUT"))
-        await peerB2.connectTo(host: "127.0.0.1", port: portSut2, local: localIdentity("B2"))
+        let peerB2 = b2Peer.manager(monotonicNowUs: clock())
+        let portB2 = try await peerB2.startListening(local: b2Peer.local)
+        let portSut2 = try await sut.startListening(local: sutPeer.local)
+        await sut.connectTo(host: "127.0.0.1", port: portB2, local: sutPeer.local)
+        await peerB2.connectTo(host: "127.0.0.1", port: portSut2, local: b2Peer.local)
 
         try await waitUntil(timeoutSeconds: 5) { await sut.diagnostics.controlState == .connected }
         let finalState = await sut.diagnostics.controlState

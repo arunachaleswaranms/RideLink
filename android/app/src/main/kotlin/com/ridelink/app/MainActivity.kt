@@ -16,15 +16,12 @@ class MainActivity : ComponentActivity() {
 
         setContent {
             MaterialTheme {
-                // AppContainer never constructs a session in a release build (this session's
-                // brief §4) — `null` here means there is no plaintext transport to show, not a
-                // bug to work around.
-                val coordinator = container.sessionCoordinator
-                if (coordinator != null) {
-                    MainScreen(coordinator = coordinator, deviceDescription = deviceDescription)
-                } else {
-                    SecureTransportUnavailableScreen()
-                }
+                container.fold(
+                    onSuccess = { MainScreen(coordinator = it.sessionCoordinator, deviceDescription = deviceDescription) },
+                    // The only way to land here is a device-identity failure. There is deliberately
+                    // no plaintext path to offer instead (ADR-007 Amendment A1).
+                    onFailure = { SecureTransportUnavailableScreen(reason = it.message.orEmpty()) },
+                )
             }
         }
     }

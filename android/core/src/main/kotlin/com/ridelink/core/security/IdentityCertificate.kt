@@ -38,7 +38,12 @@ object IdentityCertificate {
     /** 16 CSPRNG bytes, high bit cleared by the caller so it encodes as a positive INTEGER. */
     const val SERIAL_BYTES: Int = 16
 
-    /** keyUsage = digitalSignature: BIT STRING, 7 unused bits, bit 0 set. */
+    /**
+     * The DER of `keyUsage = digitalSignature`, pre-encoded: BIT STRING (`0x03`), 2 bytes, 7
+     * unused bits (`0x07`), bit 0 set (`0x80`). Written as literal bytes because that is what it
+     * is — one fixed four-byte constant from RFC 5280, not four independent numbers.
+     */
+    @Suppress("MagicNumber")
     private val KEY_USAGE_DIGITAL_SIGNATURE = byteArrayOf(0x03, 0x02, 0x07, 0x80.toByte())
 
     /**
@@ -136,9 +141,12 @@ object IdentityCertificate {
 
     private fun signatureAlgorithm(): ByteArray = Der.sequence(Der.objectIdentifier(Oid.ECDSA_WITH_SHA256))
 
+    /** TBSCertificate's `extensions [3] EXPLICIT` context tag (RFC 5280 §4.1). */
+    private const val EXTENSIONS_CONTEXT_TAG = 3
+
     private fun extensions(): ByteArray =
         Der.explicit(
-            3,
+            EXTENSIONS_CONTEXT_TAG,
             Der.sequence(
                 // basicConstraints, critical, CA:FALSE (an empty SEQUENCE — cA defaults to FALSE)
                 Der.sequence(

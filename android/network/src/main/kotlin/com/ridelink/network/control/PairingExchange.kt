@@ -2,6 +2,7 @@ package com.ridelink.network.control
 
 import com.ridelink.core.model.PeerId
 import com.ridelink.core.model.SpkiHash
+import com.ridelink.core.security.PinReplacementRefusedException
 import com.ridelink.core.security.TrustedPeer
 import com.ridelink.core.security.TrustedPeerStore
 import java.util.concurrent.atomic.AtomicBoolean
@@ -97,6 +98,7 @@ class PairingExchange(
     }
 
     /** The user tapped confirm or reject on **this** device. */
+    @Suppress("ReturnCount") // one early return per refusal reason; nesting would hide which fired
     fun onLocalDecision(accepted: Boolean): Step {
         if (!accepted) return Step.Failed(ERROR_CODE_PAIRING_REJECTED)
         if (sas6 == null) return Step.Failed(ERROR_CODE_INTERNAL)
@@ -112,6 +114,7 @@ class PairingExchange(
         return settleIfBothConfirmed()
     }
 
+    @Suppress("ReturnCount") // as above
     fun onPairResult(
         accepted: Boolean,
         advertisedSpki: SpkiHash,
@@ -128,6 +131,7 @@ class PairingExchange(
      * The acceptor additionally answers `PAIR_RESULT`; the initiator, which reaches this point by
      * *receiving* that frame, has nothing left to send.
      */
+    @Suppress("ReturnCount") // "not yet", "already done" and "done now" are three distinct answers
     private fun settleIfBothConfirmed(): Step {
         if (!localConfirmed.get() || !remoteConfirmed.get()) return Step.Wait
         if (!completed.compareAndSet(false, true)) return Step.Wait
@@ -140,8 +144,24 @@ class PairingExchange(
                 pairedAtEpochSeconds = now,
                 lastSeenAtEpochSeconds = now,
             )
-        trustedPeers.remember(peer)
-        return if (isInitiator) Step.Succeeded(peer) else Step.SendPairResultAccepted
+        return try {
+            trustedPeers.remember(peer)
+            if (isInitiator) Step.Succeeded(peer) else Step.SendPairResultAccepted
+        } catch (
+            // The exception carries no information the caller needs: the peer_id is already known
+            // here, and the outcome is a fixed PROTOCOL §4.6 code. Rethrowing or wrapping it would
+            // put an exception on a state machine's happy path for a case that is a defined,
+            // expected refusal.
+            @Suppress("SwallowedException") refused: PinReplacementRefusedException,
+        ) {
+            // ADR-012: a stored pin is never silently replaced. Reaching here means a record
+            // already exists for this peer_id under a different key, which is a `pin_mismatch`
+            // situation the user has to resolve with an explicit forget — not something pairing
+            // may paper over. Reported as a step rather than thrown, so the caller sends the peer
+            // an ERROR and closes rather than losing the exchange to an exception.
+            completed.set(false)
+            Step.Failed(ERROR_CODE_PIN_MISMATCH)
+        }
     }
 
     /** The acceptor's second half of [settleIfBothConfirmed]: the record is already written. */

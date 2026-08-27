@@ -69,7 +69,10 @@ class PlaintextTransportAbsenceTest {
         val implementations =
             mainSources.filter { file ->
                 val text = file.readText()
-                ": ControlChannel" in text && "interface ControlChannel" !in text
+                // An implementation, not a mention: `class X : ControlChannel {`. A constructor
+                // parameter typed `channel: ControlChannel,` must not count, or this test would
+                // flag ControlSessionManager for merely being given one.
+                IMPLEMENTS_CONTROL_CHANNEL.containsMatchIn(text) && "interface ControlChannel" !in text
             }
         assertEquals(
             listOf("TlsControlChannel.kt"),
@@ -86,5 +89,6 @@ class PlaintextTransportAbsenceTest {
         /** `Socket(` / `ServerSocket(` construction, excluding `SSLSocket`/`SSLServerSocket` types. */
         val RAW_SOCKET_CONSTRUCTION = Regex("""(?<![A-Za-z])(?<!SSL)(Server)?Socket\(""")
         val OVERRIDES_IS_SECURE_TRUE = Regex("""override\s+val\s+isSecure\s*:\s*Boolean\s*=\s*true""")
+        val IMPLEMENTS_CONTROL_CHANNEL = Regex(""":\s*ControlChannel\s*\{""")
     }
 }

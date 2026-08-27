@@ -753,7 +753,7 @@ small specialised one. Everything pinned.
 | Voice | `io.github.webrtc-sdk:android` | Google publishes no current Maven artifact; this is the maintained community build of upstream WebRTC. **Pinned and reviewed** — see risk register |
 | DI | **manual constructor injection** | No framework in V1. [ADR-014 §2](DECISIONS/ADR-014-initial-module-structure-and-di.md#2-dependency-injection) |
 | Preferences | DataStore + Keystore | Keystore for the device identity keypair; no secret in plaintext prefs |
-| Tests | JUnit, kotlin.test, Turbine, MockK, Robolectric, androidx.test | Turbine for Flow assertions; Robolectric keeps route-logic tests off-device |
+| Tests | JUnit, kotlin.test, Turbine, MockK, Robolectric, androidx.test, **Conscrypt (test-only)** | Turbine for Flow assertions; Robolectric keeps route-logic tests off-device. Conscrypt is `testImplementation` **only** and never reaches an APK: Android's own TLS stack *is* Conscrypt, and its exporter is reached on device through `android.net.ssl.SSLSockets`, a class that does not exist on a plain JVM — without it, the test that proves two peers derive the same six-digit SAS could not run anywhere but a phone (ADR-018) |
 | Static analysis | Android Lint + ktlint + detekt | detekt catches the complexity that Lint does not |
 
 Discovery, TLS, audio routing, hashing: **platform APIs, no dependency.**
@@ -777,9 +777,17 @@ Discovery, TLS, audio routing, hashing: **platform APIs, no dependency.**
 
 ### 10.3 Dependency count
 
-Three third-party dependencies total: WebRTC (×2 platforms) and GRDB. Everything else is
+Three third-party dependencies **shipped**: WebRTC (×2 platforms) and GRDB. Everything else is
 platform API. No DI framework, no analytics SDK, no ad SDK, no crash reporter, no network client
 library (NFR-05, §11). WebRTC is the only large one, and it is the one the brief mandates.
+
+One **test-only** dependency: Conscrypt on the Android side, for the reason in §10.1. It is in no
+`implementation` configuration, so it cannot reach an APK — and the count above is about what
+ships, which is what NFR-05 is about.
+
+Identity and TLS add **no** dependency on either platform: Android Keystore, the iOS Keychain,
+`Network.framework` and JSSE are all platform API, and the DER encoder is ~150 lines of our own
+pure code pinned by shared vectors (ADR-017).
 
 ---
 

@@ -2,34 +2,20 @@ import Foundation
 import RideLinkCore
 import Security
 
-/// **Non-security-bearing.** Phase 1a has no TLS, no device keypair and no trusted-peer store
-/// (CLAUDE.md rule 28 / this session's brief §9). `insecureSentinelSpkiHash` is a fixed sentinel,
-/// never a real key hash — it exists only so `HELLO.identity_spki_sha256` satisfies the wire
-/// shape (`SpkiHash`'s format) while this transport is active. It must never be treated as a
-/// trust anchor, logged as if it were real, or compared for pin matching: there is no pinning in
-/// Phase 1a.
-public enum ProvisionalIdentity {
-    /// Generated once per process start. Not persisted, not a durable Phase 1b `peer_id`.
-    public static let peerId: PeerId = PeerId(randomHex(byteCount: 8))
-
-    /// `sha256:` + 64 zero hex characters — structurally valid, semantically meaningless.
-    public static let insecureSentinelSpkiHash = SpkiHash("sha256:" + String(repeating: "0", count: 64))
-
-    static func randomHex(byteCount: Int) -> String {
-        var bytes = [UInt8](repeating: 0, count: byteCount)
-        let status = SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes)
-        precondition(status == errSecSuccess, "SecRandomCopyBytes failed")
-        return bytes.map { String(format: "%02x", $0) }.joined()
-    }
-}
-
 /// ADR-015: 16 CSPRNG bytes as 32 lowercase hex characters, generated once per app process per
 /// discovery session, stable across every connection opened or accepted in that session. A
-/// distinct value from `ProvisionalIdentity.peerId` and from the mDNS discovery handle — reusing
-/// one random value for two jobs is the exact mistake ADR-015 warns against.
+/// distinct value from the device's durable `peer_id` and from the mDNS discovery handle —
+/// reusing one random value for two jobs is the exact mistake ADR-015 warns against.
+///
+/// (Phase 1a's `ProvisionalIdentity` — a per-process random `peer_id` and a zero-filled sentinel
+/// `identity_spki_sha256` — is gone. Both are real now: the `peer_id` is persisted by
+/// `LocalPeerIdStore`, and the SPKI hash comes from the Keychain identity key.)
 public enum ConnTiebreakGenerator {
     public static func generate() -> ConnTiebreak {
-        ConnTiebreak(ProvisionalIdentity.randomHex(byteCount: 16))
+        var bytes = [UInt8](repeating: 0, count: 16)
+        let status = SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes)
+        precondition(status == errSecSuccess, "SecRandomCopyBytes failed")
+        return ConnTiebreak(bytes.map { String(format: "%02x", $0) }.joined())
     }
 }
 
@@ -63,7 +49,8 @@ public enum ControlMessages {
         osVersion: String,
         appVersion: String,
         sessionIdProposal: SessionId,
-        connTiebreak: ConnTiebreak
+        connTiebreak: ConnTiebreak,
+        identitySpkiSha256: SpkiHash
     ) -> Envelope {
         envelope(
             localPeerId: localPeerId,
@@ -79,7 +66,9 @@ public enum ControlMessages {
                 "app_version": .string(appVersion),
                 "protocol_versions": .array([.number(Double(ProtocolVersion.current))]),
                 "session_id_proposal": .string(sessionIdProposal.value),
-                "identity_spki_sha256": .string(ProvisionalIdentity.insecureSentinelSpkiHash.value),
+                // Advisory only (PROTOCOL §4.1): cross-checked against the TLS certificate, and a
+                // mismatch is ERROR/identity_mismatch. Trust never derives from it.
+                "identity_spki_sha256": .string(identitySpkiSha256.value),
                 "conn_tiebreak": .string(connTiebreak.value),
             ]
         )
@@ -92,7 +81,8 @@ public enum ControlMessages {
         sentAtMonoUs: Int64,
         acceptedSessionId: SessionId,
         connTiebreak: ConnTiebreak,
-        leaderPeerId: PeerId
+        leaderPeerId: PeerId,
+        identitySpkiSha256: SpkiHash
     ) -> Envelope {
         envelope(
             localPeerId: localPeerId,
@@ -104,11 +94,64 @@ public enum ControlMessages {
                 "peer_id": .string(localPeerId.value),
                 "accepted_session_id": .string(acceptedSessionId.value),
                 "protocol_version": .number(Double(ProtocolVersion.current)),
-                "identity_spki_sha256": .string(ProvisionalIdentity.insecureSentinelSpkiHash.value),
+                "identity_spki_sha256": .string(identitySpkiSha256.value),
                 "conn_tiebreak": .string(connTiebreak.value),
                 "leader_peer_id": .string(leaderPeerId.value),
             ]
         )
+    }
+
+    /// PROTOCOL §4.5. Sent by the **initiator** of the surviving connection only, so exactly one
+    /// pairing exchange runs per first meeting (§4.2).
+    ///
+    /// Carries no code and no key material: the six digits are derived independently on each side
+    /// from the TLS exporter and compared by the two humans. Putting the SAS on the wire would
+    /// destroy the entire point of the check — a man-in-the-middle would simply forward it.
+    public static func pairRequest(
+        localPeerId: PeerId,
+        sessionId: SessionId,
+        seq: Int64,
+        sentAtMonoUs: Int64,
+        displayName: String,
+        platform: String,
+        identitySpkiSha256: SpkiHash
+    ) -> Envelope {
+        envelope(localPeerId: localPeerId, type: "PAIR_REQUEST", sessionId: sessionId, seq: seq, sentAtMonoUs: sentAtMonoUs, payload: [
+            "display_name": .string(displayName),
+            "platform": .string(platform),
+            "identity_spki_sha256": .string(identitySpkiSha256.value),
+        ])
+    }
+
+    /// PROTOCOL §4.5: `{ sas6_accepted: true }` — a **boolean**, never the digits. The sender is
+    /// asserting "my user looked at my screen and said the two codes match", which is a claim
+    /// about a human, not a value that could be forwarded.
+    public static func pairConfirm(
+        localPeerId: PeerId,
+        sessionId: SessionId,
+        seq: Int64,
+        sentAtMonoUs: Int64,
+        accepted: Bool
+    ) -> Envelope {
+        envelope(localPeerId: localPeerId, type: "PAIR_CONFIRM", sessionId: sessionId, seq: seq, sentAtMonoUs: sentAtMonoUs, payload: [
+            "sas6_accepted": .bool(accepted),
+        ])
+    }
+
+    /// PROTOCOL §4.5, the acceptor's verdict. On `accepted`, both sides persist the trusted-peer record.
+    public static func pairResult(
+        localPeerId: PeerId,
+        sessionId: SessionId,
+        seq: Int64,
+        sentAtMonoUs: Int64,
+        accepted: Bool,
+        identitySpkiSha256: SpkiHash
+    ) -> Envelope {
+        envelope(localPeerId: localPeerId, type: "PAIR_RESULT", sessionId: sessionId, seq: seq, sentAtMonoUs: sentAtMonoUs, payload: [
+            "accepted": .bool(accepted),
+            "peer_id": .string(localPeerId.value),
+            "identity_spki_sha256": .string(identitySpkiSha256.value),
+        ])
     }
 
     public static func ping(localPeerId: PeerId, sessionId: SessionId, seq: Int64, sentAtMonoUs: Int64, t1MonoUs: Int64) -> Envelope {
@@ -192,3 +235,10 @@ public let errorCodeLeaderMismatch = "leader_mismatch"
 public let errorCodeVersionMismatch = "version_mismatch"
 public let errorCodeFrameTooLarge = "frame_too_large"
 public let errorCodeMalformedFrame = "malformed_frame"
+public let errorCodePinMismatch = "pin_mismatch"
+public let errorCodeIdentityMismatch = "identity_mismatch"
+public let errorCodeCertificateInvalid = "certificate_invalid"
+public let errorCodeUntrustedPeer = "untrusted_peer"
+public let errorCodePairingRejected = "pairing_rejected"
+public let errorCodePairingRateLimited = "pairing_rate_limited"
+public let errorCodeInternal = "internal"

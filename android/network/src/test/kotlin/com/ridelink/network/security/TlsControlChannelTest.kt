@@ -4,6 +4,7 @@ import com.ridelink.core.model.ConnTiebreak
 import com.ridelink.core.model.PeerId
 import com.ridelink.core.security.InMemoryTrustedPeerStore
 import com.ridelink.core.security.TrustedPeer
+import com.ridelink.core.security.UtcTime
 import com.ridelink.network.control.ControlHandshake
 import com.ridelink.network.control.ControlSocket
 import com.ridelink.network.control.ERROR_CODE_CERTIFICATE_INVALID
@@ -15,11 +16,13 @@ import com.ridelink.network.control.SeqCounter
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
-import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import org.junit.jupiter.api.Test
+import org.junit.jupiter.api.Timeout
 import java.security.SecureRandom
+import java.util.concurrent.TimeUnit
 import kotlin.test.assertEquals
 import kotlin.test.assertNotEquals
 import kotlin.test.assertNotNull
@@ -39,7 +42,13 @@ import kotlin.test.assertTrue
  * derivation, the pin decision and the HELLO exchange. What is substituted is documented on
  * [TestTlsSupport]: where the private key lives, and which call frame reaches the exporter.
  */
+@Timeout(value = 120, unit = TimeUnit.SECONDS, threadMode = Timeout.ThreadMode.SEPARATE_THREAD)
 class TlsControlChannelTest {
+    // runBlocking, not runTest: `runTest` drives a *virtual* clock, so a `withTimeout` around a
+    // real TLS handshake fires instantly instead of waiting for the socket. Every test here is
+    // deliberately doing real I/O on real loopback sockets, which is the only way to prove the
+    // exporter and the pin behave — so real time is the correct clock.
+
     private val alice = TestTlsSupport.freshIdentity()
     private val bob = TestTlsSupport.freshIdentity()
 
@@ -97,7 +106,7 @@ class TlsControlChannelTest {
 
     @Test
     fun `a real TLS 1_3 handshake completes and both ends see each other's SPKI`() =
-        runTest {
+        runBlocking {
             connected { server, client ->
                 val serverSecurity = assertNotNull(server.security, "a TLS socket must carry ChannelSecurity")
                 val clientSecurity = assertNotNull(client.security)
@@ -122,9 +131,9 @@ class TlsControlChannelTest {
 
     @Test
     fun `both ends derive the same six-digit SAS from one handshake`() =
-        runTest {
+        runBlocking {
             connected { server, client ->
-                val serverSas = assertNotNull(server.security?.deriveSas6(), "server exporter unavailable")
+                val serverSas = assertNotNull(serverSecurityOf(server).deriveSas6(), "server exporter unavailable")
                 val clientSas = assertNotNull(client.security?.deriveSas6(), "client exporter unavailable")
 
                 assertEquals(serverSas, clientSas, "the two screens must show the same six digits")
@@ -133,13 +142,13 @@ class TlsControlChannelTest {
 
                 // Stable across repeated reads of the same handshake — the code a user is looking
                 // at must not change while they read it out.
-                assertEquals(serverSas, server.security?.deriveSas6())
+                assertEquals(serverSas, serverSecurityOf(server).deriveSas6())
             }
         }
 
     @Test
     fun `a different handshake produces a different SAS`() =
-        runTest {
+        runBlocking {
             val first = mutableListOf<String>()
             repeat(2) {
                 connected { server, _ -> first += assertNotNull(server.security?.deriveSas6()) }
@@ -152,7 +161,7 @@ class TlsControlChannelTest {
 
     @Test
     fun `an unknown peer requires pairing and a known peer connects silently`() =
-        runTest {
+        runBlocking {
             connected { server, client ->
                 val emptyStore = InMemoryTrustedPeerStore()
                 val outcome = handshake(server, client, emptyStore, emptyStore)
@@ -169,7 +178,7 @@ class TlsControlChannelTest {
 
     @Test
     fun `a re-issued certificate around the same key stays trusted`() =
-        runTest {
+        runBlocking {
             // ADR-012's central behaviour, and the reason RideLink encodes its own certificate
             // rather than using Android's auto-issued one (ADR-017 §3): a new serial, a new
             // validity window and a new self-signature, around an unchanged key, must be a
@@ -197,24 +206,17 @@ class TlsControlChannelTest {
 
     @Test
     fun `a changed identity key is refused with pin_mismatch and never auto re-paired`() =
-        runTest {
+        runBlocking {
             val impostor = TestTlsSupport.freshIdentity()
             connected(clientIdentity = impostor) { server, client ->
                 // The server has a pin for bobPeerId, but the peer presenting that peer_id now has
                 // a different key. ADR-012: an unknown peer wearing a familiar name.
                 val serverStore = InMemoryTrustedPeerStore(listOf(trusted(bobPeerId, bob)))
                 val clientStore = InMemoryTrustedPeerStore(listOf(trusted(alicePeerId, alice)))
-                val serverOutcome =
-                    ControlHandshake.performAsAcceptor(
-                        server,
-                        alicePeerId,
-                        SeqCounter(),
-                        { 0L },
-                        localIdentity(alice, "Alice"),
-                        serverStore,
-                    )
+                // The acceptor blocks reading HELLO, so the initiator has to already be running —
+                // ordering these the other way round deadlocks rather than failing.
                 val clientOutcome =
-                    async {
+                    async(Dispatchers.IO) {
                         ControlHandshake.performAsInitiator(
                             client,
                             bobPeerId,
@@ -224,6 +226,15 @@ class TlsControlChannelTest {
                             clientStore,
                         )
                     }
+                val serverOutcome =
+                    ControlHandshake.performAsAcceptor(
+                        server,
+                        alicePeerId,
+                        SeqCounter(),
+                        { 0L },
+                        localIdentity(alice, "Alice"),
+                        serverStore,
+                    )
                 assertEquals(
                     HandshakeOutcome.Rejected(ERROR_CODE_PIN_MISMATCH),
                     serverOutcome,
@@ -240,7 +251,7 @@ class TlsControlChannelTest {
 
     @Test
     fun `a HELLO whose advisory identity contradicts the certificate is refused`() =
-        runTest {
+        runBlocking {
             connected { server, client ->
                 val store = InMemoryTrustedPeerStore()
                 // The initiator advertises somebody else's SPKI while presenting its own
@@ -257,27 +268,36 @@ class TlsControlChannelTest {
 
     @Test
     fun `an expired certificate is refused as certificate_invalid, not as an attack`() =
-        runTest {
+        runBlocking {
             // Issued far enough in the past that its ten-year window has closed. ADR-012 requires a
             // distinct code here so a phone with a wrong clock is not reported to its owner as a
             // security incident.
-            val ancient = TestTlsSupport.freshIdentity(now = com.ridelink.core.security.UtcTime(EXPIRED_ISSUE_EPOCH_SECONDS))
+            val ancient = TestTlsSupport.freshIdentity(now = UtcTime(EXPIRED_ISSUE_EPOCH_SECONDS))
             connected(clientIdentity = ancient) { server, client ->
                 val store = InMemoryTrustedPeerStore()
-                val serverOutcome =
+                // The initiator's own peer (Alice) is fine, so it sends HELLO and waits for a reply
+                // that never comes — the acceptor rejected the expired certificate before
+                // answering. In production `ControlSessionManager.refuse` sends ERROR and closes,
+                // which is what unblocks the peer; here the test closes the socket itself.
+                val clientOutcome =
                     async(Dispatchers.IO) {
-                        ControlHandshake.performAsAcceptor(server, alicePeerId, SeqCounter(), { 0L }, localIdentity(alice, "Alice"), store)
+                        ControlHandshake.performAsInitiator(client, bobPeerId, SeqCounter(), { 0L }, localIdentity(ancient, "Old"), store)
                     }
-                runCatching {
-                    ControlHandshake.performAsInitiator(client, bobPeerId, SeqCounter(), { 0L }, localIdentity(ancient, "Old"), store)
-                }
-                assertEquals(HandshakeOutcome.Rejected(ERROR_CODE_CERTIFICATE_INVALID), serverOutcome.await())
+                val serverOutcome =
+                    ControlHandshake.performAsAcceptor(server, alicePeerId, SeqCounter(), { 0L }, localIdentity(alice, "Alice"), store)
+                assertEquals(HandshakeOutcome.Rejected(ERROR_CODE_CERTIFICATE_INVALID), serverOutcome)
+                // The initiator is left waiting for a HELLO_ACK that will never come. Closing the
+                // socket is what production does (`ControlSessionManager.refuse`), and the
+                // initiator must report that as ConnectionClosed rather than throwing — a write
+                // racing the close is exactly how this surfaced.
+                client.close()
+                assertEquals(HandshakeOutcome.ConnectionClosed, clientOutcome.await())
             }
         }
 
     @Test
     fun `pairing fails closed when the exporter is unavailable`() =
-        runTest {
+        runBlocking {
             // ADR-007 Amendment A1: no channel binding means no SAS, and the response is to stop —
             // never to show six digits that are not bound to this TLS session.
             connected(serverProvider = TestTlsSupport.ExporterlessTlsProvider) { server, _ ->
@@ -295,7 +315,14 @@ class TlsControlChannelTest {
         coroutineScope {
             val serverOutcome =
                 async(Dispatchers.IO) {
-                    ControlHandshake.performAsAcceptor(server, alicePeerId, SeqCounter(), { 0L }, localIdentity(alice, "Alice"), serverStore)
+                    ControlHandshake.performAsAcceptor(
+                        server,
+                        alicePeerId,
+                        SeqCounter(),
+                        { 0L },
+                        localIdentity(alice, "Alice"),
+                        serverStore,
+                    )
                 }
             val clientOutcome =
                 ControlHandshake.performAsInitiator(
@@ -332,6 +359,9 @@ class TlsControlChannelTest {
         pairedAtEpochSeconds = TestTlsSupport.NOW_EPOCH_SECONDS,
         lastSeenAtEpochSeconds = TestTlsSupport.NOW_EPOCH_SECONDS,
     )
+
+    /** Non-null on every TLS socket by construction; asserting it once keeps the call sites clean. */
+    private fun serverSecurityOf(socket: ControlSocket) = assertNotNull(socket.security, "a TLS socket must carry ChannelSecurity")
 
     private companion object {
         const val HANDSHAKE_BUDGET_MS = 20_000L

@@ -121,7 +121,7 @@ class ControlSessionManager(
      * monotonic-clocks rule does not apply — and a monotonic value would be meaningless across
      * reboots, which is exactly what a persisted record has to survive.
      */
-    private val nowEpochSeconds: () -> Long = { System.currentTimeMillis() / 1000 },
+    private val nowEpochSeconds: () -> Long = { System.currentTimeMillis() / MILLIS_PER_SECOND },
     random: Random = Random,
 ) {
     private val seqCounter = SeqCounter()
@@ -863,6 +863,8 @@ class ControlSessionManager(
     }
 
     companion object {
+        private const val MILLIS_PER_SECOND = 1_000L
+
         const val KEEPALIVE_INTERVAL_MS = 2_000L // PROTOCOL §1
         const val KEEPALIVE_LOST_THRESHOLD_US = 6_000_000L // PROTOCOL §1
         const val PING_TIMEOUT_MS = 3_000L

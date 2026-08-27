@@ -74,7 +74,8 @@ class FileTrustedPeerStore(
                 // outcome is a re-pair with a fresh SAS, which is safe. Throwing here would brick
                 // the app at launch over a damaged file.
                 runCatching {
-                    JSON.decodeFromString<List<StoredPeer>>(file.readText())
+                    JSON
+                        .decodeFromString<List<StoredPeer>>(file.readText())
                         .mapNotNull { it.toDomainOrNull() }
                         .associateBy { it.peerId.value }
                 }.getOrDefault(emptyMap())
@@ -107,6 +108,7 @@ class FileTrustedPeerStore(
         val pairedAtEpochSeconds: Long,
         val lastSeenAtEpochSeconds: Long,
     ) {
+        @Suppress("ReturnCount") // one early-out per field that a corrupted file can invalidate
         fun toDomainOrNull(): TrustedPeer? {
             val id = peerId.takeIf { PEER_ID_FORMAT.matches(it) }?.let(::PeerId) ?: return null
             val spki = SpkiHash.parse(identitySpkiSha256) ?: return null

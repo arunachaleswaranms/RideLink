@@ -2,16 +2,18 @@ import SwiftUI
 
 @main
 struct RideLinkApp: App {
-    // `nil` in a Release build — see PlaintextTransportGate's doc comment (this session's brief
-    // §4). Never constructed in that configuration, not just unused.
-    @State private var coordinator = PlaintextTransportGate.makeSessionCoordinator()
+    /// Built once at launch. `SessionCoordinator.init()` creates or loads the device identity
+    /// (ADR-017) and assembles the TLS 1.3 control channel; if that fails there is deliberately no
+    /// unencrypted fallback to offer, so the app says what failed and stops.
+    @State private var session: Result<SessionCoordinator, Error> = Result { try SessionCoordinator() }
 
     var body: some Scene {
         WindowGroup {
-            if let coordinator {
+            switch session {
+            case .success(let coordinator):
                 MainScreen(coordinator: coordinator, deviceDescription: UIDevice.current.name)
-            } else {
-                SecureTransportUnavailableView()
+            case .failure(let error):
+                SecureTransportUnavailableView(reason: String(describing: error))
             }
         }
     }

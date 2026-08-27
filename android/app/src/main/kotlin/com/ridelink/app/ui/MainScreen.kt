@@ -2,6 +2,7 @@ package com.ridelink.app.ui
 
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
@@ -11,6 +12,7 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -19,16 +21,19 @@ import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import com.ridelink.app.session.SessionCoordinator
 import com.ridelink.core.sessionfsm.SessionStatus
 import com.ridelink.network.control.ControlDiagnostics
 import com.ridelink.network.control.ControlState
+import com.ridelink.network.control.PairingPrompt
 
 /**
- * Deliberately developer-oriented (CLAUDE.md Phase 1a scope / this session's brief §17): device
- * identity, connection status, and Phase 1a diagnostics (peer, RTT, clock offset/jitter,
- * reconnect count, discovery count, transport). No Ride Mode UI belongs here yet.
+ * Deliberately developer-oriented (CLAUDE.md Phase 1b scope): device identity, connection status,
+ * the six-digit pairing prompt, security warnings, and diagnostics (peer, RTT, clock
+ * offset/jitter, reconnect count, discovery count, transport). No Ride Mode UI belongs here yet.
  */
 @Composable
 fun MainScreen(
@@ -39,6 +44,8 @@ fun MainScreen(
     val peers by coordinator.discoveredPeers.collectAsState()
     val discoveryCount by coordinator.discoveryCount.collectAsState()
     val diagnostics by coordinator.controlDiagnostics.collectAsState()
+    val pairingPrompt by coordinator.pairingPrompt.collectAsState()
+    val securityAlert by coordinator.securityAlert.collectAsState()
 
     Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
         Column(
@@ -65,66 +72,191 @@ fun MainScreen(
 
             TransportBanner(diagnostics.transportLabel)
 
-            DiagnosticsCard(diagnostics = diagnostics, discoveredPeerCount = peers.size, discoveryCount = discoveryCount)
+            securityAlert?.let { code ->
+                SecurityAlertCard(code = code, onDismiss = coordinator::dismissSecurityAlert)
+            }
+
+            pairingPrompt?.let { prompt ->
+                PairingCard(prompt = prompt, onDecision = coordinator::confirmPairing)
+            }
+
+            DiagnosticsCard(
+                diagnostics = diagnostics,
+                discoveredPeerCount = peers.size,
+                discoveryCount = discoveryCount,
+                localIdentityPrefix = coordinator.localIdentityPrefix,
+            )
         }
     }
 }
 
 /**
- * Shown instead of [MainScreen] whenever `AppContainer.sessionCoordinator` is `null` — a release
- * build, where `PlainControlTransportPhase1a` must never be instantiated (this session's brief
- * §4). Phase 1b's TLS transport is what turns this back into a working screen; there is
- * deliberately no fallback to the plaintext path here.
+ * Shown instead of [MainScreen] when the device identity could not be created or loaded — which is
+ * the only way a session can now fail to assemble, since the transport itself is no longer
+ * conditional (see `di.SecureTransportPolicy`).
+ *
+ * There is deliberately no "continue without security" affordance. ADR-007 Amendment A1 forbids a
+ * plaintext fallback outright, so the honest thing for this screen to do is say what failed and
+ * stop.
  */
 @Composable
-fun SecureTransportUnavailableScreen() {
+fun SecureTransportUnavailableScreen(reason: String = "") {
     Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
         Column(
             modifier = Modifier.fillMaxSize().padding(24.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp, Alignment.CenterVertically),
         ) {
             Text("RideLink", style = MaterialTheme.typography.headlineMedium)
-            Text("Secure transport not implemented", style = MaterialTheme.typography.titleMedium)
+            Text("Secure transport unavailable", style = MaterialTheme.typography.titleMedium)
             Text(
-                "Phase 1a's control transport is plaintext and debug-only. This release build " +
-                    "will not start it. Secure transport (TLS 1.3) arrives in Phase 1b.",
+                "RideLink could not create or load this device's identity key, so it cannot open " +
+                    "an authenticated connection. There is no unencrypted fallback.",
                 style = MaterialTheme.typography.bodyMedium,
             )
+            if (reason.isNotEmpty()) {
+                Text(reason, style = MaterialTheme.typography.bodySmall)
+            }
         }
     }
 }
 
-@Suppress("MagicNumber") // named colors for the Phase 1a insecure-transport banner
-private val InsecureBannerBackground = Color(0xFFFFF3CD)
+@Suppress("MagicNumber") // named colours for the transport banner and the security cards
+private object BannerColors {
+    val InsecureBackground = Color(0xFFFFF3CD)
+    val InsecureText = Color(0xFF7A5B00)
+    val SecureBackground = Color(0xFFDFF3E0)
+    val SecureText = Color(0xFF1B5E20)
+    val AlertBackground = Color(0xFFFBE3E3)
+    val AlertText = Color(0xFF8B1A1A)
+    val PairingBackground = Color(0xFFE3EEFB)
+}
 
-@Suppress("MagicNumber")
-private val InsecureBannerText = Color(0xFF7A5B00)
-
+/**
+ * Green once the link is TLS 1.3, because the banner's job is to be *accurate*: the Phase 1a
+ * version was permanently amber and said `PLAIN / PHASE 1A / NOT SECURE`, and a banner that keeps
+ * crying wolf after the transport is secure trains the user to ignore it.
+ */
 @Composable
 private fun TransportBanner(transportLabel: String) {
+    val secure = transportLabel.startsWith("TLS")
     Card(
         modifier = Modifier.fillMaxWidth(),
-        colors = CardDefaults.cardColors(containerColor = InsecureBannerBackground),
+        colors =
+            CardDefaults.cardColors(
+                containerColor = if (secure) BannerColors.SecureBackground else BannerColors.InsecureBackground,
+            ),
     ) {
         Text(
             "TRANSPORT: $transportLabel",
             modifier = Modifier.padding(12.dp),
             style = MaterialTheme.typography.labelLarge,
-            color = InsecureBannerText,
+            color = if (secure) BannerColors.SecureText else BannerColors.InsecureText,
         )
     }
 }
+
+/**
+ * PROTOCOL §4.5: the two users compare six digits on two screens and both confirm.
+ *
+ * The code is shown large and monospaced because it is read aloud across a car park, and the
+ * wording says *compare*, not *enter* — there is nowhere to type it, deliberately: a code that
+ * travelled between the devices would prove nothing (PROTOCOL §4.5.1).
+ */
+@Composable
+private fun PairingCard(
+    prompt: PairingPrompt,
+    onDecision: (Boolean) -> Unit,
+) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(containerColor = BannerColors.PairingBackground),
+    ) {
+        Column(
+            modifier = Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            Text("Pair with this device?", style = MaterialTheme.typography.titleMedium)
+            Text(
+                prompt.peerDisplayName.ifEmpty { prompt.remotePeerId.toString() },
+                style = MaterialTheme.typography.bodyMedium,
+            )
+            Text(
+                prompt.sas6,
+                modifier = Modifier.fillMaxWidth(),
+                style = MaterialTheme.typography.displayMedium,
+                fontFamily = FontFamily.Monospace,
+                textAlign = TextAlign.Center,
+            )
+            Text(
+                "Both phones must show the same six digits. If they differ, do not confirm.",
+                style = MaterialTheme.typography.bodySmall,
+            )
+            Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                Button(onClick = { onDecision(true) }) { Text("They match") }
+                OutlinedButton(onClick = { onDecision(false) }) { Text("They differ") }
+            }
+        }
+    }
+}
+
+/**
+ * A refused handshake the user has to see. `pin_mismatch` is the one that matters: ADR-012
+ * requires it to surface as a warning and never to be resolved by silently re-pairing.
+ */
+@Composable
+private fun SecurityAlertCard(
+    code: String,
+    onDismiss: () -> Unit,
+) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(containerColor = BannerColors.AlertBackground),
+    ) {
+        Column(
+            modifier = Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Text(
+                if (code == "pin_mismatch") "Security warning" else "Connection refused",
+                style = MaterialTheme.typography.titleMedium,
+                color = BannerColors.AlertText,
+            )
+            Text(securityAlertExplanation(code), style = MaterialTheme.typography.bodySmall)
+            Text(code, style = MaterialTheme.typography.labelSmall, fontFamily = FontFamily.Monospace)
+            OutlinedButton(onClick = onDismiss) { Text("Dismiss") }
+        }
+    }
+}
+
+private fun securityAlertExplanation(code: String): String =
+    when (code) {
+        "pin_mismatch" ->
+            "This peer's identity key has changed. That happens after a reinstall — but it is also " +
+                "what an impersonation attempt looks like. RideLink will not reconnect until you " +
+                "forget this peer and pair again."
+        "certificate_invalid" ->
+            "The peer's certificate is outside its validity window. Check the date and time on both phones."
+        "identity_mismatch" ->
+            "The peer's stated identity did not match its certificate. The connection was refused."
+        else -> "The connection was refused."
+    }
 
 @Composable
 private fun DiagnosticsCard(
     diagnostics: ControlDiagnostics,
     discoveredPeerCount: Int,
     discoveryCount: Int,
+    localIdentityPrefix: String,
 ) {
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-            Text("Diagnostics (Phase 1a)", style = MaterialTheme.typography.titleMedium)
+            Text("Diagnostics (Phase 1b)", style = MaterialTheme.typography.titleMedium)
             DiagnosticRow("Control state", controlStateLabel(diagnostics.controlState))
+            // Both identities are shown redacted to 6 hex, matching the ARCHITECTURE §11 logging
+            // rule — enough to compare two screens, far too little to identify a device.
+            DiagnosticRow("This device", localIdentityPrefix)
+            DiagnosticRow("Peer identity", diagnostics.peerIdentityPrefix ?: "—")
+            DiagnosticRow("Cipher suite", diagnostics.cipherSuite ?: "—")
             DiagnosticRow("Peer", diagnostics.remotePeerId ?: "—")
             DiagnosticRow("Local leader", diagnostics.isLocalLeader?.toString() ?: "—")
             DiagnosticRow("RTT", diagnostics.rttMs?.let { "%.1f ms".format(it) } ?: "—")
