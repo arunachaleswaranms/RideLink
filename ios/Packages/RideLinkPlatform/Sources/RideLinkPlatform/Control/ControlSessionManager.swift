@@ -45,7 +45,21 @@ public struct PairingPrompt: Sendable, Equatable {
 }
 
 public enum ControlEvent: Sendable {
+    /// **The surviving secure control connection has passed the RideLink trust gate and may be
+    /// treated as authenticated by the session FSM.**
+    ///
+    /// It does *not* mean "TLS and HELLO succeeded". A TLS socket to an unknown peer is a
+    /// transport, not an authenticated RideLink session: for such a peer this event is emitted
+    /// only once both users have confirmed the six digits and the pin has been written
+    /// (PROTOCOL §4.5), and for a peer whose stored pin matched, only after `.peerTrusted`. It is
+    /// emitted from exactly one place — `activateAuthenticatedSession` — and never from the
+    /// handshake or from candidate promotion.
     case connected(remotePeerId: PeerId, sessionId: SessionId, isLocalLeader: Bool)
+    /// The peer's presented SPKI matched the stored pin, so the trust gate passed with no user
+    /// action at all (PROTOCOL §4.1 "silent connect"). Raised only on the **surviving** connection
+    /// and always immediately before `.connected` — it is what carries `PAIRING -> CONNECTING` for
+    /// a known peer, now that `.connected` no longer doubles as implicit pairing success.
+    case peerTrusted(remotePeerId: PeerId)
     case linkLost(reason: LinkLossReason)
     case duplicateConnectionClosed
     case reconnectBudgetExhausted
@@ -75,6 +89,32 @@ public actor ControlSessionManager {
     private static let clockBurstSpacingNs: UInt64 = 50_000_000 // ARCHITECTURE §7.1 "~50ms apart"
     private static let clockResyncIntervalNs: UInt64 = 10_000_000_000 // ARCHITECTURE §7.1 "every 10s thereafter"
 
+    /// PROTOCOL §1/§4.5/§4.6: what a connection that has not yet passed the RideLink trust gate is
+    /// allowed to say. Deliberately a closed list, so a Phase 2 message type is inert before
+    /// authentication unless it is added here on purpose.
+    private static let preAuthenticationFrameTypes: Set<String> = [
+        "PING", "PONG", "PAIR_REQUEST", "PAIR_CONFIRM", "PAIR_RESULT", "BYE", "ERROR",
+    ]
+
+    /// PROTOCOL §4.6's complete code list. Nothing outside it is ever shown to a user.
+    private static let protocolErrorCodes: Set<String> = [
+        errorCodeVersionMismatch, errorCodeLeaderMismatch, errorCodeUntrustedPeer,
+        errorCodePinMismatch, errorCodeIdentityMismatch, errorCodeCertificateInvalid,
+        errorCodeSessionAlreadyActive, errorCodePairingRejected, errorCodePairingRateLimited,
+        errorCodeFrameTooLarge, errorCodeMalformedFrame, errorCodeInternal,
+    ]
+
+    /// A peer-chosen `code` is only accepted if it is one of PROTOCOL §4.6's defined codes.
+    /// Anything else — a missing field, a wrong type, or free text — becomes `pairing_rejected`,
+    /// because this value reaches the user as a security message and a remote peer must not be able
+    /// to choose what that message says.
+    private static func knownErrorCode(_ payload: [String: JSONValue]) -> String {
+        guard let code = payload["code"]?.stringValue, protocolErrorCodes.contains(code) else {
+            return errorCodePairingRejected
+        }
+        return code
+    }
+
     private let localPeerId: PeerId
     private let channel: any ControlChannel
     private let trustedPeers: any TrustedPeerStore
@@ -103,7 +143,27 @@ public actor ControlSessionManager {
     /// called from completing *after* teardown (this session's brief §9/§10) — no per-candidate
     /// task is individually cancelled, so this is the backstop.
     private var isShutDown = false
+    /// The surviving connection's facts, held between promotion and the moment the trust gate lets
+    /// it become an authenticated session. Non-nil exactly while a promoted connection is still
+    /// *unauthenticated* — which, for an unknown peer, is the whole of PROTOCOL §4.5 pairing.
+    ///
+    /// It exists so that pairing completing can activate **the connection that is already open**
+    /// rather than dialling again: §4.5 runs over the same control connection, and a second TLS
+    /// handshake would produce a second exporter and therefore a code that was never the one the
+    /// two users compared.
+    private var pendingActivation: PendingActivation?
+    /// Whether the trust gate has passed on `activeSocket`. Read by `handleFrame` so that a peer
+    /// which has completed TLS but not RideLink authentication cannot invoke anything reserved for
+    /// an authenticated session. Transport alive != session authenticated.
+    private var authenticated = false
     private let pingRequests = PingRequestRegistry()
+
+    private struct PendingActivation {
+        let socket: ControlConnection
+        let remotePeerId: PeerId
+        let sessionId: SessionId
+        let isLocalLeader: Bool
+    }
 
     public private(set) var diagnostics = ControlDiagnostics()
 
@@ -323,29 +383,70 @@ public actor ControlSessionManager {
         activeSessionId = sessionId
         endedDeliberately = false
         clockState = nil
+        authenticated = false
         lastPongAtMonoUs = monotonicNowUs()
         await reconnectController.reset()
 
         let isLeader = leaderPeerId.value == localPeerId.value
+        pendingActivation = PendingActivation(
+            socket: candidate.socket, remotePeerId: remotePeerId, sessionId: sessionId, isLocalLeader: isLeader)
         updateDiagnostics {
             $0.transportLabel = self.channel.transportLabel
-            $0.controlState = .connected
+            // Deliberately `.connecting`, not `.connected`: the socket is up and the peer is
+            // identified, but nothing has authenticated it yet. Only
+            // `activateAuthenticatedSession` may claim `.connected`.
+            $0.controlState = .connecting
             $0.remotePeerId = remotePeerId.description
             $0.isLocalLeader = isLeader
             $0.peerIdentityPrefix = peerSpki.description
             $0.negotiatedProtocol = candidate.socket.security?.negotiatedProtocolDescription
         }
-        emit(.connected(remotePeerId: remotePeerId, sessionId: sessionId, isLocalLeader: isLeader))
-        // PROTOCOL §4.5: pairing runs only on the surviving connection, so this happens here —
+
+        // PROTOCOL §4.5: pairing runs only on the surviving connection, so this is decided here —
         // after duplicate resolution — and never in the handshake itself. That is what guarantees
         // exactly one six-digit code is ever displayed, even on a simultaneous first meeting.
-        if case .pairingRequired = pinDecision {
+        //
+        // The exchange is armed *before* the read loop starts, so a PAIR_REQUEST that arrives
+        // immediately cannot be dropped for want of an exchange to hand it to.
+        var pairingRequired = false
+        if case .pairingRequired = pinDecision { pairingRequired = true }
+        if pairingRequired {
             await beginPairing(socket: candidate.socket, remotePeerId: remotePeerId, peerSpki: peerSpki)
+            // `beginPairing` fails closed when the exporter is unavailable, and that closes the
+            // connection. There is nothing left to run loops over.
+            guard activeSocket === candidate.socket else { return }
         }
 
+        // The read loop and keepalive belong to the **transport**: PROTOCOL §4.5's pairing frames
+        // arrive on this same connection, and a link that dies mid-pairing still has to be noticed.
+        // Everything that presumes an authenticated peer — the ARCHITECTURE §7.1 clock burst —
+        // waits for the trust gate instead.
         readLoopTask = Task { await self.readLoop(socket: candidate.socket, sessionId: sessionId) }
         keepaliveTask = Task { await self.keepaliveLoop(socket: candidate.socket) }
-        clockSyncTask = Task { await self.clockSyncLoop(socket: candidate.socket) }
+
+        if !pairingRequired {
+            emit(.peerTrusted(remotePeerId: remotePeerId))
+            activateAuthenticatedSession()
+        }
+    }
+
+    /// The one place a connection becomes an authenticated RideLink session, and therefore the one
+    /// place `ControlEvent.connected` is emitted.
+    ///
+    /// Reached by exactly two routes: the stored SPKI pin matched (`.peerTrusted`), or both users
+    /// confirmed the six digits and the pin was written (`.pairingSucceeded`). There is no third
+    /// route, and in particular a completed TLS handshake is not one.
+    ///
+    /// It activates the connection that is **already open** — no second dial, no second handshake,
+    /// no second exporter.
+    private func activateAuthenticatedSession() {
+        guard let pending = pendingActivation, activeSocket === pending.socket else { return }
+        pendingActivation = nil
+        authenticated = true
+        updateDiagnostics { $0.controlState = .connected }
+        emit(.connected(
+            remotePeerId: pending.remotePeerId, sessionId: pending.sessionId, isLocalLeader: pending.isLocalLeader))
+        clockSyncTask = Task { await self.clockSyncLoop(socket: pending.socket) }
     }
 
     // MARK: - PROTOCOL §4.5 pairing
@@ -426,19 +527,33 @@ public actor ControlSessionManager {
         }
     }
 
+    /// Both users confirmed and `PairingExchange` has written the pin exactly once. Only now does
+    /// the surviving connection become authenticated — `.pairingSucceeded` first (which carries
+    /// `PAIRING -> CONNECTING`), then `.connected` (`CONNECTING -> CONNECTED`), over the same socket.
     private func succeedPairing(_ peer: TrustedPeer) {
         pairing = nil
         updatePairingPrompt(nil) // the six digits stop meaning anything the moment this settles
         emit(.pairingSucceeded(peer: peer))
+        activateAuthenticatedSession()
     }
 
+    /// PROTOCOL §4.5: "on failure, close the connection." A half-paired session is not a state
+    /// worth having — the peer is still untrusted, so nothing may be done over it, and no pin was
+    /// written.
+    ///
+    /// The peer is told why, and then the connection is ended as a **deliberate** close
+    /// (`.userEnded`): a pairing someone refused must never come back as an automatic reconnect
+    /// that silently re-asks.
     private func failPairing(socket: ControlConnection, code: String) async {
         pairing = nil
         updatePairingPrompt(nil)
+        pendingActivation = nil
         emit(.pairingFailed(code: code))
-        // PROTOCOL §4.5: "on failure, close the connection." A half-paired session is not a state
-        // worth having — the peer is still untrusted, so nothing may be done over it.
-        await refuse(socket, code: code)
+        try? await socket.writeFrame(
+            ControlMessages.error(
+                localPeerId: localPeerId, sessionId: activeSessionId, seq: seqCounter.nextSeq(),
+                sentAtMonoUs: monotonicNowUs(), code: code, message: "pairing failed", fatal: true))
+        await endConnection(socket, reason: .userEnded)
     }
 
     /// Pairing frames arrive on the same read loop as everything else. Every field is peer-chosen,
@@ -502,6 +617,13 @@ public actor ControlSessionManager {
 
     private func handleFrame(socket: ControlConnection, sessionId: SessionId, envelope: Envelope) async {
         let payload = envelope.payload
+        // Until the trust gate has passed, the only frames acted on are the ones an
+        // *unauthenticated* connection is defined to carry: PROTOCOL §4.5's pairing exchange, §1's
+        // keepalive, and §4.6's two ways of ending. Anything reserved for an authenticated peer is
+        // dropped the same way an unknown type is (PROTOCOL §2 rule 2) — a peer that has completed
+        // TLS but not RideLink authentication must not be able to reach it, and PING/PONG in
+        // particular can never mark authentication complete.
+        guard authenticated || Self.preAuthenticationFrameTypes.contains(envelope.type) else { return }
         switch envelope.type {
         case "PING":
             guard let t1 = payload["t1_mono_us"]?.int64Value else { return }
@@ -532,7 +654,15 @@ public actor ControlSessionManager {
         case "BYE":
             await endConnection(socket, reason: .bye)
         case "ERROR":
-            if payload["fatal"]?.boolValue == true { await endConnection(socket, reason: .bye) }
+            guard payload["fatal"]?.boolValue == true else { return }
+            // A fatal ERROR during PROTOCOL §4.5 is the other user saying no — the peer's own
+            // reject path sends exactly this. Surfacing it as a pairing failure (rather than a bare
+            // link loss) is what lets the local user be told *why* their code vanished.
+            if pairing != nil {
+                await failPairing(socket: socket, code: Self.knownErrorCode(payload))
+            } else {
+                await endConnection(socket, reason: .bye)
+            }
         default:
             break // PROTOCOL §2 rule 2: unknown types ignored, logged, not fatal
         }
@@ -542,6 +672,13 @@ public actor ControlSessionManager {
         guard activeSocket === socket else { return }
         activeSocket = nil
         endedDeliberately = reason != .network
+        authenticated = false
+        pendingActivation = nil
+        // A six-digit code belongs to one live TLS session (PROTOCOL §4.5.1). The moment that
+        // session ends the code means nothing, so it is dropped here too rather than left on a
+        // screen for a connection that no longer exists.
+        pairing = nil
+        updatePairingPrompt(nil)
         keepaliveTask?.cancel()
         clockSyncTask?.cancel()
         socket.close()
@@ -716,6 +853,8 @@ public actor ControlSessionManager {
     public func shutdown(reason: String = byeReasonShutdown) async {
         isShutDown = true
         pairing = nil
+        authenticated = false
+        pendingActivation = nil
         updatePairingPrompt(nil)
         endedDeliberately = true
         await reconnectController.cancel()

@@ -1,9 +1,20 @@
 # RideLink — Status
 
-**Updated:** 27 August 2026 (Phase 1b — secure control channel)
+**Updated:** 27 August 2026 (Phase 1b — security-state integration fix, fourth session)
 **Current milestone:** M1 (Private voice link) — not started
 **Current phase:** Phase 1b — secure control channel.
-**Phase 1b status: SPIKES PASSED, IMPLEMENTATION COMPLETE — REAL-DEVICE GATE PENDING.**
+**Phase 1b status: IMPLEMENTATION COMPLETE — REAL-DEVICE GATE PENDING.**
+
+> **Fixed this session (§2g), and it was a real security bug, not a tidy-up.** An unknown peer
+> could reach `CONNECTED` **before** the six-digit SAS was displayed, let alone confirmed:
+> `ControlEvent.Connected` was emitted as soon as duplicate resolution picked a survivor, and
+> `SessionCoordinator` — needing *something* to carry `PAIRING -> CONNECTING` — read it as pairing
+> success. Both platforms. Every individual mechanism (TLS, the pin, the exporter, the exchange,
+> the trust store) was correct and tested; the sentence joining them was wrong, and no test looked
+> at the join. `Connected` now means "the trust gate has passed", the gate is a pure shared table
+> ([ADR-019](DECISIONS/ADR-019-connected-means-authenticated.md)) pinned by
+> `protocol/vectors/session-gate/` on both platforms, and the invariant is covered by real-TLS
+> integration suites. **Do not treat "CI is green" as evidence about a join no test crosses.**
 
 The two open risks that governed this phase are **closed with measurements, not argument**
 ([ADR-007 Amendment A1](DECISIONS/ADR-007-control-channel-over-tcp-tls.md#amendment-a1--26-august-2026--secure-transport-contingency)
@@ -30,11 +41,12 @@ fails if a raw socket reappears there.
 open for Phase 1a and this phase does not close it: this machine has no Android device or
 emulator, and only the iOS *simulator*. Everything below is a laptop measurement. See §4 and §7.
 
-**Repository state:** Android — 230 unit tests across five modules, `clean test ktlintCheck detekt
-lint assembleDebug assembleRelease` all green. iOS — `RideLinkCore` 27 tests, `RideLinkPlatform`
-68 tests, `RideLink.xcodeproj` builds in **both** Debug and Release for the simulator, zero
-warnings. Shared vectors now include `protocol/vectors/identity/` (52 assertions on Android, 10
-test methods on iOS, same file).
+**Repository state:** Android — 253 unit tests across five modules, `test ktlintCheck detekt lint
+assembleDebug assembleRelease` all green. iOS — `RideLinkCore` 27 tests, `RideLinkPlatform` 91
+tests, `RideLink.xcodeproj` builds in **both** Debug and Release for the simulator, zero warnings.
+Shared vectors now include `protocol/vectors/identity/` (52 assertions on Android, 10 test methods
+on iOS, same file) and `protocol/vectors/session-gate/` (the complete 120-row trust-gate table, run
+by both platforms).
 
 ---
 
@@ -47,8 +59,8 @@ test methods on iOS, same file).
 | **Architecture correction pass** | ✅ Complete | 15 corrections applied before implementation. Details in §2 |
 | **ADR-015/ADR-010 leadership-independence correction** | ✅ **Complete this session** | See §2b |
 | **Phase 1a — control-plane skeleton** | ✅ **IMPLEMENTATION COMPLETE — REAL-DEVICE GATE PENDING** | Protocol vectors, Android + iOS discovery, plaintext control transport, clock sync, diagnostics UI, hardening pass (§2e). Real-device gate still open — see §7. Its plaintext transport has since been **deleted** (§2f) |
-| **Phase 1b — secure control channel** | ✅ **SPIKES PASSED, IMPLEMENTATION COMPLETE — REAL-DEVICE GATE PENDING** | Both ADR-007 A1 spikes closed with measurements; identity, TLS 1.3, pinning, SAS pairing, trust persistence and UI on both platforms. See §2f |
-| Phases 2–8 | ⬜ Not started | |
+| **Phase 1b — secure control channel** | ✅ **IMPLEMENTATION COMPLETE — REAL-DEVICE GATE PENDING** | Both ADR-007 A1 spikes closed with measurements; identity, TLS 1.3, pinning, SAS pairing, trust persistence and UI on both platforms (§2f). The trust-gate security bug found afterwards is fixed and vector-pinned (§2g, ADR-019) |
+| Phases 2–8 | ⬜ Not started | Despite the commit names "init phase 2a" and "phase 2a" (`d709c45`, `90cbe12`), **no Phase 2 code exists in this repository**. Those commits are Phase 1b work under a misleading name |
 
 `protocol/schema/` and `protocol/vectors/` now exist (§2c). `android/` is a real five-module
 Gradle project that builds. `ios/` now has all three pieces ARCHITECTURE §9.2 describes:
@@ -514,10 +526,111 @@ sessions, cloud/backend, accounts, streaming services. Also deliberately **not**
 
 ---
 
+## 2g. Phase 1b — security-state integration fix (27 August 2026 session, fourth)
+
+Scope was deliberately one bug. No new feature, no Phase 2, no redesign of the crypto.
+
+### The bug
+
+An **unknown** peer could drive the application FSM to `CONNECTED` before SAS pairing had even
+been offered. On both platforms:
+
+```
+TLS 1.3 handshake succeeds
+  -> certificate / SPKI checked         (correct)
+  -> candidate wins duplicate resolution (correct)
+  -> ControlSessionManager emits Connected     <-- too early
+  -> SessionCoordinator sees Connected while the FSM is in PAIRING
+  -> applies PairingSucceeded                  <-- a lie
+  -> PAIRING -> CONNECTING -> CONNECTED
+  -> ...and only now beginPairing(), PairingRequired, the six-digit code
+```
+
+Reproduced before anything was changed, as a `network`-module test against the real TLS channel
+with two unpaired peers:
+
+```
+A announced Connected before SAS pairing completed:
+  [Connected(remotePeerId=peer:bbbbbb…, sessionId=…, isLocalLeader=true),
+   PairingRequired(remotePeerId=peer:bbbbbb…)]
+```
+
+and confirmed on iOS by temporarily restoring the old emit order, which fails the new suite with
+`["Connected", "PairingRequired"]`.
+
+**Why nothing caught it.** Every mechanism had tests and they all passed: `PairingExchangeTest[s]`
+proved no pin is written until both sides confirm; `TlsControlChannelTest[s]` proved an unknown
+peer produces `pairing_required` and a known one connects silently; the FSM vectors proved
+`PAIRING -> CONNECTING` needs `PairingSucceeded`. What had no test was the *join* — which control
+event the coordinator turns into which FSM event — because it lived as a `when`/`switch` inside a
+platform class that no suite could construct (`SessionCoordinator` needs `NsdDiscoveryController`
+on Android and is in the untested app target on iOS). CI run 33098708512 was fully green over this
+bug.
+
+### The fix
+
+[ADR-019](DECISIONS/ADR-019-connected-means-authenticated.md). Same shape on both platforms.
+
+1. **`ControlEvent.Connected` has one meaning:** *the surviving secure connection has passed the RideLink trust gate and may be treated as authenticated.* Emitted from exactly one function, `activateAuthenticatedSession`, and never from the handshake or from promotion.
+2. **New `ControlEvent.PeerTrusted`** carries the silent path (stored pin matched), so `Connected` no longer has to double as pairing success. Trusted: `PeerTrusted` → `Connected`. Unknown: `PairingRequired` → *(two humans)* → `PairingSucceeded` → `Connected`.
+3. **`promote()` no longer announces a connection.** It records the survivor's facts, starts the *transport* tasks (read loop, keepalive — pairing frames arrive on that same socket, and a link that dies mid-pairing has to be noticed), and then either pairs or activates. Diagnostics show `CONNECTING`, not `CONNECTED`, while a code is on screen.
+4. **`SessionCoordinator` no longer decides.** The `(ControlEvent, status) -> SessionEvent?` table is now `SessionGate` — pure, mirrored, and pinned by `protocol/vectors/session-gate/gate_vectors.json`, the complete 120-row cross-product, run by **both** platforms. The coordinator still owns the `FsmState` (CLAUDE.md rule 8) and does the side effects.
+5. **The FSM is untouched.** No new state, no new `SessionEvent`, no changed transition; `protocol/vectors/session-fsm/` passes unchanged. `PAIRING` and `CONNECTING` stay distinct.
+6. **Pairing completes on the socket that is already open.** A second handshake would produce a second exporter, so the code the users compared would no longer bind the session in use (ADR-018). A test counts the transport's dials: one per side across the whole flow.
+7. **The clock-sync burst moved behind the gate.** ARCHITECTURE §7.1 places it at `CONNECTING`, which is now genuinely post-authentication.
+8. **A pre-authentication frame allowlist** — `PING`, `PONG`, `PAIR_*`, `BYE`, `ERROR` — so a Phase 2 message type is inert before authentication unless added deliberately. `PING`/`PONG` can never mark authentication complete.
+9. **Failure closes deliberately.** A refusal writes no pin, clears both codes, sends `ERROR{fatal}` and ends the connection as `user_ended`, so the reconnect ladder cannot silently re-offer a pairing someone refused.
+
+### Two smaller bugs found and fixed on the way
+
+| # | Bug | Fix |
+|---|---|---|
+| 1 | **A link lost in `PAIRING` wedged the session.** Neither `LinkLost` variant is legal in `PAIRING`, so the FSM rejected it and the session sat there forever with no prompt and no way forward. Pre-existing (a failed *first* dial did it too), but the fix makes `PAIRING` last much longer, so it went from rare to routine | `SessionGate` maps both `LinkLost` reasons in `PAIRING` to `PairingRejectedOrTimeout` → `DISCOVERING`. `connect_attempted` is deliberately **not** re-armed, so a refusal is not re-offered by the next mDNS `Found` |
+| 2 | **A peer's rejection left the other side showing a dead code.** The rejecter's `ERROR{fatal}` was handled as a plain link loss, so the receiving side kept its `PairingExchange` and its six digits on screen for a socket that was gone | A fatal `ERROR` arriving mid-pairing is treated as a pairing failure carrying the peer's code — and the code is surfaced **only** if it is one of PROTOCOL §4.6's defined codes, so a remote peer cannot choose the text of a security message |
+
+### What was added, and where
+
+| | Android | iOS |
+|---|---|---|
+| Trust-gate table | `network/control/SessionGate.kt` | `RideLinkPlatform/Control/SessionGate.swift` |
+| Event semantics | `ControlSessionManager.kt` — `PeerTrusted`, `activateAuthenticatedSession`, reworked `promote`/`succeedPairing`/`failPairing`, pre-auth frame allowlist | `ControlSessionManager.swift`, the same |
+| Coordinator | `app/session/SessionCoordinator.kt` — now applies what the gate returns | `RideLink/SessionCoordinator.swift`, the same |
+| Shared vectors | `protocol/vectors/session-gate/gate_vectors.json` + `tools/generate_session_gate_vectors.py` (an independent third transcription of the rules) | same file |
+| Tests | `SessionGateTest`, `SessionGateVectorTest`, `PairingSessionIntegrationTest` (+ `PairingSessionSupport`) | `SessionGateTests`, `SessionGateVectorTests`, `PairingSessionIntegrationTests` (+ `TestSupport/PairingSessionSupport.swift`, `TestSupport/Vectors.swift`) |
+
+### Explicitly not done
+
+No Phase 2 work of any kind — no WebRTC, voice, microphone, Opus, audio routing, Bluetooth, music
+or Ride Mode — despite the two preceding commits being named "init phase 2a" and "phase 2a". Those
+names are misleading; nothing in this repository is Phase 2. No pairing *timeout* was invented
+either: PROTOCOL §4.5 specifies a rate limit and no timeout, so implementing one would have been
+inventing protocol.
+
+---
+
 ## 3. Tests passed / pending
 
-**Passed and verified in the Phase 1b session (27 August 2026, third), by actually running the
-commands.** Every Gradle command below was run with
+**Passed and verified in the security-state fix session (27 August 2026, fourth), by actually
+running the commands.** Every Gradle command was run with
+`-Dorg.gradle.java.home=/opt/homebrew/opt/openjdk@21/libexec/openjdk.jdk/Contents/Home` (§4
+problem 17):
+
+- `./gradlew clean test ktlintCheck detekt lint assembleDebug assembleRelease` — **all green**, all five modules. **253 unit tests, 0 failures**: `core` 145, `network` 97 (up from 74 — `SessionGateTest` 10, `SessionGateVectorTest` 2 running the shared 120-row table, `PairingSessionIntegrationTest` 11 over real TLS), `data` 9, `app` 2. **No `detekt` threshold was raised for this change** — `LargeClass`/`TooManyFunctions`/`CyclomaticComplexMethod` were satisfied by moving the pure payload readers out of `ControlSessionManager` (where they never belonged) and by splitting `SessionGate`'s table into three small functions.
+- `swift test --package-path ios/Packages/RideLinkCore` — **27/27 pass** (unchanged; the FSM itself did not move).
+- `swift test --package-path ios/Packages/RideLinkPlatform` — **91/91 pass** (up from 68: `SessionGateTests` 10, `SessionGateVectorTests` 2, `PairingSessionIntegrationTests` 11), zero Swift 6 strict-concurrency warnings.
+- `xcodebuild … -configuration Debug` and `-configuration Release`, simulator, `CODE_SIGNING_ALLOWED=NO` — both **succeed**.
+- `python3 tools/generate_session_gate_vectors.py` — regenerates the 120-row table; both platforms run the regenerated file.
+
+**The bug was reproduced before it was fixed, on both platforms** (§2g): the Android repro failed
+with `[Connected(...), PairingRequired(...)]`, and the iOS suite was verified to fail the same way
+by temporarily restoring the old emit order. Neither test could pass against the old code.
+
+**Not run this session:** SwiftLint/SwiftFormat (not installed, §4 problem 14), the spike harness
+(unchanged this session), and anything on a physical device — see below.
+
+### Phase 1b implementation session (27 August 2026, third)
+
+**Passed and verified then, by actually running the commands.** Every Gradle command below was run with
 `-Dorg.gradle.java.home=/opt/homebrew/opt/openjdk@21/libexec/openjdk.jdk/Contents/Home`, without
 which `detekt` cannot run on this machine at all (§1, §4 problem 17):
 
@@ -655,8 +768,10 @@ session and route), and integration tests I-01…I-25. Full list in `docs/TEST_P
 | 15 | **No Android device or emulator available in this development environment** — no `adb` on `PATH`, no AVD configured. `PlainControlTransportPhase1a` and `NsdDiscoveryController` are therefore unverified against Android's real network stack | **High (blocks the Phase 1a gate)** | Needs either a physical OnePlus Nord 5 with USB debugging, or an AVD image + emulator installed via `sdkmanager`. Neither was set up this session — not attempted without asking, since it changes the toolchain |
 | 16 | **No physical iPhone available** — only the simulator, which does not exercise real mDNS multicast or real `Network.framework` Bonjour behaviour between two independent radios. Phase 1b adds to this: the iOS **Keychain** path (a permanent key, `SecIdentityCreate` over a Keychain-resident key, survival across restart/upgrade) is exercised only with a *transient* key, because an unsigned `swift test` binary has no keychain entitlement | **High (blocks the Phase 1a and 1b gates)** | Needs a physical iPhone 17 Pro Max with a Personal Team signing identity (CLAUDE.md "Apple Signing") — a user decision, not made here |
 | 17 | **`detekt` cannot run on this machine without `-Dorg.gradle.java.home=…`** — the Gradle daemon inherits Temurin 25, detekt 1.23.8 is handed `25.0.3` as a JVM target and fails with a bare version string. Pre-existing, local-only (CI's daemon is JDK 21, so CI has always been green), and **not** fixable by setting `jvmTarget`/`jdkHome` on the task — both were tried and neither helped | Low | Use the flag (it is in every §3 command), or set `org.gradle.java.home` in `~/.gradle/gradle.properties`. A committed daemon-JVM criterion (`gradle/gradle-daemon-jvm.properties`) would fix it portably but risks breaking CI if the criterion cannot be satisfied there, so it was not done blind |
-| 18 | **`ControlSessionManager` is at 32 functions on Android** and needed a second `detekt` threshold raise (24 → 34) after absorbing the PROTOCOL §4.5 pairing wiring. That is a real signal, not a false positive | Low, but it will get worse | Extract a `PairingController` owning the socket-facing half (`beginPairing`, `sendPairRequest`, `applyPairingStep`, `succeedPairing`, `failPairing`, `handlePairingFrame`). Not done in the Phase 1b session because the class is under live test coverage for dedup/reconnect/teardown and a structural refactor of it belongs in a change that is *only* that refactor |
+| 18 | **`ControlSessionManager` is the largest class in the codebase** and has now absorbed the trust-gate wiring on top of the PROTOCOL §4.5 pairing wiring. The 27 Aug (fourth) session pushed it back under the existing `detekt` thresholds *without raising them*, by moving the pure payload readers (`requiredLongField`, `requiredBooleanField`, `requiredSpkiField`, `knownErrorCode`, `isPlausibleClockSample`) out of the class — they never touched a session — but that is headroom, not a fix | Low, but it will get worse | Unchanged: extract a `PairingController` owning the socket-facing half (`beginPairing`, `sendPairRequest`, `applyPairingStep`, `succeedPairing`, `failPairing`, `handlePairingFrame`, `activateAuthenticatedSession`). Deliberately not done alongside a security fix; it belongs in a change that is *only* that refactor |
 | 19 | **The manual `host:port` / QR fallback for blocked mDNS is not implemented.** ARCHITECTURE §4.4 scopes it to Phase 1b | Medium | It is a *discovery* feature with no security content, so it was deliberately left until after the security work. First item in §7. Problem 7 is the reason it matters |
+| 20 | **`SessionCoordinator` itself is still not directly unit-testable on either platform** — Android's needs a concrete `NsdDiscoveryController` (an Android type), and iOS's lives in the app target, which has no test target. That is precisely the gap the §2g bug hid in: a `when`/`switch` no suite could reach. It is now *mostly* closed by moving the decision into `SessionGate` (pure, mirrored, vector-pinned), leaving the coordinator a thin applier — but "thin" is a code reading, not a test | Medium | Either (a) give `NsdDiscoveryController` an interface and add an `app`-module test, or (b) add a test target to `RideLink.xcodeproj`. Do **not** let logic drift back into the coordinator in the meantime: anything with a decision in it belongs behind `SessionGate` or another pure, mirrored type |
+| 21 | **Diagnostics now show `CONNECTING` while a six-digit code is on screen**, where they previously showed `CONNECTED`. This is deliberate and more honest (ADR-019 §5), but it is a user-visible change that has never been looked at on a real screen | Low | Confirm it reads sensibly during I-02 on the two phones; the FR-023 diagnostics screen is one of the things I-02 exercises anyway |
 
 Resolved 26 Aug 2026 session: `CLAUDE.md` in `.gitignore` (was problem 1); `.DS_Store` tracking
 (was problem 7 — the claim was incorrect; the files are untracked and now ignored); the ADR-015/
@@ -687,9 +802,9 @@ Not blocking Phase 1. Answers needed before Phase 6.
 
 ## 7. Next exact task
 
-**Phase 1b — secure control channel. SPIKES PASSED, IMPLEMENTATION COMPLETE, REAL-DEVICE GATE
-PENDING.** Everything below is done and verified by the automatable tests this machine can run.
-What remains is hardware, plus one deliberately deferred feature.
+**Phase 1b — secure control channel. IMPLEMENTATION COMPLETE, REAL-DEVICE GATE PENDING.**
+Everything below is done and verified by the automatable tests this machine can run. What remains
+is hardware, plus one deliberately deferred feature.
 
 1. ✅ **Both ADR-007 A1 spikes** — self-signed X.509 from a platform-held keypair, and a public TLS exporter producing identical bytes across stacks. Measured, recorded, ADR'd (§2f).
 2. ✅ **Per-device identity** — P-256 in Android Keystore / the iOS Keychain, non-exportable, usable with the screen locked (ADR-017).
@@ -702,6 +817,7 @@ What remains is hardware, plus one deliberately deferred feature.
 9. ✅ **Exporter interoperability** — proven across three TLS 1.3 implementations.
 10. ✅ **Plaintext removed from production paths** — deleted from `main` on both platforms, with a mechanical test that fails if it returns.
 11. ✅ **Security-focused tests and documentation** — real-handshake suites on both platforms, `protocol/vectors/identity/`, ADR-017, ADR-018, a results file, and a re-runnable spike harness.
+12. ✅ **The trust gate** ([ADR-019](DECISIONS/ADR-019-connected-means-authenticated.md), §2g) — `Connected` means the trust gate passed, not that TLS came up. An unknown peer cannot reach `CONNECTED` before SAS confirmation on both sides and trust persistence; a trusted peer still connects silently. Pinned by `protocol/vectors/session-gate/` (120 rows, both platforms) and by real-TLS session integration suites on both platforms.
 
 **Immediately actionable next steps, in order:**
 
@@ -710,7 +826,7 @@ What remains is hardware, plus one deliberately deferred feature.
 3. **Run the Phase 1b gate**: I-02 (the two codes match, are six digits, and pairing completes), I-03 (reconnect is silent, no code), I-04 (a doctored pin is refused), I-16 (simultaneous first meeting shows exactly one code), I-19 (certificate re-issued around the same key ⇒ silent), I-20 (key changed ⇒ `pin_mismatch`), I-21 (wrong clock ⇒ `certificate_invalid`, not an attack warning). I-19/I-20/I-21 are the ones that exercise what a laptop cannot: Android Keystore, the iOS Keychain, and device-Conscrypt's exporter.
 4. **Record every result** — pass, fail and measured numbers — in `docs/test-results/`, per the "measurements, not impressions" rule.
 5. **Then the deferred feature:** the manual `host:port` / QR fallback for blocked mDNS (ARCHITECTURE §4.4, §4 problem 19). It is Phase 1b scope, has no security content, and was left until after the security work deliberately.
-6. **Then the recorded tech debt:** extract a `PairingController` from `ControlSessionManager` (§4 problem 18), as a change that is only that refactor.
+6. **Then the recorded tech debt:** extract a `PairingController` from `ControlSessionManager` (§4 problem 18), as a change that is only that refactor; and close the `SessionCoordinator` testability gap (§4 problem 20) so a decision can never again live where no suite can reach it.
 
 **Gate for 1b:** I-02, I-03, I-04, I-16, I-19, I-20, I-21 pass on the two real phones;
 `vectors/sas/` and `vectors/identity/` pass on both platforms (✅ **already true**); the plaintext
@@ -721,6 +837,12 @@ it is absent from *all* builds).
 > that the entire pairing design rests on was measured between Apple and *Conscrypt-on-a-laptop*,
 > not between an iPhone and a OnePlus. That substitution is the single most important thing for the
 > next session to close, and it is closed by I-02, not by more unit tests.
+>
+> **And do not treat green CI as evidence about anything no test crosses.** CI run 33098708512 was
+> green over a bug that let an unknown peer reach `CONNECTED` before the six digits were displayed
+> (§2g). Every component had tests; the join between them had none, because it lived where no suite
+> could construct it. When reviewing this codebase, look for decisions in places the test suite
+> cannot reach — that is where the next one will be.
 
 **Then Phase 2 — voice.** WebRTC/DTLS-SRTP behind `network/voice` / `RideLinkPlatform.Voice`,
 negotiated over the control channel this phase just secured. Pin the community WebRTC artifacts

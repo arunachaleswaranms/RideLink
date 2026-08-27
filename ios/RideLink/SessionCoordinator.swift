@@ -12,10 +12,13 @@ import UIKit
 /// Phase 1b scope: discovery -> TLS 1.3 handshake -> SPKI pin check -> HELLO/dedup -> either a
 /// silent trusted connect or PROTOCOL §4.5 pairing with a six-digit SAS -> `CONNECTED`.
 ///
-/// The Phase 1a shortcut where `pairingSucceeded` fired automatically right after `peerSelected`
-/// is **gone**: the FSM now stays in `.pairing` until the pin check says the peer is already
-/// trusted, or until both users have confirmed the code. That was a placeholder for exactly this,
-/// and removing it is what makes the `.pairing` state mean what ARCHITECTURE §3 says it means.
+/// **Which FSM event a control event implies is not decided here.** That table is `SessionGate` —
+/// pure, shared with Android case for case, and exhausted by unit tests on both platforms —
+/// because it is where the Phase 1b security property lives: `.connected` is never read as
+/// implicit pairing success, so an unknown peer cannot reach `CONNECTED` before both users have
+/// confirmed the six digits and the pin has been written. What stays here is ownership of the
+/// state itself (CLAUDE.md rule 8) and the side effects a control event carries: raising a
+/// security alert, and starting a reconnect.
 @Observable
 @MainActor
 public final class SessionCoordinator {
@@ -196,57 +199,46 @@ public final class SessionCoordinator {
         // ARCHITECTURE §4.1: a discovered peer cannot be labelled "known" before a connection
         // exists, because the mDNS TXT record deliberately carries nothing durable (ADR-002 A1).
         // Whether this ends in a silent trusted connect or a pairing prompt is decided *after* the
-        // TLS handshake, by the SPKI pin — so `.pairingSucceeded` is no longer applied here.
+        // TLS handshake, by the SPKI pin — so `.pairingSucceeded` is never applied here.
         _ = applyEvent(.peerSelected)
         let manager = controlSessionManager
         let identity = localIdentity
         Task { await manager.connectTo(host: peer.host, port: port, local: identity) }
     }
 
+    /// Side effects first, then the one transition `SessionGate` says this event implies.
     private func handleControlEvent(_ event: ControlEvent) {
+        applySideEffects(event)
+        if let sessionEvent = SessionGate.sessionEvent(for: event, status: state.status) {
+            _ = applyEvent(sessionEvent)
+        }
+        // Only after the FSM has been moved: `beginReconnect` requires `.reconnecting`, which is
+        // exactly what the transition above establishes.
+        if case .linkLost(.network) = event { beginReconnectIfPossible() }
+    }
+
+    private func applySideEffects(_ event: ControlEvent) {
         switch event {
-        case .connected:
-            // A trusted peer never raises `.pairingRequired`, so reaching `.connected` from
-            // `.pairing` without a code is the silent-connect path of ARCHITECTURE §4.3, not a
-            // skipped check: the pin already matched inside the handshake.
-            if state.status == .pairing { _ = applyEvent(.pairingSucceeded) }
-            switch state.status {
-            case .connecting: _ = applyEvent(.connectionEstablished)
-            case .reconnecting: _ = applyEvent(.reconnectSucceeded)
-            default: break
-            }
-        case .linkLost(let reason):
-            switch reason {
-            case .network:
-                if state.status == .connecting {
-                    _ = applyEvent(.connectionFailed)
-                } else {
-                    _ = applyEvent(.linkLost(reason: .network))
-                }
-                beginReconnectIfPossible()
-            case .bye:
-                _ = applyEvent(.linkLost(reason: .bye))
-            case .duplicateConnection, .userEnded:
-                break
-            }
-        case .duplicateConnectionClosed:
-            _ = applyEvent(.duplicateConnectionClosed)
-        case .reconnectBudgetExhausted:
-            _ = applyEvent(.reconnectBudgetExhausted)
+        case .peerTrusted(let remotePeerId):
+            // ARCHITECTURE §4.3's silent connect: the stored pin matched, so no code and no prompt
+            // — but this, not `.connected`, is what passes the trust gate.
+            logger.info("SessionCoordinator", "known peer \(remotePeerId), silent connect")
         case .pairingRequired(let remotePeerId):
             logger.info("SessionCoordinator", "pairing required with \(remotePeerId)")
         case .pairingSucceeded(let peer):
+            // `PairingExchange` already wrote the pin, exactly once and only after both users
+            // confirmed.
             logger.info("SessionCoordinator", "paired with \(peer.peerId) (\(peer.identitySpkiSha256))")
         case .pairingFailed(let code):
             securityAlert = code
-            _ = applyEvent(.pairingRejectedOrTimeout)
         case .handshakeRefused(let code):
             // pin_mismatch is the one that must never be quietly retried (ADR-012): it means the
             // key behind a familiar peer_id changed, which is either a reinstall or an attack, and
             // only the user can tell those apart.
             securityAlert = code
             logger.warn("SessionCoordinator", "handshake refused: \(code)")
-            if state.status == .pairing { _ = applyEvent(.pairingRejectedOrTimeout) }
+        case .connected, .linkLost, .duplicateConnectionClosed, .reconnectBudgetExhausted:
+            break
         }
     }
 

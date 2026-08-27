@@ -139,8 +139,8 @@ the mapping is recorded in [ADR-008](DECISIONS/ADR-008-requirement-conflict-reso
 |---|---|---|
 | `IDLE` | IDLE | No session. Nothing on the network. |
 | `DISCOVERING` | *(implicit)* | Browsing/advertising mDNS. No peer chosen. |
-| `PAIRING` | PAIRING | Peer chosen; trust being established (first meeting only). |
-| `CONNECTING` | CONNECTING | TLS handshake + `HELLO`/`HELLO_ACK` + duplicate-connection resolution + capability exchange. |
+| `PAIRING` | PAIRING | Peer chosen; trust being established. Spans the TLS handshake, the SPKI pin check, duplicate-connection resolution and — for an unknown peer — the whole of the §4.5 SAS exchange. A TLS socket existing does **not** leave this state ([ADR-019](DECISIONS/ADR-019-connected-means-authenticated.md)). |
+| `CONNECTING` | CONNECTING | The peer is **authenticated**: the pin matched, or both users confirmed the six digits and the record was written. Capability exchange and the opening clock-sync burst run here. |
 | `CONNECTED` | READY | Control plane up, clock synced, audio routes checked. Pre-ride. |
 | `RIDE_ACTIVE` | RIDING | Ride Mode engaged: intercom and/or music session running. |
 | `RECONNECTING` | RECONNECTING | Control plane lost; local playback and state retained. |
@@ -181,6 +181,12 @@ Rules that prevent the bugs this shape is designed to avoid:
 4. There is exactly one owner of this state per app (`SessionCoordinator`). No view model may hold connection state of its own — this is the explicit anti-requirement in the brief.
 5. Every transition is logged with a monotonic timestamp, prior state, trigger and reason. This log is the primary debugging artefact (NFR-08).
 6. Losing a duplicate connection (§4.2) is **not** a state transition and **not** a fault. The rejected socket never had a session to leave.
+7. **`PAIRING -> CONNECTING` is the trust gate, and only two things open it:** the stored SPKI pin matched, or both users confirmed the six digits and the trusted-peer record was written. A completed TLS handshake is neither ([ADR-019](DECISIONS/ADR-019-connected-means-authenticated.md)). The control plane says so with two distinct events — `PeerTrusted` and `PairingSucceeded` — and `Connected` means *"the trust gate has already passed"*, never *"TLS came up"*.
+8. A link lost while in `PAIRING` is a pairing that did not happen: it exits via `PairingRejectedOrTimeout` to `DISCOVERING`, and the peer is **not** re-dialled automatically, so a refusal cannot be re-offered by the next mDNS `Found`.
+
+The `(ControlEvent, status) -> SessionEvent` table that encodes rules 6–8 is `SessionGate` on both
+platforms, pinned by [`protocol/vectors/session-gate/`](../protocol/vectors/session-gate/) — the
+complete cross-product, so a platform that disagrees fails a laptop unit test.
 
 ---
 
@@ -247,12 +253,18 @@ anywhere in the system. The certificate is a wrapper; the key is the identity.
 **Pairing — first meeting only:**
 
 1. Both on the same LAN/hotspot; both in `DISCOVERING`.
-2. One user taps the discovered peer → `PAIRING`.
-3. TLS 1.3 handshake with self-signed certificates, both sides. Nothing is trusted yet.
+2. One user taps the discovered peer → `PAIRING`. **The session stays in `PAIRING` for everything that follows.**
+3. TLS 1.3 handshake with self-signed certificates, both sides. Nothing is trusted yet — the socket is a transport, not an authenticated session.
 4. Duplicate connections resolved (§4.2). Everything below happens on the survivor only.
 5. Each side derives a **six-digit verification code** from the TLS exporter secret bound to both certificates, by the exact algorithm in [PROTOCOL §4.5.1](PROTOCOL.md#451-the-six-digit-sas--exact-construction) — so a man-in-the-middle produces different codes on the two screens.
 6. Both users see the code; both confirm it matches. This is the "explicit local approval" of §11, and it is a real channel-binding check, not decoration.
 7. On confirmation each side stores a **trusted peer record**: `{ peer_id, identity_spki_sha256, display_name, paired_at, last_seen_at }`, in Keystore-backed / Keychain-backed storage.
+8. **Only now** does the session leave `PAIRING`, on the connection that is already open — no second handshake, or the code the users compared would no longer bind the session in use ([ADR-019](DECISIONS/ADR-019-connected-means-authenticated.md) §6).
+
+If pairing ends without a pin — either user refuses, a `PAIR_*` frame contradicts the certificate,
+or the exporter is unavailable — nothing is stored, both screens drop the code, the connection is
+closed **deliberately** so the reconnect ladder cannot re-offer it, and the session returns to
+`DISCOVERING`.
 
 **Subsequent connections** are silent: TLS + SPKI pin check, no code, no prompt.
 

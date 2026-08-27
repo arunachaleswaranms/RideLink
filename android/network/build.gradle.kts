@@ -46,6 +46,15 @@ dependencies {
 
 tasks.withType<Test> {
     useJUnitPlatform()
+    // `SessionGate`'s trust-gate table is a shared vector (protocol/vectors/session-gate/), so
+    // network's suite needs the same vectors directory core's does — a gate that disagreed between
+    // the two platforms would otherwise only show up on two phones.
+    systemProperty(
+        "ridelink.protocolVectorsDir",
+        rootProject.rootDir.parentFile
+            .resolve("protocol/vectors")
+            .absolutePath,
+    )
     testLogging {
         events("passed", "skipped", "failed")
     }

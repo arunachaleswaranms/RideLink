@@ -120,7 +120,8 @@ distinguished by `MANIFEST_BEGIN.kind` (§8.1).
              │──── TCP connect + TLS 1.3 handshake ─────►│
              │◄──── certificates exchanged ─────────────►│
              │                                          │
-             │  both sides check the SPKI pin. unknown peer → §4.5 pairing
+             │  both sides check the SPKI pin. unknown peer → §4.5 pairing,
+             │  and the session stays in PAIRING until §4.5 completes
              │                                          │
              │──── HELLO ──────────────────────────────►│
              │◄─── HELLO_ACK ───────────────────────────│
@@ -134,6 +135,17 @@ distinguished by `MANIFEST_BEGIN.kind` (§8.1).
              ▼                                          ▼
         state = CONNECTED                        state = CONNECTED
 ```
+
+**The diagram is the trusted path.** For an unknown peer, everything from `CAPABILITIES` onward
+waits for §4.5 to complete: the session is in `PAIRING` from the moment the peer is selected until
+both users have confirmed the six digits and the pin has been written
+([ADR-019](DECISIONS/ADR-019-connected-means-authenticated.md)). A completed TLS handshake is a
+transport, not an authenticated session, and it never by itself produces `CONNECTED`.
+
+Before the trust gate opens, a connection may carry only `PING`, `PONG`, `PAIR_REQUEST`,
+`PAIR_CONFIRM`, `PAIR_RESULT`, `BYE` and `ERROR`. Anything else is dropped exactly as an unknown
+type is (§2 rule 2) — including, in particular, every message type Phase 2 adds, unless it is added
+to that list deliberately.
 
 `HELLO` payload:
 
@@ -349,8 +361,9 @@ A                                                                  B
 │◄─ PAIR_RESULT { accepted: true, peer_id, identity_spki_sha256 } ───│
 ```
 
-- On success each side persists `{ peer_id, identity_spki_sha256, display_name, paired_at, last_seen_at }` — the **trusted peer record**. `identity_spki_sha256` is the pin.
-- Rate limit: 3 pairing attempts per minute per remote address; on failure, close the connection.
+- On success each side persists `{ peer_id, identity_spki_sha256, display_name, paired_at, last_seen_at }` — the **trusted peer record**. `identity_spki_sha256` is the pin. Only then does the session leave `PAIRING`, and it does so **on this same connection** — a second handshake would produce a second exporter, so the code the users compared would no longer bind the session in use.
+- Rate limit: 3 pairing attempts per minute per remote address; on failure, close the connection. There is **no pairing timeout** in v1: two people comparing digits on two screens have no defensible deadline, and an invented one would be a way to end a security check without an answer.
+- On failure — either user refuses, a `PAIR_*` frame's advertised identity contradicts the certificate, a frame is malformed, or the exporter is unavailable — **nothing is persisted**, both sides drop the code, and the connection is closed as a *deliberate* end (not a link loss), so §10's reconnect ladder cannot silently re-offer a pairing someone just refused. A peer that refuses sends `ERROR { code: "pairing_rejected", fatal: true }` first; the receiver surfaces the peer's `code` to its user **only** if it is one of §4.6's defined codes, and otherwise reports `pairing_rejected`. A remote peer must not be able to choose the text of a security message.
 - The **TLS exporter secret** binds the code to this specific TLS session and to both certificates. A man-in-the-middle terminates two distinct TLS sessions and therefore cannot produce matching codes on the two screens. This is what makes the confirmation a real check rather than theatre.
 
 #### 4.5.1 The six-digit SAS — exact construction

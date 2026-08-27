@@ -100,10 +100,17 @@ struct TestPeer {
     ///   indefinitely, so nothing except this timeout bounds a reconnect attempt against a dead
     ///   port. (Android gets an immediate `ECONNREFUSED` on loopback instead, which is why its
     ///   equivalent tests need no such knob.)
-    func manager(monotonicNowUs: @escaping @Sendable () -> Int64, connectTimeoutMs: Int64 = 5000) -> ControlSessionManager {
+    /// - Parameter channelOverride: defaults to this peer's own real TLS channel. A test that needs
+    ///   to observe the transport itself — how many connections a flow actually opens, say — passes
+    ///   a wrapper.
+    func manager(
+        monotonicNowUs: @escaping @Sendable () -> Int64,
+        connectTimeoutMs: Int64 = 5000,
+        channelOverride: (any ControlChannel)? = nil
+    ) -> ControlSessionManager {
         ControlSessionManager(
             localPeerId: peerId,
-            channel: channel(connectTimeoutMs: connectTimeoutMs),
+            channel: channelOverride ?? channel(connectTimeoutMs: connectTimeoutMs),
             trustedPeers: trustedPeers,
             monotonicNowUs: monotonicNowUs,
             nowEpochSeconds: { TestTlsSupport.nowEpochSeconds }

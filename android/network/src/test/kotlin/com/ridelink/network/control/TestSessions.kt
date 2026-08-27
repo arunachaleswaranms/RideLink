@@ -66,15 +66,20 @@ class TestPeer(
         )
     }
 
+    /**
+     * @param channel defaults to this peer's own real TLS channel. A test that needs to observe
+     *   the transport itself — how many sockets a flow actually opens, say — passes a wrapper.
+     */
     fun manager(
         scope: CoroutineScope,
         monotonicNowUs: () -> Long,
+        channel: ControlChannel = channel(),
     ): ControlSessionManager =
         ControlSessionManager(
             scope = scope,
             monotonicNowUs = monotonicNowUs,
             localPeerId = peerId,
-            channel = channel(),
+            channel = channel,
             trustedPeers = trustedPeers,
             nowEpochSeconds = { TestTlsSupport.NOW_EPOCH_SECONDS },
         )
