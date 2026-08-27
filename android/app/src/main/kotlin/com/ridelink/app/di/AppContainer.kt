@@ -34,8 +34,19 @@ private const val NANOS_PER_MICRO = 1_000L
  */
 class AppContainer(
     context: Context,
-    private val plaintextTransportAllowed: Boolean = BuildConfig.DEBUG,
+    requestedPlaintextTransportAllowed: Boolean = BuildConfig.DEBUG,
 ) {
+    /**
+     * Non-bypassable: `BuildConfig.DEBUG` is ANDed into the effective value regardless of what a
+     * caller requests, so passing `true` explicitly (a future test, a careless call site) can
+     * never enable the plaintext transport in a Release build — only a Debug build where the
+     * caller also wants it can. `DEBUG && true` -> allowed; `DEBUG && false` -> blocked;
+     * `RELEASE && true` -> blocked; `RELEASE && false` -> blocked. See [TransportGateTest] for
+     * all four combinations asserted directly.
+     */
+    private val plaintextTransportAllowed: Boolean =
+        effectivePlaintextTransportAllowed(isDebugBuild = BuildConfig.DEBUG, requested = requestedPlaintextTransportAllowed)
+
     // A SupervisorJob is required here, not merely tidy: network.control's accept loop, read
     // loop, keepalive and clock-sync bursts are all children of this scope, and one of them
     // throwing must never cancel its siblings (see ControlSessionManager's own tests).

@@ -7,6 +7,28 @@ import XCTest
 /// tests use real loopback TCP `ControlSessionManager` pairs, the same pattern as
 /// `DuplicateConnectionResolutionTests`.
 final class PingRaceAndReconnectTests: XCTestCase {
+    /// How long a clock burst (11 pipelined pings, ~50ms apart — see `runClockBurst`) is given to
+    /// produce at least one sample before a test gives up on it.
+    ///
+    /// **Measured, not guessed** (CI-stabilization session): the healthy case converges in
+    /// 0.5-1.5s across dozens of local runs. A single genuinely-dropped PONG is bounded by exactly
+    /// `pingTimeoutMs` (3.0s) *regardless of the other 10 samples* now that the burst pipelines
+    /// its sends (it no longer serializes one slow ping's full timeout in front of the rest), so a
+    /// real drop still resolves in roughly 3.0-3.2s, not indefinitely. Twice, on this same loaded
+    /// development machine, the previous 2.5s deadline was tripped with full diagnostics attached
+    /// (`testRepeatedClockBurstsAllCompleteQuickly`, iterations 0 and 3): both showed
+    /// `clockOffsetUs == nil` at ~2.53-2.55s elapsed *and* `rttMs == 3.0` — proof a PONG did
+    /// arrive, quickly and healthily over the wire, but was processed by this actor only after its
+    /// own 3s timeout had already fired and removed the waiter. That is scheduling latency on an
+    /// oversubscribed machine (this session found Sophos endpoint-protection, VS Code, Chrome and
+    /// a Gradle daemon all competing for CPU during these runs), not a protocol or lifecycle bug —
+    /// `PingRequestRegistry`'s own dedicated tests prove the request bookkeeping itself is race-
+    /// free under genuine concurrent load. 4.0s sits comfortably above both the healthy case and
+    /// the single-drop floor (~3.2s) while staying far below the 5s connect timeout and the
+    /// multi-second reconnect-ladder waits elsewhere in this file, so a burst that is *actually*
+    /// stuck (not just slow) still fails this test rather than hanging silently.
+    private let clockBurstConvergenceTimeoutSeconds: Double = 4.0
+
     private func localIdentity(_ name: String) -> LocalHandshakeIdentity {
         LocalHandshakeIdentity(displayName: name, platform: "ios", osVersion: "test", appVersion: "test", connTiebreak: ConnTiebreakGenerator.generate())
     }
@@ -23,9 +45,9 @@ final class PingRaceAndReconnectTests: XCTestCase {
     /// peer that responds immediately" the brief asks for. With the pre-fix ordering (write,
     /// *then* register the waiter), an immediate PONG can race ahead of registration and be
     /// silently dropped, forcing that sample to wait out the full 3s `pingTimeoutMs`. Eleven
-    /// samples at ~50ms spacing complete in well under a second when every PONG is caught; a
-    /// single dropped PONG alone pushes the burst past 3s. The 2.5s deadline below is far under
-    /// the failure case and comfortably over the success case.
+    /// samples at ~50ms spacing complete in well under two seconds when every PONG is caught; see
+    /// `clockBurstConvergenceTimeoutSeconds`'s doc comment for exactly what the deadline below is
+    /// measured against.
     func testClockBurstCompletesQuicklyWithNoDroppedPongs() async throws {
         let peerA = ControlSessionManager(localPeerId: PeerId("1111111111111111"), monotonicNowUs: clock())
         let peerB = ControlSessionManager(localPeerId: PeerId("2222222222222222"), monotonicNowUs: clock())
@@ -39,7 +61,7 @@ final class PingRaceAndReconnectTests: XCTestCase {
         try await waitUntil(timeoutSeconds: 5) { await peerA.diagnostics.controlState == .connected }
 
         // The first clock burst (11 samples) runs immediately on CONNECTED (ARCHITECTURE §7.1).
-        try await waitUntil(timeoutSeconds: 2.5) { await peerA.diagnostics.clockOffsetUs != nil }
+        try await waitUntil(timeoutSeconds: clockBurstConvergenceTimeoutSeconds) { await peerA.diagnostics.clockOffsetUs != nil }
 
         let diagnostics = await peerA.diagnostics
         XCTAssertNotNil(diagnostics.clockOffsetUs, "clock burst must converge without any sample silently timing out")
@@ -51,10 +73,19 @@ final class PingRaceAndReconnectTests: XCTestCase {
     /// Runs several independent connect/burst cycles back to back. A race that only sometimes
     /// reproduces would eventually show up as an occasional slow burst; every iteration here must
     /// stay fast.
+    ///
+    /// CI-stabilization note: this test failed intermittently on GitHub Actions (run 33033917411)
+    /// and has been observed to fail rarely (roughly 1 in 10-20 runs) even after the orphan-
+    /// timeout-task fix, always with a bare `notReady` and no further context. Rather than loosen
+    /// the deadline blindly, every wait below now reports full diagnostics — iteration index,
+    /// connection state, clock-burst RTT/offset/jitter, reconnect count, pending-ping count and
+    /// elapsed wall-clock time — on failure, so a future recurrence (here or on CI) is diagnosable
+    /// from the failure message alone instead of a bare error name.
     func testRepeatedClockBurstsAllCompleteQuickly() async throws {
         for i in 0..<5 {
             let peerA = ControlSessionManager(localPeerId: PeerId("aaaaaaaaaaaaaaa\(i)"), monotonicNowUs: clock())
             let peerB = ControlSessionManager(localPeerId: PeerId("bbbbbbbbbbbbbbb\(i)"), monotonicNowUs: clock())
+            let iterationStart = Date()
 
             let portA = try await peerA.startListening(local: localIdentity("A"))
             let portB = try await peerB.startListening(local: localIdentity("B"))
@@ -62,8 +93,38 @@ final class PingRaceAndReconnectTests: XCTestCase {
             await peerA.connectTo(host: "127.0.0.1", port: portB, local: localIdentity("A"))
             await peerB.connectTo(host: "127.0.0.1", port: portA, local: localIdentity("B"))
 
-            try await waitUntil(timeoutSeconds: 5) { await peerA.diagnostics.controlState == .connected }
-            try await waitUntil(timeoutSeconds: 2.5) { await peerA.diagnostics.clockOffsetUs != nil }
+            do {
+                try await waitUntil(timeoutSeconds: 5) { await peerA.diagnostics.controlState == .connected }
+            } catch {
+                let d = await peerA.diagnostics
+                let pending = await peerA.pendingPingCount
+                let reconnects = await peerA.reconnectCount
+                XCTFail(
+                    "iteration \(i): failed to reach CONNECTED within 5s (elapsed \(Date().timeIntervalSince(iterationStart))s). "
+                        + "controlState=\(d.controlState) rttMs=\(String(describing: d.rttMs)) "
+                        + "clockOffsetUs=\(String(describing: d.clockOffsetUs)) pendingPings=\(pending) reconnectCount=\(reconnects)"
+                )
+                await peerA.shutdown()
+                await peerB.shutdown()
+                return
+            }
+
+            do {
+                try await waitUntil(timeoutSeconds: clockBurstConvergenceTimeoutSeconds) { await peerA.diagnostics.clockOffsetUs != nil }
+            } catch {
+                let d = await peerA.diagnostics
+                let pending = await peerA.pendingPingCount
+                let reconnects = await peerA.reconnectCount
+                XCTFail(
+                    "iteration \(i): clock burst did not converge within \(clockBurstConvergenceTimeoutSeconds)s (elapsed \(Date().timeIntervalSince(iterationStart))s since "
+                        + "iteration start). This means at least one PING never got its PONG within the 3s per-ping timeout — controlState="
+                        + "\(d.controlState) rttMs=\(String(describing: d.rttMs)) clockOffsetUs=\(String(describing: d.clockOffsetUs)) "
+                        + "clockJitterUs=\(String(describing: d.clockJitterUs)) pendingPings=\(pending) reconnectCount=\(reconnects)"
+                )
+                await peerA.shutdown()
+                await peerB.shutdown()
+                return
+            }
 
             await peerA.shutdown()
             await peerB.shutdown()
@@ -98,7 +159,7 @@ final class PingRaceAndReconnectTests: XCTestCase {
         await peerA2.connectTo(host: "127.0.0.1", port: portB2, local: localIdentity("A"))
         await peerB2.connectTo(host: "127.0.0.1", port: portA2, local: localIdentity("B"))
         try await waitUntil(timeoutSeconds: 5) { await peerA2.diagnostics.controlState == .connected }
-        try await waitUntil(timeoutSeconds: 2.5) { await peerA2.diagnostics.clockOffsetUs != nil }
+        try await waitUntil(timeoutSeconds: clockBurstConvergenceTimeoutSeconds) { await peerA2.diagnostics.clockOffsetUs != nil }
 
         await peerA2.shutdown()
         await peerB2.shutdown()

@@ -43,4 +43,28 @@ class TransportGateTest {
         assertTrue(gatedByPlaintextTransport(allowed = true) { Unit } != null)
         assertNull(gatedByPlaintextTransport(allowed = false) { Unit })
     }
+
+    // CI-stabilization session's brief §11: the invariant must be impossible to override — a
+    // caller requesting `true` must still be blocked in a Release build. All four combinations,
+    // asserted directly against the pure function `AppContainer` actually uses.
+
+    @Test
+    fun `debug plus requested true is allowed`() {
+        assertTrue(effectivePlaintextTransportAllowed(isDebugBuild = true, requested = true))
+    }
+
+    @Test
+    fun `debug plus requested false is blocked`() {
+        assertFalse(effectivePlaintextTransportAllowed(isDebugBuild = true, requested = false))
+    }
+
+    @Test
+    fun `release plus requested true is blocked -- the non-bypassable case`() {
+        assertFalse(effectivePlaintextTransportAllowed(isDebugBuild = false, requested = true))
+    }
+
+    @Test
+    fun `release plus requested false is blocked`() {
+        assertFalse(effectivePlaintextTransportAllowed(isDebugBuild = false, requested = false))
+    }
 }

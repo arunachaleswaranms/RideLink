@@ -69,7 +69,7 @@ public actor ControlSessionManager {
     /// called from completing *after* teardown (this session's brief §9/§10) — no per-candidate
     /// task is individually cancelled, so this is the backstop.
     private var isShutDown = false
-    private var pendingPings: [Int64: CheckedContinuation<ClockSync.Sample, Error>] = [:]
+    private let pingRequests = PingRequestRegistry()
 
     public private(set) var diagnostics = ControlDiagnostics()
     public var onEvent: (@Sendable (ControlEvent) -> Void)?
@@ -78,6 +78,14 @@ public actor ControlSessionManager {
     public var reconnectCount: Int {
         get async { await reconnectController.reconnectCount }
     }
+
+    /// Diagnostic-only: how many PING requests are currently awaiting their PONG. Exists so a
+    /// test (or a future on-device diagnostics screen) can tell "stuck waiting on the network"
+    /// apart from "never even asked" when a clock burst runs slower than expected — this is
+    /// exactly the visibility CI-stabilization work needed when
+    /// `testRepeatedClockBurstsAllCompleteQuickly` failed on a shared runner with only a bare
+    /// `notReady` to go on.
+    public var pendingPingCount: Int { pingRequests.count }
 
     private let connectTimeoutMs: Int64
 
@@ -302,7 +310,7 @@ public actor ControlSessionManager {
             // algorithm and shared vectors are untouched.
             guard isPlausibleClockSample(t1: t1, t2: t2, t3: t3, t4: t4) else { return }
             lastPongAtMonoUs = t4
-            pendingPings.removeValue(forKey: t1)?.resume(returning: ClockSync.Sample(t1MonoUs: t1, t2MonoUs: t2, t3MonoUs: t3, t4MonoUs: t4))
+            pingRequests.succeed(id: t1, with: ClockSync.Sample(t1MonoUs: t1, t2MonoUs: t2, t3MonoUs: t3, t4MonoUs: t4))
             updateDiagnostics { $0.rttMs = Double((t4 - t1) - (t3 - t2)) / 1000.0 }
         case "BYE":
             await endConnection(socket, reason: .bye)
@@ -355,13 +363,31 @@ public actor ControlSessionManager {
         }
     }
 
+    /// Issues the burst's pings **~50ms apart, without waiting for each one's PONG before sending
+    /// the next** (CI-stabilization note). The previous, fully-sequential design (`await` each
+    /// ping's full round trip — up to its 3s timeout — before sending the next) meant a single
+    /// slow-but-not-lost PONG serialized the *entire* burst: N moderately delayed round trips add
+    /// up, and one genuinely lost PONG cost the full 3s by itself. Pipelining bounds the burst's
+    /// total duration by roughly `spacing × (count − 1) + the single slowest round trip`, not the
+    /// *sum* of all of them — this is what let `testRepeatedClockBurstsAllCompleteQuickly` still
+    /// occasionally miss its 2.5s deadline under real scheduling contention even after the
+    /// orphan-timeout-task fix (GitHub Actions run 33033917411, and reproduced locally at roughly
+    /// 1-in-10 runs on a loaded machine). `sendPingAndAwait`'s own registration-before-write
+    /// ordering, id-collision guard and orphan-timeout cancellation are all per-request and
+    /// unaffected by issuing several at once.
     private func runClockBurst(socket: ControlConnection) async {
-        var samples: [ClockSync.Sample] = []
+        var pingTasks: [Task<ClockSync.Sample?, Never>] = []
         for _ in 0..<Self.clockBurstSampleCount {
-            if let sample = try? await sendPingAndAwait(socket: socket, timeoutMs: Self.pingTimeoutMs) {
+            if Task.isCancelled { break }
+            pingTasks.append(Task { try? await self.sendPingAndAwait(socket: socket, timeoutMs: Self.pingTimeoutMs) })
+            try? await Task.sleep(nanoseconds: Self.clockBurstSpacingNs)
+            if Task.isCancelled { break }
+        }
+        var samples: [ClockSync.Sample] = []
+        for task in pingTasks {
+            if let sample = await task.value {
                 samples.append(sample)
             }
-            try? await Task.sleep(nanoseconds: Self.clockBurstSpacingNs)
         }
         guard !samples.isEmpty else { return }
         let result = ClockSync.applyWindow(previous: clockState, samples: samples)
@@ -376,37 +402,50 @@ public actor ControlSessionManager {
     /// Registers the waiter **before** writing the PING frame. `writeFrame` suspends this actor,
     /// and a fast (e.g. loopback) peer can have `handleFrame`'s `"PONG"` case run on this same
     /// actor before `writeFrame` returns — if the waiter were registered after the write, that
-    /// PONG would find no entry in `pendingPings` and be silently dropped until timeout (this
+    /// PONG would find no entry in `pingRequests` and be silently dropped until timeout (this
     /// session's brief §2). Registering first, synchronously, before any suspension closes the
     /// race: `withCheckedThrowingContinuation`'s body runs on this actor's isolation with no
-    /// `await` in it, so `pendingPings[t1] = continuation` happens atomically with respect to any
+    /// `await` in it, so `pingRequests.register(...)` happens atomically with respect to any
     /// other actor-isolated code, including `handleFrame`.
+    ///
+    /// **CI-stabilization fix:** `id` is reserved via `pingRequests.reserveUniqueId`, not the raw
+    /// `monotonicNowUs()` read — two calls landing on the same microsecond (the keepalive loop and
+    /// the clock-sync burst can both be mid-`sendPingAndAwait` at once) must never silently
+    /// overwrite each other's waiter. The timeout `Task` is itself cancelled by
+    /// `PingRequestRegistry.succeed`/`fail` the instant a request resolves, so a fast PONG never
+    /// leaves an orphaned timeout sleeping out its full duration — that pile-up of near-
+    /// simultaneous stale wakeups, under real CI scheduling contention, is what delayed actual PONG
+    /// handling enough to blow an unrelated ping's timeout (`testRepeatedClockBurstsAllCompleteQuickly`,
+    /// GitHub Actions run 33033917411). The `Task.isCancelled` guard after the sleep additionally
+    /// ensures a cancelled timeout task can never call `fail` at all — closing the (astronomically
+    /// unlikely but provable) hazard of a stale wakeup targeting a since-reused id.
     private func sendPingAndAwait(socket: ControlConnection, timeoutMs: Int64) async throws -> ClockSync.Sample {
-        let t1 = monotonicNowUs()
         return try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<ClockSync.Sample, Error>) in
-            pendingPings[t1] = continuation
+            let t1 = self.pingRequests.reserveAndRegister(startingFrom: self.monotonicNowUs(), continuation: continuation)
+            let timeoutTask = Task {
+                try? await Task.sleep(nanoseconds: UInt64(max(0, timeoutMs)) * 1_000_000)
+                guard !Task.isCancelled else { return }
+                self.timeoutPing(t1: t1)
+            }
+            self.pingRequests.attachTimeout(id: t1, timeoutTask: timeoutTask)
             Task {
                 do {
                     try await socket.writeFrame(ControlMessages.ping(localPeerId: self.localPeerId, sessionId: self.activeSessionId, seq: self.seqCounter.nextSeq(), sentAtMonoUs: t1, t1MonoUs: t1))
                 } catch {
                     self.failPing(t1: t1, error: error)
-                    return
                 }
-                try? await Task.sleep(nanoseconds: UInt64(max(0, timeoutMs)) * 1_000_000)
-                self.timeoutPing(t1: t1)
             }
         }
     }
 
-    /// Write failure: remove the pending entry and resume (throw) exactly once. `removeValue`
-    /// returns `nil` if the PONG or a timeout already claimed this entry, making this a no-op in
-    /// that case rather than a double-resume.
+    /// Write failure: fail exactly once and cancel the still-sleeping timeout task. No-op if the
+    /// PONG or a timeout already claimed this entry.
     private func failPing(t1: Int64, error: Error) {
-        pendingPings.removeValue(forKey: t1)?.resume(throwing: error)
+        pingRequests.fail(id: t1, with: error)
     }
 
     private func timeoutPing(t1: Int64) {
-        pendingPings.removeValue(forKey: t1)?.resume(throwing: ControlTransportError.notReady)
+        pingRequests.fail(id: t1, with: ControlTransportError.notReady)
     }
 
     /// Live-wire acceptance check for a raw `(t1,t2,t3,t4)` PONG sample, run **before** it is
@@ -428,11 +467,10 @@ public actor ControlSessionManager {
     }
 
     /// Teardown (`endConnection`/`shutdown`) must fail every outstanding waiter rather than
-    /// leave it to time out on a socket that is already dead (this session's brief §10).
+    /// leave it to time out on a socket that is already dead (this session's brief §10), and
+    /// must cancel their timeout tasks so none linger past this manager's lifetime.
     private func failAllPendingPings(with error: Error) {
-        let waiters = pendingPings
-        pendingPings.removeAll()
-        for (_, continuation) in waiters { continuation.resume(throwing: error) }
+        pingRequests.failAll(with: error)
     }
 
     /// Starts `ReconnectController`'s ladder after a genuine network-caused link loss. Each
