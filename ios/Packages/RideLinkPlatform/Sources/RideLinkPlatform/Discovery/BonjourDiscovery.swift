@@ -57,6 +57,22 @@ public func buildTxtRecord(discoveryHandle: String) -> [String: String] {
     ["v": "1", "dh": discoveryHandle, "plat": "ios"]
 }
 
+private let instanceNameHandlePrefixLength = 8
+
+/// Neutral, ephemeral Bonjour/mDNS **instance name** — deliberately not the device model, a
+/// user-chosen name, username, `peer_id`, SPKI or any other durable identifier (this session's
+/// brief §6). This matters on iOS specifically because `NWListener.Service(name: nil, ...)`
+/// falls back to the device's Bonjour name, which is tied to `UIDevice.current.name` — leaving
+/// `name` unset here would silently leak it. Derived from the same rotating `DiscoveryHandle`
+/// the TXT record's `dh` carries, truncated to 8 hex characters — long enough to disambiguate
+/// concurrent advertisements on one LAN, short enough that the instance name itself isn't just a
+/// second copy of the full 32-character handle. Rotates exactly when `dh` rotates, by
+/// construction: this function is pure and carries no state of its own. Mirrors Android's
+/// `instanceServiceName`.
+public func instanceServiceName(discoveryHandle: String) -> String {
+    "RideLink-\(discoveryHandle.prefix(instanceNameHandlePrefixLength))"
+}
+
 /// `Network`-framework-backed implementation of PROTOCOL §4.1 / ARCHITECTURE §4.1 discovery.
 ///
 /// The TXT record carries **exactly** `{v, dh, plat}` (CLAUDE.md privacy rules) — no `peer_id`,
@@ -71,6 +87,22 @@ public func buildTxtRecord(discoveryHandle: String) -> [String: String] {
 /// discovery handle re-assigns `NWListener.service` in place, which `Network.framework` supports
 /// as a live TXT-record update — it never cancels or rebinds the listener, so an established
 /// control connection accepted through it is completely unaffected.
+///
+/// **`@unchecked Sendable` invariant (reviewed this session, brief §8):** every stored mutable
+/// property (`browser`, `activeListener`, `rotationTask`, `selfHandles`'s internal state) is read
+/// and written **only** while executing on `queue`. Two nuances that made this easy to violate
+/// without noticing:
+/// - The public API surface (`startAdvertising`, `stopAdvertising`, `startBrowsing`,
+///   `stopBrowsing`) may be called from *any* thread/actor — every one of them must therefore
+///   dispatch its own body onto `queue` rather than touching state directly on the caller's
+///   thread. (Two call sites did not, before this review — see the change history in git blame
+///   for `stopAdvertising`/`startBrowsing`/`stopBrowsing`.)
+/// - `listener` in `startAdvertising` is **not** started on this type's `queue` — it is owned and
+///   started by `ControlSessionManager` on its own listener queue (`Framing.swift`). Any callback
+///   `listener` invokes (`serviceRegistrationUpdateHandler`, `stateUpdateHandler`) therefore fires
+///   on *that* queue, not `queue`, and must hop onto `queue` before touching this type's state —
+///   `stateUpdateHandler` never touches it (safe as-is); `serviceRegistrationUpdateHandler` reads
+///   `selfHandles.currentHandle` and does, so it hops explicitly.
 public final class BonjourDiscovery: @unchecked Sendable {
     private var browser: NWBrowser?
     private let queue = DispatchQueue(label: "com.ridelink.platform.discovery")
@@ -78,9 +110,16 @@ public final class BonjourDiscovery: @unchecked Sendable {
 
     private var activeListener: NWListener?
 
-    /// The dh this instance is currently advertising, so [startBrowsing] can filter out
-    /// self-discovery. Read/written only on `queue`.
-    private var activeDiscoveryHandle: String?
+    /// The dh(s) this instance currently considers self, so `startBrowsing` can filter out
+    /// self-discovery even mid-rotation (this session's brief §8). Read/written only on `queue`.
+    private let selfHandles = SelfDiscoveryHandles()
+
+    /// How long the just-superseded `dh` is still recognised as self after a rotation.
+    /// `NWListener.service` reassignment is documented as a single "live update", not Android's
+    /// two-step unregister-then-register, so there is no OS callback confirming the old
+    /// advertisement is gone — this bounded window (same order of magnitude as
+    /// `DuplicateConnectionArbiter.gracePeriodNs`) stands in for that confirmation.
+    private static let selfHandleGracePeriodNs: UInt64 = 1_000_000_000 // 1s
 
     public init() {}
 
@@ -97,9 +136,15 @@ public final class BonjourDiscovery: @unchecked Sendable {
             self.activeListener = listener
             onStateChange(.starting)
 
-            listener.serviceRegistrationUpdateHandler = { change in
+            // `listener` is started on ControlSessionManager's own listener queue, not `queue` —
+            // this handler fires there, not here, so reading `selfHandles` must hop onto `queue`
+            // explicitly rather than touching it directly on whatever thread this runs on.
+            listener.serviceRegistrationUpdateHandler = { [weak self] change in
+                guard let self else { return }
                 if case .add(let endpoint) = change, case .service(let name, _, _, _) = endpoint {
-                    onStateChange(.advertising(serviceName: name, discoveryHandle: self.activeDiscoveryHandle ?? ""))
+                    self.queue.async {
+                        onStateChange(.advertising(serviceName: name, discoveryHandle: self.selfHandles.currentHandle ?? ""))
+                    }
                 }
             }
             let previousStateHandler = listener.stateUpdateHandler
@@ -129,44 +174,65 @@ public final class BonjourDiscovery: @unchecked Sendable {
 
     private func rotate(listener: NWListener) {
         let dh = DiscoveryHandle.generate()
-        activeDiscoveryHandle = dh
+        // The old dh stays recognised as self for a bounded grace period after this — see
+        // `selfHandleGracePeriodNs`'s doc comment for why iOS needs a timer rather than an OS
+        // confirmation callback (this session's brief §8).
+        selfHandles.rotate(dh)
         var txt = NWTXTRecord()
         for (key, value) in buildTxtRecord(discoveryHandle: dh) {
             txt[key] = value
         }
         // Re-assigning `.service` on an already-started listener is a live TXT-record update in
         // Network.framework, not a rebind — the accepting socket (and any connection already
-        // accepted through it) is untouched.
-        listener.service = NWListener.Service(type: serviceType, txtRecord: txt)
+        // accepted through it) is untouched. `name:` is explicit and never left to default —
+        // see `instanceServiceName`'s doc comment for why that default is unsafe here.
+        listener.service = NWListener.Service(name: instanceServiceName(discoveryHandle: dh), type: serviceType, txtRecord: txt)
+
+        Task { [weak self] in
+            try? await Task.sleep(nanoseconds: Self.selfHandleGracePeriodNs)
+            guard let self else { return }
+            self.queue.async { self.selfHandles.clearPrevious() }
+        }
     }
 
     public func stopAdvertising() {
-        rotationTask?.cancel()
-        rotationTask = nil
+        // `rotationTask` must be cancelled on `queue`, same as every other stored property here —
+        // cancelling it directly on the caller's thread (the bug this review found, brief §8)
+        // raced against `startAdvertising`'s queue-confined write of the same property.
         queue.async { [weak self] in
+            self?.rotationTask?.cancel()
+            self?.rotationTask = nil
             self?.activeListener?.service = nil
             self?.activeListener = nil
-            self?.activeDiscoveryHandle = nil
+            self?.selfHandles.reset()
         }
     }
 
     public func startBrowsing(onEvent: @escaping @Sendable (DiscoveryEvent) -> Void) {
-        let params = NWParameters()
-        params.includePeerToPeer = false
-        let browser = NWBrowser(for: .bonjour(type: serviceType, domain: nil), using: params)
-        browser.browseResultsChangedHandler = { [weak self] _, changes in
+        // `browser` must be written on `queue`, same as every other stored property here —
+        // mutating it directly on the caller's thread (the bug this review found, brief §8) had
+        // no synchronization against `stopBrowsing`'s own direct-on-caller-thread mutation.
+        queue.async { [weak self] in
             guard let self else { return }
-            for change in changes {
-                self.handle(change, onEvent: onEvent)
+            let params = NWParameters()
+            params.includePeerToPeer = false
+            let browser = NWBrowser(for: .bonjour(type: serviceType, domain: nil), using: params)
+            browser.browseResultsChangedHandler = { [weak self] _, changes in
+                guard let self else { return }
+                for change in changes {
+                    self.handle(change, onEvent: onEvent)
+                }
             }
+            browser.start(queue: self.queue)
+            self.browser = browser
         }
-        browser.start(queue: queue)
-        self.browser = browser
     }
 
     public func stopBrowsing() {
-        browser?.cancel()
-        browser = nil
+        queue.async { [weak self] in
+            self?.browser?.cancel()
+            self?.browser = nil
+        }
     }
 
     private func handle(_ change: NWBrowser.Result.Change, onEvent: @escaping @Sendable (DiscoveryEvent) -> Void) {
@@ -194,7 +260,7 @@ public final class BonjourDiscovery: @unchecked Sendable {
     }
 
     private func isNotSelf(_ peer: DiscoveredPeer) -> Bool {
-        peer.discoveryHandle != activeDiscoveryHandle
+        !selfHandles.isSelf(peer.discoveryHandle)
     }
 
     private func resolve(_ result: NWBrowser.Result, onPeerFound: @escaping @Sendable (DiscoveredPeer) -> Void) {

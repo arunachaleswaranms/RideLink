@@ -7,8 +7,13 @@ extension JSONValue {
         return nil
     }
 
+    /// `Int64(exactly:)`, not the non-failable `Int64(_:)` — the latter **traps** (fatal error,
+    /// not a thrown `Error`) on a `Double` that is NaN, infinite, or outside `Int64`'s range.
+    /// PROTOCOL fields like `t1_mono_us` are attacker/peer-controlled JSON numbers, so an
+    /// extreme or non-finite value here must fail safely, not crash the read loop (this
+    /// session's brief §7).
     var int64Value: Int64? {
-        if case .number(let value) = self { return Int64(value) }
+        if case .number(let value) = self { return Int64(exactly: value) }
         return nil
     }
 

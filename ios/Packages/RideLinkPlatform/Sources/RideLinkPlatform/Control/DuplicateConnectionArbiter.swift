@@ -95,4 +95,15 @@ public actor DuplicateConnectionArbiter {
         }
         return nil
     }
+
+    /// Drains and returns every currently-held candidate, clearing arbiter state. Used on
+    /// teardown (this session's brief §9/§10): a candidate awaiting its rival or its grace
+    /// period is a real open socket the transport layer is holding, and it must be closed like
+    /// any other live socket rather than left to resolve on its own after the owner is gone.
+    public func drainAll() -> [Candidate] {
+        let held = [outbound, inbound].compactMap { $0 }
+        outbound = nil
+        inbound = nil
+        return held
+    }
 }

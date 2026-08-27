@@ -75,7 +75,10 @@ class SessionCoordinator(
                 }
                 val port = controlSessionManager.startListening(localIdentity)
                 launch {
-                    discovery.advertise(deviceServiceName(), port).collect { advertiseState ->
+                    // The Bonjour/mDNS instance name is derived from the rotating discovery
+                    // handle inside NsdDiscoveryController.advertise() itself — never the device
+                    // model/name (this session's brief §6) — so no name is passed in here.
+                    discovery.advertise(port).collect { advertiseState ->
                         logger.debug("SessionCoordinator", "advertise: $advertiseState")
                     }
                 }
@@ -196,6 +199,4 @@ class SessionCoordinator(
             }
         }
     }
-
-    private fun deviceServiceName(): String = "RideLink-${localIdentity.displayName}"
 }

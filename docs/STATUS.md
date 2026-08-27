@@ -1,26 +1,40 @@
 # RideLink — Status
 
-**Updated:** 27 August 2026 (Phase 1a control-transport session)
+**Updated:** 27 August 2026 (Phase 1a cleanup/hardening session)
 **Current milestone:** M1 (Private voice link) — not started
 **Current phase:** Phase 1a — control-plane skeleton, no crypto.
-**Phase 1a status: IMPLEMENTATION COMPLETE, REAL-DEVICE GATE PENDING.** Every Phase 1a
+**Phase 1a status: IMPLEMENTATION COMPLETE — REAL-DEVICE GATE PENDING.** Every Phase 1a
 deliverable in `docs/PROTOCOL.md` / `docs/ARCHITECTURE.md` §1–§7 is implemented and unit/
 integration-tested on **both** platforms — discovery lifecycle (advertise+browse, Found/Updated/
 Lost, self-filtering, dh rotation), `PlainControlTransportPhase1a` (framing, HELLO/HELLO_ACK,
 socket-level duplicate-connection dedup, TCP_NODELAY+keepalive, reconnect/backoff), `core.sync` /
 `RideLinkCore.Sync` clock estimation (shared vectors, byte-identical on both platforms), and a
-Phase 1a diagnostics UI. What is **not** done is running any of this on the two real phones — this
-machine has no Android device/emulator (no `adb`, no AVD) and only the iOS *simulator* (not a
-physical iPhone) was available this session. See §2d and §7 for exactly what that gate still needs.
+Phase 1a diagnostics UI. This session (§2e) reviewed the whole control/discovery lifecycle
+end-to-end, found and fixed ten real implementation defects (an iOS PING/PONG race, a reconnect
+re-entrancy bug on both platforms plus a genuine "the ladder never actually stops" bug the fix for
+that exposed, an unbounded-hang bug in iOS's TCP connect path, a release-build plaintext-transport
+guard, an Android NSD callback leak, mDNS instance-name privacy leaks on both platforms, unsafe
+malformed-message parsing on both platforms (including a wire-triggerable crash on iOS), a
+discovery-handle rotation self-discovery race on both platforms, real `@unchecked Sendable`
+invariant violations on iOS, control-task teardown leaks on both platforms, and a live-wire
+clock-sample overflow/crash risk on both platforms), each with regression tests. What is **still
+not** done is running any of this on the two real phones — this machine has no Android
+device/emulator (no `adb`, no AVD) and only the iOS *simulator* (not a physical iPhone) was
+available this session. See §2d, §2e and §7 for exactly what that gate still needs.
 
-**Repository state:** protocol vectors + schema exist (now including `vectors/clock/`, new this
-session). Android's five modules all build/test/lint clean; `core` unchanged from last session,
-`network` now has real `discovery` and `control` implementations with unit/integration tests
-(56 network-module tests, all passing, including two real-loopback-socket simultaneous-connect
-dedup tests). iOS mirrors this: `RideLinkCore` (17/17 tests) and `RideLinkPlatform` (17/17 tests,
-including the same real-socket dedup test over `Network.framework` loopback) both build and test
-clean under Swift 6 strict concurrency with zero warnings; `RideLink.xcodeproj` builds and the
-Phase 1a diagnostics UI renders correctly on-simulator (screenshot-verified). See §2d.
+**Repository state:** protocol vectors + schema exist (`vectors/clock/` since the prior session).
+Android's five modules all build/test/lint/detekt clean, **including `assembleRelease`, new this
+session** — `network` now has 52 tests (measured, not the prior session's claimed count carried
+forward), including this session's new regression coverage: NSD callback lifecycle, mDNS
+instance-name privacy, reconnect re-entrancy, the iOS PING race, malformed PING/PONG handling,
+dh-rotation self-race, and teardown. `app` has 3 tests for the new release-transport gate. iOS
+mirrors this: `RideLinkCore` (17/17 tests, unchanged) and `RideLinkPlatform` (40/40 tests, up from
+17 — 23 new regression tests this session) both build and test clean under Swift 6 strict
+concurrency with zero warnings; `RideLink.xcodeproj` builds in
+**both Debug and Release** configurations (Release build now new/required, this session — proves
+the plaintext transport compiles out) and the Phase 1a diagnostics UI renders correctly
+on-simulator (screenshot-verified in the prior session; not re-screenshotted this session, since
+no UI changed). See §2d, §2e.
 
 ---
 
@@ -32,7 +46,7 @@ Phase 1a diagnostics UI renders correctly on-simulator (screenshot-verified). Se
 | Docs baseline | ✅ Complete (earlier session) | Requirements transcribed, architecture/protocol/test plan/ADR-001…010 written |
 | **Architecture correction pass** | ✅ Complete | 15 corrections applied before implementation. Details in §2 |
 | **ADR-015/ADR-010 leadership-independence correction** | ✅ **Complete this session** | See §2b |
-| **Phase 1a — control-plane skeleton** | 🔶 **In progress this session** | Protocol vectors, Android scaffold + core + discovery, iOS RideLinkCore scaffold. Details in §2c. Remaining work in §7 |
+| **Phase 1a — control-plane skeleton** | ✅ **IMPLEMENTATION COMPLETE — REAL-DEVICE GATE PENDING** | Protocol vectors, Android + iOS discovery, plaintext control transport, clock sync, diagnostics UI, and this session's hardening pass (§2e). Real-device gate is the only remaining work — see §7 |
 | Phases 1b–8 | ⬜ Not started | |
 
 `protocol/schema/` and `protocol/vectors/` now exist (§2c). `android/` is a real five-module
@@ -80,7 +94,9 @@ to `1.18.0`, and `androidx.lifecycle:lifecycle-runtime-ktx` to `2.10.0` — one 
 of these three currently requires `compileSdk 37`, which conflicts with the ADR-011 `compileSdk
 36` baseline. **Do not bump these three without also revisiting ADR-011.**
 
-**Xcode is the only remaining prerequisite**, and it blocks the iOS half of scaffolding only.
+All toolchain prerequisites are installed and verified (table above) — nothing here still blocks
+either platform's scaffolding. The only remaining gate for Phase 1a is the two-real-phones test
+pass described in §7, which is hardware, not toolchain.
 
 ---
 
@@ -300,6 +316,114 @@ treated as security-bearing anywhere in the new code.
 
 ---
 
+## 2e. Phase 1a cleanup / hardening pass (27 August 2026 session, second)
+
+An independent review of the §2d implementation found ten real defects — not stylistic issues —
+each confirmed by reproducing it in a test that failed before the fix and passes after. No Phase
+1b work (TLS, identity, pairing) was touched; no protocol/wire shape changed. All fixes are code-
+and test-only.
+
+1. **iOS PING/PONG race.** `ControlSessionManager.sendPingAndAwait` wrote the PING frame *before*
+   registering the waiter in `pendingPings`. Because `writeFrame` suspends, a fast (e.g. loopback)
+   peer's PONG could be processed by this same actor before the waiter existed, silently dropping
+   it until the 3 s timeout. Fixed by registering the waiter synchronously inside
+   `withCheckedThrowingContinuation`'s body, before any suspension. Android's ordering was already
+   correct (reviewed, not changed) — but its write-failure path leaked the pending entry, fixed
+   alongside.
+2. **Reconnect re-entrancy, both platforms.** `ReconnectController`'s own attempts called the
+   *public* `connectTo`, which emits `.linkLost`/`LinkLost` on failure. `SessionCoordinator` reacts
+   to that event by calling `beginReconnect` again, starting a second ladder on top of the first.
+   Fixed by splitting `connectTo` (top-level, may emit) from a new internal `attemptConnection` /
+   `attemptConnection` (used only by the reconnect ladder, never emits). **While validating this
+   fix, found a second, independent bug it depends on**: iOS's `ReconnectController.start()`
+   wraps `Task.sleep` in `try?`, which swallows the `CancellationError` that would otherwise stop
+   the loop — so `cancel()` merely dropped the caller's reference while the loop kept running
+   *detached*, still calling `onAttempt` on schedule. Fixed by checking `Task.isCancelled`
+   explicitly at each loop step. **A third, separate bug surfaced testing this on iOS**:
+   `ControlConnection.connect` had no timeout — `NWConnection` can sit in `.waiting` (e.g. on
+   `ECONNREFUSED`) indefinitely rather than surfacing `.failed`, so a reconnect attempt against an
+   unreachable peer could hang forever. Fixed with a `connectTimeoutMs` race (default 5000 ms,
+   matching Android's existing `ControlSocket.connect` timeout) using the `SingleResumeContinuation`
+   pattern — not `withThrowingTaskGroup`, which does not actually cancel a sibling task blocked on
+   a raw continuation (confirmed by reproducing the hang with a minimal repro before writing the
+   fix).
+3. **Plaintext transport not enforced as debug-only.** Documentation said `PlainControlTransportPhase1a`
+   is debug-only; nothing enforced it. Android: `AppContainer.sessionCoordinator` is now `SessionCoordinator?`,
+   gated by a pure `gatedByPlaintextTransport(allowed = BuildConfig.DEBUG) { ... }` helper —
+   `NsdDiscoveryController`/`ControlSessionManager` are never *constructed* in a release build, not
+   just unused; `MainActivity` shows `SecureTransportUnavailableScreen` when `null`.
+   `buildConfig = true` added to `app/build.gradle.kts`. iOS: `PlaintextTransportGate.makeSessionCoordinator()`
+   wraps `SessionCoordinator()` in `#if DEBUG`/`#else nil#endif` — a **compile-time** exclusion
+   (confirmed `SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG` is set only for the Debug build
+   configuration in the checked-in `project.pbxproj`); `RideLinkApp` shows `SecureTransportUnavailableView`
+   when `nil`.
+4. **Android NSD `ServiceInfoCallback` leak (API 34+).** `resolveModern` registered a callback per
+   `onServiceFound` with nothing ever unregistering it. Added `ServiceInfoCallbackRegistry` (pure,
+   no `android.*`) tracking registrations by service name; wired to unregister on service-lost,
+   browse-stop, teardown and registration-failure, and to safely replace (not leak) a duplicate
+   registration for the same service name.
+5. **mDNS instance-name privacy leak, both platforms.** Android's advertised service name was
+   `"RideLink-${Build.MANUFACTURER} ${Build.MODEL}"`. iOS's `NWListener.Service` had no explicit
+   `name:`, which falls back to the device's Bonjour name (tied to `UIDevice.current.name`) — a
+   leak that existed even though the TXT record itself was already privacy-clean. Both now use a
+   neutral `"RideLink-" + dh.take(8)` derived from the rotating discovery handle
+   (`instanceServiceName`, mirrored on both platforms), rotating exactly when `dh` rotates.
+6. **Unsafe PING/PONG field extraction, both platforms.** Android used `payload[key]!!.jsonPrimitive.long`,
+   which throws (killing the read-loop coroutine) on a missing/wrong-typed/non-numeric field.
+   Replaced with `requiredLongField`/`requiredBooleanField`, which validate presence, JSON type
+   (rejecting quoted-string numbers) and representability, returning `null` instead of throwing.
+   iOS's `guard let ... else { return }` shape was already safe against missing/wrong-typed
+   fields, but `JSONValue.int64Value` used the non-failable `Int64(_:)` on a `Double`, which
+   **traps** (crashes the process, not a thrown `Error`) on NaN/infinite/out-of-range input —
+   fixed with `Int64(exactly:)`.
+7. **Discovery-handle rotation self-race, both platforms.** Rotating `dh` flips the "self" handle
+   synchronously, but the old advertisement can still be resolvable for a short window afterward
+   (Android: `unregisterService` is async; iOS: `NWListener.service` reassignment has no completion
+   callback at all) — during that window a stale self-resolution could be misread as a newly
+   discovered peer. Added `SelfDiscoveryHandles` (pure, mirrored on both platforms) tracking
+   current + previous handle; Android clears "previous" on the old registration's confirmed
+   `onServiceUnregistered`, iOS on a bounded 1 s grace period (no equivalent OS callback exists).
+8. **iOS `@unchecked Sendable` review — `BonjourDiscovery`.** Confirmed the documented invariant
+   ("every access confined to `queue`") was **violated** in three places: `startBrowsing`/
+   `stopBrowsing` mutated `browser` directly on the caller's thread; `stopAdvertising` cancelled
+   `rotationTask` directly on the caller's thread; and `listener.serviceRegistrationUpdateHandler`
+   (which fires on `ControlSessionManager`'s listener queue, not `BonjourDiscovery`'s own) read
+   `selfHandles` without hopping onto `queue` first. All three fixed; no new `@unchecked Sendable`
+   added anywhere.
+9. **Control-task teardown, both platforms.** `shutdown()` cancelled the read/keepalive/clock-sync/
+   reconnect tasks and closed the active socket, but did **not** close candidate sockets the
+   `DuplicateConnectionArbiter` was still holding mid-resolution — added `arbiter.drainAll()`,
+   closed on shutdown. Also added a dedicated `isShutDown` flag (distinct from `endedDeliberately`,
+   which also becomes true after an ordinary BYE) so a handshake/dedup resolution already in
+   flight when `shutdown()` was called cannot "resurrect" a connection afterward; reset on the
+   next `startListening`, since `ControlSessionManager` is reused across sessions. Fixing this
+   surfaced Android's `failAllPendingPings` iterating a live `ConcurrentHashMap` with
+   `.keys.toList()`, which threw `NoSuchElementException` under concurrent modification from an
+   in-flight keepalive/clock-sync coroutine — fixed using `ConcurrentHashMap.forEach`, the JDK's
+   documented concurrent-safe traversal.
+10. **Clock-sync live-wire input validation, both platforms.** PONG's `t2`/`t3` are peer-controlled.
+    `ClockSync.Sample.rttUs`/`offsetUs` use plain `Int64`/`Long` subtraction on both platforms —
+    trapping (crashing) on overflow in Swift, silently wrapping to a wrong-but-plausible value in
+    Kotlin. Added `isPlausibleClockSample` (both platforms) using overflow-*reporting* arithmetic
+    to reject a sample before it is ever constructed. Reproduced and confirmed the iOS crash with
+    a concrete wire-reachable input (`t2 = 9223372036854774784`, `t3 = -9223372036854775808` —
+    both individually exact `Double`→`Int64` round-trips, so both pass the field-type check from
+    fix 6, but their difference overflows `Int64`) before writing the fix; the regression test
+    uses that exact input. `ClockSync`'s own algorithm and `protocol/vectors/clock/` are
+    **untouched** — its existing `rttUs > 0` outlier filter already rejects the *result* of a
+    non-overflowing bad sample; this fix only prevents the arithmetic itself from overflowing.
+
+**Verification:** every fix above has a dedicated regression test (new files:
+`PingRaceAndReconnectTest[s]`, `MalformedPingPongTest[s]`, `ServiceInfoCallbackRegistryTest`,
+`SelfDiscoveryHandlesTest[s]`, `TeardownTest[s]`, plus additions to `DiscoveryPrivacyTest[s]` and
+`TransportGateTest`). `./gradlew clean test ktlintCheck detekt lint assembleDebug assembleRelease`
+and `swift test` for both packages plus `xcodebuild` Debug **and** Release simulator builds all
+pass — see §3 for the exact commands and results. Static analysis thresholds touched: `detekt.yml`
+`TooManyFunctions.thresholdInClasses` raised 20 → 24 for `ControlSessionManager`, documented in
+the config file itself with the same style-calibration precedent as prior sessions' adjustments.
+
+---
+
 ## 3. Tests passed / pending
 
 **Passed and verified 27 August 2026 session, by actually running the commands:**
@@ -322,6 +446,33 @@ treated as security-bearing anywhere in the new code.
   — succeeds, zero warnings. Installed and launched on the iPhone 17 Pro Max **simulator**; a
   screenshot confirms the Phase 1a diagnostics UI (§2d) renders correctly, including the
   `TRANSPORT: PLAIN / PHASE 1A / NOT SECURE` banner.
+
+**Passed and verified 27 August 2026 session (cleanup/hardening pass, §2e), by actually running
+the commands:**
+
+- `./gradlew clean` then `:core:test`, `test`, `ktlintCheck`, `detekt`, `lint`, `assembleDebug`,
+  `assembleRelease` — **all green**, all five Android modules. `network` module: 52 tests (up from
+  the prior session's suite; net new this session: NSD callback lifecycle, mDNS instance-name
+  privacy, reconnect re-entrancy, PING-race regression, malformed PING/PONG, dh-rotation
+  self-race, teardown). `app` module: 3 new tests for the release-transport gate. `lint` run
+  explicitly this session (not run to completion as such in the prior session — only
+  `assembleDebug`, which does not run full `lint`) and found + fixed 4 genuine pre-existing
+  `NewApi` errors in `NsdDiscoveryController` unrelated to this session's new code (guarded with
+  `@RequiresApi`, matching the existing SDK-tiered pattern the file already used elsewhere).
+- `swift test --package-path ios/Packages/RideLinkCore` — **17/17 tests pass**, unchanged.
+- `swift test --package-path ios/Packages/RideLinkPlatform` — **40/40 tests pass** (17 prior + 23
+  new this session across `PingRaceAndReconnectTests`, `MalformedPingPongTests`,
+  `SelfDiscoveryHandlesTests`, `TeardownTests`, plus additions to `DiscoveryPrivacyTests`), zero
+  Swift 6 strict-concurrency warnings. Run multiple times consecutively with no flakes.
+- `xcodebuild ... -configuration Debug -sdk iphonesimulator ... build` — succeeds, zero warnings
+  (checked explicitly with a clean build + grep for `warning:`, only the pre-existing benign
+  "no AppIntents.framework dependency" notice present).
+- `xcodebuild ... -configuration Release -sdk iphonesimulator ... build` — **succeeds, new this
+  session.** This is the direct proof the release-transport guard works: `PlaintextTransportGate`
+  compiles `SessionCoordinator()` out entirely under Release (`#if DEBUG`), so a successful Release
+  build is evidence the plaintext transport was never reachable, not merely unused.
+- Not re-run this session, since no UI changed: the on-simulator screenshot verification from
+  §2d/§3 above.
 
 **Not passed / not run this session, stated plainly — this is the entire real-device gate:**
 
@@ -429,7 +580,7 @@ have — it is not a code task.
 5. ✅ **`core.protocol` / `RideLinkCore.Protocol`** — done and verified on both platforms against the same shared vectors.
 6. ✅ **`core.sessionfsm` / `RideLinkCore.SessionFSM`** — done and verified on both platforms against the same shared vectors.
 7. ✅ **Discovery** — Found/Updated/Lost lifecycle, self-filtering, dh rotation, shared-listener advertising, TXT privacy, API-tiered Android resolution (§2d). Unit/integration-tested on both platforms; **not yet run against either platform's real mDNS stack on real hardware** (§4 problems 11, 15, 16).
-8. ✅ **`network.control` / `RideLinkPlatform.Control`** — `PlainControlTransportPhase1a`: framing (cap enforced pre-allocation), HELLO/HELLO_ACK, real-socket duplicate-connection dedup, `TCP_NODELAY`+keepalive, PROTOCOL §10 reconnect ladder. Done this session (§2d), tested with real loopback sockets on both platforms including simultaneous mutual connect.
+8. ✅ **`network.control` / `RideLinkPlatform.Control`** — `PlainControlTransportPhase1a`: framing (cap enforced pre-allocation), HELLO/HELLO_ACK, real-socket duplicate-connection dedup, `TCP_NODELAY`+keepalive, PROTOCOL §10 reconnect ladder. Done in the first session (§2d), tested with real loopback sockets on both platforms including simultaneous mutual connect. **Hardened in the follow-up session (§2e):** PING race, reconnect re-entrancy, malformed-message safety, teardown leaks, clock-sample overflow, and — ahead of the Phase 1b gate below — the plaintext transport is now actually compiled out of release builds on both platforms, not just documented as debug-only.
 9. ✅ **`core.sync` / `RideLinkCore.Sync`** — offset/RTT/jitter estimator with outlier rejection, EWMA, step-confirmation, against 16 shared `clock/*.json` vectors, byte-identical on both platforms. Done this session (§2d).
 10. ✅ **Diagnostics UI** on both — state, peer, RTT, offset, jitter, reconnect count, discovery count, and an explicit `PLAIN / PHASE 1A / NOT SECURE` transport banner. Done this session (§2d); screenshot-verified on iOS simulator, build-verified on Android (no emulator to run it on).
 
@@ -469,7 +620,13 @@ platforms producing identical output for one handshake. Then: device keypair in
 Keystore/Keychain, TLS 1.3 both ends, `identity_spki_sha256` pinning with the re-issue semantics
 of PROTOCOL §4.5.3, SAS derivation + pairing UI, manual `host:port`/QR fallback.
 **Gate for 1b:** I-02, I-03, I-04, I-16, I-19, I-20, I-21 pass; `vectors/sas/` and
-`vectors/identity/` pass on both platforms; the plaintext path is compiled out of release builds.
+`vectors/identity/` pass on both platforms; the plaintext path is compiled out of release builds
+(✅ **already true**, done in the §2e cleanup session, ahead of when this gate needed it).
+
+**Recommended next coding session, once the real-device Phase 1a gate above passes:** Opus 5 /
+xhigh reasoning effort, for the Phase 1b secure-transport spike (ADR-007 Amendment A1's two
+open-risk items — iOS self-signed X.509 generation and TLS keying-material exporter availability
+on both platforms). Do not start that work before the real-device gate passes.
 
 ---
 

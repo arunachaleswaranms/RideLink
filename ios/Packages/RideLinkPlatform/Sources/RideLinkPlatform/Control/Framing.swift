@@ -84,7 +84,14 @@ public final class ControlConnection: @unchecked Sendable {
         connection.start(queue: queue)
     }
 
-    public static func connect(host: String, port: UInt16) async throws -> ControlConnection {
+    /// `connectTimeoutMs` mirrors Android's `ControlSocket.connect(host, port, connectTimeoutMs =
+    /// 5000)`. Without it, a connection to an address that actively refuses (`ECONNREFUSED`) can
+    /// sit in `NWConnection`'s `.waiting` state **indefinitely** — Network.framework treats
+    /// `.waiting` as a retryable condition it may resolve on its own if the network path changes,
+    /// and never surfaces it as `.failed` on its own. Left unbounded, a single unreachable-peer
+    /// reconnect attempt would hang forever, stalling the whole ladder on attempt one (this
+    /// session's brief §2/§9 — a reconnect attempt must fail within a bounded time, not hang).
+    public static func connect(host: String, port: UInt16, connectTimeoutMs: Int64 = 5000) async throws -> ControlConnection {
         let queue = DispatchQueue(label: "com.ridelink.platform.control.connection")
         guard let nwPort = NWEndpoint.Port(rawValue: port) else {
             throw ControlTransportError.connectFailed("invalid port \(port)")
@@ -96,7 +103,7 @@ public final class ControlConnection: @unchecked Sendable {
 
         let nwConnection = NWConnection(host: NWEndpoint.Host(host), port: nwPort, using: params)
         let control = ControlConnection(connection: nwConnection, isInitiator: true, queue: queue)
-        try await control.waitUntilReady()
+        try await control.waitUntilReady(timeoutMs: connectTimeoutMs)
         return control
     }
 
@@ -108,21 +115,39 @@ public final class ControlConnection: @unchecked Sendable {
         return ControlConnection(connection: nwConnection, isInitiator: false, queue: queue)
     }
 
-    private func waitUntilReady() async throws {
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            let box = SingleResumeContinuation(continuation)
-            connection.stateUpdateHandler = { state in
-                switch state {
-                case .ready:
-                    box.resume(returning: ())
-                case .failed(let error):
-                    box.resume(throwing: ControlTransportError.connectFailed("\(error)"))
-                case .cancelled:
-                    box.resume(throwing: ControlTransportError.connectFailed("cancelled"))
-                default:
-                    break
+    /// Races the real ready/failed state against a timeout. **Not** implemented with
+    /// `withThrowingTaskGroup`: cancelling a sibling task that is suspended inside a
+    /// `CheckedContinuation` does not resume it — cancellation is cooperative, and a
+    /// `stateUpdateHandler`-driven continuation has no cancellation checkpoint of its own — so a
+    /// task-group "race" would leave the group waiting forever for the losing child to actually
+    /// finish, even after `cancelAll()`. Using a single `SingleResumeContinuation` that *either*
+    /// the state handler *or* the timer can resume (whichever comes first; the loser is a no-op)
+    /// is what actually bounds this call. On either path losing, `connection.cancel()` releases
+    /// the underlying socket so a timed-out attempt does not linger.
+    private func waitUntilReady(timeoutMs: Int64) async throws {
+        do {
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+                let box = SingleResumeContinuation(continuation)
+                connection.stateUpdateHandler = { state in
+                    switch state {
+                    case .ready:
+                        box.resume(returning: ())
+                    case .failed(let error):
+                        box.resume(throwing: ControlTransportError.connectFailed("\(error)"))
+                    case .cancelled:
+                        box.resume(throwing: ControlTransportError.connectFailed("cancelled"))
+                    default:
+                        break // includes `.waiting` — see connect()'s doc comment
+                    }
+                }
+                Task {
+                    try? await Task.sleep(nanoseconds: UInt64(max(0, timeoutMs)) * 1_000_000)
+                    box.resume(throwing: ControlTransportError.connectFailed("timed out connecting after \(timeoutMs)ms"))
                 }
             }
+        } catch {
+            connection.cancel()
+            throw error
         }
     }
 

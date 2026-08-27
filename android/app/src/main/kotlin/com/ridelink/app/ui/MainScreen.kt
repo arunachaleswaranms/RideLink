@@ -70,6 +70,30 @@ fun MainScreen(
     }
 }
 
+/**
+ * Shown instead of [MainScreen] whenever `AppContainer.sessionCoordinator` is `null` — a release
+ * build, where `PlainControlTransportPhase1a` must never be instantiated (this session's brief
+ * §4). Phase 1b's TLS transport is what turns this back into a working screen; there is
+ * deliberately no fallback to the plaintext path here.
+ */
+@Composable
+fun SecureTransportUnavailableScreen() {
+    Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
+        Column(
+            modifier = Modifier.fillMaxSize().padding(24.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp, Alignment.CenterVertically),
+        ) {
+            Text("RideLink", style = MaterialTheme.typography.headlineMedium)
+            Text("Secure transport not implemented", style = MaterialTheme.typography.titleMedium)
+            Text(
+                "Phase 1a's control transport is plaintext and debug-only. This release build " +
+                    "will not start it. Secure transport (TLS 1.3) arrives in Phase 1b.",
+                style = MaterialTheme.typography.bodyMedium,
+            )
+        }
+    }
+}
+
 @Suppress("MagicNumber") // named colors for the Phase 1a insecure-transport banner
 private val InsecureBannerBackground = Color(0xFFFFF3CD)
 

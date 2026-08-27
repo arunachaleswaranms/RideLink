@@ -101,6 +101,20 @@ class DuplicateConnectionArbiter(
         }
     }
 
+    /**
+     * Drains and returns every currently-held candidate, clearing arbiter state. Used on teardown
+     * (this session's brief §9/§10): a candidate awaiting its rival or its grace period is a real
+     * open socket the transport layer is holding, and it must be closed like any other live
+     * socket rather than left to resolve on its own after the owner is gone.
+     */
+    @Synchronized
+    fun drainAll(): List<Candidate> {
+        val held = listOfNotNull(outbound, inbound)
+        outbound = null
+        inbound = null
+        return held
+    }
+
     companion object {
         const val GRACE_PERIOD_MS = 300L
     }

@@ -4,6 +4,7 @@ import android.content.Context
 import android.net.nsd.NsdManager
 import android.net.nsd.NsdServiceInfo
 import android.os.Build
+import androidx.annotation.RequiresApi
 import com.ridelink.core.model.DiscoveredPeer
 import com.ridelink.core.model.Platform
 import kotlinx.coroutines.channels.awaitClose
@@ -83,6 +84,20 @@ fun buildTxtRecord(discoveryHandle: String): Map<String, String> =
         "plat" to "android",
     )
 
+private const val INSTANCE_NAME_HANDLE_PREFIX_LENGTH = 8
+
+/**
+ * Neutral, ephemeral Bonjour/mDNS **instance name** — deliberately not the device model,
+ * manufacturer, a user-chosen name, username, `peer_id`, SPKI or any other durable identifier
+ * (this session's brief §6). Derived from the same rotating [DiscoveryHandle] the TXT record's
+ * `dh` carries, truncated to 8 hex characters — long enough to disambiguate concurrent
+ * advertisements on one LAN, short enough that the instance name itself isn't just a second copy
+ * of the full 32-character handle. Rotates exactly when `dh` rotates, by construction: this
+ * function is pure and carries no state of its own, so [DiscoveryPrivacyTest] can assert its
+ * output directly with no `NsdManager` involved.
+ */
+fun instanceServiceName(discoveryHandle: String): String = "RideLink-${discoveryHandle.take(INSTANCE_NAME_HANDLE_PREFIX_LENGTH)}"
+
 /**
  * Android `NsdManager`-backed implementation of PROTOCOL §4.1 / ARCHITECTURE §4.1 discovery.
  *
@@ -102,10 +117,13 @@ class NsdDiscoveryController(
     private val nsdManager = context.applicationContext.getSystemService(Context.NSD_SERVICE) as NsdManager
     private val mainExecutor: Executor = context.applicationContext.mainExecutor
 
+    // Shared between advertise() and browse() (two independent callbackFlows) so a resolution
+    // arriving on the browse side can be checked against whatever the advertise side currently
+    // considers self — including the just-rotated-away previous handle (this session's brief §8).
+    private val selfHandles = SelfDiscoveryHandles()
+
     /** The dh this controller is currently advertising, so [browse] can filter out self-discovery. */
-    @Volatile
-    var activeDiscoveryHandle: String? = null
-        private set
+    val activeDiscoveryHandle: String? get() = selfHandles.currentHandle
 
     /**
      * Advertises this device on the LAN. The flow stays open until cancelled; unregisters on
@@ -117,7 +135,6 @@ class NsdDiscoveryController(
      * exactly this reason.
      */
     fun advertise(
-        localServiceName: String,
         port: Int,
         rotationIntervalMs: Long = DiscoveryHandleRotationPolicy.ROTATION_INTERVAL_MS,
     ): Flow<AdvertiseState> =
@@ -125,10 +142,13 @@ class NsdDiscoveryController(
             var registeredListener: NsdManager.RegistrationListener? = null
 
             fun register(dh: String) {
-                activeDiscoveryHandle = dh
+                // Synchronous: the moment a new dh is chosen it is "self", and (per
+                // SelfDiscoveryHandles) so is whatever was self a moment ago, until that old
+                // registration is confirmed gone below.
+                selfHandles.rotate(dh)
                 val serviceInfo =
                     NsdServiceInfo().apply {
-                        serviceName = localServiceName
+                        serviceName = instanceServiceName(dh)
                         serviceType = SERVICE_TYPE
                         setPort(port)
                         buildTxtRecord(dh).forEach { (key, value) -> setAttribute(key, value) }
@@ -146,12 +166,20 @@ class NsdDiscoveryController(
                             trySendBlocking(AdvertiseState.Failed(errorCode))
                         }
 
-                        override fun onServiceUnregistered(serviceInfo: NsdServiceInfo) = Unit
+                        // Confirms the *previous* registration (this listener's own dh, now
+                        // superseded) is actually gone from the network — the real signal that
+                        // closes the self-discovery transition window, not a fixed timer.
+                        override fun onServiceUnregistered(serviceInfo: NsdServiceInfo) {
+                            selfHandles.clearPrevious()
+                        }
 
                         override fun onUnregistrationFailed(
                             serviceInfo: NsdServiceInfo,
                             errorCode: Int,
                         ) {
+                            // Best-effort: an OS-reported failure to unregister still means we
+                            // must stop waiting for confirmation, or "previous" would never clear.
+                            selfHandles.clearPrevious()
                             trySendBlocking(AdvertiseState.Failed(errorCode))
                         }
                     }
@@ -174,7 +202,7 @@ class NsdDiscoveryController(
             awaitClose {
                 rotationJob.cancel()
                 registeredListener?.let { runCatching { nsdManager.unregisterService(it) } }
-                activeDiscoveryHandle = null
+                selfHandles.reset()
             }
         }
 
@@ -191,8 +219,13 @@ class NsdDiscoveryController(
         callbackFlow {
             // mDNS service *names*, not discovery handles, are what onServiceLost gives back
             // unresolved — this map is what lets Lost still carry the right dh.
-            val tracker = DiscoveryLifecycleTracker(isSelf = { it.discoveryHandle == activeDiscoveryHandle })
+            val tracker = DiscoveryLifecycleTracker(isSelf = { selfHandles.isSelf(it.discoveryHandle) })
             val trackerLock = Any() // NsdManager callbacks can arrive on arbitrary threads
+
+            // API 34+ only (resolveLegacy never populates it): tracks every live
+            // ServiceInfoCallback registration by service name so it can be unregistered on
+            // service loss, browse stop or controller teardown — never left to leak (§5).
+            val callbackRegistry = ServiceInfoCallbackRegistry<NsdManager.ServiceInfoCallback>()
 
             val discoveryListener =
                 object : NsdManager.DiscoveryListener {
@@ -215,13 +248,16 @@ class NsdDiscoveryController(
                     override fun onDiscoveryStopped(serviceType: String) = Unit
 
                     override fun onServiceFound(serviceInfo: NsdServiceInfo) {
-                        resolveOne(serviceInfo) { peer ->
+                        resolveOne(serviceInfo, callbackRegistry) { peer ->
                             val event = synchronized(trackerLock) { tracker.onResolved(serviceInfo.serviceName, peer) }
                             event?.let { trySendBlocking(it) }
                         }
                     }
 
                     override fun onServiceLost(serviceInfo: NsdServiceInfo) {
+                        if (Build.VERSION.SDK_INT >= API_LEVEL_SERVICE_INFO_CALLBACK) {
+                            unregisterCallback(callbackRegistry.remove(serviceInfo.serviceName))
+                        }
                         val event = synchronized(trackerLock) { tracker.onServiceLost(serviceInfo.serviceName) }
                         event?.let { trySendBlocking(it) }
                     }
@@ -229,28 +265,45 @@ class NsdDiscoveryController(
 
             nsdManager.discoverServices(SERVICE_TYPE, NsdManager.PROTOCOL_DNS_SD, discoveryListener)
 
-            awaitClose { nsdManager.stopServiceDiscovery(discoveryListener) }
+            awaitClose {
+                nsdManager.stopServiceDiscovery(discoveryListener)
+                if (Build.VERSION.SDK_INT >= API_LEVEL_SERVICE_INFO_CALLBACK) {
+                    callbackRegistry.removeAll().forEach(::unregisterCallback)
+                }
+            }
         }
+
+    @RequiresApi(API_LEVEL_SERVICE_INFO_CALLBACK)
+    private fun unregisterCallback(callback: NsdManager.ServiceInfoCallback?) {
+        callback ?: return
+        runCatching { nsdManager.unregisterServiceInfoCallback(callback) }
+    }
 
     /** API-tiered resolution (this session's brief §4C). [onResolved] may fire more than once per call on API 34+. */
     private fun resolveOne(
         serviceInfo: NsdServiceInfo,
+        callbackRegistry: ServiceInfoCallbackRegistry<NsdManager.ServiceInfoCallback>,
         onResolved: (DiscoveredPeer) -> Unit,
     ) {
         if (Build.VERSION.SDK_INT >= API_LEVEL_SERVICE_INFO_CALLBACK) {
-            resolveModern(serviceInfo, onResolved)
+            resolveModern(serviceInfo, callbackRegistry, onResolved)
         } else {
             resolveLegacy(serviceInfo, onResolved)
         }
     }
 
+    @RequiresApi(API_LEVEL_SERVICE_INFO_CALLBACK)
     private fun resolveModern(
         serviceInfo: NsdServiceInfo,
+        callbackRegistry: ServiceInfoCallbackRegistry<NsdManager.ServiceInfoCallback>,
         onResolved: (DiscoveredPeer) -> Unit,
     ) {
+        val serviceName = serviceInfo.serviceName
         val callback =
             object : NsdManager.ServiceInfoCallback {
-                override fun onServiceInfoCallbackRegistrationFailed(errorCode: Int) = Unit
+                override fun onServiceInfoCallbackRegistrationFailed(errorCode: Int) {
+                    callbackRegistry.recordFailed(serviceName)
+                }
 
                 override fun onServiceUpdated(updated: NsdServiceInfo) {
                     parsePeer(updated)?.let(onResolved)
@@ -260,7 +313,11 @@ class NsdDiscoveryController(
 
                 override fun onServiceInfoCallbackUnregistered() = Unit
             }
+        // A duplicate onServiceFound with no intervening Lost (rare, but not forbidden by the
+        // API) must not leak the previous registration for this exact service name.
+        unregisterCallback(callbackRegistry.record(serviceName, callback))
         runCatching { nsdManager.registerServiceInfoCallback(serviceInfo, mainExecutor, callback) }
+            .onFailure { callbackRegistry.recordFailed(serviceName) }
     }
 
     private fun resolveLegacy(

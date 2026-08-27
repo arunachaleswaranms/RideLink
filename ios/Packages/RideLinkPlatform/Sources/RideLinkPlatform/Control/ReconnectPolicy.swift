@@ -52,20 +52,31 @@ public actor ReconnectController {
     /// Starts (or restarts) the retry loop. `onAttempt` returns `true` on success (stops the loop
     /// and resets it for next time) or `false` to keep retrying. `onExhausted` fires once the
     /// 120s budget is spent with no success.
+    ///
+    /// **Must check `Task.isCancelled` explicitly** (this session's brief §9/§10). `delayMs`'s
+    /// production implementation is `try? await Task.sleep(...)` — the `try?` is there so a
+    /// timer tick never throws into this loop, but it also swallows the `CancellationError`
+    /// `Task.sleep` throws when `cancel()` cancels this task. Without an explicit check, a
+    /// cancelled loop would keep running to completion in the background, invisible to
+    /// `cancel()`'s caller and still calling `onAttempt` on a schedule no one asked for.
     public func start(onAttempt: @escaping @Sendable () async -> Bool, onExhausted: @escaping @Sendable () async -> Void) {
         cancel()
         task = Task {
             while self.remainingBudget() {
+                if Task.isCancelled { return }
                 let fraction = self.randomFraction()
                 let (currentAttempt, delay) = self.nextDelay(fraction: fraction)
                 await self.delayMs(delay)
+                if Task.isCancelled { return }
                 self.recordElapsed(delay, attempt: currentAttempt)
                 if await onAttempt() {
                     self.reset()
                     return
                 }
             }
-            await onExhausted()
+            if !Task.isCancelled {
+                await onExhausted()
+            }
         }
     }
 

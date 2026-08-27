@@ -28,6 +28,9 @@ android {
 
     buildFeatures {
         compose = true
+        // Generates BuildConfig.DEBUG, the composition-root switch that gates
+        // PlainControlTransportPhase1a — see AppContainer's doc comment (this session's brief §4).
+        buildConfig = true
     }
 }
 
@@ -52,4 +55,15 @@ dependencies {
     implementation(libs.kotlinx.coroutines.android)
 
     debugImplementation(libs.compose.ui.tooling)
+
+    testImplementation(libs.junit.jupiter)
+    testImplementation(libs.kotlin.test)
+    testImplementation(libs.kotlin.test.junit5)
+}
+
+tasks.withType<Test> {
+    useJUnitPlatform()
+    testLogging {
+        events("passed", "skipped", "failed")
+    }
 }

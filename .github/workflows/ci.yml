@@ -64,6 +64,11 @@ jobs:
       - name: assembleDebug
         run: ./gradlew assembleDebug
 
+      # Proves the release-transport guard (CLAUDE.md's plaintext-transport-is-debug-only rule):
+      # a release build must succeed without PlainControlTransportPhase1a ever being reachable.
+      - name: assembleRelease
+        run: ./gradlew assembleRelease
+
   ios:
     runs-on: macos-26
     timeout-minutes: 30
@@ -82,11 +87,27 @@ jobs:
       - name: RideLinkPlatform tests
         run: swift test --package-path ios/Packages/RideLinkPlatform
 
-      - name: Build unsigned simulator target
+      - name: Build unsigned Debug simulator target
         run: |
           xcodebuild \
             -project ios/RideLink.xcodeproj \
             -scheme RideLink \
+            -configuration Debug \
+            -sdk iphonesimulator \
+            -destination 'generic/platform=iOS Simulator' \
+            CODE_SIGNING_ALLOWED=NO \
+            build
+
+      # Proves the release-transport guard (CLAUDE.md's plaintext-transport-is-debug-only rule):
+      # PlaintextTransportGate.makeSessionCoordinator() compiles out SessionCoordinator() entirely
+      # under Release (SWIFT_ACTIVE_COMPILATION_CONDITIONS has no DEBUG there), so a Release build
+      # succeeding here is proof the plaintext transport was never reachable, not just unused.
+      - name: Build unsigned Release simulator target
+        run: |
+          xcodebuild \
+            -project ios/RideLink.xcodeproj \
+            -scheme RideLink \
+            -configuration Release \
             -sdk iphonesimulator \
             -destination 'generic/platform=iOS Simulator' \
             CODE_SIGNING_ALLOWED=NO \

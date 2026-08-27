@@ -6,6 +6,7 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.material3.MaterialTheme
 import com.ridelink.app.ui.MainScreen
+import com.ridelink.app.ui.SecureTransportUnavailableScreen
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -15,7 +16,15 @@ class MainActivity : ComponentActivity() {
 
         setContent {
             MaterialTheme {
-                MainScreen(coordinator = container.sessionCoordinator, deviceDescription = deviceDescription)
+                // AppContainer never constructs a session in a release build (this session's
+                // brief §4) — `null` here means there is no plaintext transport to show, not a
+                // bug to work around.
+                val coordinator = container.sessionCoordinator
+                if (coordinator != null) {
+                    MainScreen(coordinator = coordinator, deviceDescription = deviceDescription)
+                } else {
+                    SecureTransportUnavailableScreen()
+                }
             }
         }
     }
