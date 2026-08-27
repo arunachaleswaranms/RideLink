@@ -6,6 +6,19 @@ package com.ridelink.core.protocol
  * already-exported bytes.
  */
 object Sas {
+    /**
+     * PROTOCOL §4.5.1: ASCII, 24 bytes, no trailing NUL. Lives here rather than in each platform's
+     * transport so the two cannot drift — a single differing character produces two different
+     * six-digit codes, which to the users is indistinguishable from a man-in-the-middle.
+     */
+    const val EXPORTER_LABEL: String = "EXPORTER-RideLink-SAS-v1"
+
+    /**
+     * PROTOCOL §4.5.1: a fixed 32 bytes are exported everywhere, even though only the first 4 are
+     * used, so the exporter call itself is identical on both platforms. Bytes 4…31 are reserved.
+     */
+    const val EXPORTER_LENGTH_BYTES: Int = 32
+
     private const val MODULUS = 1_000_000L
     private const val SAS6_DIGITS = 6
     private const val EXPORTER_PREFIX_BYTES = 4

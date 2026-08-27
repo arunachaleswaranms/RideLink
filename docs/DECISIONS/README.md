@@ -21,9 +21,14 @@ Consequences · Alternatives considered.
 | [014](ADR-014-initial-module-structure-and-di.md) | Pragmatic initial module structure, and manual DI | Accepted |
 | [015](ADR-015-duplicate-connection-resolution.md) | Deterministic duplicate-connection resolution | Accepted |
 | [016](ADR-016-effective-audio-capability-model.md) | Effective audio capability model, not independent routes | Accepted |
+| [017](ADR-017-identity-key-and-certificate.md) | P-256 identity key, and a shared certificate encoder on both platforms | Accepted |
+| [018](ADR-018-tls-exporter-channel-binding.md) | The SAS channel binding is a TLS 1.3 exporter with an empty context | Accepted |
 
 ADRs 011–016 and the three amendments came out of the pre-Phase-1 correction pass recorded in
-[`../STATUS.md`](../STATUS.md#2-what-changed-in-the-correction-pass).
+[`../STATUS.md`](../STATUS.md#2-what-changed-in-the-correction-pass). ADRs 017–018 came out of the
+Phase 1b security spike, and are backed by measurements in
+[`../test-results/phase1b-security-spike-20260827.md`](../test-results/phase1b-security-spike-20260827.md)
+rather than by argument — they close ADR-007 Amendment A1's two open risks.
 
 **Adding one:** next free number, update this table, link it from the relevant section of
 `ARCHITECTURE.md`.

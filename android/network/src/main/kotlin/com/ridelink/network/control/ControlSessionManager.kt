@@ -2,6 +2,10 @@ package com.ridelink.network.control
 
 import com.ridelink.core.model.PeerId
 import com.ridelink.core.model.SessionId
+import com.ridelink.core.model.SpkiHash
+import com.ridelink.core.security.PinDecision
+import com.ridelink.core.security.TrustedPeer
+import com.ridelink.core.security.TrustedPeerStore
 import com.ridelink.core.sync.ClockSync
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
@@ -29,9 +33,9 @@ import kotlin.random.Random
 
 enum class ControlState { IDLE, CONNECTING, CONNECTED, RECONNECTING, DISCONNECTED, ENDED }
 
-/** FR-023 diagnostics surface (this session's brief §17). Never claims security it doesn't have. */
+/** FR-023 diagnostics surface. Never claims security it doesn't have. */
 data class ControlDiagnostics(
-    val transportLabel: String = "PLAIN / PHASE 1A / NOT SECURE",
+    val transportLabel: String = "NOT CONNECTED",
     val controlState: ControlState = ControlState.IDLE,
     val remotePeerId: String? = null,
     val isLocalLeader: Boolean? = null,
@@ -39,6 +43,10 @@ data class ControlDiagnostics(
     val clockOffsetUs: Long? = null,
     val clockJitterUs: Long? = null,
     val reconnectCount: Int = 0,
+    /** First 6 hex of the peer's `identity_spki_sha256`, per the ARCHITECTURE §11 redaction rule. */
+    val peerIdentityPrefix: String? = null,
+    /** Negotiated TLS cipher suite, so the UI can show what actually protects the link. */
+    val cipherSuite: String? = null,
 )
 
 sealed class ControlEvent {
@@ -55,27 +63,78 @@ sealed class ControlEvent {
     object DuplicateConnectionClosed : ControlEvent()
 
     object ReconnectBudgetExhausted : ControlEvent()
+
+    /**
+     * The peer is unknown and PROTOCOL §4.5 pairing is required. Raised only on the **surviving**
+     * connection (§4.2), so exactly one six-digit code is ever shown.
+     */
+    data class PairingRequired(
+        val remotePeerId: PeerId,
+    ) : ControlEvent()
+
+    /** The handshake was refused. [code] is a PROTOCOL §4.6 code — `pin_mismatch` is the serious one. */
+    data class HandshakeRefused(
+        val code: String,
+    ) : ControlEvent()
+
+    /** Both users confirmed the six digits and the trusted-peer record is written (PROTOCOL §4.5). */
+    data class PairingSucceeded(
+        val peer: TrustedPeer,
+    ) : ControlEvent()
+
+    /** Pairing ended without a pin being written. [code] is a PROTOCOL §4.6 code. */
+    data class PairingFailed(
+        val code: String,
+    ) : ControlEvent()
 }
 
 /**
- * Top-level Phase 1a control-plane orchestrator: binds the listener, accepts inbound and dials
- * outbound candidates, resolves duplicates ([DuplicateConnectionArbiter]), runs the surviving
- * connection's read loop, keepalive and clock-sync bursts ([ClockSync]), and reconnect
- * ([ReconnectController]). One instance per ride session attempt.
+ * What the pairing screen shows. [sas6] is the six digits the user compares with the other phone
+ * — displayed and then discarded. It is never logged, never persisted and never sent
+ * (PROTOCOL §4.5.1, ARCHITECTURE §11), so this object must not outlive the prompt.
+ */
+data class PairingPrompt(
+    val sas6: String,
+    val remotePeerId: PeerId,
+    val peerDisplayName: String,
+)
+
+/**
+ * Top-level control-plane orchestrator: binds the listener, accepts inbound and dials outbound
+ * candidates, resolves duplicates ([DuplicateConnectionArbiter]), applies the SPKI pin decision,
+ * runs the surviving connection's read loop, keepalive and clock-sync bursts ([ClockSync]), and
+ * reconnect ([ReconnectController]). One instance per ride session attempt.
  *
- * **[PlainControlTransportPhase1a] — plaintext, debug/development builds only.**
+ * It knows nothing about TLS. The [channel] it is given decides how bytes are protected, and the
+ * only channel a shipped build can construct is
+ * [com.ridelink.network.security.TlsControlChannel].
  */
 class ControlSessionManager(
     private val scope: CoroutineScope,
     private val monotonicNowUs: () -> Long,
-    private val localPeerId: PeerId = ProvisionalIdentity.peerId,
+    private val localPeerId: PeerId,
+    private val channel: ControlChannel,
+    private val trustedPeers: TrustedPeerStore,
+    /**
+     * Wall clock, for the `paired_at`/`last_seen_at` fields of a trusted-peer record only. Those
+     * are human-facing timestamps in a stored record, never used for scheduling, so CLAUDE.md's
+     * monotonic-clocks rule does not apply — and a monotonic value would be meaningless across
+     * reboots, which is exactly what a persisted record has to survive.
+     */
+    private val nowEpochSeconds: () -> Long = { System.currentTimeMillis() / 1000 },
     random: Random = Random,
-    private val ioDispatcher: kotlinx.coroutines.CoroutineDispatcher = Dispatchers.IO,
 ) {
     private val seqCounter = SeqCounter()
     private val arbiter = DuplicateConnectionArbiter(localPeerId, ConnTiebreakGenerator.generate())
     private val reconnectController =
         ReconnectController(scope, random) { ms -> delay(ms) }
+
+    /**
+     * Where the fire-and-forget socket writes below run (a courtesy `BYE`/`ERROR` before closing).
+     * Framed reads and writes on a live socket already confine their own blocking I/O
+     * ([ControlSocket]), so this is only for the paths that are not awaited.
+     */
+    private val ioDispatcher = Dispatchers.IO
 
     private var listener: ControlListener? = null
     private var acceptJob: Job? = null
@@ -117,6 +176,25 @@ class ControlSessionManager(
     private val _events = MutableSharedFlow<ControlEvent>(extraBufferCapacity = 16)
     val events: SharedFlow<ControlEvent> = _events.asSharedFlow()
 
+    /**
+     * Non-null exactly while a first-meeting pairing is awaiting the two users. Cleared as soon as
+     * the exchange settles either way, so the six digits do not linger in memory or on screen
+     * after they stop meaning anything.
+     */
+    private val _pairingPrompt = MutableStateFlow<PairingPrompt?>(null)
+    val pairingPrompt: StateFlow<PairingPrompt?> = _pairingPrompt.asStateFlow()
+
+    @Volatile
+    private var pairing: PairingExchange? = null
+
+    /**
+     * Captured from whichever call started this session's activity. Pairing needs the local
+     * display name and `identity_spki_sha256` after the handshake has already finished, so they
+     * cannot stay parameters of the handshake alone.
+     */
+    @Volatile
+    private var localIdentity: LocalHandshakeIdentity? = null
+
     val reconnectCount: Int get() = reconnectController.reconnectCount
 
     /**
@@ -127,7 +205,8 @@ class ControlSessionManager(
      */
     suspend fun startListening(local: LocalHandshakeIdentity): Int {
         isShutDown = false
-        val bound = ControlListener.bind(ioDispatcher)
+        _diagnostics.update { it.copy(transportLabel = channel.transportLabel) }
+        val bound = channel.bind()
         listener = bound
         acceptJob =
             scope.launch {
@@ -190,7 +269,7 @@ class ControlSessionManager(
         port: Int,
     ): ControlSocket? =
         try {
-            ControlSocket.connect(host, port, ioDispatcher)
+            channel.connect(host, port)
         } catch (e: IOException) {
             null
         }
@@ -200,6 +279,7 @@ class ControlSessionManager(
         socket: ControlSocket,
         local: LocalHandshakeIdentity,
     ) {
+        localIdentity = local
         if (activeSocket != null) {
             rejectAsAlreadyActive(socket)
             return
@@ -213,6 +293,7 @@ class ControlSessionManager(
                     seqCounter,
                     monotonicNowUs,
                     local.copy(connTiebreak = arbiter.connTiebreak),
+                    trustedPeers,
                 )
             } else {
                 ControlHandshake.performAsAcceptor(
@@ -221,6 +302,7 @@ class ControlSessionManager(
                     seqCounter,
                     monotonicNowUs,
                     local.copy(connTiebreak = arbiter.connTiebreak),
+                    trustedPeers,
                 )
             }
 
@@ -229,7 +311,7 @@ class ControlSessionManager(
         // the single source of truth for both the top-level and the reconnect-driven path.
         when (outcome) {
             is HandshakeOutcome.Success -> resolveCandidate(DuplicateConnectionArbiter.Candidate(socket, outcome))
-            is HandshakeOutcome.Rejected -> socket.close()
+            is HandshakeOutcome.Rejected -> refuse(socket, outcome.errorCode)
             HandshakeOutcome.ConnectionClosed -> socket.close()
         }
     }
@@ -248,6 +330,32 @@ class ControlSessionManager(
                 candidate.socket.close()
             }
         }
+    }
+
+    /**
+     * Tells the peer why before closing, then surfaces it. `pin_mismatch` in particular must
+     * reach the user as a security warning rather than vanishing into a reconnect loop (ADR-012),
+     * which is why this emits an event instead of only closing the socket.
+     */
+    private suspend fun refuse(
+        socket: ControlSocket,
+        code: String,
+    ) {
+        runCatching {
+            socket.writeFrame(
+                ControlMessages.error(
+                    localPeerId = localPeerId,
+                    sessionId = SessionId("n/a"),
+                    seq = seqCounter.nextSeq(),
+                    sentAtMonoUs = monotonicNowUs(),
+                    code = code,
+                    message = "handshake refused",
+                    fatal = true,
+                ),
+            )
+        }
+        socket.close()
+        _events.tryEmit(ControlEvent.HandshakeRefused(code))
     }
 
     private fun rejectAsAlreadyActive(socket: ControlSocket) {
@@ -309,16 +417,133 @@ class ControlSessionManager(
         val isLeader = candidate.outcome.leaderPeerId == localPeerId
         _diagnostics.update {
             it.copy(
+                transportLabel = channel.transportLabel,
                 controlState = ControlState.CONNECTED,
                 remotePeerId = candidate.outcome.remotePeerId.toString(),
                 isLocalLeader = isLeader,
+                peerIdentityPrefix = candidate.outcome.peerIdentitySpkiSha256.toString(),
+                cipherSuite = candidate.socket.security?.negotiatedCipherSuite,
             )
         }
         _events.tryEmit(ControlEvent.Connected(candidate.outcome.remotePeerId, candidate.outcome.sessionId, isLeader))
+        // PROTOCOL §4.5: pairing runs only on the surviving connection, so this is raised here —
+        // after duplicate resolution — and never in the handshake itself. That is what guarantees
+        // exactly one six-digit code is ever displayed, even on a simultaneous first meeting.
+        if (candidate.outcome.pinDecision is PinDecision.PairingRequired) {
+            beginPairing(candidate)
+        }
 
         readLoopJob = scope.launch { readLoop(candidate.socket, candidate.outcome.sessionId) }
         keepaliveJob = scope.launch { keepaliveLoop(candidate.socket) }
         clockSyncJob = scope.launch { clockSyncLoop(candidate.socket) }
+    }
+
+    /**
+     * Starts PROTOCOL §4.5 pairing on the surviving connection. The six digits come from the TLS
+     * exporter for **this** handshake (§4.5.1), which is what makes the comparison a real
+     * channel-binding check rather than decoration.
+     */
+    private suspend fun beginPairing(candidate: DuplicateConnectionArbiter.Candidate) {
+        val socket = candidate.socket
+        val exchange =
+            PairingExchange(
+                remotePeerId = candidate.outcome.remotePeerId,
+                peerIdentitySpkiSha256 = candidate.outcome.peerIdentitySpkiSha256,
+                isInitiator = socket.isInitiator,
+                trustedPeers = trustedPeers,
+                nowEpochSeconds = nowEpochSeconds,
+            )
+        pairing = exchange
+        when (val step = exchange.begin(socket.security?.deriveSas6())) {
+            is PairingExchange.Step.Failed -> failPairing(socket, step.code)
+            else -> {
+                _pairingPrompt.value =
+                    PairingPrompt(
+                        sas6 = requireNotNull(exchange.sas6),
+                        remotePeerId = candidate.outcome.remotePeerId,
+                        peerDisplayName = exchange.peerDisplayName,
+                    )
+                _events.tryEmit(ControlEvent.PairingRequired(candidate.outcome.remotePeerId))
+                if (socket.isInitiator) sendPairRequest(socket)
+            }
+        }
+    }
+
+    private suspend fun sendPairRequest(socket: ControlSocket) {
+        runCatching {
+            socket.writeFrame(
+                ControlMessages.pairRequest(
+                    localPeerId = localPeerId,
+                    sessionId = activeSessionId,
+                    seq = seqCounter.nextSeq(),
+                    sentAtMonoUs = monotonicNowUs(),
+                    displayName = localIdentity?.displayName.orEmpty(),
+                    platform = localIdentity?.platform.orEmpty(),
+                    identitySpkiSha256 = requireNotNull(localIdentity).identitySpkiSha256,
+                ),
+            )
+        }
+    }
+
+    /**
+     * The user's answer on **this** device. Both users must confirm before any pin is written —
+     * one screen's "yes" is only half of the check PROTOCOL §4.5 describes.
+     */
+    fun confirmPairing(accepted: Boolean) {
+        val exchange = pairing ?: return
+        val socket = activeSocket ?: return
+        scope.launch { applyPairingStep(socket, exchange, exchange.onLocalDecision(accepted)) }
+    }
+
+    private suspend fun applyPairingStep(
+        socket: ControlSocket,
+        exchange: PairingExchange,
+        step: PairingExchange.Step,
+    ) {
+        when (step) {
+            PairingExchange.Step.Wait -> Unit
+            PairingExchange.Step.SendPairConfirm ->
+                runCatching {
+                    socket.writeFrame(
+                        ControlMessages.pairConfirm(localPeerId, activeSessionId, seqCounter.nextSeq(), monotonicNowUs(), true),
+                    )
+                }
+            PairingExchange.Step.SendPairResultAccepted -> {
+                runCatching {
+                    socket.writeFrame(
+                        ControlMessages.pairResult(
+                            localPeerId,
+                            activeSessionId,
+                            seqCounter.nextSeq(),
+                            monotonicNowUs(),
+                            accepted = true,
+                            identitySpkiSha256 = requireNotNull(localIdentity).identitySpkiSha256,
+                        ),
+                    )
+                }
+                exchange.completedPeer()?.let { succeedPairing(it) }
+            }
+            is PairingExchange.Step.Succeeded -> succeedPairing(step.peer)
+            is PairingExchange.Step.Failed -> failPairing(socket, step.code)
+        }
+    }
+
+    private fun succeedPairing(peer: TrustedPeer) {
+        pairing = null
+        _pairingPrompt.value = null // the six digits stop meaning anything the moment this settles
+        _events.tryEmit(ControlEvent.PairingSucceeded(peer))
+    }
+
+    private suspend fun failPairing(
+        socket: ControlSocket,
+        code: String,
+    ) {
+        pairing = null
+        _pairingPrompt.value = null
+        _events.tryEmit(ControlEvent.PairingFailed(code))
+        // PROTOCOL §4.5: "on failure, close the connection." A half-paired session is not a state
+        // worth having — the peer is still untrusted, so nothing may be done over it.
+        refuse(socket, code)
     }
 
     private suspend fun readLoop(
@@ -389,6 +614,7 @@ class ControlSessionManager(
                 pendingPings.remove(t1)?.complete(ClockSync.Sample(t1, t2, t3, t4))
                 _diagnostics.update { it.copy(rttMs = ((t4 - t1) - (t3 - t2)) / MICROS_PER_MS) }
             }
+            "PAIR_REQUEST", "PAIR_CONFIRM", "PAIR_RESULT" -> handlePairingFrame(socket, frame.envelope.type, payload)
             "BYE" -> endConnection(socket, LinkLossReason.BYE)
             "ERROR" -> {
                 if (requiredBooleanField(payload, "fatal") == true) endConnection(socket, LinkLossReason.BYE)
@@ -396,6 +622,48 @@ class ControlSessionManager(
             else -> Unit // PROTOCOL §2 rule 2: unknown types ignored, logged, not fatal
         }
     }
+
+    /**
+     * Pairing frames arrive on the same read loop as everything else. Every field is peer-chosen,
+     * so each is read through a non-throwing accessor and a malformed one ends the exchange rather
+     * than the coroutine — the same rule the handshake follows.
+     *
+     * A pairing frame with no exchange in progress is dropped, not treated as an error: it is what
+     * a duplicated or late frame looks like after the exchange has already settled.
+     */
+    @Suppress("ReturnCount")
+    private suspend fun handlePairingFrame(
+        socket: ControlSocket,
+        type: String,
+        payload: JsonObject,
+    ) {
+        val exchange = pairing ?: return
+        val step =
+            when (type) {
+                "PAIR_REQUEST" -> {
+                    val spki = requiredSpkiField(payload) ?: return failPairing(socket, ERROR_CODE_MALFORMED_FRAME)
+                    val displayName = (payload["display_name"] as? JsonPrimitive)?.takeIf { it.isString }?.content.orEmpty()
+                    exchange.onPairRequest(displayName, spki).also {
+                        // The peer's name only becomes known here, and the prompt is already on
+                        // screen by then — refresh it rather than showing a blank name.
+                        _pairingPrompt.update { prompt -> prompt?.copy(peerDisplayName = exchange.peerDisplayName) }
+                    }
+                }
+                "PAIR_CONFIRM" -> {
+                    val accepted = requiredBooleanField(payload, "sas6_accepted") ?: return failPairing(socket, ERROR_CODE_MALFORMED_FRAME)
+                    exchange.onPairConfirm(accepted)
+                }
+                else -> {
+                    val accepted = requiredBooleanField(payload, "accepted") ?: return failPairing(socket, ERROR_CODE_MALFORMED_FRAME)
+                    val spki = requiredSpkiField(payload) ?: return failPairing(socket, ERROR_CODE_MALFORMED_FRAME)
+                    exchange.onPairResult(accepted, spki)
+                }
+            }
+        applyPairingStep(socket, exchange, step)
+    }
+
+    private fun requiredSpkiField(payload: JsonObject): SpkiHash? =
+        (payload["identity_spki_sha256"] as? JsonPrimitive)?.takeIf { it.isString }?.content?.let(SpkiHash::parse)
 
     /**
      * Safe, non-throwing extraction for a required numeric wire field (this session's brief §7):
@@ -570,6 +838,8 @@ class ControlSessionManager(
 
     suspend fun shutdown(reason: String = BYE_REASON_SHUTDOWN) {
         isShutDown = true
+        pairing = null
+        _pairingPrompt.value = null
         endedDeliberately = true
         reconnectController.cancel()
         acceptJob?.cancel()

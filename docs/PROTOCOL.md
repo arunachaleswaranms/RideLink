@@ -1,7 +1,9 @@
 # RideLink Peer Protocol — v1
 
 **Status:** specification baseline for Phase 1. **Wire version:** `1`.
-**Last updated:** 26 August 2026 (architecture correction pass — see [STATUS §2](STATUS.md#2-what-changed-in-the-correction-pass)).
+**Last updated:** 27 August 2026 (Phase 1b security spike — §4.5.1's exporter context wording
+corrected against measured platform behaviour; see [ADR-018](DECISIONS/ADR-018-tls-exporter-channel-binding.md)
+and [STATUS §2f](STATUS.md#2f-phase-1b-security-spike-27-august-2026-session)).
 Machine-readable schemas and golden vectors land in `protocol/` during Phase 1, alongside the
 codecs that consume them.
 
@@ -357,10 +359,10 @@ Both platforms must produce byte-identical output from identical input. The algo
 specified here; there is nothing left to an implementer's judgement.
 
 ```
-Step 1 — TLS exporter (RFC 8446 §7.5 / RFC 5705)
+Step 1 — TLS 1.3 exporter (RFC 8446 §7.5)
 
     label   = "EXPORTER-RideLink-SAS-v1"     ASCII, 24 bytes, no trailing NUL
-    context = zero-length, but PRESENT       (an empty context, not an absent one)
+    context = the TLS 1.3 EMPTY context value
     length  = 32
 
     S = TLS-Exporter(label, context, length)      # 32 bytes
@@ -382,20 +384,32 @@ Step 5 — format
     sas6 = decimal digits of `value`, left-padded with '0' to EXACTLY 6 characters
 ```
 
+Each platform's concrete call, so nothing is left to inference
+([ADR-018](DECISIONS/ADR-018-tls-exporter-channel-binding.md)):
+
+| Platform | Call | Available from |
+|---|---|---|
+| Android | `android.net.ssl.SSLSockets.exportKeyingMaterial(socket, "EXPORTER-RideLink-SAS-v1", new byte[0], 32)` | API **31** — exactly the ADR-011 `minSdk` |
+| Apple | `sec_protocol_metadata_create_secret(metadata, 24, "EXPORTER-RideLink-SAS-v1", 32)` | iOS 12.0 |
+
 Points that were previously ambiguous or wrong, made explicit:
 
 - **Exactly six digits, always.** The old specification took 20 bits (0…1 048 575) and converted to decimal, which can produce **seven** digits. The `mod 1000000` in step 4 is what guarantees the range, and the left-pad in step 5 is what guarantees the width. `000000` is a valid code and must display as six zeroes, never as `0`.
+- **Under TLS 1.3 there is no "absent" context.** RFC 8446 §7.5 always hashes a context value, so an absent context and an empty one are the *same input* — unlike RFC 5705 / TLS 1.2, where they differ. This matters because Apple's public API offers no way to pass a present-but-empty context (`sec_protocol_metadata_create_secret_with_context` with `context_len: 0` returns nil), only the context-less call above. Measured equivalent on the one stack that can express both, and cross-checked between three independent TLS 1.3 implementations — [ADR-018](DECISIONS/ADR-018-tls-exporter-channel-binding.md) and [`test-results/phase1b-security-spike-20260827.md`](test-results/phase1b-security-spike-20260827.md).
 - **No additional HKDF.** The TLS exporter *is* HKDF-Expand-Label with the label above, so it already provides domain separation. A second KDF layer would add nothing but a second place for the two implementations to disagree.
 - **Byte order is big-endian**, stated because it is the single most likely source of a cross-platform mismatch.
 - **Bytes 4…31 of `S` are unused** in v1. They are still exported (a fixed 32-byte length keeps the exporter call identical everywhere) and are reserved. A vector asserts that changing them does not change `sas6`.
 - **Modulo bias is accepted and quantified.** `2³² = 4294·10⁶ + 967296`, so 967 296 of the million residues occur 4295 times and the rest 4294 — a relative deviation of ~2.3 × 10⁻⁴. Against a 6-digit code with a 3-attempts-per-minute limit, that is irrelevant. Rejection sampling is deliberately *not* used: it would make the function partial and much harder to pin down with golden vectors.
 - **`sas6` is never logged, never transmitted, and never persisted.** There is no log path for it at all ([ARCHITECTURE §11](ARCHITECTURE.md#11-privacy-and-security-posture)). `PAIR_CONFIRM` carries a boolean, not the code.
 
-**Contingency.** Neither platform's public TLS surface is confirmed to expose a keying-material
-exporter (see the risk register, [ARCHITECTURE §12](ARCHITECTURE.md#12-known-architectural-risks)).
-If the Phase 1b spike finds no public exporter on either side, the response is a focused
-channel-binding design review — **not** a substitute derived from something weaker, and not a
-private or hidden API ([ADR-007 Amendment A1](DECISIONS/ADR-007-control-channel-over-tcp-tls.md#amendment-a1--26-august-2026--secure-transport-contingency)).
+**Contingency — resolved, 27 August 2026.** Both platforms expose a public keying-material
+exporter, and the two produce byte-identical output for the same TLS 1.3 connection. Measured in
+[`test-results/phase1b-security-spike-20260827.md`](test-results/phase1b-security-spike-20260827.md);
+decided in [ADR-018](DECISIONS/ADR-018-tls-exporter-channel-binding.md). The design review that
+[ADR-007 Amendment A1](DECISIONS/ADR-007-control-channel-over-tcp-tls.md#amendment-a1--26-august-2026--secure-transport-contingency)
+would have required is **not** triggered, and no weaker substitute was needed or taken. What the
+spike could not cover — Android's *device* TLS stack, as opposed to the same Conscrypt/BoringSSL
+implementation running on a laptop — is closed by integration test I-02, not by this section.
 
 #### 4.5.2 SAS golden vectors
 

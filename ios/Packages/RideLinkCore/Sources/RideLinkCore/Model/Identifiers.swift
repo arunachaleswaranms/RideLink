@@ -43,6 +43,15 @@ public struct SpkiHash: Hashable, Sendable, CustomStringConvertible {
 
     public var description: String { "spki:\(hex.prefix(redactedPrefixLen))…" }
 
+    /// Non-trapping constructor for values that arrive **off the wire**
+    /// (`HELLO.identity_spki_sha256`, a persisted trusted-peer record). `init(_:)`'s
+    /// `precondition` is right for our own values, where a malformed one is a bug — but a peer
+    /// chooses what it sends, and a `precondition` on wire input is a remotely triggerable crash.
+    /// Returns nil instead; the caller answers `ERROR/malformed_frame`.
+    public static func parse(_ value: String) -> SpkiHash? {
+        isValid(value) ? SpkiHash(value) : nil
+    }
+
     private static func isValid(_ s: String) -> Bool {
         guard s.hasPrefix("sha256:") else { return false }
         let hex = s.dropFirst("sha256:".count)

@@ -4,6 +4,16 @@ import Foundation
 /// TLS exporter call itself is a Phase 1b concern (ADR-007 Amendment A1); this function takes the
 /// already-exported bytes.
 public enum Sas {
+    /// PROTOCOL §4.5.1: ASCII, 24 bytes, no trailing NUL. Lives here rather than in each
+    /// platform's transport so the two cannot drift — a single differing character produces two
+    /// different six-digit codes, which to the users is indistinguishable from a
+    /// man-in-the-middle.
+    public static let exporterLabel = "EXPORTER-RideLink-SAS-v1"
+
+    /// PROTOCOL §4.5.1: a fixed 32 bytes are exported everywhere, even though only the first 4 are
+    /// used, so the exporter call itself is identical on both platforms. Bytes 4…31 are reserved.
+    public static let exporterLengthBytes = 32
+
     private static let modulus: UInt32 = 1_000_000
     private static let sas6Digits = 6
     private static let exporterPrefixBytes = 4

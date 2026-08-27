@@ -1,0 +1,439 @@
+{
+  "_comment": "Identity vectors for ADR-012 (identity_spki_sha256 is the only pinned value) and ADR-017 (P-256 key, shared DER certificate encoder). Every public point and every signature value here is FABRICATED/throwaway test material \u2014 no private key for any of it exists, and per CLAUDE.md vectors/identity/ never carries real key material. Regenerate with tools/generate_identity_vectors.py.",
+  "der_length_vectors": {
+    "_comment": "DER definite-length, minimal form. The single most likely place for two hand-written encoders to diverge, so it is pinned on its own.",
+    "cases": [
+      {
+        "name": "zero",
+        "length": 0,
+        "expected_hex": "00"
+      },
+      {
+        "name": "one",
+        "length": 1,
+        "expected_hex": "01"
+      },
+      {
+        "name": "max-short-form",
+        "length": 127,
+        "expected_hex": "7f"
+      },
+      {
+        "name": "first-long-form",
+        "length": 128,
+        "expected_hex": "8180"
+      },
+      {
+        "name": "one-byte-long-form-max",
+        "length": 255,
+        "expected_hex": "81ff"
+      },
+      {
+        "name": "two-byte-long-form",
+        "length": 256,
+        "expected_hex": "820100"
+      },
+      {
+        "name": "two-byte-long-form-max",
+        "length": 65535,
+        "expected_hex": "82ffff"
+      },
+      {
+        "name": "three-byte-long-form",
+        "length": 65536,
+        "expected_hex": "83010000"
+      },
+      {
+        "name": "control-frame-cap",
+        "length": 262144,
+        "expected_hex": "83040000"
+      }
+    ]
+  },
+  "der_integer_vectors": {
+    "_comment": "DER INTEGER, non-negative, minimal two's-complement. Leading zeroes are stripped unless one is needed to keep the value positive.",
+    "cases": [
+      {
+        "name": "zero",
+        "magnitude_hex": "00",
+        "expected_hex": "020100"
+      },
+      {
+        "name": "one",
+        "magnitude_hex": "01",
+        "expected_hex": "020101"
+      },
+      {
+        "name": "max-without-pad",
+        "magnitude_hex": "7f",
+        "expected_hex": "02017f"
+      },
+      {
+        "name": "high-bit-set-needs-pad",
+        "magnitude_hex": "80",
+        "expected_hex": "02020080"
+      },
+      {
+        "name": "redundant-leading-zero-stripped",
+        "magnitude_hex": "0001",
+        "expected_hex": "020101"
+      },
+      {
+        "name": "necessary-leading-zero-kept",
+        "magnitude_hex": "0080",
+        "expected_hex": "02020080"
+      },
+      {
+        "name": "many-redundant-leading-zeroes",
+        "magnitude_hex": "00000001",
+        "expected_hex": "020101"
+      },
+      {
+        "name": "version-v3",
+        "magnitude_hex": "02",
+        "expected_hex": "020102"
+      },
+      {
+        "name": "serial-16-bytes-high-bit-clear",
+        "magnitude_hex": "7f0a1b2c3d4e5f60718293a4b5c6d7e8",
+        "expected_hex": "02107f0a1b2c3d4e5f60718293a4b5c6d7e8"
+      },
+      {
+        "name": "serial-16-bytes-high-bit-set",
+        "magnitude_hex": "ff0a1b2c3d4e5f60718293a4b5c6d7e8",
+        "expected_hex": "021100ff0a1b2c3d4e5f60718293a4b5c6d7e8"
+      }
+    ]
+  },
+  "spki_vectors": {
+    "_comment": "SubjectPublicKeyInfo for a P-256 key, built from the raw uncompressed X9.63 point. 91 bytes, canonical. Android reads these bytes straight out of PublicKey.getEncoded(); iOS rebuilds them from the point, because SecKeyCopyExternalRepresentation returns the bare point (ADR-017 \u00a74). Both must land here.",
+    "cases": [
+      {
+        "name": "point-a",
+        "point_hex": "0425c034bba2b1790eb95671cf18f8852d1755c8ee170cb7b13abf2819aab8dbf120515d7196f26c2b73c5c073b3ed26e6511c3a7f72f320c3c7f5e7b787efeb8b",
+        "expected": {
+          "spki_der_hex": "3059301306072a8648ce3d020106082a8648ce3d0301070342000425c034bba2b1790eb95671cf18f8852d1755c8ee170cb7b13abf2819aab8dbf120515d7196f26c2b73c5c073b3ed26e6511c3a7f72f320c3c7f5e7b787efeb8b",
+          "spki_der_bytes": 91,
+          "identity_spki_sha256": "sha256:85bdcc4140d79b91ad705660814ac2525ca7789e9a8cb1b3c15402d03117d293"
+        }
+      },
+      {
+        "name": "point-b",
+        "point_hex": "0418ec5199e0f5ede771c4896d95f1ec86d0a21072aee764593fcda596bba52016b53d41463b3483e27310c0f717529a09153ffa027b944475d6b81caed6d953d8",
+        "expected": {
+          "spki_der_hex": "3059301306072a8648ce3d020106082a8648ce3d0301070342000418ec5199e0f5ede771c4896d95f1ec86d0a21072aee764593fcda596bba52016b53d41463b3483e27310c0f717529a09153ffa027b944475d6b81caed6d953d8",
+          "spki_der_bytes": 91,
+          "identity_spki_sha256": "sha256:688d03420192ff0f419b714f67e5e060c01deaa96d5d212c28a60e8d0122718a"
+        }
+      }
+    ],
+    "rejected_points": [
+      {
+        "name": "empty",
+        "point_hex": "",
+        "reason": "not 65 bytes"
+      },
+      {
+        "name": "too-short",
+        "point_hex": "0425c034bba2b1790eb95671cf18f8852d1755c8ee170cb7b13abf2819aab8dbf120515d7196f26c2b73c5c073b3ed26e6511c3a7f72f320c3c7f5e7b787efeb",
+        "reason": "not 65 bytes"
+      },
+      {
+        "name": "too-long",
+        "point_hex": "0425c034bba2b1790eb95671cf18f8852d1755c8ee170cb7b13abf2819aab8dbf120515d7196f26c2b73c5c073b3ed26e6511c3a7f72f320c3c7f5e7b787efeb8b00",
+        "reason": "not 65 bytes"
+      },
+      {
+        "name": "compressed-form-even",
+        "point_hex": "0225c034bba2b1790eb95671cf18f8852d1755c8ee170cb7b13abf2819aab8dbf1",
+        "reason": "leading byte must be 0x04 (uncompressed); compressed points are not accepted"
+      },
+      {
+        "name": "compressed-form-odd",
+        "point_hex": "0325c034bba2b1790eb95671cf18f8852d1755c8ee170cb7b13abf2819aab8dbf1",
+        "reason": "leading byte must be 0x04 (uncompressed)"
+      },
+      {
+        "name": "wrong-leading-byte",
+        "point_hex": "0025c034bba2b1790eb95671cf18f8852d1755c8ee170cb7b13abf2819aab8dbf120515d7196f26c2b73c5c073b3ed26e6511c3a7f72f320c3c7f5e7b787efeb8b",
+        "reason": "leading byte must be 0x04"
+      }
+    ]
+  },
+  "identity_spki_sha256_format_vectors": {
+    "_comment": "ADR-012: \"sha256:\" followed by exactly 64 LOWERCASE hex characters.",
+    "accepted": [
+      {
+        "name": "canonical",
+        "value": "sha256:85bdcc4140d79b91ad705660814ac2525ca7789e9a8cb1b3c15402d03117d293"
+      },
+      {
+        "name": "all-zero-digest",
+        "value": "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+      },
+      {
+        "name": "all-f-digest",
+        "value": "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+      }
+    ],
+    "rejected": [
+      {
+        "name": "missing-prefix",
+        "value": "85bdcc4140d79b91ad705660814ac2525ca7789e9a8cb1b3c15402d03117d293",
+        "reason": "no \"sha256:\" prefix"
+      },
+      {
+        "name": "uppercase-hex",
+        "value": "sha256:85BDCC4140D79B91AD705660814AC2525CA7789E9A8CB1B3C15402D03117D293",
+        "reason": "hex must be lowercase, so two peers cannot disagree on case"
+      },
+      {
+        "name": "too-short",
+        "value": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "reason": "63 hex characters"
+      },
+      {
+        "name": "too-long",
+        "value": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "reason": "65 hex characters"
+      },
+      {
+        "name": "non-hex",
+        "value": "sha256:gggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggg",
+        "reason": "not hex"
+      },
+      {
+        "name": "wrong-algorithm-prefix",
+        "value": "sha512:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "reason": "only sha256: exists in v1"
+      },
+      {
+        "name": "empty",
+        "value": "",
+        "reason": "empty"
+      }
+    ]
+  },
+  "tbs_certificate_vectors": {
+    "_comment": "The exact TBSCertificate both platforms must produce for the same inputs (ADR-017 \u00a72). Fixed serial and fixed validity, so the encoding is fully determined. Only the signature differs between platforms, because ECDSA is randomised \u2014 which is why the signature is not pinned here and the certificate case below uses a fabricated one.",
+    "cases": [
+      {
+        "name": "canonical-identity-certificate",
+        "input": {
+          "point_hex": "0425c034bba2b1790eb95671cf18f8852d1755c8ee170cb7b13abf2819aab8dbf120515d7196f26c2b73c5c073b3ed26e6511c3a7f72f320c3c7f5e7b787efeb8b",
+          "serial_hex": "7f0a1b2c3d4e5f60718293a4b5c6d7e8",
+          "not_before_utc": "260826120000Z",
+          "not_after_utc": "360823120000Z",
+          "subject_common_name": "RideLink Device"
+        },
+        "expected": {
+          "tbs_der_hex": "3081f8a00302010202107f0a1b2c3d4e5f60718293a4b5c6d7e8300a06082a8648ce3d040302301a3118301606035504030c0f526964654c696e6b20446576696365301e170d3236303832363132303030305a170d3336303832333132303030305a301a3118301606035504030c0f526964654c696e6b204465766963653059301306072a8648ce3d020106082a8648ce3d0301070342000425c034bba2b1790eb95671cf18f8852d1755c8ee170cb7b13abf2819aab8dbf120515d7196f26c2b73c5c073b3ed26e6511c3a7f72f320c3c7f5e7b787efeb8ba320301e300c0603551d130101ff04023000300e0603551d0f0101ff040403020780",
+          "tbs_der_bytes": 251,
+          "certificate_der_hex_with_fabricated_signature": "308201313081f8a00302010202107f0a1b2c3d4e5f60718293a4b5c6d7e8300a06082a8648ce3d040302301a3118301606035504030c0f526964654c696e6b20446576696365301e170d3236303832363132303030305a170d3336303832333132303030305a301a3118301606035504030c0f526964654c696e6b204465766963653059301306072a8648ce3d020106082a8648ce3d0301070342000425c034bba2b1790eb95671cf18f8852d1755c8ee170cb7b13abf2819aab8dbf120515d7196f26c2b73c5c073b3ed26e6511c3a7f72f320c3c7f5e7b787efeb8ba320301e300c0603551d130101ff04023000300e0603551d0f0101ff040403020780300a06082a8648ce3d040302032800302502100102030405060708090a0b0c0d0e0f100211008f1e2d3c4b5a69788796a5b4c3d2e1f0",
+          "fabricated_signature_der_hex": "302502100102030405060708090a0b0c0d0e0f100211008f1e2d3c4b5a69788796a5b4c3d2e1f0"
+        }
+      },
+      {
+        "name": "different-key-same-everything-else",
+        "input": {
+          "point_hex": "0418ec5199e0f5ede771c4896d95f1ec86d0a21072aee764593fcda596bba52016b53d41463b3483e27310c0f717529a09153ffa027b944475d6b81caed6d953d8",
+          "serial_hex": "7f0a1b2c3d4e5f60718293a4b5c6d7e8",
+          "not_before_utc": "260826120000Z",
+          "not_after_utc": "360823120000Z",
+          "subject_common_name": "RideLink Device"
+        },
+        "expected": {
+          "tbs_der_hex": "3081f8a00302010202107f0a1b2c3d4e5f60718293a4b5c6d7e8300a06082a8648ce3d040302301a3118301606035504030c0f526964654c696e6b20446576696365301e170d3236303832363132303030305a170d3336303832333132303030305a301a3118301606035504030c0f526964654c696e6b204465766963653059301306072a8648ce3d020106082a8648ce3d0301070342000418ec5199e0f5ede771c4896d95f1ec86d0a21072aee764593fcda596bba52016b53d41463b3483e27310c0f717529a09153ffa027b944475d6b81caed6d953d8a320301e300c0603551d130101ff04023000300e0603551d0f0101ff040403020780",
+          "tbs_der_bytes": 251
+        }
+      }
+    ],
+    "properties": [
+      {
+        "name": "subject-carries-no-device-information",
+        "expected": {
+          "subject_common_name": "RideLink Device",
+          "identical_on_every_device": true,
+          "note": "ADR-017 \u00a72 / CLAUDE.md privacy rules: the certificate is sent in the clear to anyone who can open the port, so it must contain no device name, user name, hardware serial or library information. Identity is the SPKI hash, never the subject text."
+        }
+      },
+      {
+        "name": "no-subject-alternative-name-extension",
+        "expected": {
+          "extension_oids": [
+            "2.5.29.19",
+            "2.5.29.15"
+          ],
+          "note": "basicConstraints and keyUsage only. A SAN would be a durable identifier on the wire."
+        }
+      }
+    ]
+  },
+  "pin_decision_vectors": {
+    "_comment": "PROTOCOL \u00a74.1 and \u00a74.5.3 as a pure function of (stored pin, SPKI computed from the presented certificate, the advisory HELLO field, and certificate validity). Never a network call, never a clock read \u2014 `now_utc` is an input.",
+    "cases": [
+      {
+        "name": "unknown-peer-no-stored-pin",
+        "input": {
+          "stored_pin": null,
+          "presented_spki": "sha256:85bdcc4140d79b91ad705660814ac2525ca7789e9a8cb1b3c15402d03117d293",
+          "hello_advisory": "sha256:85bdcc4140d79b91ad705660814ac2525ca7789e9a8cb1b3c15402d03117d293",
+          "certificate_valid": true
+        },
+        "expected": {
+          "decision": "pairing_required"
+        }
+      },
+      {
+        "name": "known-peer-pin-matches",
+        "input": {
+          "stored_pin": "sha256:85bdcc4140d79b91ad705660814ac2525ca7789e9a8cb1b3c15402d03117d293",
+          "presented_spki": "sha256:85bdcc4140d79b91ad705660814ac2525ca7789e9a8cb1b3c15402d03117d293",
+          "hello_advisory": "sha256:85bdcc4140d79b91ad705660814ac2525ca7789e9a8cb1b3c15402d03117d293",
+          "certificate_valid": true
+        },
+        "expected": {
+          "decision": "trusted"
+        }
+      },
+      {
+        "name": "certificate-reissued-same-key-still-trusted",
+        "input": {
+          "stored_pin": "sha256:85bdcc4140d79b91ad705660814ac2525ca7789e9a8cb1b3c15402d03117d293",
+          "presented_spki": "sha256:85bdcc4140d79b91ad705660814ac2525ca7789e9a8cb1b3c15402d03117d293",
+          "hello_advisory": "sha256:85bdcc4140d79b91ad705660814ac2525ca7789e9a8cb1b3c15402d03117d293",
+          "certificate_valid": true,
+          "certificate_serial_changed": true,
+          "certificate_validity_changed": true
+        },
+        "expected": {
+          "decision": "trusted",
+          "note": "ADR-012: the pin is the key, not the certificate bytes. Silent connect, no SAS."
+        }
+      },
+      {
+        "name": "identity-key-changed",
+        "input": {
+          "stored_pin": "sha256:85bdcc4140d79b91ad705660814ac2525ca7789e9a8cb1b3c15402d03117d293",
+          "presented_spki": "sha256:688d03420192ff0f419b714f67e5e060c01deaa96d5d212c28a60e8d0122718a",
+          "hello_advisory": "sha256:688d03420192ff0f419b714f67e5e060c01deaa96d5d212c28a60e8d0122718a",
+          "certificate_valid": true
+        },
+        "expected": {
+          "decision": "pin_mismatch",
+          "error_code": "pin_mismatch",
+          "note": "never auto re-paired; requires an explicit forget-peer"
+        }
+      },
+      {
+        "name": "hello-advisory-field-lies",
+        "input": {
+          "stored_pin": "sha256:85bdcc4140d79b91ad705660814ac2525ca7789e9a8cb1b3c15402d03117d293",
+          "presented_spki": "sha256:85bdcc4140d79b91ad705660814ac2525ca7789e9a8cb1b3c15402d03117d293",
+          "hello_advisory": "sha256:688d03420192ff0f419b714f67e5e060c01deaa96d5d212c28a60e8d0122718a",
+          "certificate_valid": true
+        },
+        "expected": {
+          "decision": "identity_mismatch",
+          "error_code": "identity_mismatch",
+          "note": "PROTOCOL \u00a74.1: HELLO.identity_spki_sha256 is advisory and is cross-checked against the TLS certificate. Trust never derives from a field a peer can choose."
+        }
+      },
+      {
+        "name": "hello-advisory-lies-on-an-unknown-peer",
+        "input": {
+          "stored_pin": null,
+          "presented_spki": "sha256:85bdcc4140d79b91ad705660814ac2525ca7789e9a8cb1b3c15402d03117d293",
+          "hello_advisory": "sha256:688d03420192ff0f419b714f67e5e060c01deaa96d5d212c28a60e8d0122718a",
+          "certificate_valid": true
+        },
+        "expected": {
+          "decision": "identity_mismatch",
+          "error_code": "identity_mismatch",
+          "note": "checked before pairing is offered, so a liar never reaches the SAS screen"
+        }
+      },
+      {
+        "name": "certificate-expired-known-peer",
+        "input": {
+          "stored_pin": "sha256:85bdcc4140d79b91ad705660814ac2525ca7789e9a8cb1b3c15402d03117d293",
+          "presented_spki": "sha256:85bdcc4140d79b91ad705660814ac2525ca7789e9a8cb1b3c15402d03117d293",
+          "hello_advisory": "sha256:85bdcc4140d79b91ad705660814ac2525ca7789e9a8cb1b3c15402d03117d293",
+          "certificate_valid": false
+        },
+        "expected": {
+          "decision": "certificate_invalid",
+          "error_code": "certificate_invalid",
+          "note": "a distinct code so a device clock problem is not reported to the user as an attack"
+        }
+      },
+      {
+        "name": "certificate-expired-outranks-pin-mismatch",
+        "input": {
+          "stored_pin": "sha256:85bdcc4140d79b91ad705660814ac2525ca7789e9a8cb1b3c15402d03117d293",
+          "presented_spki": "sha256:688d03420192ff0f419b714f67e5e060c01deaa96d5d212c28a60e8d0122718a",
+          "hello_advisory": "sha256:688d03420192ff0f419b714f67e5e060c01deaa96d5d212c28a60e8d0122718a",
+          "certificate_valid": false
+        },
+        "expected": {
+          "decision": "certificate_invalid",
+          "note": "structure is checked before identity: an unparseable or out-of-window certificate is rejected without reasoning about whose key it claims to be"
+        }
+      }
+    ]
+  },
+  "certificate_validity_vectors": {
+    "_comment": "Pure window check. `now` is an input, never read from a clock inside the domain layer.",
+    "cases": [
+      {
+        "name": "inside-window",
+        "not_before_utc": "260826120000Z",
+        "not_after_utc": "360823120000Z",
+        "now_utc": "300101000000Z",
+        "expected": {
+          "valid": true
+        }
+      },
+      {
+        "name": "exactly-not-before",
+        "not_before_utc": "260826120000Z",
+        "not_after_utc": "360823120000Z",
+        "now_utc": "260826120000Z",
+        "expected": {
+          "valid": true,
+          "note": "boundaries are inclusive"
+        }
+      },
+      {
+        "name": "exactly-not-after",
+        "not_before_utc": "260826120000Z",
+        "not_after_utc": "360823120000Z",
+        "now_utc": "360823120000Z",
+        "expected": {
+          "valid": true,
+          "note": "boundaries are inclusive"
+        }
+      },
+      {
+        "name": "one-second-before-window",
+        "not_before_utc": "260826120000Z",
+        "not_after_utc": "360823120000Z",
+        "now_utc": "260826115959Z",
+        "expected": {
+          "valid": false,
+          "reason": "not_yet_valid"
+        }
+      },
+      {
+        "name": "one-second-after-window",
+        "not_before_utc": "260826120000Z",
+        "not_after_utc": "360823120000Z",
+        "now_utc": "360823120001Z",
+        "expected": {
+          "valid": false,
+          "reason": "expired"
+        }
+      }
+    ]
+  }
+}

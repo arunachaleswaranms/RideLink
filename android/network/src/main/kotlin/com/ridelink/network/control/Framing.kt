@@ -5,7 +5,6 @@ import com.ridelink.core.protocol.Envelope
 import com.ridelink.core.protocol.EnvelopeCodec
 import com.ridelink.core.protocol.FrameLimits
 import kotlinx.coroutines.CoroutineDispatcher
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
@@ -15,27 +14,20 @@ import java.io.DataInputStream
 import java.io.DataOutputStream
 import java.io.EOFException
 import java.io.IOException
-import java.net.InetSocketAddress
 import java.net.ServerSocket
 import java.net.Socket
 
 /**
- * PHASE 1a PLAINTEXT CONTROL TRANSPORT.
+ * Control-plane framing (PROTOCOL §1): `uint32` big-endian byte length, then that many UTF-8 JSON
+ * bytes. [FrameLimits.MAX_CONTROL_FRAME_BYTES] is 262 144, and the length prefix is read and
+ * validated **before** the payload buffer is allocated — [ControlSocket.readFrame] returns
+ * [FrameReadResult.FrameTooLarge] without ever calling `ByteArray(length)` for an oversized or
+ * negative length.
  *
- * **`PlainControlTransportPhase1a` — not secure, debug/development builds only.** PROTOCOL §1
- * specifies TCP over **TLS 1.3**; Phase 1b has not started (CLAUDE.md rule 28), so this transport
- * carries the same length-prefixed JSON framing over **plain TCP**. Every type in this file is
- * named or documented so a reviewer cannot mistake it for the production transport, and callers
- * must gate its use behind a debug-build check (wired in `app` — release builds must not
- * construct a [ControlListener] or [ControlSocket] at all).
- *
- * Framing (PROTOCOL §1): `uint32` big-endian byte length, then that many UTF-8 JSON bytes.
- * [FrameLimits.MAX_CONTROL_FRAME_BYTES] is 262 144. The length prefix is read and validated
- * **before** the payload buffer is allocated — [readFrame] returns [FrameReadResult.FrameTooLarge]
- * without ever calling `ByteArray(length)` for an oversized or negative length.
+ * Transport-neutral by design. Whether the bytes underneath are TLS records (production, the only
+ * option — see [ControlChannel]) or plaintext (a test fixture) is decided by the [ControlChannel]
+ * that produced the socket, and nothing in this file knows or cares.
  */
-object PlainControlTransportPhase1a
-
 sealed class FrameReadResult {
     data class Frame(
         val envelope: Envelope,
@@ -57,16 +49,20 @@ sealed class FrameReadResult {
 }
 
 /**
- * One control-plane TCP socket, plain (Phase 1a), framed per [PlainControlTransportPhase1a].
- * Blocking I/O confined to [ioDispatcher] (CLAUDE.md "Kotlin coroutines / Dispatchers.IO are
- * appropriate"). A single [ControlSocket] is safe for one concurrent reader and one concurrent
- * writer (typical read-loop + write-on-demand usage); concurrent writers are serialised by
- * [writeLock].
+ * One control-plane socket, framed per the rules above. Blocking I/O confined to [ioDispatcher]
+ * (CLAUDE.md "Kotlin coroutines / Dispatchers.IO are appropriate"). Safe for one concurrent reader
+ * and one concurrent writer (the read-loop + write-on-demand shape the session manager uses);
+ * concurrent writers are serialised by [writeLock].
+ *
+ * Construct these through a [ControlChannel], never directly — that is what guarantees a
+ * production socket has completed a TLS 1.3 handshake and carries a non-null [security].
  */
-class ControlSocket private constructor(
+class ControlSocket internal constructor(
     private val socket: Socket,
     val isInitiator: Boolean,
     private val ioDispatcher: CoroutineDispatcher,
+    /** Non-null on every production socket. Null only on the test-only plaintext fixture. */
+    val security: ChannelSecurity?,
 ) : AutoCloseable {
     private val input = DataInputStream(BufferedInputStream(socket.getInputStream()))
     private val output = DataOutputStream(BufferedOutputStream(socket.getOutputStream()))
@@ -89,7 +85,7 @@ class ControlSocket private constructor(
             }
         }
 
-    @Suppress("ReturnCount", "TooGenericExceptionCaught", "SwallowedException")
+    @Suppress("ReturnCount", "SwallowedException")
     suspend fun readFrame(): FrameReadResult =
         withContext(ioDispatcher) {
             val length =
@@ -125,61 +121,35 @@ class ControlSocket private constructor(
     }
 
     companion object {
-        suspend fun connect(
-            host: String,
-            port: Int,
-            ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
-            connectTimeoutMs: Int = 5000,
-        ): ControlSocket =
-            withContext(ioDispatcher) {
-                val socket = Socket()
-                socket.connect(InetSocketAddress(host, port), connectTimeoutMs)
-                configure(socket)
-                ControlSocket(socket, isInitiator = true, ioDispatcher = ioDispatcher)
-            }
-
-        fun fromAccepted(
-            socket: Socket,
-            ioDispatcher: CoroutineDispatcher,
-        ): ControlSocket {
-            configure(socket)
-            return ControlSocket(socket, isInitiator = false, ioDispatcher = ioDispatcher)
-        }
-
-        private fun configure(socket: Socket) {
-            // CLAUDE.md rule 10 / PROTOCOL §1: TCP_NODELAY so clock-sync PING/PONG isn't held by
-            // Nagle. OS-level keepalive is best-effort; the application PING/PONG (2s/6s,
-            // PROTOCOL §1) remains authoritative for session health, never this.
+        /**
+         * CLAUDE.md rule 10 / PROTOCOL §1: `TCP_NODELAY` so clock-sync PING/PONG is not held by
+         * Nagle. OS-level keepalive is best-effort; the application PING/PONG (2 s / 6 s,
+         * PROTOCOL §1) remains authoritative for session health, never this.
+         */
+        internal fun configureTcp(socket: Socket) {
             socket.tcpNoDelay = true
             socket.keepAlive = true
         }
     }
 }
 
-/** Binds an OS-selected dynamic TCP port (PROTOCOL §1) and accepts inbound [ControlSocket]s. */
-class ControlListener private constructor(
+/**
+ * An accepting control-plane listener on an OS-selected dynamic TCP port (PROTOCOL §1). The port
+ * is what discovery advertises, so exactly one socket is bound per session.
+ *
+ * [acceptOne] is supplied by the owning [ControlChannel]: it is where a TLS server handshake runs
+ * and where a socket acquires its [ChannelSecurity], so that neither this class nor
+ * [ControlSessionManager] has to know a transport exists.
+ */
+class ControlListener internal constructor(
     private val serverSocket: ServerSocket,
-    private val ioDispatcher: CoroutineDispatcher,
+    private val acceptOne: suspend (ServerSocket) -> ControlSocket,
 ) : AutoCloseable {
     val localPort: Int get() = serverSocket.localPort
 
-    suspend fun accept(): ControlSocket =
-        withContext(ioDispatcher) {
-            val socket = serverSocket.accept()
-            ControlSocket.fromAccepted(socket, ioDispatcher)
-        }
+    suspend fun accept(): ControlSocket = acceptOne(serverSocket)
 
     override fun close() {
         runCatching { serverSocket.close() }
-    }
-
-    companion object {
-        suspend fun bind(ioDispatcher: CoroutineDispatcher = Dispatchers.IO): ControlListener =
-            withContext(ioDispatcher) {
-                val server = ServerSocket()
-                server.reuseAddress = true
-                server.bind(InetSocketAddress(0)) // dynamic port; advertised via mDNS by the caller
-                ControlListener(server, ioDispatcher)
-            }
     }
 }

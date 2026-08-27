@@ -3,50 +3,46 @@ package com.ridelink.app.di
 import android.content.Context
 import android.os.Build
 import android.os.SystemClock
-import com.ridelink.app.BuildConfig
 import com.ridelink.app.session.SessionCoordinator
 import com.ridelink.core.logging.InMemoryLogSink
+import com.ridelink.core.security.TrustedPeerStore
+import com.ridelink.core.security.UtcTime
+import com.ridelink.data.trustedpeers.FileTrustedPeerStore
+import com.ridelink.data.trustedpeers.LocalPeerIdStore
 import com.ridelink.network.control.ConnTiebreakGenerator
 import com.ridelink.network.control.ControlSessionManager
 import com.ridelink.network.control.LocalHandshakeIdentity
 import com.ridelink.network.discovery.NsdDiscoveryController
+import com.ridelink.network.security.AndroidKeystoreIdentityStore
+import com.ridelink.network.security.DeviceIdentity
+import com.ridelink.network.security.TlsControlChannel
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import java.io.File
 
 private const val APP_VERSION = "0.1.0"
 private const val NANOS_PER_MICRO = 1_000L
+private const val MILLIS_PER_SECOND = 1_000L
 
 /**
  * Manual constructor dependency injection (ADR-014 §2 — no DI framework in V1). This is the
  * composition root; nothing outside `app` should construct a [SessionCoordinator] directly.
  *
- * **Release-transport guard (this session's brief §4).** `PlainControlTransportPhase1a` is
- * plaintext and debug/development only — PROTOCOL §1's TLS 1.3 requirement is Phase 1b's job, not
- * implemented yet. [plaintextTransportAllowed] defaults to `BuildConfig.DEBUG` and is the single
- * point that decides whether the plaintext transport may exist at all. This is enforced by
- * construction, not a warning: [NsdDiscoveryController] and [ControlSessionManager] — the two
- * types capable of putting bytes on a real socket — are never *instantiated* when it is `false`,
- * so [sessionCoordinator] is `null` and the UI must show a "secure transport not implemented"
- * state instead of a working screen. `core` and `network` do not depend on `BuildConfig` — the
- * decision is made once, here, at the composition root, exactly as CLAUDE.md's module boundaries
- * require.
+ * **Security wiring (Phase 1b).** Three things are assembled here and nowhere else:
+ *
+ * 1. the device's identity keypair and certificate, from Android Keystore ([AndroidKeystoreIdentityStore], ADR-017);
+ * 2. the one production [com.ridelink.network.control.ControlChannel], which is TLS 1.3 ([TlsControlChannel], ADR-007);
+ * 3. the trusted-peer store the SPKI pin is checked against ([FileTrustedPeerStore], ADR-012).
+ *
+ * The Phase 1a `BuildConfig.DEBUG` plaintext gate is **gone**, replaced by something stronger:
+ * the plaintext transport no longer exists in any production source set, so there is nothing left
+ * to gate. [requireSecureControlChannel] is the residual runtime assertion, and
+ * `network`'s `PlaintextTransportAbsenceTest` is the mechanical guard that keeps it that way.
  */
 class AppContainer(
     context: Context,
-    requestedPlaintextTransportAllowed: Boolean = BuildConfig.DEBUG,
 ) {
-    /**
-     * Non-bypassable: `BuildConfig.DEBUG` is ANDed into the effective value regardless of what a
-     * caller requests, so passing `true` explicitly (a future test, a careless call site) can
-     * never enable the plaintext transport in a Release build — only a Debug build where the
-     * caller also wants it can. `DEBUG && true` -> allowed; `DEBUG && false` -> blocked;
-     * `RELEASE && true` -> blocked; `RELEASE && false` -> blocked. See [TransportGateTest] for
-     * all four combinations asserted directly.
-     */
-    private val plaintextTransportAllowed: Boolean =
-        effectivePlaintextTransportAllowed(isDebugBuild = BuildConfig.DEBUG, requested = requestedPlaintextTransportAllowed)
-
     // A SupervisorJob is required here, not merely tidy: network.control's accept loop, read
     // loop, keepalive and clock-sync bursts are all children of this scope, and one of them
     // throwing must never cancel its siblings (see ControlSessionManager's own tests).
@@ -54,9 +50,28 @@ class AppContainer(
 
     private val monotonicNowUs: () -> Long = { SystemClock.elapsedRealtimeNanos() / NANOS_PER_MICRO }
 
-    // Phase 1a: an in-memory sink is enough to prove the redaction-by-construction contract.
+    /**
+     * The one wall-clock read in the app, and only X.509 uses it. Certificate validity is defined
+     * in wall-clock terms by RFC 5280 and has no monotonic alternative — see
+     * [com.ridelink.core.security.UtcTime] for why this is the single permitted exception to
+     * CLAUDE.md's monotonic-clocks rule.
+     */
+    private val wallClockNow: () -> UtcTime = { UtcTime(System.currentTimeMillis() / MILLIS_PER_SECOND) }
+
+    // Phase 1b: an in-memory sink is enough to prove the redaction-by-construction contract.
     // A persistent/platform sink (Logcat, ring buffer) arrives when there is a reason to keep one.
     private val logSink = InMemoryLogSink()
+
+    private val securityDirectory: File = File(context.filesDir, "security").apply { mkdirs() }
+
+    private val deviceIdentity: DeviceIdentity =
+        AndroidKeystoreIdentityStore().loadOrCreate(wallClockNow())
+
+    val trustedPeers: TrustedPeerStore = FileTrustedPeerStore(File(securityDirectory, "trusted_peers.json"))
+
+    private val localPeerId = LocalPeerIdStore(File(securityDirectory, "peer_id")).loadOrCreate()
+
+    private val controlChannel = TlsControlChannel(deviceIdentity)
 
     private val localIdentity =
         LocalHandshakeIdentity(
@@ -65,18 +80,30 @@ class AppContainer(
             osVersion = Build.VERSION.RELEASE ?: "unknown",
             appVersion = APP_VERSION,
             connTiebreak = ConnTiebreakGenerator.generate(),
+            identitySpkiSha256 = deviceIdentity.identitySpkiSha256,
         )
 
-    /** `null` in a release build — see the class doc comment. Never constructed, not just unused. */
-    val sessionCoordinator: SessionCoordinator? =
-        gatedByPlaintextTransport(plaintextTransportAllowed) {
+    val sessionCoordinator: SessionCoordinator
+
+    init {
+        requireSecureControlChannel(controlChannel.isSecure, controlChannel.transportLabel)
+        sessionCoordinator =
             SessionCoordinator(
                 discovery = NsdDiscoveryController(context),
-                controlSessionManager = ControlSessionManager(scope = appScope, monotonicNowUs = monotonicNowUs),
+                controlSessionManager =
+                    ControlSessionManager(
+                        scope = appScope,
+                        monotonicNowUs = monotonicNowUs,
+                        localPeerId = localPeerId,
+                        channel = controlChannel,
+                        trustedPeers = trustedPeers,
+                    ),
                 localIdentity = localIdentity,
                 scope = appScope,
                 logSink = logSink,
                 monotonicNowUs = monotonicNowUs,
+                trustedPeers = trustedPeers,
+                nowEpochSeconds = { System.currentTimeMillis() / MILLIS_PER_SECOND },
             )
-        }
+    }
 }

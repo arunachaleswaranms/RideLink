@@ -9,10 +9,13 @@ import com.ridelink.core.sessionfsm.FsmState
 import com.ridelink.core.sessionfsm.SessionEvent
 import com.ridelink.core.sessionfsm.SessionFsm
 import com.ridelink.core.sessionfsm.SessionStatus
+import com.ridelink.core.security.TrustedPeer
+import com.ridelink.core.security.TrustedPeerStore
 import com.ridelink.network.control.ControlDiagnostics
 import com.ridelink.network.control.ControlEvent
 import com.ridelink.network.control.ControlSessionManager
 import com.ridelink.network.control.LocalHandshakeIdentity
+import com.ridelink.network.control.PairingPrompt
 import com.ridelink.network.discovery.DiscoveryEvent
 import com.ridelink.network.discovery.NsdDiscoveryController
 import kotlinx.coroutines.CoroutineScope
@@ -29,12 +32,13 @@ import com.ridelink.network.control.LinkLossReason as ControlLinkLossReason
  * holds connection state of its own; every screen observes [state], [discoveredPeers] and
  * [controlDiagnostics] here.
  *
- * Phase 1a scope: discovery -> [PlainControlTransportPhase1a][com.ridelink.network.control.PlainControlTransportPhase1a]
- * HELLO/dedup/PING-PONG -> `CONNECTED`. There is no pairing UI yet (CLAUDE.md rule 28 / this
- * session's brief §9): the first discovered peer is dialled automatically and `PairingSucceeded`
- * is applied immediately after `PeerSelected`, since Phase 1a's plaintext transport has no trust
- * to establish yet. That is a Phase 1a *simplification*, not a change to the FSM's legal
- * transitions — real pairing (SAS confirmation) arrives with Phase 1b.
+ * Phase 1b scope: discovery -> TLS 1.3 handshake -> SPKI pin check -> HELLO/dedup -> either a
+ * silent trusted connect or PROTOCOL §4.5 pairing with a six-digit SAS -> `CONNECTED`.
+ *
+ * The Phase 1a shortcut where `PairingSucceeded` fired automatically right after `PeerSelected`
+ * is **gone**: the FSM now stays in `PAIRING` until the pin check says the peer is already
+ * trusted, or until both users have confirmed the code. That was a placeholder for exactly this,
+ * and removing it is what makes the `PAIRING` state mean what ARCHITECTURE §3 says it means.
  */
 class SessionCoordinator(
     private val discovery: NsdDiscoveryController,
@@ -43,6 +47,8 @@ class SessionCoordinator(
     private val scope: CoroutineScope,
     logSink: LogSink,
     monotonicNowUs: () -> Long,
+    private val trustedPeers: TrustedPeerStore,
+    private val nowEpochSeconds: () -> Long,
 ) {
     private val logger = StructuredLogger(logSink, monotonicNowUs)
 
@@ -56,6 +62,32 @@ class SessionCoordinator(
     val discoveryCount: StateFlow<Int> = _discoveryCount.asStateFlow()
 
     val controlDiagnostics: StateFlow<ControlDiagnostics> = controlSessionManager.diagnostics
+
+    /** Non-null only while two users are being asked to compare six digits (PROTOCOL §4.5). */
+    val pairingPrompt: StateFlow<PairingPrompt?> = controlSessionManager.pairingPrompt
+
+    private val _securityAlert = MutableStateFlow<String?>(null)
+
+    /**
+     * A refused handshake the user needs to see rather than a transient failure to retry.
+     * `pin_mismatch` above all: ADR-012 requires it to surface as a security warning and never to
+     * be auto-resolved by re-pairing.
+     */
+    val securityAlert: StateFlow<String?> = _securityAlert.asStateFlow()
+
+    /** The user's answer on the pairing screen. Both peers must answer before any pin is written. */
+    fun confirmPairing(accepted: Boolean) {
+        controlSessionManager.confirmPairing(accepted)
+    }
+
+    fun forgetPeer(peer: TrustedPeer) {
+        trustedPeers.forget(peer.peerId)
+        _securityAlert.value = null
+    }
+
+    fun dismissSecurityAlert() {
+        _securityAlert.value = null
+    }
 
     private var sessionJob: Job? = null
     private var connectAttempted = false
@@ -118,10 +150,13 @@ class SessionCoordinator(
     }
 
     /**
-     * Phase 1a auto-connects to the first peer it discovers rather than waiting for a tap — there
-     * is no pairing UI yet to tap *into* (CLAUDE.md rule 28). ARCHITECTURE §4.1's "exactly one
-     * trusted peer -> silent auto-connect" UX is the eventual behaviour; Phase 1a has no trust
-     * store yet, so this is that same idea applied to "exactly one peer discovered" instead.
+     * ARCHITECTURE §4.1: a discovered peer cannot be labelled "known" before a connection exists,
+     * because the mDNS TXT record deliberately carries nothing durable (ADR-002 Amendment A1). So
+     * the first discovered peer is dialled, and whether that ends in a silent trusted connect or a
+     * pairing prompt is decided *after* the TLS handshake, by the SPKI pin.
+     *
+     * `PairingSucceeded` is no longer applied here. The session now sits in `PAIRING` until the
+     * pin check or the two users resolve it.
      */
     private fun maybeConnect(peer: DiscoveredPeer) {
         if (connectAttempted) return
@@ -130,18 +165,39 @@ class SessionCoordinator(
         lastPeerHost = peer.host
         lastPeerPort = peer.port
         applyEvent(SessionEvent.PeerSelected)
-        applyEvent(SessionEvent.PairingSucceeded)
         controlSessionManager.connectTo(peer.host, peer.port, localIdentity)
     }
 
     private fun handleControlEvent(event: ControlEvent) {
         when (event) {
             is ControlEvent.Connected -> {
+                // A trusted peer never raises PairingRequired, so reaching CONNECTED from PAIRING
+                // without a code is the silent-connect path of ARCHITECTURE §4.3, not a skipped
+                // check: the pin already matched inside the handshake.
+                if (_state.value.status == SessionStatus.PAIRING) applyEvent(SessionEvent.PairingSucceeded)
                 when (_state.value.status) {
                     SessionStatus.CONNECTING -> applyEvent(SessionEvent.ConnectionEstablished)
                     SessionStatus.RECONNECTING -> applyEvent(SessionEvent.ReconnectSucceeded)
                     else -> Unit
                 }
+            }
+            is ControlEvent.PairingRequired ->
+                logger.info("SessionCoordinator", "pairing required with ${event.remotePeerId}")
+            is ControlEvent.PairingSucceeded -> {
+                trustedPeers.remember(event.peer.copy(lastSeenAtEpochSeconds = nowEpochSeconds()))
+                logger.info("SessionCoordinator", "paired with ${event.peer.peerId} (${event.peer.identitySpkiSha256})")
+            }
+            is ControlEvent.PairingFailed -> {
+                _securityAlert.value = event.code
+                applyEvent(SessionEvent.PairingRejectedOrTimeout)
+            }
+            is ControlEvent.HandshakeRefused -> {
+                // pin_mismatch is the one that must never be quietly retried (ADR-012): it means
+                // the key behind a familiar peer_id changed, which is either a reinstall or an
+                // attack, and only the user can tell those apart.
+                _securityAlert.value = event.code
+                logger.warn("SessionCoordinator", "handshake refused: ${event.code}")
+                if (_state.value.status == SessionStatus.PAIRING) applyEvent(SessionEvent.PairingRejectedOrTimeout)
             }
             is ControlEvent.LinkLost -> {
                 when (event.reason) {

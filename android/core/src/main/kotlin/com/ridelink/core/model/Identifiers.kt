@@ -52,6 +52,16 @@ value class SpkiHash(
 
     companion object {
         private val FORMAT = Regex("^sha256:[0-9a-f]{64}$")
+
+        /**
+         * Non-throwing constructor for values that arrive **off the wire**
+         * (`HELLO.identity_spki_sha256`, a persisted trusted-peer record). The primary
+         * constructor's `require` is right for our own values, where a malformed one is a bug —
+         * but a peer chooses what it sends, so throwing there would let a remote peer kill a
+         * coroutine with one malformed frame. Returns null instead; the caller answers
+         * `ERROR/malformed_frame`.
+         */
+        fun parse(value: String): SpkiHash? = if (FORMAT.matches(value)) SpkiHash(value) else null
     }
 }
 

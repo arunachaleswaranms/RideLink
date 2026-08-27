@@ -83,6 +83,7 @@ object ControlMessages {
         appVersion: String,
         sessionIdProposal: SessionId,
         connTiebreak: ConnTiebreak,
+        identitySpkiSha256: SpkiHash,
     ): Envelope =
         envelope(
             localPeerId = localPeerId,
@@ -99,7 +100,9 @@ object ControlMessages {
                     put("app_version", appVersion)
                     putJsonArray("protocol_versions") { add(JsonPrimitive(ProtocolVersion.CURRENT)) }
                     put("session_id_proposal", sessionIdProposal.value)
-                    put("identity_spki_sha256", ProvisionalIdentity.insecureSentinelSpkiHash.value)
+                    // Advisory only (PROTOCOL §4.1): cross-checked against the TLS certificate,
+                    // and a mismatch is ERROR/identity_mismatch. Trust never derives from it.
+                    put("identity_spki_sha256", identitySpkiSha256.value)
                     put("conn_tiebreak", connTiebreak.value)
                 },
         )
@@ -112,6 +115,7 @@ object ControlMessages {
         acceptedSessionId: SessionId,
         connTiebreak: ConnTiebreak,
         leaderPeerId: PeerId,
+        identitySpkiSha256: SpkiHash,
     ): Envelope =
         envelope(
             localPeerId = localPeerId,
@@ -124,9 +128,84 @@ object ControlMessages {
                     put("peer_id", localPeerId.value)
                     put("accepted_session_id", acceptedSessionId.value)
                     put("protocol_version", ProtocolVersion.CURRENT)
-                    put("identity_spki_sha256", ProvisionalIdentity.insecureSentinelSpkiHash.value)
+                    put("identity_spki_sha256", identitySpkiSha256.value)
                     put("conn_tiebreak", connTiebreak.value)
                     put("leader_peer_id", leaderPeerId.value)
+                },
+        )
+
+    /**
+     * PROTOCOL §4.5. Sent by the **initiator** of the surviving connection only, so exactly one
+     * pairing exchange runs per first meeting (§4.2).
+     *
+     * Carries no code and no key material: the six digits are derived independently on each side
+     * from the TLS exporter and compared by the two humans. Putting the SAS on the wire would
+     * destroy the entire point of the check — a man-in-the-middle would simply forward it.
+     */
+    fun pairRequest(
+        localPeerId: PeerId,
+        sessionId: SessionId,
+        seq: Long,
+        sentAtMonoUs: Long,
+        displayName: String,
+        platform: String,
+        identitySpkiSha256: SpkiHash,
+    ): Envelope =
+        envelope(
+            localPeerId = localPeerId,
+            type = "PAIR_REQUEST",
+            sessionId = sessionId,
+            seq = seq,
+            sentAtMonoUs = sentAtMonoUs,
+            payload =
+                buildJsonObject {
+                    put("display_name", displayName)
+                    put("platform", platform)
+                    put("identity_spki_sha256", identitySpkiSha256.value)
+                },
+        )
+
+    /**
+     * PROTOCOL §4.5: `{ sas6_accepted: true }` — a **boolean**, never the digits. The sender is
+     * asserting "my user looked at my screen and said the two codes match", which is a claim about
+     * a human, not a value that could be forwarded.
+     */
+    fun pairConfirm(
+        localPeerId: PeerId,
+        sessionId: SessionId,
+        seq: Long,
+        sentAtMonoUs: Long,
+        accepted: Boolean,
+    ): Envelope =
+        envelope(
+            localPeerId = localPeerId,
+            type = "PAIR_CONFIRM",
+            sessionId = sessionId,
+            seq = seq,
+            sentAtMonoUs = sentAtMonoUs,
+            payload = buildJsonObject { put("sas6_accepted", accepted) },
+        )
+
+    /** PROTOCOL §4.5, the acceptor's verdict. On `accepted`, both sides persist the trusted-peer record. */
+    fun pairResult(
+        localPeerId: PeerId,
+        sessionId: SessionId,
+        seq: Long,
+        sentAtMonoUs: Long,
+        accepted: Boolean,
+        identitySpkiSha256: SpkiHash,
+    ): Envelope =
+        envelope(
+            localPeerId = localPeerId,
+            type = "PAIR_RESULT",
+            sessionId = sessionId,
+            seq = seq,
+            sentAtMonoUs = sentAtMonoUs,
+            payload =
+                buildJsonObject {
+                    put("accepted", accepted)
+                    put("peer_id", localPeerId.value)
+                    put("identity_spki_sha256", identitySpkiSha256.value)
                 },
         )
 
@@ -228,3 +307,10 @@ const val ERROR_CODE_LEADER_MISMATCH = "leader_mismatch"
 const val ERROR_CODE_VERSION_MISMATCH = "version_mismatch"
 const val ERROR_CODE_FRAME_TOO_LARGE = "frame_too_large"
 const val ERROR_CODE_MALFORMED_FRAME = "malformed_frame"
+const val ERROR_CODE_PIN_MISMATCH = "pin_mismatch"
+const val ERROR_CODE_IDENTITY_MISMATCH = "identity_mismatch"
+const val ERROR_CODE_CERTIFICATE_INVALID = "certificate_invalid"
+const val ERROR_CODE_UNTRUSTED_PEER = "untrusted_peer"
+const val ERROR_CODE_PAIRING_REJECTED = "pairing_rejected"
+const val ERROR_CODE_PAIRING_RATE_LIMITED = "pairing_rate_limited"
+const val ERROR_CODE_INTERNAL = "internal"
