@@ -49,6 +49,18 @@ public final class SessionCoordinator {
     private var lastPeerPort: UInt16?
     private var sessionTask: Task<Void, Never>?
 
+    /// Ordered delivery for `ControlEvent`/`PairingPrompt` (see `OrderedEventChannel`): each gets
+    /// its own channel plus exactly one long-lived consumer `Task`, replacing a
+    /// `Task { @MainActor in ... }` per event, which only preserved *creation* order, not the
+    /// *execution* order the trust gate depends on. Both are recreated per `startDiscovery()` and
+    /// torn down in `teardownSession()`, so a stale event from a torn-down session cannot mutate
+    /// the next one: the old channel is finished (further sends become no-ops) and the old
+    /// consumer task is cancelled before a new pair is created.
+    private var controlEventChannel: OrderedEventChannel<ControlEvent>?
+    private var controlEventTask: Task<Void, Never>?
+    private var pairingPromptChannel: OrderedEventChannel<PairingPrompt?>?
+    private var pairingPromptTask: Task<Void, Never>?
+
     /// Assembles the security wiring, and nothing else does: the Keychain identity (ADR-017), the
     /// one production `ControlChannel` — TLS 1.3 — and the trusted-peer store the SPKI pin is
     /// checked against (ADR-012).
@@ -130,19 +142,34 @@ public final class SessionCoordinator {
         let manager = controlSessionManager
         let discoverySession = discovery
         let identity = localIdentity
-        Task { [weak self] in
-            await manager.setOnEvent { event in
-                Task { @MainActor in self?.handleControlEvent(event) }
+
+        // Exactly one consumer per channel, draining in a single `for await` loop — see
+        // `OrderedEventChannel`'s doc comment for why a `Task` per event cannot make this
+        // guarantee. `send` itself is a plain synchronous call, so it is safe to invoke directly
+        // from `ControlSessionManager`'s actor-isolated `emit`/`updatePairingPrompt`.
+        let events = OrderedEventChannel<ControlEvent>()
+        controlEventChannel = events
+        controlEventTask?.cancel()
+        controlEventTask = Task { @MainActor [weak self] in
+            for await event in events.stream {
+                self?.handleControlEvent(event)
             }
         }
+
+        let prompts = OrderedEventChannel<PairingPrompt?>()
+        pairingPromptChannel = prompts
+        pairingPromptTask?.cancel()
+        pairingPromptTask = Task { @MainActor [weak self] in
+            for await prompt in prompts.stream {
+                self?.pairingPrompt = prompt
+            }
+        }
+
+        Task { await manager.setOnEvent { event in events.send(event) } }
+        Task { await manager.setOnPairingPromptChanged { prompt in prompts.send(prompt) } }
         Task { [weak self] in
             await manager.setOnDiagnosticsChanged { diagnostics in
                 Task { @MainActor in self?.controlDiagnostics = diagnostics }
-            }
-        }
-        Task { [weak self] in
-            await manager.setOnPairingPromptChanged { prompt in
-                Task { @MainActor in self?.pairingPrompt = prompt }
             }
         }
 
@@ -168,6 +195,18 @@ public final class SessionCoordinator {
     private func teardownSession() {
         sessionTask?.cancel()
         sessionTask = nil
+        // Cancel the consumer, then finish the channel: cancellation is the cooperative signal,
+        // finishing is what actually ends the `for await` loop and turns any subsequent `send`
+        // from a not-yet-updated `ControlSessionManager` callback into a no-op rather than a stale
+        // mutation of the next session's state.
+        controlEventTask?.cancel()
+        controlEventTask = nil
+        controlEventChannel?.finish()
+        controlEventChannel = nil
+        pairingPromptTask?.cancel()
+        pairingPromptTask = nil
+        pairingPromptChannel?.finish()
+        pairingPromptChannel = nil
         discovery.stopBrowsing()
         discovery.stopAdvertising()
         let manager = controlSessionManager

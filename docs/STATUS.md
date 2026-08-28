@@ -1,6 +1,6 @@
 # RideLink — Status
 
-**Updated:** 27 August 2026 (Phase 1b — security-state integration fix, fourth session)
+**Updated:** 28 August 2026 (Phase 1b — iOS control-event ordering fix, fifth session)
 **Current milestone:** M1 (Private voice link) — not started
 **Current phase:** Phase 1b — secure control channel.
 **Phase 1b status: IMPLEMENTATION COMPLETE — REAL-DEVICE GATE PENDING.**
@@ -42,8 +42,8 @@ open for Phase 1a and this phase does not close it: this machine has no Android 
 emulator, and only the iOS *simulator*. Everything below is a laptop measurement. See §4 and §7.
 
 **Repository state:** Android — 253 unit tests across five modules, `test ktlintCheck detekt lint
-assembleDebug assembleRelease` all green. iOS — `RideLinkCore` 27 tests, `RideLinkPlatform` 91
-tests, `RideLink.xcodeproj` builds in **both** Debug and Release for the simulator, zero warnings.
+assembleDebug assembleRelease` all green. iOS — `RideLinkCore` 27 tests, `RideLinkPlatform` 99
+tests (§2h), `RideLink.xcodeproj` builds in **both** Debug and Release for the simulator, zero warnings.
 Shared vectors now include `protocol/vectors/identity/` (52 assertions on Android, 10 test methods
 on iOS, same file) and `protocol/vectors/session-gate/` (the complete 120-row trust-gate table, run
 by both platforms).
@@ -605,6 +605,63 @@ or Ride Mode — despite the two preceding commits being named "init phase 2a" a
 names are misleading; nothing in this repository is Phase 2. No pairing *timeout* was invented
 either: PROTOCOL §4.5 specifies a rate limit and no timeout, so implementing one would have been
 inventing protocol.
+
+---
+
+## 2h. Phase 1b — iOS control-event ordering fix (28 August 2026 session, fifth)
+
+Delivery-only. The security model, `SessionGate`'s table, `SessionFsm` and every crypto primitive
+are unchanged; no ADR was needed because no design changed.
+
+### The bug
+
+`SessionCoordinator.startDiscovery()` subscribed to `ControlSessionManager`'s events with
+`setOnEvent { event in Task { @MainActor in self?.handleControlEvent(event) } }` — a **new**
+unstructured `Task` per event. `ControlSessionManager` deliberately emits ordered pairs
+(`.pairingSucceeded` then `.connected`; `.peerTrusted` then `.connected`, both synchronously,
+back to back, inside `succeedPairing`/`promote`) and `SessionGate` (ADR-019) depends on that order
+surviving delivery. A `Task` per event preserves the order events were *created* in, not the order
+they *run* in — Swift gives no ordering guarantee between independently created tasks on the same
+executor. Nothing in this repository proved otherwise; it was found by inspection, matching the
+same class of gap ADR-019 itself closed (a join no test crossed), not a device failure.
+`pairingPromptChanged` had the identical shape, with a real consequence if it lost ordering: a
+stale six-digit code reappearing after pairing had already settled.
+
+### The fix
+
+`OrderedEventChannel<Element>` (`RideLinkPlatform/Control/OrderedEventChannel.swift`) — a minimal
+`AsyncStream` wrapper: `send` enqueues synchronously from any isolation context, `finish` ends the
+stream. `SessionCoordinator` now creates one `OrderedEventChannel<ControlEvent>` and one
+`OrderedEventChannel<PairingPrompt?>` per `startDiscovery()`, each drained by exactly one
+long-lived `Task` running a single `for await` loop — so event *N+1* is structurally unable to be
+handled before event *N*. `teardownSession()` cancels both consumer tasks and finishes both
+channels before the next `startDiscovery()` creates a fresh pair, so a callback still in flight
+from a torn-down `ControlSessionManager` session lands as a no-op `send` on an already-finished
+channel rather than mutating the next session's state. `onDiagnosticsChanged` (cosmetic UI only,
+no security content) was deliberately left on its prior per-callback `Task` — out of scope per this
+session's brief.
+
+Android already collects `controlSessionManager.events` with a single `Flow.collect` inside one
+`launch {}` — Kotlin `Flow` collection is inherently sequential on one coroutine, so the equivalent
+defect does not exist there. Confirmed by inspection; **no Android change was made.**
+
+### Verification
+
+`OrderedEventChannelTests` (5 tests) exercise the abstraction directly: FIFO order over 200 sends,
+two synchronous back-to-back sends (the exact production shape) repeated 50×, `finish()` ending an
+in-progress consumer loop, a `send` after `finish()` being silently dropped, and a cancelled
+consumer leaving nothing running. `PairingSessionOrderingTests` (3 tests) reproduce the real
+`SessionCoordinator` wiring — `ControlSessionManager.emit` → `channel.send` → one consumer `Task`
+— over real TLS 1.3 handshakes between two real `ControlSessionManager`s, proving the unknown-peer
+`PairingRequired → PairingSucceeded → Connected` order, the known-peer `PeerTrusted → Connected`
+order with no SAS prompt, and that a stale `send` issued after `detach()` cannot move the FSM. All
+8 pass; the full ordering + pairing suite (`OrderedEventChannelTests` +
+`PairingSessionOrderingTests` + `PairingSessionIntegrationTests`, 21 tests) was run **20/20
+consecutive times with 0 failures**. `swift test` for `RideLinkPlatform` is 99/99 (up from 91);
+`RideLinkCore` is unchanged at 27/27. `xcodebuild` Debug and Release both succeed for the
+simulator, zero warnings beyond the pre-existing benign "no AppIntents.framework dependency"
+notice. Android's full `test ktlintCheck detekt lint assembleDebug assembleRelease` is unchanged
+at 253/253 with 0 failures, confirming no regression from a session that touched no Android file.
 
 ---
 
