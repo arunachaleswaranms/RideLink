@@ -73,6 +73,20 @@ jobs:
       - name: assembleRelease
         run: ./gradlew assembleRelease
 
+      # A CI-only test failure is useless if its report cannot be read afterwards. Phase 2a hit a
+      # failure that reproduced on no local run, and the console log carried the assertion's location
+      # without its message. Uploading the XML/HTML reports on failure makes the next one diagnosable
+      # instead of guessable. `if: failure()` only — this uploads nothing on a green run.
+      - name: Upload test reports on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-test-reports
+          path: |
+            android/*/build/reports/tests/
+            android/*/build/test-results/
+          retention-days: 14
+
   ios:
     runs-on: macos-26
     timeout-minutes: 30

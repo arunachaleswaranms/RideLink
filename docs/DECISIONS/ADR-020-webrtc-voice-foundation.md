@@ -32,11 +32,11 @@ unauthenticated peer starting voice?
 | | Android | Apple |
 |---|---|---|
 | Coordinate | `io.github.webrtc-sdk:android` | `https://github.com/stasel/WebRTC.git` |
-| Version | **`144.7559.14`** (exact, in `gradle/libs.versions.toml`) | **`151.0.0`** (`exact:`, in `RideLinkPlatform/Package.swift`) |
-| Upstream | Chromium **M144** | Chromium **M151**, commit `f20ebb8adbf4fa781830e4384c61f732bd28a217` |
+| Version | **`144.7559.14`** (exact, in `gradle/libs.versions.toml`) | **`152.0.0`** (`exact:`, in `RideLinkPlatform/Package.swift`) — was `151.0.0`; see **Amendment A1** |
+| Upstream | Chromium **M144** | Chromium **M152** (Amendment A1) |
 | License | BSD-3-Clause (artifact POM); packaging repo MIT | BSD-3-Clause (`LICENSE.md`) |
 | Distribution | Maven Central AAR, 48.7 MB | GitHub release XCFramework, 44.6 MB zipped / 96 MB expanded |
-| Integrity | Maven Central checksums | **SHA-256 in the dependency's own manifest**, verified byte-for-byte against the published release: `64a218fad3d84a0d783321aa9a1eec58ca266ac7879123f86b0b44b703b7d8dc` |
+| Integrity | Maven Central checksums (and Maven Central does not permit deleting a published artifact) | **SHA-256 in the dependency's own manifest**, verified byte-for-byte against the published release: `115cb9944248a3302c0c8af17462e2576a28ccc7adef9f6a1fe66ee75d9e1cc8`. **A checksum protects integrity, not availability** — see Amendment A1 |
 
 **No floating versions and no ranges.** Android uses a single pinned string in the version
 catalogue; Apple uses `.package(url:exact:)`, deliberately not `upToNextMajor` — a WebRTC minor bump
@@ -45,13 +45,13 @@ changes a media stack, and it should be a commit, not a resolution.
 Supply-chain review, performed rather than assumed
 ([evidence](../test-results/phase2a-webrtc-spike-20260828.md)):
 
-- **Native contents.** Android: four ABIs (`arm64-v8a`, `armeabi-v7a`, `x86`, `x86_64`), and the `classes.jar` contains only `org/webrtc` and `org/jni_zero`. Apple: four slices — `ios-arm64`, `ios-arm64_x86_64-simulator`, **`macos-arm64_x86_64`**, `ios-maccatalyst`.
+- **Native contents.** Android: four ABIs (`arm64-v8a`, `armeabi-v7a`, `x86`, `x86_64`), and the `classes.jar` contains only `org/webrtc` and `org/jni_zero`. Apple: four slices — `ios-arm64`, `ios-x86_64_arm64-simulator`, **`macos-x86_64_arm64`**, `ios-x86_64_arm64-maccatalyst` (re-verified on M152, Amendment A1).
 - **No telemetry.** Neither artifact declares a permission, service, receiver or analytics class. Apple's bundled `PrivacyInfo.xcprivacy` states `NSPrivacyTracking: false`, no collected data types and no tracking domains. Every URL in both binaries is an RTP header-extension URI, a CRL string inside the bundled root store, or a source-tree reference — **no upload endpoint of any kind**. WebRTC's own `Metrics` histograms are local-only, are not enabled, and have no network path in the library.
 - **API floors.** Android AAR declares `minSdkVersion 21`, below the ADR-011 `minSdk 31`. Apple slices: iOS `minos 12.0`, macOS `minos 13.0` — both below the ADR-011 iOS 26.0 target and `RideLinkPlatform`'s `.macOS(.v14)`.
 - **Release builds work.** Android `assembleRelease` and Apple `xcodebuild -configuration Release` both succeed with the dependency in place.
 
-**The milestone skew is accepted knowingly.** Android is on M144 and Apple on M151, because neither
-distribution publishes the other's milestone. WebRTC is designed for cross-version interoperability
+**The milestone skew is accepted knowingly.** Android is on M144 and Apple on M152 (M151 at the time
+of writing; see Amendment A1), because neither distribution publishes the other's milestone. WebRTC is designed for cross-version interoperability
 — browsers several milestones apart interoperate continuously — and both ends negotiate the same
 Opus and the same DTLS-SRTP profiles. It is recorded here so that a future interop problem is
 investigated against a known difference rather than discovered as a surprise.
@@ -61,6 +61,9 @@ investigated against a known difference rather than discovered as a surprise.
 `stasel/WebRTC`'s XCFramework carries a **macOS** slice. Because `RideLinkPlatform` already builds
 and tests for macOS (ADR-014's mechanical boundary enforcement), that means `swift test` links the
 same WebRTC binary an iPhone build would — same commit, same BoringSSL, same Opus.
+
+This is checked on every version bump rather than assumed: Amendment A1's re-pin re-verified the
+macOS slice's presence explicitly, because losing it would silently take the real media test with it.
 
 So Phase 2a has **real media evidence on a laptop**: `VoiceEngineLoopbackTests` stands up two real
 `WebRtcVoiceEngine`s, negotiates them against each other, and asserts host-only candidates, DTLS
@@ -201,3 +204,95 @@ table a laptop can exhaust.
 | `iceTransportPolicy = .noHost`-style restriction instead of an empty server list | Restricts the wrong thing. The empty server list is what makes a non-local candidate impossible to gather; a transport policy is a filter over candidates a server was still contacted to obtain |
 | Keep SDP as `RTCSessionDescription` across the seam with `@unchecked Sendable` | Defeats Swift 6's checking for no benefit, and the primitive form is what the wire needs anyway. `@unchecked Sendable` is confined to two immutable-value observers where the compiler genuinely cannot see the confinement |
 | Put the negotiation logic in `VoiceController` | Exactly the mistake ADR-019 was written about: a decision in a class no test can construct. STATUS §4 problem 20 says not to, and this is the first chance to obey it |
+
+
+---
+
+## Amendment A1 — 2 September 2026 — the Apple pin moves to M152 because upstream deleted the M151 release
+
+**Status of the ADR: still Accepted.** Every decision above stands. What changes is one version
+number, and one risk assessment that was too optimistic.
+
+### What happened
+
+Phase 2a pinned `stasel/WebRTC` at `exact: "151.0.0"` on 28 August, having verified the XCFramework's
+SHA-256 byte-for-byte against the published release. On 2 September the first CI run of the phase
+failed on both platforms, and the iOS half failed like this:
+
+```
+error: failed downloading
+  'https://github.com/stasel/WebRTC/releases/download/151.0.0/WebRTC-M151.xcframework.zip'
+  which is required by binary target 'WebRTC': badResponseStatusCode(404)
+```
+
+Not a transient network error — the asset was gone. Upstream's own replacement release says so:
+
+> ⚠️ Note: The original 151.0.0 release got accidentally deleted. This is a re-release of M151 with
+> the same parameters but **the checksum is different from the original**.
+
+The git **tag** `151.0.0` still exists; the GitHub **release** and therefore its asset do not.
+
+### Why `151.0.1` is not the fix
+
+The obvious move — bump to the re-release — does not work, and this is worth recording because it
+looks like it should. `151.0.1`'s own `Package.swift` still points its `url` at the deleted
+**`151.0.0`** path while carrying the **new** checksum, so resolving it fails one of two ways:
+
+```
+# cold cache (CI):
+error: failed downloading '.../releases/download/151.0.0/...': badResponseStatusCode(404)
+
+# warm cache holding the original bytes (this machine):
+error: checksum of downloaded artifact of binary target 'WebRTC'
+  (64a218fa…) does not match checksum specified by the manifest (6f3f5693…)
+```
+
+Verified empirically both ways before choosing.
+
+### The decision
+
+**Pin `exact: "152.0.0"`** — Chromium **M152**, published 31 August 2026, checksum
+`115cb9944248a3302c0c8af17462e2576a28ccc7adef9f6a1fe66ee75d9e1cc8`, and a manifest whose `url`
+points at its own tag. Re-validated from scratch rather than assumed, because it is a different
+milestone from the one the spike measured:
+
+| Check | Result |
+|---|---|
+| SHA-256 of the downloaded asset vs the manifest | ✅ matches |
+| **macOS slice present** — the thing that makes real media testable on a laptop | ✅ `macos-x86_64_arm64` |
+| iOS device + simulator + maccatalyst slices | ✅ all four as before |
+| `PrivacyInfo.xcprivacy` | ✅ `NSPrivacyTracking: false`, no collected data types, no tracking domains |
+| Telemetry endpoints in the macOS binary | ✅ none beyond the same RTP-URI / CRL / source-reference set |
+| `RideLinkPlatform` tests, including the real two-engine DTLS-SRTP/Opus loopback | ✅ 134/134 |
+| `xcodebuild` Debug **and** Release, clean | ✅ both, zero warnings |
+
+The milestone skew against Android widens from M144↔M151 to **M144↔M152**, which changes nothing
+about the reasoning: WebRTC interoperates across milestones by design, both ends negotiate the same
+Opus and DTLS-SRTP profiles, and the two real stacks still have never spoken to each other. Recorded,
+not hidden.
+
+### The risk assessment this corrects
+
+The original §1 said the Apple dependency's integrity was verified "byte-for-byte" and treated that
+as the end of the supply-chain question. It was not. **A checksum protects integrity; it does not
+protect availability**, and an SPM `binaryTarget` resolves a URL that a third party can delete.
+Integrity held perfectly here — the mismatch was *detected*, exactly as designed — and the build
+still broke.
+
+So the honest statement is: the Apple WebRTC dependency has a **single point of failure outside this
+project's control**, it fired within five days of being introduced, and it will fire again. Recorded
+as a High-severity open problem in `docs/STATUS.md` §4 rather than left as a footnote.
+
+Mitigations considered:
+
+| Option | Assessment |
+|---|---|
+| **Re-pin when it breaks** (chosen) | Zero cost, and the checksum still guarantees that whatever *is* fetched is what the manifest describes. Costs a broken build and a session's attention each time it happens |
+| Vendor the XCFramework into the repository | Immune to upstream deletion, and the only option that actually removes the failure mode. Costs ~45 MB of binary in git history for a two-device personal project, and `.gitignore` exists partly to keep large binaries out. **Reconsider if this recurs** |
+| Mirror the asset somewhere we control | Same effect as vendoring without the git-history cost, but it needs a hosting location this project deliberately does not have (no cloud, no backend) |
+| Move to CocoaPods (`WebRTC-lib`) | Trades a GitHub release for a CDN'd pod, which is more durable — but adds a second package manager to a project that has exactly one, and the pod is published by the same maintainer from the same binaries |
+| Track `branch: "latest"` as the upstream README suggests | Directly contrary to §1's pinning decision. An unpinned media stack is worse than an occasionally-unavailable pinned one |
+
+The Android side is unaffected: Maven Central does not permit deleting a published artifact, so
+`io.github.webrtc-sdk:android:144.7559.14` cannot vanish the same way. That asymmetry is now a
+recorded property of the two distributions rather than an assumption.

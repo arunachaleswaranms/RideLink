@@ -34,5 +34,11 @@ tasks.test {
     )
     testLogging {
         events("passed", "skipped", "failed")
+        // FULL, not the default SHORT: a CI failure whose assertion message is truncated to
+        // `AssertionFailedError at Foo.kt:314` is not a debugging artefact, it is a prompt to guess.
+        // Phase 2a hit exactly that — a real CI-only failure whose message the log did not carry.
+        exceptionFormat = org.gradle.api.tasks.testing.logging.TestExceptionFormat.FULL
+        showStackTraces = true
+        showCauses = true
     }
 }

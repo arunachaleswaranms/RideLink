@@ -13,6 +13,19 @@ not be.
 **Verdict: both distributions are usable as-is. No architecture blocker. No unsafe substitution was
 needed or taken.**
 
+> ### ⚠️ Superseded in one respect, 2 September 2026
+> Every measurement below stands as taken. **But the Apple version this file measured — `151.0.0` —
+> no longer exists**: upstream deleted the release five days later ("The original 151.0.0 release got
+> accidentally deleted", their words), and the first CI run of the phase failed with a hard 404 on
+> the binary. The pin is now `152.0.0`, re-validated from scratch — checksum, the macOS slice, the
+> privacy manifest, the telemetry sweep and the real media test all re-run and all clean.
+>
+> The measurements in §5 (real DTLS-SRTP/Opus media, host-only ICE) were re-confirmed on M152.
+> What the incident changes is §2's conclusion, not §5's: a checksum protects **integrity**, and it
+> did exactly that — the mismatch was detected — but it does not protect **availability**. See
+> [ADR-020 Amendment A1](../DECISIONS/ADR-020-webrtc-voice-foundation.md#amendment-a1--2-september-2026--the-apple-pin-moves-to-m152-because-upstream-deleted-the-m151-release)
+> and `docs/STATUS.md` §4 problem 27.
+
 ---
 
 ## 1. What was selected
