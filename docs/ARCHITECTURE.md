@@ -1,6 +1,9 @@
 # RideLink — Architecture
 
-**Status:** baseline for Phase 1, corrected 26 August 2026. **Last updated:** 26 August 2026.
+**Status:** baseline for Phases 1–2a. **Last updated:** 28 August 2026 (Phase 2a — WebRTC
+distributions pinned and reviewed, `core`/`RideLinkCore` package listings brought up to date, and
+the community-artifact risk closed with evidence. See
+[ADR-020](DECISIONS/ADR-020-webrtc-voice-foundation.md)).
 Requirement IDs (`FR-nnn`, `NFR-nn`) refer to [`REQUIREMENTS.md`](REQUIREMENTS.md).
 Binding decisions live in [`DECISIONS/`](DECISIONS/). What changed in the correction pass and
 why is recorded in [`STATUS.md`](STATUS.md).
@@ -312,7 +315,7 @@ product (REQUIREMENTS §8) and the reason Phase 0 existed.
 |---|---|
 | Music playback | `androidx.media3` `ExoPlayer` inside a `MediaSessionService` |
 | Background / lock screen | One foreground service, declared `mediaPlayback` and (when the intercom is part of the ride) `microphone` — see §6.4 |
-| Voice | WebRTC `PeerConnection` with the built-in `AudioDeviceModule` (owns its own `AudioRecord`/`AudioTrack`, HW AEC/NS/AGC where present) |
+| Voice | WebRTC `PeerConnection` with the built-in `AudioDeviceModule` (owns its own `AudioRecord`/`AudioTrack`, HW AEC/NS/AGC where present). Implemented in `network/voice/WebRtcVoiceEngine`; the session and route half is `audio/route/AndroidVoiceAudioSession`, and the two are deliberately separate calls to tear down (ADR-020 §6) |
 | Route + focus | `AudioManager` — `setCommunicationDevice()` (API 31+, our `minSdk`) for the helmet unit, `AudioFocusRequest` with `WILL_PAUSE_WHEN_DUCKED = false` so *we* control ducking, `AudioDeviceCallback` for connect/disconnect |
 | Ducking | `ExoPlayer.volume` ramped over ~150–250 ms, never stepped (FR-016) |
 
@@ -322,7 +325,7 @@ product (REQUIREMENTS §8) and the reason Phase 0 existed.
 |---|---|
 | Music playback | `AVAudioEngine` + `AVAudioPlayerNode` (chosen over `AVAudioPlayer` for sample-accurate scheduling — see §7) |
 | Background / lock screen | `UIBackgroundModes: audio`; `MPNowPlayingInfoCenter` + `MPRemoteCommandCenter` |
-| Voice | WebRTC `RTCPeerConnection` over the duplex session configuration below |
+| Voice | WebRTC `RTCPeerConnection` over the duplex session configuration below. Implemented in `RideLinkPlatform/Voice/WebRtcVoiceEngine`; the session and route half is `RideLinkPlatform/Route/IosVoiceAudioSession`, and the two are deliberately separate calls to tear down (ADR-020 §6) |
 | Route + interruption | `AVAudioSession.routeChangeNotification`, `interruptionNotification`, `mediaServicesWereResetNotification` — all three handled explicitly, not just the first (FR-019, NFR-02) |
 | Ducking | `AVAudioMixerNode.outputVolume` ramp, same 150–250 ms envelope |
 
@@ -662,8 +665,8 @@ android/
 │   └── src/main/kotlin/…/{ui/, session/, service/, di/}
 │
 ├── core/           [pure JVM]        THE DOMAIN. No Android SDK on its classpath.
-│   └── …/{model/, protocol/, sessionfsm/, sync/, queue/, manifest/,
-│           hashing/, logging/, audiopolicy/}
+│   └── …/{model/, protocol/, sessionfsm/, sync/, security/, voice/,
+│           audiopolicy/, queue/, manifest/, hashing/, logging/}
 │
 ├── network/        [Android lib]     …/{discovery/, control/, security/, transfer/, voice/}
 ├── audio/          [Android lib]     …/{player/, route/}
@@ -705,8 +708,9 @@ ios/
 │
 └── Packages/
     ├── RideLinkCore/                 # THE DOMAIN — one target, mirrors android core/
-    │   └── Sources/RideLinkCore/{Model/, Protocol/, SessionFSM/, Sync/, Queue/,
-    │                              Manifest/, Hashing/, Logging/, AudioPolicy/}
+    │   └── Sources/RideLinkCore/{Model/, Protocol/, SessionFSM/, Sync/, Security/,
+    │                              Voice/, AudioPolicy/, Queue/, Manifest/,
+    │                              Hashing/, Logging/}
     │
     └── RideLinkPlatform/             # Apple frameworks — one target
         └── Sources/RideLinkPlatform/{Discovery/, Control/, Security/, Transfer/,
@@ -762,7 +766,7 @@ small specialised one. Everything pinned.
 | JSON | kotlinx-serialization-json | compile-time codegen, no reflection, exact-shape control for the envelope |
 | DB + search | Room (+ FTS4) | official; FTS gives FR-008 search without hand-rolled indexing |
 | Playback | androidx.media3 (ExoPlayer + MediaSession) | format coverage, precise seek, playback-rate control, `MediaSessionService` solves FR-019 |
-| Voice | `io.github.webrtc-sdk:android` | Google publishes no current Maven artifact; this is the maintained community build of upstream WebRTC. **Pinned and reviewed** — see risk register |
+| Voice | `io.github.webrtc-sdk:android` **`144.7559.14`** (Chromium M144), BSD-3-Clause | Google publishes no current Maven artifact; this is the maintained community build of *unmodified* upstream WebRTC. **Pinned exactly** (never a range) and supply-chain reviewed: four ABIs, only `org/webrtc` + `org/jni_zero` classes, no permission or service in its manifest, and no telemetry endpoint in the binary. [ADR-020](DECISIONS/ADR-020-webrtc-voice-foundation.md), [evidence](test-results/phase2a-webrtc-spike-20260828.md) |
 | DI | **manual constructor injection** | No framework in V1. [ADR-014 §2](DECISIONS/ADR-014-initial-module-structure-and-di.md#2-dependency-injection) |
 | Preferences | DataStore + Keystore | Keystore for the device identity keypair; no secret in plaintext prefs |
 | Tests | JUnit, kotlin.test, Turbine, MockK, Robolectric, androidx.test, **Conscrypt (test-only)** | Turbine for Flow assertions; Robolectric keeps route-logic tests off-device. Conscrypt is `testImplementation` **only** and never reaches an APK: Android's own TLS stack *is* Conscrypt, and its exporter is reached on device through `android.net.ssl.SSLSockets`, a class that does not exist on a plain JVM — without it, the test that proves two peers derive the same six-digit SAS could not run anywhere but a phone (ADR-018) |
@@ -782,7 +786,7 @@ Discovery, TLS, audio routing, hashing: **platform APIs, no dependency.**
 | Playback | AVFoundation (`AVAudioEngine`) | sample-accurate `scheduleSegment(at:)` is required by §7.2 |
 | Audio session | AVAudioSession | required by brief; two configurations per §6.2 |
 | DB + search | **GRDB.swift** | needs SQLite **FTS5** for search parity with Room FTS; Core Data/SwiftData make FTS awkward. Actively maintained, single-purpose. *Alternative considered:* raw SQLite3 C API — no dependency but materially more code |
-| Voice | `stasel/WebRTC` (SPM) | maintained SPM distribution of Google's official WebRTC binaries. **Pinned** |
+| Voice | `stasel/WebRTC` **`151.0.0`** exact (Chromium M151), BSD-3-Clause | Maintained SPM distribution of *unmodified* upstream WebRTC. An SPM `binaryTarget`, so its SHA-256 is verified at resolve time — checked independently against the published release. `NSPrivacyTracking: false`, no collected data types, no tracking domains, no upload endpoint. Its XCFramework carries a **macOS** slice, which is what lets `swift test` run real DTLS-SRTP/Opus media on a laptop. [ADR-020](DECISIONS/ADR-020-webrtc-voice-foundation.md), [evidence](test-results/phase2a-webrtc-spike-20260828.md) |
 | DI | manual constructor injection | same decision as Android |
 | Tests | Swift Testing + XCTest | Swift Testing for the pure package; XCTest for anything needing a host app |
 | Static analysis | SwiftLint + SwiftFormat | standard, CI-friendly |
@@ -823,7 +827,8 @@ Encoded as build- and code-level rules, not just intentions:
 |---|---|---|---|
 | ~~Self-signed X.509 identity generation on iOS~~ **Resolved 27 Aug 2026** | ~~High~~ Low | Phase 1b | Spiked and measured. A ~150-line DER encoder plus `SecKeyCreateSignature` produces a certificate that Apple's own parser, BoringSSL and OpenSSL all accept, and `SecIdentityCreate` turns it into a `Network.framework` TLS identity with no PKCS#12 and no key export. [ADR-017](DECISIONS/ADR-017-identity-key-and-certificate.md), [results](test-results/phase1b-security-spike-20260827.md). Residual: none of it has run against the iOS Keychain on a device |
 | ~~TLS keying-material **exporter** availability on both platforms~~ **Resolved 27 Aug 2026** | ~~High~~ Low | Phase 1b | Both platforms expose one from public API (`SSLSockets.exportKeyingMaterial`, API 31 — exactly `minSdk`; `sec_protocol_metadata_create_secret`, iOS 12). Apple and Conscrypt/BoringSSL produce **byte-identical** output for the same TLS 1.3 connection, cross-checked against OpenSSL. [ADR-018](DECISIONS/ADR-018-tls-exporter-channel-binding.md), [results](test-results/phase1b-security-spike-20260827.md). Residual: the Android side was measured on Conscrypt-on-JVM, not on the phone |
-| WebRTC dependency is community-published on both platforms | Medium | Phase 2 | Pin exact versions, vendor the binaries, isolate behind `network/voice` / `RideLinkPlatform.Voice` so replacement is contained |
+| ~~WebRTC dependency is community-published on both platforms~~ **Closed 28 Aug 2026** | ~~Medium~~ Low | Phase 2a | Both distributions pinned **exactly**, licences confirmed BSD-3-Clause, Apple's XCFramework SHA-256 verified independently, both binaries checked for telemetry (none: no upload endpoint, `NSPrivacyTracking: false`), release builds proven, and both isolated behind `network/voice` / `RideLinkPlatform.Voice`. [ADR-020](DECISIONS/ADR-020-webrtc-voice-foundation.md), [evidence](test-results/phase2a-webrtc-spike-20260828.md). **Residual:** Android is on Chromium M144 and Apple on M151 because neither distribution publishes the other's milestone — interop-safe by WebRTC's design, but the two real stacks have never spoken to each other |
+| **Voice media has never run on a phone** | **High** | Phase 2a gate | Real WebRTC media *is* proven locally — two real engines, host-only ICE, DTLS-SRTP, Opus, under `swift test` on macOS. What is absent is every device-specific part: `RTCAudioSession`, `AudioManager`, a Bluetooth route, a helmet unit, a screen lock, and the Android media path at all (`PeerConnectionFactory.initialize` needs a `Context`). Closed by the §7 device gate, not by more unit tests |
 | `AVAudioEngine` scheduling precision on real hardware | Medium | Phase 5 | Measure, do not assume; loopback test in TEST_PLAN §5 |
 | mDNS blocked on hotspots/enterprise APs | Medium | Phase 1 | Manual `host:port` + QR fallback (Phase 1b) |
 | Phase 0 results not yet recorded | Medium | Phase 6 | Does not block Phases 1–5; default to Mode C until known. `AUDIO_STATE.confidence` stays `assumed` until they are |

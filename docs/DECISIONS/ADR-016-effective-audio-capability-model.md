@@ -122,3 +122,52 @@ opened once per ride segment and stays open (ARCHITECTURE §6.3, §6.4).
 | Report raw platform route descriptions as free text | Unparseable by the peer, un-vectorable in tests, and a privacy leak: device names are personally identifying |
 | One combined message instead of `CAPABILITIES` + `AUDIO_STATE` | Static negotiation data and high-frequency runtime state have different cadences and different consumers. Merging them means re-sending library counts and limits on every route change |
 | Wait for Phase 0 results before modelling any of this | The model has to exist for the results to land in. `confidence: "assumed"` is how the current state of knowledge is represented honestly in the meantime |
+
+---
+
+## Amendment A1 — 28 August 2026 — correction: `media_quality` is about *narrowed* duplex, not duplex
+
+**Status of the ADR: still Accepted.** No wire value, no field and no enum changes. What changes is
+one derivation rule, which was internally inconsistent.
+
+Found while implementing the shared audio vocabulary in Phase 2a
+([ADR-020](ADR-020-webrtc-voice-foundation.md)): this ADR contradicted itself about `builtin`.
+
+**Decision → choice 2** said:
+
+> `media_quality` is derived, not measured: `reduced` whenever the effective output profile is a
+> duplex profile other than `duplex_wide_stereo`.
+
+**Decision → choice 4's representable-states table** said:
+
+| Situation | `endpoint_class` | `microphone_open` | `effective_output_profile` | `media_quality` |
+|---|---|---|---|---|
+| Nothing attached | `builtin_speaker` | `true` | `builtin` | `full` |
+
+`builtin` **is** duplex and **is not** `duplex_wide_stereo`, so the prose gives `reduced` and the
+table gives `full`. Both were written in the same change; nothing had implemented either, so nothing
+had noticed.
+
+**The table is right and the prose was imprecise.** `media_quality` answers one question — *has
+opening the microphone cost the music anything?* — and for a phone's own speaker and microphone the
+answer is no. That is the same fact `profile_coupling: "independent"` already states for that route;
+the prose rule contradicted it. The prose was written while thinking about Bluetooth duplex
+profiles, where "duplex" and "narrowed" happen to coincide, and it generalised the coincidence.
+
+**Corrected rule, and the only one now implemented:**
+
+> `media_quality` is `reduced` whenever the effective output profile is a **narrowed** duplex profile
+> — `duplex_narrowband` or `duplex_wideband`. `duplex_wide_stereo` and `builtin` are duplex but not
+> narrowed and are therefore `full`. `none` is `unavailable`; `unknown` is `unknown`.
+
+It is expressed once, as `AudioProfile.isNarrowedDuplex` in `core.audiopolicy` /
+`RideLinkCore.AudioPolicy`, and `AudioRouteSnapshot.mediaQuality` is derived from it on both
+platforms — so the correction cannot be applied to one phone and not the other.
+
+Consequences: none on the wire. Every value in the table above is unchanged, including the ordinary
+Bluetooth intercom case (`duplex_wideband` ⇒ `reduced`), which is the one the product actually cares
+about. The corrected rule only changes what would have been reported for the built-in route and for
+a future `duplex_wide_stereo` Bluetooth endpoint — and in both cases it changes it from a false
+"your music is degraded" to the truth.
+
+`docs/PROTOCOL.md` §4.4's derivation sentence is corrected to match in the same change.

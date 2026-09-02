@@ -22,8 +22,8 @@ subscription and no telemetry — the app is expected to work with mobile data s
 
 ## Status
 
-**Phase 0 (hardware feasibility) is done. Phases 1a and 1b are implementation-complete; the
-real-device gate is pending for both.**
+**Phase 0 (hardware feasibility) is done. Phases 1a, 1b and 2a are implementation-complete; the
+real-device gate is pending for all three.**
 
 Phase 1b's two open security risks are closed with measurements rather than argument: a
 hand-encoded self-signed X.509 certificate that Apple's parser, BoringSSL and OpenSSL all accept,
@@ -36,9 +36,24 @@ The control plane is now TLS 1.3 with mutual authentication, `identity_spki_sha2
 first-meeting SAS pairing with persisted trust. **There is no plaintext transport left in any
 production source set.**
 
-None of it has run on the two real phones yet — this environment has no Android device or emulator
-and only an iOS simulator. See [`docs/STATUS.md`](docs/STATUS.md) for exactly what is verified and
-what is not.
+**Phase 2a adds the voice transport foundation:** WebRTC behind pinned, checksum-verified,
+telemetry-audited distributions on both platforms; SDP and ICE signalled over the control channel
+that Phase 1b secured; host candidates only, with no STUN or TURN configured and no field that
+could carry one; and DTLS-SRTP with Opus. `VOICE_*` frames are **absent from the
+pre-authentication frame allowlist**, so an unauthenticated peer cannot start voice at all — proven
+over real TLS on both platforms. Decisions:
+[`ADR-020`](docs/DECISIONS/ADR-020-webrtc-voice-foundation.md); evidence:
+[`docs/test-results/phase2a-webrtc-spike-20260828.md`](docs/test-results/phase2a-webrtc-spike-20260828.md).
+
+Real WebRTC media *has* been established and measured on the build machine — two real engines,
+host-only candidates, DTLS connected, `audio/opus` at 48 kHz — because the Apple WebRTC XCFramework
+carries a macOS slice, so `swift test` links the same binary an iPhone build would.
+
+**None of it has run on the two real phones, and no audio has been captured or played anywhere.**
+This environment has no Android device or emulator and only an iOS simulator; the Android media path
+has no test at all, and neither audio-session implementation has ever executed on a device. No
+latency figure exists. See [`docs/STATUS.md`](docs/STATUS.md) for exactly what is verified and what
+is not, and [`docs/TEST_PLAN.md`](docs/TEST_PLAN.md) §3.1a for the line drawn item by item.
 
 ## Repository layout
 

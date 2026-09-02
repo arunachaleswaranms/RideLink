@@ -23,7 +23,7 @@ Read these before changing anything. They are authoritative; this file is a summ
 | What's on the wire? | `docs/PROTOCOL.md` |
 | How do we verify? | `docs/TEST_PLAN.md` |
 | State now / exact next task | `docs/STATUS.md` |
-| Why this way? | `docs/DECISIONS/` (ADR-001…019) |
+| Why this way? | `docs/DECISIONS/` (ADR-001…020) |
 | What was actually measured? | `docs/test-results/` — including the Phase 1b security spike |
 | What did the hardware do? | `docs/PHASE0_RESULTS.md` (awaiting user input) |
 
@@ -47,9 +47,10 @@ Read these before changing anything. They are authoritative; this file is a summ
 | 12 | **`identity_spki_sha256` is the only pinned identity.** SHA-256 of the DER SubjectPublicKeyInfo | Never pin a whole-certificate fingerprint; never call an SPKI hash `cert_fingerprint` |
 | 13 | **One identity algorithm for both platforms: ECDSA P-256, `ecdsa-with-SHA256`** (ADR-017). Keys live in Android Keystore / the iOS Keychain and are never exported. RideLink encodes its own certificate with a shared DER encoder; the platform does the signing | Never choose the algorithm per platform; never use Android's `KeyGenParameterSpec` auto-issued certificate (it cannot be re-issued around an existing key, which breaks ADR-012) |
 | 14 | **There is no plaintext control transport.** The only plaintext `ControlChannel` lives in a *test* source set, so it cannot be linked into an app at all | Never add a "debug-only" plaintext path to a production source set; never make security conditional on a build flag |
+| 16 | **Voice media may never start before the trust gate.** `VOICE_*` is absent from the pre-authentication frame allowlist, and that absence *is* its access control (ADR-020). The ADR-010 leader is always the WebRTC offerer — never the TCP initiator. ICE is an empty server list and `VoiceEngineConfig` has no field that could carry a STUN/TURN server. `VoiceEngine.stop()` drops the peer connection; only `release()` closes the capture device, because reopening it renegotiates the Bluetooth profile and Android forbids reopening a microphone from the background | Never add a voice type to the pre-auth allowlist; never infer the offerer from who dialled; never add an ICE server "just for testing"; never let a link blip release capture |
 | 15 | **`ControlEvent.Connected` means "the surviving connection passed the RideLink trust gate"** (ADR-019). `PAIRING -> CONNECTING` opens only on `PeerTrusted` (stored pin matched) or `PairingSucceeded` (both users confirmed and the pin was written). The gate table is `SessionGate` on both platforms, pinned by `vectors/session-gate/` | Never read "TLS and HELLO succeeded" as authentication; never let `Connected` imply pairing success; never start a task that presumes an authenticated peer just because a socket exists |
 
-Reasoning: `docs/DECISIONS/ADR-001…019`.
+Reasoning: `docs/DECISIONS/ADR-001…020`.
 
 ## Platform stack and baselines
 
@@ -148,6 +149,10 @@ python3 tools/generate_identity_vectors.py
 # Regenerate the trust-gate vectors (ADR-019; an independent third transcription of the table)
 python3 tools/generate_session_gate_vectors.py
 
+# Regenerate the Phase 2a voice vectors (ADR-020; both independent third implementations)
+python3 tools/generate_voice_signal_vectors.py
+python3 tools/generate_voice_fsm_vectors.py
+
 # Requirements doc (DOCX is read-only input; never modify it)
 python3 tools/extract_docx.py docs/RideLink_Requirements_and_Implementation_Plan.docx
 ```
@@ -180,23 +185,47 @@ resume are deferred, but the chunk and page framing keep both possible.
 
 ## Current phase
 
-**Phase 1b — secure control channel. Implementation complete; the two-real-phones gate is open.**
+**Phase 2a — voice transport foundation. Implementation complete; the real-device audio gate is
+open.**
 
-Phase 0 (hardware feasibility) is complete; do **not** repeat it. Phases 1a and 1b are both
-implementation-complete and green on both platforms: TLS 1.3 with mutual authentication,
+Phase 0 (hardware feasibility) is complete; do **not** repeat it. Phases 1a, 1b and 2a are all
+implementation-complete and green on both platforms.
+
+**Phase 1b** gave the secure control channel: TLS 1.3 with mutual authentication,
 `identity_spki_sha256` pinning, first-meeting SAS pairing and persisted trust, on top of the
-Phase 1a discovery/framing/clock-sync layer.
-
-The security-state integration bug found after that — `Connected` being read as implicit pairing
-success, which let an unknown peer reach `CONNECTED` before the six digits were shown — is fixed
-and pinned by shared vectors on both platforms (rule 15 above, ADR-019, `docs/STATUS.md` §2g).
+Phase 1a discovery/framing/clock-sync layer. The security-state integration bug found after that —
+`Connected` being read as implicit pairing success, which let an unknown peer reach `CONNECTED`
+before the six digits were shown — is fixed and pinned by shared vectors on both platforms
+(rule 15 above, ADR-019, `docs/STATUS.md` §2g).
 
 Both of ADR-007 Amendment A1's open risks are closed with measurements — see
 `docs/test-results/phase1b-security-spike-20260827.md`, ADR-017 and ADR-018. **Do not re-open or
 re-litigate those two decisions without new measurements.**
 
-What is *not* done is anything on a real phone. In particular the Android half of the
-exporter-equality result was measured against Conscrypt on a laptop, not against the device's own
-TLS stack, and neither Android Keystore nor the iOS Keychain has run on hardware. Read
-`docs/STATUS.md` §4 and §7 for exactly what is verified versus pending, and for the exact next
-task.
+**Phase 2a** built the voice plane on top of that channel (ADR-020,
+`docs/test-results/phase2a-webrtc-spike-20260828.md`, `docs/STATUS.md` §2i):
+
+- WebRTC pinned **exactly** — `io.github.webrtc-sdk:android:144.7559.14` and `stasel/WebRTC` `exact: "151.0.0"`. Both BSD-3-Clause, Apple's XCFramework SHA-256 verified independently, both binaries read for telemetry (none: no upload endpoint anywhere). **Never widen these to a version range** — a WebRTC minor bump changes a media stack.
+- PROTOCOL §7 is now a full specification: `VOICE_OFFER`/`VOICE_ANSWER`/`VOICE_ICE`/`VOICE_STATE`, exact schemas, bounds, and the authentication gate. There is deliberately **no `VOICE_END`** — `VOICE_STATE { state: "closed" }` is the teardown signal.
+- **`VOICE_*` is absent from the pre-authentication frame allowlist**, which is the whole of its access control (rule 15's corollary). Adding a voice type to that list is a security change, and a test fails if anyone does.
+- The **ADR-010 leader is always the WebRTC offerer**, never the TCP initiator. A follower sends intent; the offerer's response to intent is idempotent, so two simultaneous Start Voice presses produce one negotiation.
+- **Host candidates only.** The ICE server list is empty and `VoiceEngineConfig` has *no field* that could carry a STUN or TURN server. Adding one would take a protocol and ADR change, which is the point.
+- `VoiceEngine.stop()` and `release()` are **two separate calls**: a control-link blip drops the peer connection but must never close the capture device, because reopening it renegotiates the Bluetooth profile (ARCHITECTURE §6.2/§6.3) and because Android forbids reopening a microphone from the background (§6.4).
+- Every decision lives in the pure, mirrored `VoiceNegotiation` table, pinned by `protocol/vectors/voice-fsm/` — not in `VoiceController`. That is the direct lesson of ADR-019 and of STATUS §4 problem 20.
+
+**Real WebRTC media is proven on this machine** — two real engines, host-only candidates, DTLS
+connected, `audio/opus` at 48 kHz, deterministic over five runs. It works under `swift test` because
+the Apple WebRTC XCFramework carries a macOS slice.
+
+**What is *not* done is anything on a real phone, and no audio has been captured or played
+anywhere.** In particular: the Android WebRTC media path has **no test of any kind**
+(`PeerConnectionFactory.initialize` needs an Android `Context`); neither `AndroidVoiceAudioSession`
+nor `IosVoiceAudioSession` has ever executed on a device, only their pure route mappers are tested;
+`RideForegroundService` has never started; every `assumed` value in the two route mappers is a
+reasoned guess about unmeasured hardware; and **no latency figure exists**, so the <200 ms target
+must not be described as approached, let alone met. The Phase 1b device gate is also still open, and
+the Android half of the exporter-equality result was measured against Conscrypt on a laptop rather
+than the phone's own TLS stack.
+
+Read `docs/STATUS.md` §4 and §7 for exactly what is verified versus pending and for the exact next
+task, and `docs/TEST_PLAN.md` §3.1a / §5.1 / §6.1 for the line drawn item by item.

@@ -4,6 +4,7 @@ import android.content.Context
 import android.os.Build
 import android.os.SystemClock
 import com.ridelink.app.session.SessionCoordinator
+import com.ridelink.audio.route.AndroidVoiceAudioSession
 import com.ridelink.core.logging.InMemoryLogSink
 import com.ridelink.core.security.TrustedPeerStore
 import com.ridelink.core.security.UtcTime
@@ -16,12 +17,15 @@ import com.ridelink.network.discovery.NsdDiscoveryController
 import com.ridelink.network.security.AndroidKeystoreIdentityStore
 import com.ridelink.network.security.DeviceIdentity
 import com.ridelink.network.security.TlsControlChannel
+import com.ridelink.network.voice.VoiceController
+import com.ridelink.network.voice.WebRtcVoiceEngine
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import java.io.File
 
 private const val APP_VERSION = "0.1.0"
+private const val VOICE_TRACK_ID = "ridelink-voice"
 private const val NANOS_PER_MICRO = 1_000L
 private const val MILLIS_PER_SECOND = 1_000L
 
@@ -41,7 +45,7 @@ private const val MILLIS_PER_SECOND = 1_000L
  * `network`'s `PlaintextTransportAbsenceTest` is the mechanical guard that keeps it that way.
  */
 class AppContainer(
-    context: Context,
+    private val context: Context,
 ) {
     // A SupervisorJob is required here, not merely tidy: network.control's accept loop, read
     // loop, keepalive and clock-sync bursts are all children of this scope, and one of them
@@ -83,6 +87,20 @@ class AppContainer(
             identitySpkiSha256 = deviceIdentity.identitySpkiSha256,
         )
 
+    /**
+     * Hoisted out of the coordinator's construction because the voice subsystem needs *this* instance
+     * — `voice.send` writes to the surviving authenticated connection, and a second manager
+     * would have no connection at all (PROTOCOL §7.1).
+     */
+    private val controlSessionManager =
+        ControlSessionManager(
+            scope = appScope,
+            monotonicNowUs = monotonicNowUs,
+            localPeerId = localPeerId,
+            channel = controlChannel,
+            trustedPeers = trustedPeers,
+        )
+
     val sessionCoordinator: SessionCoordinator
 
     init {
@@ -90,20 +108,35 @@ class AppContainer(
         sessionCoordinator =
             SessionCoordinator(
                 discovery = NsdDiscoveryController(context),
-                controlSessionManager =
-                    ControlSessionManager(
-                        scope = appScope,
-                        monotonicNowUs = monotonicNowUs,
-                        localPeerId = localPeerId,
-                        channel = controlChannel,
-                        trustedPeers = trustedPeers,
-                    ),
+                controlSessionManager = controlSessionManager,
                 localIdentity = localIdentity,
                 scope = appScope,
                 logSink = logSink,
                 monotonicNowUs = monotonicNowUs,
                 trustedPeers = trustedPeers,
                 nowEpochSeconds = { System.currentTimeMillis() / MILLIS_PER_SECOND },
+                buildVoiceController = ::voiceController,
             )
     }
+
+    /**
+     * Phase 2a's voice subsystem, built **per authenticated session** by `SessionCoordinator` and
+     * nowhere else — which is what makes "one `VoiceController` per two-person session" a structural
+     * property rather than a convention (ADR-020).
+     *
+     * `isLocalLeader` comes from `HELLO_ACK.leader_peer_id`, so the offerer role is ADR-010
+     * leadership and nothing else (PROTOCOL §7.3). It is deliberately *not* derived from which side
+     * dialled the TCP connection.
+     */
+    private fun voiceController(isLocalLeader: Boolean): VoiceController =
+        VoiceController(
+            scope = appScope,
+            engine = WebRtcVoiceEngine(context),
+            audioSession = AndroidVoiceAudioSession(context),
+            transport = controlSessionManager.voice,
+            isLocalLeader = isLocalLeader,
+            // One audio track per peer (ADR-003). A fixed, non-identifying id: a track id crosses the
+            // wire inside the SDP, so it must not carry a device name.
+            localTrackId = VOICE_TRACK_ID,
+        )
 }

@@ -31,14 +31,22 @@ import com.ridelink.network.control.ControlState
 import com.ridelink.network.control.PairingPrompt
 
 /**
- * Deliberately developer-oriented (CLAUDE.md Phase 1b scope): device identity, connection status,
- * the six-digit pairing prompt, security warnings, and diagnostics (peer, RTT, clock
- * offset/jitter, reconnect count, discovery count, transport). No Ride Mode UI belongs here yet.
+ * Deliberately developer-oriented (CLAUDE.md Phase 2a scope): device identity, connection status,
+ * the six-digit pairing prompt, security warnings, control diagnostics, and — new in Phase 2a — a
+ * voice card with Start/End, mute, and the FR-023 media diagnostics.
+ *
+ * **No Ride Mode UI belongs here yet.** This is a diagnostics surface, which ADR-020 says is what
+ * Phase 2a's UI should be: enough to drive and observe voice on two phones, and no design decisions
+ * about a real riding screen made before anyone has ridden with it.
+ *
+ * Nothing here renders an SDP, a candidate string, an IP address or a port — PROTOCOL §7.7 gives
+ * those no display path any more than a log path.
  */
 @Composable
 fun MainScreen(
     coordinator: SessionCoordinator,
     deviceDescription: String,
+    onStartVoice: () -> Unit = coordinator::startVoice,
 ) {
     val state by coordinator.state.collectAsState()
     val peers by coordinator.discoveredPeers.collectAsState()
@@ -46,6 +54,7 @@ fun MainScreen(
     val diagnostics by coordinator.controlDiagnostics.collectAsState()
     val pairingPrompt by coordinator.pairingPrompt.collectAsState()
     val securityAlert by coordinator.securityAlert.collectAsState()
+    val voice by coordinator.voiceDiagnostics.collectAsState()
 
     Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
         Column(
@@ -78,6 +87,17 @@ fun MainScreen(
 
             pairingPrompt?.let { prompt ->
                 PairingCard(prompt = prompt, onDecision = coordinator::confirmPairing)
+            }
+
+            // PROTOCOL §7.1 in the UI: voice controls exist only once the trust gate has passed.
+            // A disabled button would still be a button; an absent card cannot be pressed.
+            if (state.status == SessionStatus.CONNECTED || state.status == SessionStatus.RIDE_ACTIVE) {
+                VoiceCard(
+                    voice = voice,
+                    onStartVoice = onStartVoice,
+                    onEndVoice = coordinator::endVoice,
+                    onToggleMute = { coordinator.setMicrophoneMuted(!voice.micMuted) },
+                )
             }
 
             DiagnosticsCard(
@@ -121,7 +141,7 @@ fun SecureTransportUnavailableScreen(reason: String = "") {
 }
 
 @Suppress("MagicNumber") // named colours for the transport banner and the security cards
-private object BannerColors {
+internal object BannerColors {
     val InsecureBackground = Color(0xFFFFF3CD)
     val InsecureText = Color(0xFF7A5B00)
     val SecureBackground = Color(0xFFDFF3E0)
@@ -270,7 +290,7 @@ private fun DiagnosticsCard(
 }
 
 @Composable
-private fun DiagnosticRow(
+internal fun DiagnosticRow(
     label: String,
     value: String,
 ) {

@@ -4,4 +4,8 @@
     <string name="start_discovery">Start Discovery</string>
     <string name="label_device">Device:</string>
     <string name="label_connection">Connection:</string>
+    <string name="ride_channel_name">Ride session</string>
+    <string name="ride_channel_description">Keeps the intercom and the peer link running while the screen is locked.</string>
+    <string name="ride_notification_title">RideLink intercom active</string>
+    <string name="ride_notification_text">Microphone open for the intercom.</string>
 </resources>

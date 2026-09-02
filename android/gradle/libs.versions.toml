@@ -13,6 +13,7 @@ ktlint = "14.2.0"
 detekt = "1.23.8"
 # Test-only. See network/build.gradle.kts for why this is here and why it is never shipped.
 conscrypt = "2.6.3"
+webrtcAndroid = "144.7559.14"
 
 [libraries]
 core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "coreKtx" }
@@ -32,6 +33,7 @@ kotlin-test = { group = "org.jetbrains.kotlin", name = "kotlin-test", version.re
 kotlin-test-junit5 = { group = "org.jetbrains.kotlin", name = "kotlin-test-junit5", version.ref = "kotlinTest" }
 kotlinx-coroutines-test = { group = "org.jetbrains.kotlinx", name = "kotlinx-coroutines-test", version.ref = "kotlinxCoroutines" }
 conscrypt-openjdk-uber = { group = "org.conscrypt", name = "conscrypt-openjdk-uber", version.ref = "conscrypt" }
+webrtc-android = { group = "io.github.webrtc-sdk", name = "android", version.ref = "webrtcAndroid" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }

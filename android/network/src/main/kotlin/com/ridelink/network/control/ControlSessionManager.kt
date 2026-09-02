@@ -3,10 +3,14 @@ package com.ridelink.network.control
 import com.ridelink.core.model.PeerId
 import com.ridelink.core.model.SessionId
 import com.ridelink.core.model.SpkiHash
+import com.ridelink.core.protocol.Envelope
+import com.ridelink.core.protocol.VoiceMessageTypes
 import com.ridelink.core.security.PinDecision
 import com.ridelink.core.security.TrustedPeer
 import com.ridelink.core.security.TrustedPeerStore
 import com.ridelink.core.sync.ClockSync
+import com.ridelink.network.voice.AuthenticatedFrameWriter
+import com.ridelink.network.voice.VoiceSignalRelay
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -245,6 +249,35 @@ class ControlSessionManager(
     private var localIdentity: LocalHandshakeIdentity? = null
 
     val reconnectCount: Int get() = reconnectController.reconnectCount
+
+    /**
+     * The `VOICE_*` half of the control plane (PROTOCOL §7): the signal sink, the outbound transport,
+     * and the refusal counters.
+     *
+     * Extracted rather than inlined here, because this class was already the largest in the codebase
+     * and `docs/STATUS.md` §4 problem 18 predicted it would get worse — detekt's `LargeClass` fired
+     * the first time Phase 2a tried to add the wiring inline, which is the tool doing its job.
+     *
+     * Its writer supplier yields non-null **only while the trust gate has passed**, so there is no
+     * send path for a voice frame on an unauthenticated connection. The inbound gate is separate and
+     * stronger: [handleFrame]'s pre-authentication allowlist drops every `VOICE_*` type before the
+     * dispatch below can reach the relay at all (PROTOCOL §7.1).
+     */
+    val voice: VoiceSignalRelay =
+        VoiceSignalRelay(
+            localPeerId = localPeerId,
+            monotonicNowUs = monotonicNowUs,
+            nextSeq = { seqCounter.nextSeq() },
+            activeSessionId = { activeSessionId },
+            authenticatedWriter = {
+                val socket = activeSocket
+                if (socket == null || !authenticated) {
+                    null
+                } else {
+                    AuthenticatedFrameWriter { envelope -> socket.writeFrame(envelope) }
+                }
+            },
+        )
 
     /**
      * Binds the OS-selected dynamic port and starts accepting inbound candidates. This instance
@@ -711,7 +744,13 @@ class ControlSessionManager(
         // peer is dropped the same way an unknown type is (PROTOCOL §2 rule 2) — a peer that has
         // completed TLS but not RideLink authentication must not be able to reach it, and
         // PING/PONG in particular can never mark authentication complete.
-        if (!authenticated && frame.envelope.type !in PRE_AUTHENTICATION_FRAME_TYPES) return
+        if (!authenticated && frame.envelope.type !in PRE_AUTHENTICATION_FRAME_TYPES) {
+            // Counted rather than merely dropped when it is a voice frame: PROTOCOL §7.1's whole
+            // point is that VOICE_* is inert before the trust gate, and "it never happened" and
+            // "it happened and was refused" are different facts on a diagnostics screen.
+            if (frame.envelope.type in VoiceMessageTypes.ALL) voice.countPreAuthenticationDrop()
+            return
+        }
         when (frame.envelope.type) {
             "PING" -> {
                 // A malformed/missing field is dropped, not fatal: the framing was intact (this
@@ -741,6 +780,9 @@ class ControlSessionManager(
                 _diagnostics.update { it.copy(rttMs = ((t4 - t1) - (t3 - t2)) / MICROS_PER_MS) }
             }
             "PAIR_REQUEST", "PAIR_CONFIRM", "PAIR_RESULT" -> handlePairingFrame(socket, frame.envelope.type, payload)
+            // Reachable only past the guard above, so only for an authenticated peer (PROTOCOL §7.1).
+            VoiceMessageTypes.OFFER, VoiceMessageTypes.ANSWER, VoiceMessageTypes.ICE, VoiceMessageTypes.STATE ->
+                voice.deliver(frame.envelope.type, payload)
             "BYE" -> endConnection(socket, LinkLossReason.BYE)
             "ERROR" -> {
                 if (requiredBooleanField(payload, "fatal") != true) return
@@ -935,10 +977,30 @@ class ControlSessionManager(
         _diagnostics.update { it.copy(reconnectCount = reconnectController.reconnectCount) }
     }
 
+    /**
+     * Writes an arbitrary already-built frame to the surviving connection, bypassing every
+     * higher-level guard.
+     *
+     * `internal`, so it is reachable from this module's own unit tests and from nowhere else. It
+     * exists for one job that cannot be done any other way: simulating a **hostile or buggy peer**
+     * on the *same real TLS connection*. `voice.send` deliberately refuses to send before
+     * the trust gate, which is correct — and which is exactly why proving the *receiver's* guard
+     * needs a path that does not consult it.
+     */
+    internal suspend fun writeRawFrame(envelope: Envelope): Boolean {
+        val socket = activeSocket ?: return false
+        return runCatching { socket.writeFrame(envelope) }.isSuccess
+    }
+
     suspend fun shutdown(reason: String = BYE_REASON_SHUTDOWN) {
         isShutDown = true
         pairing = null
         authenticated = false
+        // This manager is reused across sessions, so a sink still attached from the previous one must
+        // not survive into the next — the same hazard STATUS §2h fixed for control events, applied to
+        // the voice sink. The coordinator also detaches it, and doing both is deliberate: neither
+        // teardown path may depend on the other having run.
+        voice.reset()
         pendingActivation = null
         _pairingPrompt.value = null
         endedDeliberately = true
@@ -969,7 +1031,7 @@ class ControlSessionManager(
          * is allowed to say. Deliberately a closed list, so a Phase 2 message type is inert before
          * authentication unless it is added here on purpose.
          */
-        private val PRE_AUTHENTICATION_FRAME_TYPES =
+        internal val PRE_AUTHENTICATION_FRAME_TYPES =
             setOf("PING", "PONG", "PAIR_REQUEST", "PAIR_CONFIRM", "PAIR_RESULT", "BYE", "ERROR")
 
         private const val MILLIS_PER_SECOND = 1_000L

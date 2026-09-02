@@ -1,15 +1,35 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
     <!--
-        Phase 1a only requests INTERNET, for local-network discovery and the plain-TCP control
-        channel skeleton. RECORD_AUDIO, POST_NOTIFICATIONS, BLUETOOTH_CONNECT and the foreground
-        service permissions (ARCHITECTURE §6.4) are added when Ride Mode is actually implemented,
-        not before — CLAUDE.md's "smallest coherent increment" rule.
+        ARCHITECTURE §6.4's manifest surface. Phase 2a adds everything the intercom needs and
+        nothing it does not.
 
-        Whether NsdManager discovery additionally requires NEARBY_WIFI_DEVICES on API 33+ is an
-        open question that must be settled on a real device (ARCHITECTURE §6.4), not assumed here.
+        Whether NsdManager discovery additionally requires NEARBY_WIFI_DEVICES on API 33+ is still
+        an open question that must be settled on a real device (ARCHITECTURE §6.4), not assumed
+        here. Our reading is that it does not — that permission governs Wi-Fi scanning, Aware and
+        Direct, not DNS-SD.
     -->
+
+    <!-- Local TCP/TLS sockets and WebRTC. Cannot be scoped to the LAN; ARCHITECTURE §11 records
+         that no code path contacts a non-link-local address, and PROTOCOL §7.6 configures an empty
+         ICE server list so there is no STUN or TURN egress either. -->
     <uses-permission android:name="android.permission.INTERNET" />
+
+    <!-- Intercom capture. Runtime-requested on an explicit user action, never at launch. -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+
+    <!-- The foreground-service notification, which is also the lock-screen control surface. -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+    <!-- Enumerate and name the helmet unit for setCommunicationDevice() and the readiness UI. -->
+    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
+
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
+    <!-- Declared now because one service carries both types for a ride (ARCHITECTURE §6.4).
+         Phase 2a does not request mediaPlayback at runtime: there is no player until Phase 5, and
+         requesting a type the app does not use is how an app gets killed rather than trusted. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
 
     <application
         android:name=".RideLinkApplication"
@@ -28,5 +48,12 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!-- One service, both types declared; the *runtime* start specifies only the types this
+             ride actually uses (ARCHITECTURE §6.4). -->
+        <service
+            android:name=".service.RideForegroundService"
+            android:exported="false"
+            android:foregroundServiceType="microphone|mediaPlayback" />
     </application>
 </manifest>

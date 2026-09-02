@@ -42,6 +42,19 @@ struct MainScreen: View {
                     PairingCard(prompt: prompt) { coordinator.confirmPairing(accepted: $0) }
                 }
 
+                // PROTOCOL §7.1 in the UI: voice controls exist only once the trust gate has passed.
+                // A disabled button would still be a button; an absent card cannot be pressed.
+                if coordinator.state.status == .connected || coordinator.state.status == .rideActive {
+                    VoiceCard(
+                        voice: coordinator.voiceDiagnostics,
+                        // Routed through the coordinator, which owns the controller's lifetime — the
+                        // view never touches `VoiceController` directly (CLAUDE.md rule 8).
+                        onStartVoice: { coordinator.startVoice() },
+                        onEndVoice: { coordinator.endVoice() },
+                        onToggleMute: { coordinator.setMicrophoneMuted(!coordinator.voiceDiagnostics.micMuted) }
+                    )
+                }
+
                 DiagnosticsCard(
                     diagnostics: coordinator.controlDiagnostics,
                     discoveredPeerCount: coordinator.discoveredPeers.count,

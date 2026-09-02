@@ -204,6 +204,49 @@ public enum ControlMessages {
         ])
     }
 
+    /// PROTOCOL §7.4 — the four `VOICE_*` frames, encoded from one already-validated `VoiceSignal`.
+    ///
+    /// There is deliberately no per-message builder here. The bounds and the field shapes live in
+    /// `VoiceSignalCodec` (in `RideLinkCore`, shared with Android and pinned by
+    /// `protocol/vectors/voice-signal/`), so encoding is a mechanical transcription of a value that has
+    /// already been checked. A second hand-written builder per message type is a second place for the
+    /// two platforms to disagree.
+    public static func voiceSignal(
+        localPeerId: PeerId,
+        sessionId: SessionId,
+        seq: Int64,
+        sentAtMonoUs: Int64,
+        signal: VoiceSignal
+    ) -> Envelope {
+        var payload: JSONObject = [:]
+        switch signal {
+        case .offer(let id, let sdp), .answer(let id, let sdp):
+            payload[VoiceSignalCodec.fieldVoiceSessionId] = .string(id.value)
+            payload[VoiceSignalCodec.fieldSdp] = .string(sdp)
+        case .iceCandidate(let id, let candidate, let mid, let index):
+            payload[VoiceSignalCodec.fieldVoiceSessionId] = .string(id.value)
+            payload[VoiceSignalCodec.fieldCandidate] = .string(candidate)
+            // Explicit JSON null rather than an absent key: PROTOCOL §7.4 makes `sdp_mid` nullable, and
+            // a null is the sender saying "identified by index alone" rather than the sender having
+            // forgotten the field.
+            payload[VoiceSignalCodec.fieldSdpMid] = mid.map { JSONValue.string($0) } ?? .null
+            payload[VoiceSignalCodec.fieldSdpMlineIndex] = .number(Double(index))
+        case .state(let id, let state, let micMuted, let mode):
+            payload[VoiceSignalCodec.fieldVoiceSessionId] = id.map { JSONValue.string($0.value) } ?? .null
+            payload[VoiceSignalCodec.fieldState] = .string(state.wire)
+            payload[VoiceSignalCodec.fieldMicMuted] = .bool(micMuted)
+            payload[VoiceSignalCodec.fieldMode] = .string(mode.wire)
+        }
+        return envelope(
+            localPeerId: localPeerId,
+            type: signal.messageType,
+            sessionId: sessionId,
+            seq: seq,
+            sentAtMonoUs: sentAtMonoUs,
+            payload: payload
+        )
+    }
+
     private static func envelope(
         localPeerId: PeerId,
         type: String,

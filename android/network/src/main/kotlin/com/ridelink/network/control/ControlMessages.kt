@@ -6,6 +6,10 @@ import com.ridelink.core.model.SessionId
 import com.ridelink.core.model.SpkiHash
 import com.ridelink.core.protocol.Envelope
 import com.ridelink.core.protocol.ProtocolVersion
+import com.ridelink.core.protocol.VoiceMessageTypes
+import com.ridelink.core.protocol.VoiceSignal
+import com.ridelink.core.protocol.VoiceSignalCodec
+import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
@@ -186,6 +190,69 @@ object ControlMessages {
                     put("identity_spki_sha256", identitySpkiSha256.value)
                 },
         )
+
+    /**
+     * PROTOCOL §7.4 — the four `VOICE_*` frames, encoded from one already-validated [VoiceSignal].
+     *
+     * There is deliberately no per-message builder here. The bounds and the field shapes live in
+     * [VoiceSignalCodec] (in `core`, shared with iOS and pinned by `protocol/vectors/voice-signal/`),
+     * so encoding is a mechanical transcription of a value that has already been checked. A second
+     * hand-written builder per message type is a second place for the two platforms to disagree.
+     */
+    fun voiceSignal(
+        localPeerId: PeerId,
+        sessionId: SessionId,
+        seq: Long,
+        sentAtMonoUs: Long,
+        signal: VoiceSignal,
+    ): Envelope {
+        val type =
+            when (signal) {
+                is VoiceSignal.Offer -> VoiceMessageTypes.OFFER
+                is VoiceSignal.Answer -> VoiceMessageTypes.ANSWER
+                is VoiceSignal.IceCandidate -> VoiceMessageTypes.ICE
+                is VoiceSignal.State -> VoiceMessageTypes.STATE
+            }
+        val payload =
+            buildJsonObject {
+                when (signal) {
+                    is VoiceSignal.Offer -> {
+                        put(VoiceSignalCodec.FIELD_VOICE_SESSION_ID, signal.voiceSessionId.value)
+                        put(VoiceSignalCodec.FIELD_SDP, signal.sdp)
+                    }
+                    is VoiceSignal.Answer -> {
+                        put(VoiceSignalCodec.FIELD_VOICE_SESSION_ID, signal.voiceSessionId.value)
+                        put(VoiceSignalCodec.FIELD_SDP, signal.sdp)
+                    }
+                    is VoiceSignal.IceCandidate -> {
+                        put(VoiceSignalCodec.FIELD_VOICE_SESSION_ID, signal.voiceSessionId.value)
+                        put(VoiceSignalCodec.FIELD_CANDIDATE, signal.candidate)
+                        // Explicit JSON null rather than an absent key: PROTOCOL §7.4 makes
+                        // `sdp_mid` nullable, and a null is the sender saying "identified by index
+                        // alone" rather than the sender having forgotten the field.
+                        val mid = signal.sdpMid
+                        if (mid == null) {
+                            put(VoiceSignalCodec.FIELD_SDP_MID, JsonNull)
+                        } else {
+                            put(VoiceSignalCodec.FIELD_SDP_MID, mid)
+                        }
+                        put(VoiceSignalCodec.FIELD_SDP_MLINE_INDEX, signal.sdpMlineIndex)
+                    }
+                    is VoiceSignal.State -> {
+                        val id = signal.voiceSessionId
+                        if (id == null) {
+                            put(VoiceSignalCodec.FIELD_VOICE_SESSION_ID, JsonNull)
+                        } else {
+                            put(VoiceSignalCodec.FIELD_VOICE_SESSION_ID, id.value)
+                        }
+                        put(VoiceSignalCodec.FIELD_STATE, signal.state.wire)
+                        put(VoiceSignalCodec.FIELD_MIC_MUTED, signal.micMuted)
+                        put(VoiceSignalCodec.FIELD_MODE, signal.mode.wire)
+                    }
+                }
+            }
+        return envelope(localPeerId, type, sessionId, seq, sentAtMonoUs, payload)
+    }
 
     fun ping(
         localPeerId: PeerId,

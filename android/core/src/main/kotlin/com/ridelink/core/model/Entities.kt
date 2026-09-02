@@ -74,18 +74,15 @@ data class SessionMetrics(
     val reconnectCount: Int,
 )
 
-enum class EndpointClass { BLUETOOTH, WIRED, BUILTIN_SPEAKER, BUILTIN_EARPIECE, OTHER, UNKNOWN }
-
-enum class AudioProfile { MEDIA_STEREO, DUPLEX_NARROWBAND, DUPLEX_WIDEBAND, DUPLEX_WIDE_STEREO, BUILTIN, NONE, UNKNOWN }
-
-enum class ProfileCoupling { INDEPENDENT, INPUT_FORCES_OUTPUT, UNKNOWN }
-
-/** REQUIREMENTS §16 AudioRoute, refined by ADR-016 into declared capability + effective runtime state. */
-data class AudioRoute(
-    val endpointClass: EndpointClass,
-    val effectiveOutputProfile: AudioProfile,
-    val effectiveInputProfile: AudioProfile,
-    val effectiveOutputSampleRateHz: Int?,
-    val effectiveInputSampleRateHz: Int?,
-    val profileCoupling: ProfileCoupling,
-)
+// REQUIREMENTS §16's `AudioRoute` entity, and the `EndpointClass` / `AudioProfile` /
+// `ProfileCoupling` enums it was made of, used to be declared here as unimplemented Phase 1a shells.
+// Phase 2a implements them, and they moved to `core.audiopolicy` — which is where ADR-016 says the
+// audio vocabulary lives, and the one place platform profile names are translated into it.
+//
+// The implemented form is `core.audiopolicy.AudioRouteSnapshot`. It is a superset: ADR-016's runtime
+// half needs `route_state`, `confidence`, an interruption flag and the derived `media_quality`, none
+// of which the shell had. Keeping both would have been two types for one concept, differing only in
+// which one a given call site happened to reach for — exactly the drift the shared vectors exist to
+// prevent, in a place no vector could see.
+//
+// See ADR-016 and `docs/STATUS.md` §2i.

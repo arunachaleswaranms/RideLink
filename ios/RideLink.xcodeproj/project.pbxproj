@@ -10,6 +10,7 @@
 		3AB0CC5ABC0C4289B39D0CF2 /* RideLinkApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 64AC9619678E3FA914955CE0 /* RideLinkApp.swift */; };
 		DC7409DFAD200B422AAB1CE6 /* SessionCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6A7B3DB9D86092FBE9BE657E /* SessionCoordinator.swift */; };
 		463C73AE6E0372402BEDCCA8 /* MainScreen.swift in Sources */ = {isa = PBXBuildFile; fileRef = F57B63A6163CD2391653DC32 /* MainScreen.swift */; };
+		A1B2C3D4E5F60718293A4B5C /* VoiceCard.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0F1E2D3C4B5A69788796A5B4 /* VoiceCard.swift */; };
 		DAB0391CE2C018470044B457 /* SecureTransportPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = EB36F50DDB861E6A58E2B0F2 /* SecureTransportPolicy.swift */; };
 /* End PBXBuildFile section */
 
@@ -18,6 +19,7 @@
 		64AC9619678E3FA914955CE0 /* RideLinkApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RideLinkApp.swift; sourceTree = "<group>"; };
 		6A7B3DB9D86092FBE9BE657E /* SessionCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionCoordinator.swift; sourceTree = "<group>"; };
 		F57B63A6163CD2391653DC32 /* MainScreen.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MainScreen.swift; sourceTree = "<group>"; };
+		0F1E2D3C4B5A69788796A5B4 /* VoiceCard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoiceCard.swift; sourceTree = "<group>"; };
 		EB36F50DDB861E6A58E2B0F2 /* SecureTransportPolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SecureTransportPolicy.swift; sourceTree = "<group>"; };
 		D98B8F9B15BF0E88C459151B /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 /* End PBXFileReference section */
@@ -47,6 +49,7 @@
 				64AC9619678E3FA914955CE0 /* RideLinkApp.swift */,
 				6A7B3DB9D86092FBE9BE657E /* SessionCoordinator.swift */,
 				F57B63A6163CD2391653DC32 /* MainScreen.swift */,
+				0F1E2D3C4B5A69788796A5B4 /* VoiceCard.swift */,
 				EB36F50DDB861E6A58E2B0F2 /* SecureTransportPolicy.swift */,
 				D98B8F9B15BF0E88C459151B /* Info.plist */,
 			);
@@ -140,6 +143,7 @@
 				3AB0CC5ABC0C4289B39D0CF2 /* RideLinkApp.swift in Sources */,
 				DC7409DFAD200B422AAB1CE6 /* SessionCoordinator.swift in Sources */,
 				463C73AE6E0372402BEDCCA8 /* MainScreen.swift in Sources */,
+				A1B2C3D4E5F60718293A4B5C /* VoiceCard.swift in Sources */,
 				DAB0391CE2C018470044B457 /* SecureTransportPolicy.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;

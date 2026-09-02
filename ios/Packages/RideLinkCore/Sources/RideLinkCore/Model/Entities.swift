@@ -103,37 +103,15 @@ public struct SessionMetrics: Sendable, Equatable {
     public let reconnectCount: Int
 }
 
-public enum EndpointClass: Sendable, Equatable {
-    case bluetooth
-    case wired
-    case builtinSpeaker
-    case builtinEarpiece
-    case other
-    case unknown
-}
-
-public enum AudioProfile: Sendable, Equatable {
-    case mediaStereo
-    case duplexNarrowband
-    case duplexWideband
-    case duplexWideStereo
-    case builtin
-    case none
-    case unknown
-}
-
-public enum ProfileCoupling: Sendable, Equatable {
-    case independent
-    case inputForcesOutput
-    case unknown
-}
-
-/// REQUIREMENTS §16 AudioRoute, refined by ADR-016 into declared capability + effective runtime state.
-public struct AudioRoute: Sendable, Equatable {
-    public let endpointClass: EndpointClass
-    public let effectiveOutputProfile: AudioProfile
-    public let effectiveInputProfile: AudioProfile
-    public let effectiveOutputSampleRateHz: Int?
-    public let effectiveInputSampleRateHz: Int?
-    public let profileCoupling: ProfileCoupling
-}
+// REQUIREMENTS §16's `AudioRoute` entity, and the `EndpointClass` / `AudioProfile` /
+// `ProfileCoupling` enums it was made of, used to be declared here as unimplemented Phase 1a shells.
+// Phase 2a implements them, and they moved to `RideLinkCore.AudioPolicy` — which is where ADR-016
+// says the audio vocabulary lives, and the one place platform profile names are translated into it.
+//
+// The implemented form is `AudioRouteSnapshot`. It is a superset: ADR-016's runtime half needs
+// `route_state`, `confidence`, an interruption flag and the derived `media_quality`, none of which
+// the shell had. Keeping both would have been two types for one concept, differing only in which one
+// a given call site happened to reach for — exactly the drift the shared vectors exist to prevent,
+// in a place no vector could see.
+//
+// See ADR-016 and `docs/STATUS.md` §2i.

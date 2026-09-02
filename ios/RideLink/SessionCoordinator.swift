@@ -38,6 +38,9 @@ public final class SessionCoordinator {
     /// This device's own `identity_spki_sha256`, redacted to 6 hex for display (ARCHITECTURE §11).
     public let localIdentityPrefix: String
 
+    /// FR-023 voice diagnostics. Empty until an authenticated session exists (PROTOCOL §7.1).
+    public private(set) var voiceDiagnostics = VoiceDiagnostics()
+
     private let discovery = BonjourDiscovery()
     private let trustedPeers: any TrustedPeerStore
     private let controlSessionManager: ControlSessionManager
@@ -60,6 +63,15 @@ public final class SessionCoordinator {
     private var controlEventTask: Task<Void, Never>?
     private var pairingPromptChannel: OrderedEventChannel<PairingPrompt?>?
     private var pairingPromptTask: Task<Void, Never>?
+
+    /// Phase 2a. Built per authenticated session by `attachVoice` and torn down with it, so there is
+    /// exactly one per two-person session and none at all before the trust gate has passed
+    /// (PROTOCOL §7.1).
+    ///
+    /// This coordinator contains no voice logic: it starts and stops the controller, tells it when the
+    /// control link goes, and exposes its diagnostics. Every voice decision is in the pure
+    /// `VoiceNegotiation` table, for the reason STATUS §4 problem 20 gives.
+    private var voice: VoiceController?
 
     /// Assembles the security wiring, and nothing else does: the Keychain identity (ADR-017), the
     /// one production `ControlChannel` — TLS 1.3 — and the trusted-peer store the SPKI pin is
@@ -193,6 +205,7 @@ public final class SessionCoordinator {
     }
 
     private func teardownSession() {
+        releaseVoice()
         sessionTask?.cancel()
         sessionTask = nil
         // Cancel the consumer, then finish the channel: cancellation is the cooperative signal,
@@ -245,6 +258,78 @@ public final class SessionCoordinator {
         Task { await manager.connectTo(host: peer.host, port: port, local: identity) }
     }
 
+    // MARK: - Phase 2a voice (PROTOCOL §7)
+
+    /// The user pressed Start Voice. A no-op when there is no authenticated session, because the
+    /// controller only exists once the trust gate has passed — there is no state to consult, which is
+    /// the point: "is voice allowed?" is answered by whether the object exists.
+    public func startVoice() {
+        guard let voice else { return }
+        Task { await voice.start() }
+    }
+
+    public func endVoice() {
+        guard let voice else { return }
+        Task { await voice.stop() }
+    }
+
+    public func setMicrophoneMuted(_ muted: Bool) {
+        guard let voice else { return }
+        Task { await voice.setMicrophoneMuted(muted) }
+    }
+
+    /// Creates the voice subsystem for a session that has **just** passed the trust gate, and only then.
+    /// Idempotent across a reconnect: `.connected` fires again after `.reconnectSucceeded`, and the
+    /// existing controller is the right one to keep — it still holds the open capture device for this
+    /// ride segment, which a fresh one would have to reopen.
+    private func attachVoice(isLocalLeader: Bool) {
+        if let voice {
+            // A reconnect. If the user had consented to voice, rebuild the media transport as a fresh
+            // negotiation (PROTOCOL §7.8); `start()` is idempotent when voice is already live.
+            if voiceDiagnostics.localAudioOpen {
+                Task { await voice.start() }
+            }
+            return
+        }
+        let manager = controlSessionManager
+        Task { @MainActor [weak self] in
+            // The relay is actor-isolated on the manager, so it is awaited rather than read: it captures
+            // the manager's `activeSocket`/`authenticated`, which is what makes its writer non-nil only
+            // past the trust gate (PROTOCOL §7.1).
+            let relay = await manager.voiceRelay()
+            let controller = VoiceController(
+                engine: WebRtcVoiceEngine(),
+                audioSession: IosVoiceAudioSession(),
+                transport: relay,
+                isLocalLeader: isLocalLeader,
+                // One audio track per peer (ADR-003). A fixed, non-identifying id: a track id crosses
+                // the wire inside the SDP, so it must not carry a device name.
+                localTrackId: "ridelink-voice"
+            )
+            guard let self else { return }
+            self.voice = controller
+            await controller.attach()
+            await controller.setOnDiagnosticsChanged { diagnostics in
+                Task { @MainActor in self.voiceDiagnostics = diagnostics }
+            }
+            await relay.setSink(controller)
+            self.logger.info("SessionCoordinator", "voice subsystem attached (offerer=\(isLocalLeader))")
+        }
+    }
+
+    /// ARCHITECTURE §3 rule 3: only a deliberate end releases the audio session. Called on `BYE` and
+    /// from the `ENDING` effect, never on a link blip.
+    private func releaseVoice() {
+        guard let controller = voice else { return }
+        voice = nil
+        voiceDiagnostics = VoiceDiagnostics()
+        let manager = controlSessionManager
+        Task {
+            await manager.voiceRelay().setSink(nil)
+            await controller.shutdown()
+        }
+    }
+
     /// Side effects first, then the one transition `SessionGate` says this event implies.
     private func handleControlEvent(_ event: ControlEvent) {
         applySideEffects(event)
@@ -276,7 +361,16 @@ public final class SessionCoordinator {
             // only the user can tell those apart.
             securityAlert = code
             logger.warn("SessionCoordinator", "handshake refused: \(code)")
-        case .connected, .linkLost, .duplicateConnectionClosed, .reconnectBudgetExhausted:
+        case .connected(_, _, let isLocalLeader):
+            attachVoice(isLocalLeader: isLocalLeader)
+        case .linkLost(let reason):
+            // PROTOCOL §7.8: media goes, the capture device stays (ARCHITECTURE §6.3/§6.4), and nothing
+            // is retried here — §10's control ladder is the app's only reconnect loop.
+            if let voice {
+                Task { await voice.onControlLinkLost() }
+            }
+            if reason == .bye { releaseVoice() }
+        case .duplicateConnectionClosed, .reconnectBudgetExhausted:
             break
         }
     }
@@ -309,7 +403,8 @@ public final class SessionCoordinator {
         case .logTransition(let from, let to, let trigger):
             logger.info("SessionCoordinator", "\(from.status) -> \(to.status) (\(trigger))")
         case .releaseAudioAndStopForegroundService:
-            logger.info("SessionCoordinator", "release audio session (not yet implemented, Phase 1a)")
+            logger.info("SessionCoordinator", "release audio session")
+            releaseVoice()
             teardownSession()
         }
     }

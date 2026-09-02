@@ -19,6 +19,8 @@ import com.ridelink.network.control.PairingPrompt
 import com.ridelink.network.control.SessionGate
 import com.ridelink.network.discovery.DiscoveryEvent
 import com.ridelink.network.discovery.NsdDiscoveryController
+import com.ridelink.network.voice.VoiceController
+import com.ridelink.network.voice.VoiceDiagnostics
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -52,6 +54,16 @@ class SessionCoordinator(
     monotonicNowUs: () -> Long,
     private val trustedPeers: TrustedPeerStore,
     private val nowEpochSeconds: () -> Long,
+    /**
+     * Phase 2a. Built per authenticated session by [buildVoiceController] and torn down with it, so
+     * there is exactly one per two-person session and none at all before the trust gate has passed
+     * (PROTOCOL §7.1).
+     *
+     * The coordinator does **not** contain any voice logic: it starts and stops the controller, tells
+     * it when the control link goes, and exposes its diagnostics. Every voice decision is in the pure
+     * `VoiceNegotiation` table, for the reason STATUS §4 problem 20 gives.
+     */
+    private val buildVoiceController: (isLocalLeader: Boolean) -> VoiceController,
 ) {
     private val logger = StructuredLogger(logSink, monotonicNowUs)
 
@@ -95,6 +107,32 @@ class SessionCoordinator(
         _securityAlert.value = null
     }
 
+    private val _voiceDiagnostics = MutableStateFlow(VoiceDiagnostics())
+
+    /** FR-023 voice diagnostics. Empty until an authenticated session exists. */
+    val voiceDiagnostics: StateFlow<VoiceDiagnostics> = _voiceDiagnostics.asStateFlow()
+
+    @Volatile
+    private var voice: VoiceController? = null
+    private var voiceDiagnosticsJob: Job? = null
+
+    /**
+     * Phase 2a's user actions. Each is a no-op when there is no authenticated session, because the
+     * controller only exists once the trust gate has passed — there is no state to consult, which is
+     * the point: "is voice allowed?" is answered by whether the object exists.
+     */
+    fun startVoice() {
+        voice?.start()
+    }
+
+    fun endVoice() {
+        voice?.stop()
+    }
+
+    fun setMicrophoneMuted(muted: Boolean) {
+        voice?.setMicrophoneMuted(muted)
+    }
+
     private var sessionJob: Job? = null
     private var connectAttempted = false
     private var lastPeerHost: String? = null
@@ -133,6 +171,7 @@ class SessionCoordinator(
     }
 
     private fun teardownSession() {
+        releaseVoice()
         sessionJob?.cancel()
         sessionJob = null
         scope.launch { controlSessionManager.shutdown() }
@@ -213,12 +252,52 @@ class SessionCoordinator(
                 _securityAlert.value = event.code
                 logger.warn("SessionCoordinator", "handshake refused: ${event.code}")
             }
-            is ControlEvent.Connected,
-            is ControlEvent.LinkLost,
+            is ControlEvent.Connected -> attachVoice(event.isLocalLeader)
+            is ControlEvent.LinkLost -> {
+                // PROTOCOL §7.8: media goes, the capture device stays (ARCHITECTURE §6.3/§6.4), and
+                // nothing is retried here — §10's control ladder is the app's only reconnect loop.
+                voice?.onControlLinkLost()
+                if (event.reason == ControlLinkLossReason.BYE) releaseVoice()
+            }
             ControlEvent.DuplicateConnectionClosed,
             ControlEvent.ReconnectBudgetExhausted,
             -> Unit
         }
+    }
+
+    /**
+     * Creates the voice subsystem for a session that has **just** passed the trust gate, and only
+     * then. Idempotent across a reconnect: `Connected` fires again after
+     * `ReconnectSucceeded`, and the existing controller is the right one to keep — it still holds the
+     * open capture device for this ride segment, which a fresh one would have to reopen.
+     */
+    private fun attachVoice(isLocalLeader: Boolean) {
+        if (voice != null) {
+            // A reconnect. If the user had consented to voice, rebuild the media transport as a fresh
+            // negotiation (PROTOCOL §7.8); `start()` is idempotent when voice is already live.
+            if (_voiceDiagnostics.value.localAudioOpen) voice?.start()
+            return
+        }
+        val controller = buildVoiceController(isLocalLeader)
+        voice = controller
+        controlSessionManager.voice.sink = controller
+        voiceDiagnosticsJob =
+            scope.launch { controller.diagnostics.collect { _voiceDiagnostics.value = it } }
+        logger.info("SessionCoordinator", "voice subsystem attached (offerer=$isLocalLeader)")
+    }
+
+    /**
+     * ARCHITECTURE §3 rule 3: only a deliberate end releases the audio session. Called on `BYE` and
+     * from the `ENDING` effect, never on a link blip.
+     */
+    private fun releaseVoice() {
+        val controller = voice ?: return
+        voice = null
+        controlSessionManager.voice.sink = null
+        voiceDiagnosticsJob?.cancel()
+        voiceDiagnosticsJob = null
+        scope.launch { controller.shutdown() }
+        _voiceDiagnostics.value = VoiceDiagnostics()
     }
 
     private fun beginReconnectIfPossible() {
@@ -253,7 +332,8 @@ class SessionCoordinator(
             is Effect.LogTransition ->
                 logger.info("SessionCoordinator", "${effect.from.status} -> ${effect.to.status} (${effect.trigger})")
             is Effect.ReleaseAudioAndStopForegroundService -> {
-                logger.info("SessionCoordinator", "release audio + stop foreground service (not yet implemented, Phase 1a)")
+                logger.info("SessionCoordinator", "release audio + stop foreground service")
+                releaseVoice()
                 teardownSession()
             }
         }

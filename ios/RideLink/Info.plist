@@ -28,6 +28,12 @@
 	</array>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>RideLink discovers your paired phone over the local Wi-Fi network to connect the intercom and shared music session.</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>RideLink uses the microphone for the rider-to-pillion intercom. Voice is sent only to your paired phone over the local network, is never recorded, and is never written to disk.</string>
+	<key>UIBackgroundModes</key>
+	<array>
+		<string>audio</string>
+	</array>
 	<key>NSBonjourServices</key>
 	<array>
 		<string>_ridelink._tcp</string>

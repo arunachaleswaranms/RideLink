@@ -165,6 +165,47 @@ public actor ControlSessionManager {
         let isLocalLeader: Bool
     }
 
+    /// The `VOICE_*` half of the control plane (PROTOCOL §7): the signal sink, the outbound transport,
+    /// and the refusal counters.
+    ///
+    /// Extracted rather than inlined here, for the reason `docs/STATUS.md` §4 problem 18 gives — and to
+    /// keep the two platforms structurally the same, since the Android side had to extract it when
+    /// detekt's `LargeClass` fired.
+    ///
+    /// Its writer supplier yields non-nil **only while the trust gate has passed**, so there is no send
+    /// path for a voice frame on an unauthenticated connection. The inbound gate is separate and
+    /// stronger: `handleFrame`'s pre-authentication allowlist drops every `VOICE_*` type before the
+    /// dispatch can reach the relay at all.
+    /// Async accessor, because the relay is actor-isolated: it captures `self` to reach `activeSocket`
+    /// and `authenticated`, which is the whole point — the writer it hands out is non-nil only while the
+    /// trust gate has passed.
+    public func voiceRelay() -> VoiceSignalRelay { voice }
+
+    private lazy var voice: VoiceSignalRelay = VoiceSignalRelay(
+        localPeerId: localPeerId,
+        monotonicNowUs: monotonicNowUs,
+        nextSeq: { [seqCounter] in seqCounter.nextSeq() },
+        activeSessionId: { [weak self] in await self?.currentSessionId() ?? SessionId("n/a") },
+        authenticatedWriter: { [weak self] in await self?.authenticatedWriter() }
+    )
+
+    private func currentSessionId() -> SessionId { activeSessionId }
+
+    /// Non-nil only while the surviving connection has passed the trust gate. Returning a closure rather
+    /// than the connection keeps `ControlConnection` — which is internal to this module — from leaking
+    /// into the relay's signature, and keeps the relay unable to hold a socket across a teardown.
+    private func authenticatedWriter() -> AuthenticatedFrameWriter? {
+        guard let socket = activeSocket, authenticated else { return nil }
+        return { envelope in
+            do {
+                try await socket.writeFrame(envelope)
+                return true
+            } catch {
+                return false
+            }
+        }
+    }
+
     public private(set) var diagnostics = ControlDiagnostics()
 
     /// Non-nil exactly while a first-meeting pairing is awaiting the two users. Cleared as soon as
@@ -623,7 +664,15 @@ public actor ControlSessionManager {
         // dropped the same way an unknown type is (PROTOCOL §2 rule 2) — a peer that has completed
         // TLS but not RideLink authentication must not be able to reach it, and PING/PONG in
         // particular can never mark authentication complete.
-        guard authenticated || Self.preAuthenticationFrameTypes.contains(envelope.type) else { return }
+        guard authenticated || Self.preAuthenticationFrameTypes.contains(envelope.type) else {
+            // Counted rather than merely dropped when it is a voice frame: PROTOCOL §7.1's whole point
+            // is that VOICE_* is inert before the trust gate, and "it never happened" and "it happened
+            // and was refused" are different facts on a diagnostics screen.
+            if VoiceMessageTypes.all.contains(envelope.type) {
+                await voice.countPreAuthenticationDrop()
+            }
+            return
+        }
         switch envelope.type {
         case "PING":
             guard let t1 = payload["t1_mono_us"]?.int64Value else { return }
@@ -651,6 +700,9 @@ public actor ControlSessionManager {
             updateDiagnostics { $0.rttMs = Double((t4 - t1) - (t3 - t2)) / 1000.0 }
         case "PAIR_REQUEST", "PAIR_CONFIRM", "PAIR_RESULT":
             await handlePairingFrame(socket: socket, type: envelope.type, payload: envelope.payload)
+        // Reachable only past the guard above, so only for an authenticated peer (PROTOCOL §7.1).
+        case VoiceMessageTypes.offer, VoiceMessageTypes.answer, VoiceMessageTypes.ice, VoiceMessageTypes.state:
+            await voice.deliver(type: envelope.type, payload: envelope.payload)
         case "BYE":
             await endConnection(socket, reason: .bye)
         case "ERROR":
@@ -850,10 +902,37 @@ public actor ControlSessionManager {
 
     private func hasActiveSocket() -> Bool { activeSocket != nil }
 
+    /// Writes an arbitrary already-built frame to the surviving connection, bypassing every
+    /// higher-level guard.
+    ///
+    /// `internal`, so it is reachable from this module's own tests and from nowhere else. It exists for
+    /// one job that cannot be done any other way: simulating a **hostile or buggy peer** on the *same
+    /// real TLS connection*. `voice.send` deliberately refuses to send before the trust gate, which is
+    /// correct — and which is exactly why proving the *receiver's* guard needs a path that does not
+    /// consult it.
+    @discardableResult
+    func writeRawFrame(_ envelope: Envelope) async -> Bool {
+        guard let socket = activeSocket else { return false }
+        do {
+            try await socket.writeFrame(envelope)
+            return true
+        } catch {
+            return false
+        }
+    }
+
+    /// Exposed for the frame-allowlist property test (PROTOCOL §7.1). `internal`, and read-only.
+    static var preAuthenticationFrameTypesForTest: Set<String> { preAuthenticationFrameTypes }
+
     public func shutdown(reason: String = byeReasonShutdown) async {
         isShutDown = true
         pairing = nil
         authenticated = false
+        // This manager is reused across sessions, so a sink still attached from the previous one must
+        // not survive into the next — the same hazard STATUS §2h fixed for control events, applied to
+        // the voice sink. The coordinator also detaches it, and doing both is deliberate: neither
+        // teardown path may depend on the other having run.
+        await voice.reset()
         pendingActivation = nil
         updatePairingPrompt(nil)
         endedDeliberately = true

@@ -1,9 +1,22 @@
 # RideLink — Status
 
-**Updated:** 28 August 2026 (Phase 1b — iOS control-event ordering fix, fifth session)
-**Current milestone:** M1 (Private voice link) — not started
-**Current phase:** Phase 1b — secure control channel.
-**Phase 1b status: IMPLEMENTATION COMPLETE — REAL-DEVICE GATE PENDING.**
+**Updated:** 28 August 2026 (Phase 2a — WebRTC voice transport foundation, sixth session)
+**Current milestone:** M1 (Private voice link) — in progress
+**Current phase:** Phase 2a — voice transport foundation.
+**Phase 2a status: IMPLEMENTATION COMPLETE — REAL-DEVICE AUDIO GATE PENDING.**
+**Phase 1b status: IMPLEMENTATION COMPLETE — REAL-DEVICE GATE PENDING (unchanged).**
+
+> **What is genuinely new evidence this session, and what is not.** Real WebRTC media *was*
+> established and measured on this machine: two real `WebRtcVoiceEngine`s, host candidates only,
+> DTLS `connected`, `SRTP_AES128_CM_HMAC_SHA1_80`, `audio/opus` at 48 kHz, deterministic over 5 runs.
+> That is possible because `stasel/WebRTC`'s XCFramework carries a **macOS** slice, so `swift test`
+> links the same binary an iPhone build would ([ADR-020](DECISIONS/ADR-020-webrtc-voice-foundation.md),
+> [evidence](test-results/phase2a-webrtc-spike-20260828.md)).
+>
+> **No audio was captured or played anywhere, on either platform.** No microphone, no speaker, no
+> Bluetooth, no phone. The **Android** media path is untested even locally — `PeerConnectionFactory.initialize`
+> needs an Android `Context`. `AVAudioSession` and `AudioManager` have no test coverage at all; only
+> their pure route mappers do. See §4 and §7, and TEST_PLAN §3.1a for the line item by item.
 
 > **Fixed this session (§2g), and it was a real security bug, not a tidy-up.** An unknown peer
 > could reach `CONNECTED` **before** the six-digit SAS was displayed, let alone confirmed:
@@ -41,12 +54,13 @@ fails if a raw socket reappears there.
 open for Phase 1a and this phase does not close it: this machine has no Android device or
 emulator, and only the iOS *simulator*. Everything below is a laptop measurement. See §4 and §7.
 
-**Repository state:** Android — 253 unit tests across five modules, `test ktlintCheck detekt lint
-assembleDebug assembleRelease` all green. iOS — `RideLinkCore` 27 tests, `RideLinkPlatform` 99
-tests (§2h), `RideLink.xcodeproj` builds in **both** Debug and Release for the simulator, zero warnings.
-Shared vectors now include `protocol/vectors/identity/` (52 assertions on Android, 10 test methods
-on iOS, same file) and `protocol/vectors/session-gate/` (the complete 120-row trust-gate table, run
-by both platforms).
+**Repository state:** Android — **296** unit tests across five modules (was 253), `test ktlintCheck
+detekt lint assembleDebug assembleRelease` all green. iOS — `RideLinkCore` **39** tests (was 27),
+`RideLinkPlatform` **134** tests (was 99), `RideLink.xcodeproj` builds in **both** Debug and Release
+for the simulator with zero warnings. Shared vectors: `protocol/vectors/identity/`,
+`protocol/vectors/session-gate/` (120 rows), and new this session `protocol/vectors/voice-signal/`
+(70 rows) and `protocol/vectors/voice-fsm/` (52 rows) — every one run by **both** platforms from the
+same file.
 
 ---
 
@@ -60,7 +74,8 @@ by both platforms).
 | **ADR-015/ADR-010 leadership-independence correction** | ✅ **Complete this session** | See §2b |
 | **Phase 1a — control-plane skeleton** | ✅ **IMPLEMENTATION COMPLETE — REAL-DEVICE GATE PENDING** | Protocol vectors, Android + iOS discovery, plaintext control transport, clock sync, diagnostics UI, hardening pass (§2e). Real-device gate still open — see §7. Its plaintext transport has since been **deleted** (§2f) |
 | **Phase 1b — secure control channel** | ✅ **IMPLEMENTATION COMPLETE — REAL-DEVICE GATE PENDING** | Both ADR-007 A1 spikes closed with measurements; identity, TLS 1.3, pinning, SAS pairing, trust persistence and UI on both platforms (§2f). The trust-gate security bug found afterwards is fixed and vector-pinned (§2g, ADR-019) |
-| Phases 2–8 | ⬜ Not started | Despite the commit names "init phase 2a" and "phase 2a" (`d709c45`, `90cbe12`), **no Phase 2 code exists in this repository**. Those commits are Phase 1b work under a misleading name |
+| **Phase 2a — voice transport foundation** | ✅ **IMPLEMENTATION COMPLETE — REAL-DEVICE AUDIO GATE PENDING** | WebRTC pinned and reviewed on both platforms, PROTOCOL §7 specified in full, the negotiation table shared and vector-pinned, the pre-authentication `VOICE_*` refusal proven over real TLS on both platforms, and **real DTLS-SRTP/Opus media measured on this machine** (§2i, [ADR-020](DECISIONS/ADR-020-webrtc-voice-foundation.md)). No audio captured or played anywhere; the Android media path is untested even locally |
+| Phases 2b–8 | ⬜ Not started | The earlier commits named "init phase 2a" and "phase 2a" (`d709c45`, `90cbe12`) were Phase 1b work under a misleading name. Phase 2a proper is the sixth session, §2i |
 
 `protocol/schema/` and `protocol/vectors/` now exist (§2c). `android/` is a real five-module
 Gradle project that builds. `ios/` now has all three pieces ARCHITECTURE §9.2 describes:
@@ -665,6 +680,136 @@ at 253/253 with 0 failures, confirming no regression from a session that touched
 
 ---
 
+## 2i. Phase 2a — voice transport foundation (28 August 2026 session, sixth)
+
+Two steps, in order, as the brief required: a dependency/API spike first, then implementation only
+after the spike answered the open questions. Decisions:
+[ADR-020](DECISIONS/ADR-020-webrtc-voice-foundation.md). Evidence:
+[`test-results/phase2a-webrtc-spike-20260828.md`](test-results/phase2a-webrtc-spike-20260828.md).
+
+### The spike, run first (Phase 2a.1)
+
+ADR-003 named two candidate WebRTC distributions in June and left four things open. All four now
+have answers, and none required a weaker substitute:
+
+1. **Distributions pinned exactly, and reviewed rather than trusted.** Android
+   `io.github.webrtc-sdk:android:144.7559.14` (Chromium M144, BSD-3-Clause, 48.7 MB AAR, four ABIs,
+   `minSdkVersion 21`); Apple `stasel/WebRTC` `exact: "151.0.0"` (Chromium M151, BSD-3-Clause, SPM
+   `binaryTarget` whose SHA-256 was verified byte-for-byte against the published release). Neither
+   declares a permission, service or analytics class; **every** HTTP string in both native binaries
+   was extracted and read, and all of them are RTP header-extension URIs, a CRL string inside the
+   bundled root store, or source references — **no upload endpoint of any kind**. Apple's bundled
+   `PrivacyInfo.xcprivacy` states `NSPrivacyTracking: false` with no collected data types.
+2. **Maven Central's search index was stale**, reporting `125.6422.07` (March 2025) as the newest
+   Android version. `maven-metadata.xml` has `144.7559.14`. Worth knowing: the stale answer is the
+   one a casual check returns, and it would have pinned a version 16 milestones old.
+3. **The macOS slice is the find that mattered.** It is what makes real DTLS-SRTP/Opus media
+   testable on a laptop at all — see the box at the top of this file.
+4. **Swift 6 refuses to let WebRTC objects leave a callback.** `RTCSessionDescription`,
+   `RTCIceCandidate` and `RTCStatisticsReport` are not `Sendable`; three compile errors were
+   reproduced deliberately before designing around them. The fix is not a suppression: every value
+   is reduced to a primitive *inside* the callback — which coincides exactly with the boundary
+   PROTOCOL §7.4 already defines. It shaped the `VoiceEngine` seam on **both** platforms.
+
+**Milestone skew accepted knowingly:** Android M144, Apple M151, because neither distribution
+publishes the other's. WebRTC interoperates across milestones by design; recorded so a future
+interop problem is investigated against a known difference rather than met as a surprise.
+
+### What was built (Phase 2a.2)
+
+**Shared, pure, vector-pinned** (`core.protocol`/`core.voice`/`core.audiopolicy` mirrored by
+`RideLinkCore.Protocol`/`.Voice`/`.AudioPolicy`):
+
+- `VoiceSignal` + `VoiceSignalCodec` — the four `VOICE_*` messages, total and non-throwing, with every PROTOCOL §7.5 bound enforced **before** a peer-supplied string reaches the media stack.
+- `VoiceNegotiation` — the complete PROTOCOL §7 negotiation table as a pure `(state, input) -> (state, actions)` reducer. This is where the offerer rule, glare, the generation guard and "a link loss must not close the capture device" live, so a laptop can exhaust them.
+- `VoiceSessionId` — PROTOCOL §7.2's generation guard, a distinct type from `ConnTiebreak`.
+- `PendingCandidates` — the bounded trickle-ICE queue; at capacity the **oldest** is dropped and every drop is **counted**.
+- `VoiceEngine`/`VoiceAudioSession`/`VoiceSignalTransport`/`VoiceSignalSink` — primitive-only seams, which is what makes `VoiceController` testable with no WebRTC at all.
+- `VoiceStatsMapping` — one shared `webrtc-stats` mapping, so both platforms report the same numbers.
+- `audiopolicy` — ADR-016's vocabulary, now **implemented** rather than a shell (see the consolidation note below).
+
+**New shared vectors:** `protocol/vectors/voice-signal/` (70 rows) and
+`protocol/vectors/voice-fsm/` (52 rows), generated by `tools/generate_voice_signal_vectors.py` and
+`tools/generate_voice_fsm_vectors.py` — independent third implementations written from PROTOCOL, not
+ported from either platform. **Both generators disagreed with the Kotlin implementation on first
+run, and both disagreements were real findings** (see below).
+
+**Android:** `network/voice/{VoiceController, WebRtcVoiceEngine, VoiceSignalRelay}`,
+`audio/route/{AndroidVoiceAudioSession, AndroidAudioRouteMapper}`,
+`app/service/RideForegroundService`, a voice card in the UI, and the ARCHITECTURE §6.4 manifest
+surface (`RECORD_AUDIO`, `POST_NOTIFICATIONS`, `BLUETOOTH_CONNECT`, the two FGS permissions, one
+service declaring `microphone|mediaPlayback`).
+
+**iOS:** `RideLinkPlatform/Voice/{VoiceController, WebRtcVoiceEngine, VoiceSignalRelay}`,
+`RideLinkPlatform/Route/{IosVoiceAudioSession, IosAudioRouteMapper}`, a voice card, and
+`NSMicrophoneUsageDescription` + `UIBackgroundModes: audio`.
+
+**PROTOCOL §7 grew from a 28-line sketch to a full specification** — schemas, bounds, the
+authentication gate, the generation guard, the offerer rule, logging rules and lifecycle.
+
+### The security property, and how it is enforced
+
+> A peer that has completed TLS but has not passed the ADR-019 trust gate cannot start voice.
+
+Enforced structurally, not by a check that could be forgotten: `VOICE_*` is **absent** from
+`ControlSessionManager`'s pre-authentication frame allowlist, so the read loop's dispatch never
+reaches the voice branch, and `VoiceController` is not constructed at all until `Connected` fires.
+Proven over **real TLS on both platforms** by `VoiceAuthenticationGateTest[s]`: two real unpaired
+peers reach `PAIRING` with an unanswered six-digit code, one sends every `VOICE_*` frame there is,
+none arrives — and the refusals are **counted**, so the test cannot be satisfied by the frames never
+being sent. The same frames from the same peer *are* delivered once both users confirm.
+
+### Three real findings, none of them cosmetic
+
+1. **A contradiction inside ADR-016.** Its prose said `media_quality` is `reduced` for "a duplex
+   profile other than `duplex_wide_stereo`"; its own representable-states table said `builtin` is
+   `full`. `builtin` satisfies the prose and contradicts the table. The table is right — a phone's
+   own speaker and microphone do not degrade each other — and the prose had generalised a
+   coincidence that holds only for Bluetooth. Corrected to "a **narrowed** duplex profile" and
+   recorded as [ADR-016 Amendment A1](DECISIONS/ADR-016-effective-audio-capability-model.md#amendment-a1--28-august-2026--correction-media_quality-is-about-narrowed-duplex-not-duplex).
+   Found by a unit test, before any of it shipped.
+2. **A duplicated audio vocabulary.** `EndpointClass`, `AudioProfile`, `ProfileCoupling` and
+   `AudioRoute` already existed as unimplemented Phase 1a shells in `model/Entities`, referenced by
+   nothing but each other. Phase 2a's first draft added a parallel set in `audiopolicy` — and
+   **Kotlin did not complain, because the packages differ**, which is worse than a compile error.
+   Consolidated: the enums moved to `audiopolicy` (where ADR-016 says the vocabulary lives) and the
+   `AudioRoute` shell is replaced by the implemented `AudioRouteSnapshot`. Two types for one concept,
+   differing only in which one a call site reached for, is exactly the drift the shared vectors exist
+   to prevent — in a place no vector could see.
+3. **A missed candidate-type inspection.** PROTOCOL §7.6 inspects the `typ` of every candidate this
+   side *gathers* as well as every one it *receives*. The first controller draft only checked the
+   receive direction — and the gathering direction is the one that would reveal a STUN server had
+   been contacted. Caught by the test written for it, fixed on both platforms.
+
+Plus two the independent generators caught, which is what they are for: the Python transcription
+mispredicted the rejection reason for a present-but-non-string `voice_session_id` (the codec
+correctly distinguishes "absent" from "wrong type"), and one property test over-specified a drop
+reason (a stale *engine callback* and a foreign *wire* generation are deliberately diagnosed
+differently). In both cases the implementation was right and the third implementation was wrong,
+which is a useful direction for a disagreement to point.
+
+### `ControlSessionManager` got bigger, and the extraction happened
+
+STATUS §4 problem 18 predicted this class would get worse and named the fix. detekt's `LargeClass`
+fired the **first time** the voice wiring went in inline — the tool doing exactly its job. The whole
+voice half was extracted to `VoiceSignalRelay` on both platforms, leaving about twenty lines of
+wiring; there is no smaller way to attach a subsystem to it at all. The residual overflow is
+pre-existing (the class was already at 608 counted lines before this phase touched it), so
+`config/detekt/detekt.yml` now documents a `LargeClass` threshold with the reason, and **problem 18
+is escalated below**. The prescribed `PairingController` extraction is deliberately still not done
+here: it touches the pairing and trust-gate paths, and STATUS §4 says it belongs in a change that is
+*only* that refactor.
+
+### Explicitly not done
+
+Music playback, music sync, local music transfer, manifest transfer, the drift ladder, Ride Mode as
+a product screen, navigation announcements, PTT/VOX gating (Phase 2a sends `mode: continuous`
+always), in-place WebRTC renegotiation (V1 tears down and negotiates afresh), the manual
+`host:port`/QR discovery fallback, and the `PairingController` refactor. No Phase 2b work of any
+kind.
+
+---
+
 ## 3. Tests passed / pending
 
 **Passed and verified in the security-state fix session (27 August 2026, fourth), by actually
@@ -696,6 +841,49 @@ which `detekt` cannot run on this machine at all (§1, §4 problem 17):
 - `swift test --package-path ios/Packages/RideLinkPlatform` — **68/68 pass** (up from 40; +10 `TlsControlChannelTests`, +9 `PairingExchangeTests`, plus the existing suites re-pointed at the real TLS channel), zero Swift 6 strict-concurrency warnings.
 - `xcodebuild … -configuration Debug` and `-configuration Release`, simulator, `CODE_SIGNING_ALLOWED=NO` — both **succeed**, zero warnings beyond the pre-existing benign "no AppIntents.framework dependency" notice.
 - `./tools/spikes/phase1b-tls-exporter/run.sh` — **10/10 PASS**, including the cross-stack Apple ↔ Conscrypt exporter equality that this whole phase rests on.
+
+**Passed and verified in the Phase 2a session (28 August 2026, sixth), by actually running the
+commands.** Every Gradle command was run with
+`-Dorg.gradle.java.home=/opt/homebrew/opt/openjdk@21/libexec/openjdk.jdk/Contents/Home` (§4
+problem 17):
+
+- `./gradlew test ktlintCheck detekt lint assembleDebug assembleRelease` — **all green**, all five
+  Android modules. **296 tests** (was 253): `core` 154 (was 121 — plus `voice-signal/`'s 70 rows and
+  `voice-fsm/`'s 52 rows), `network` 120, `audio` 11 (new module suite), `app` 2, `data` 9.
+- `swift test --package-path ios/Packages/RideLinkCore` — **39/39** (was 27).
+- `swift test --package-path ios/Packages/RideLinkPlatform` — **134/134** (was 99), zero Swift 6
+  strict-concurrency warnings.
+- `xcodebuild` Debug **and** Release for the simulator — both succeed, **zero warnings** beyond the
+  pre-existing benign "no AppIntents.framework dependency" notice.
+
+**Real WebRTC media, measured — this is the one genuinely new class of evidence.**
+`VoiceEngineLoopbackTests` runs two real `WebRtcVoiceEngine`s against each other under `swift test`
+on macOS, linking the same WebRTC binary an iPhone build would (ADR-020). Asserted from the stack's
+own statistics: gathered candidate types exactly `{host}` (no `srflx`, no `prflx`, no `relay`),
+`dtlsState = connected`, `dtlsCipher = TLS_AES_128_GCM_SHA256`,
+`srtpCipher = SRTP_AES128_CM_HMAC_SHA1_80`, `audio/opus` at 48 000 Hz, remote track present on both
+sides. **Deterministic: the suite was run 5 consecutive times with 0 failures.** `packetsSent = 0`,
+which is expected and is not a failure — there is no microphone in a headless run, so the transport
+is up and nothing is speaking into it. That is exactly the line between "media path established" and
+"audio works".
+
+**The Phase 2a security invariant is proven over real TLS on both platforms.**
+`VoiceAuthenticationGateTest` / `VoiceAuthenticationGateTests`: two real unpaired
+`ControlSessionManager`s complete a real TLS 1.3 handshake, reach `PAIRING` with an unanswered
+six-digit code, and one sends every `VOICE_*` frame there is. None reaches the voice subsystem; the
+refusals are **counted**, so the test cannot be satisfied by the frames never being sent; and the
+same frames from the same peer *are* delivered once both users confirm. Malformed and oversize
+`VOICE_*` frames are dropped **without ending the control connection**, verified by a well-formed
+frame still arriving afterwards.
+
+**Not run this session, stated plainly:** nothing on a physical device, on either platform, and no
+audio anywhere. The Android WebRTC engine has **no test of any kind** (§4 problem 22). Neither
+audio-session implementation has ever run (§4 problem 23). `RideForegroundService` has never started
+(§4 problem 25). No latency was measured and none may be claimed. See §7 and TEST_PLAN §3.1a.
+
+---
+
+### Earlier sessions, kept for history
 
 **The security tests are real handshakes, not mocks.** `TlsControlChannelTest[s]` on both platforms
 open real loopback TCP, complete a real mutually authenticated TLS 1.3 handshake with certificates
@@ -812,7 +1000,7 @@ session and route), and integration tests I-01…I-25. Full list in `docs/TEST_P
 | 2 | ~~**TLS keying-material exporter availability is unconfirmed**~~ **Resolved 27 Aug 2026 (Phase 1b spike).** Public on both (`SSLSockets.exportKeyingMaterial` API 31; `sec_protocol_metadata_create_secret` iOS 12), byte-identical across Apple ↔ Conscrypt for one TLS 1.3 connection, cross-checked against OpenSSL. [ADR-018](DECISIONS/ADR-018-tls-exporter-channel-binding.md) | ~~High~~ — | **Residual:** the Android side was measured on Conscrypt-on-JVM, not on the phone. Folded into problem 15 |
 | 3 | Phase 0 measured results not recorded (mode, helmet model, topology, latency) | Medium | Blocks **Phase 6 only**. Template ready at `docs/PHASE0_RESULTS.md`. Until filled, `AUDIO_STATE.confidence` stays `assumed` and Phase 6 defaults to Mode C |
 | 4 | ~~Xcode not installed~~ **Resolved 26 Aug 2026 (this session).** User installed Xcode 27.0 beta; SDK confirmed newer than baseline (ADR-011 Amendment A2), deployment target unchanged; `RideLink.xcodeproj` and `RideLinkPlatform` now built and verified (§7) | — | Xcode 27 being a beta remains a residual, lower risk — see the amendment |
-| 5 | WebRTC artifacts are community-published on both platforms | Medium | Pin exact versions in Phase 2; isolated behind `network/voice` / `RideLinkPlatform.Voice` |
+| 5 | ~~WebRTC artifacts are community-published on both platforms~~ **Resolved 28 Aug 2026 (Phase 2a spike).** Both pinned exactly (`144.7559.14` / `151.0.0`), licences confirmed BSD-3-Clause, Apple's XCFramework SHA-256 verified independently, both binaries read for telemetry (none — no upload endpoint, `NSPrivacyTracking: false`), release builds proven, isolated behind `network/voice` / `RideLinkPlatform.Voice`. [ADR-020](DECISIONS/ADR-020-webrtc-voice-foundation.md), [evidence](test-results/phase2a-webrtc-spike-20260828.md) | ~~Medium~~ — | **Residual:** Android is Chromium M144 and Apple M151 (neither distribution publishes the other's milestone). Interop-safe by WebRTC's design; the two real stacks have never spoken to each other. Closed by V-01 |
 | 6 | TCP jitter may floor clock-offset precision | Low | Measure in Phase 1 (I-08). Only if it exceeds ~5 ms, add a UDP `PING`/`PONG` path. Do not pre-build it |
 | 7 | mDNS may be blocked on hotspots / enterprise APs | Medium | Manual `host:port` + QR fallback in Phase 1b |
 | 8 | Removing `fp6` means a discovered peer cannot be labelled "known" before connecting | Low | Accepted trade (ADR-002 A1). Mitigated by an auto-attempt silent connect when exactly one trusted peer exists. Watch whether the pre-ride UX suffers in real use |
@@ -825,9 +1013,15 @@ session and route), and integration tests I-01…I-25. Full list in `docs/TEST_P
 | 15 | **No Android device or emulator available in this development environment** — no `adb` on `PATH`, no AVD configured. `PlainControlTransportPhase1a` and `NsdDiscoveryController` are therefore unverified against Android's real network stack | **High (blocks the Phase 1a gate)** | Needs either a physical OnePlus Nord 5 with USB debugging, or an AVD image + emulator installed via `sdkmanager`. Neither was set up this session — not attempted without asking, since it changes the toolchain |
 | 16 | **No physical iPhone available** — only the simulator, which does not exercise real mDNS multicast or real `Network.framework` Bonjour behaviour between two independent radios. Phase 1b adds to this: the iOS **Keychain** path (a permanent key, `SecIdentityCreate` over a Keychain-resident key, survival across restart/upgrade) is exercised only with a *transient* key, because an unsigned `swift test` binary has no keychain entitlement | **High (blocks the Phase 1a and 1b gates)** | Needs a physical iPhone 17 Pro Max with a Personal Team signing identity (CLAUDE.md "Apple Signing") — a user decision, not made here |
 | 17 | **`detekt` cannot run on this machine without `-Dorg.gradle.java.home=…`** — the Gradle daemon inherits Temurin 25, detekt 1.23.8 is handed `25.0.3` as a JVM target and fails with a bare version string. Pre-existing, local-only (CI's daemon is JDK 21, so CI has always been green), and **not** fixable by setting `jvmTarget`/`jdkHome` on the task — both were tried and neither helped | Low | Use the flag (it is in every §3 command), or set `org.gradle.java.home` in `~/.gradle/gradle.properties`. A committed daemon-JVM criterion (`gradle/gradle-daemon-jvm.properties`) would fix it portably but risks breaking CI if the criterion cannot be satisfied there, so it was not done blind |
-| 18 | **`ControlSessionManager` is the largest class in the codebase** and has now absorbed the trust-gate wiring on top of the PROTOCOL §4.5 pairing wiring. The 27 Aug (fourth) session pushed it back under the existing `detekt` thresholds *without raising them*, by moving the pure payload readers (`requiredLongField`, `requiredBooleanField`, `requiredSpkiField`, `knownErrorCode`, `isPlausibleClockSample`) out of the class — they never touched a session — but that is headroom, not a fix | Low, but it will get worse | Unchanged: extract a `PairingController` owning the socket-facing half (`beginPairing`, `sendPairRequest`, `applyPairingStep`, `succeedPairing`, `failPairing`, `handlePairingFrame`, `activateAuthenticatedSession`). Deliberately not done alongside a security fix; it belongs in a change that is *only* that refactor |
+| 18 | **`ControlSessionManager` is the largest class in the codebase, and Phase 2a made it larger.** detekt's `LargeClass` fired the first time the voice wiring went in inline; the whole voice half was extracted to `VoiceSignalRelay` on both platforms in response, leaving ~20 lines of wiring, and there is no smaller way to attach a subsystem to it. The class was **already at 608 counted lines before Phase 2a touched it**, so `config/detekt/detekt.yml` now documents a `LargeClass` threshold with the reason. That headroom is the last of it | **Medium** (was Low) | Unchanged and now overdue: extract a `PairingController` owning the socket-facing half (`beginPairing`, `sendPairRequest`, `applyPairingStep`, `succeedPairing`, `failPairing`, `handlePairingFrame`, `activateAuthenticatedSession`), as a change that is **only** that refactor. It touches the pairing and trust-gate paths, which is precisely why it must not ride along with a feature |
+| ~~18-old~~ | **(previous wording, kept for history)** `ControlSessionManager` is the largest class in the codebase and has now absorbed the trust-gate wiring on top of the PROTOCOL §4.5 pairing wiring. The 27 Aug (fourth) session pushed it back under the existing `detekt` thresholds *without raising them*, by moving the pure payload readers (`requiredLongField`, `requiredBooleanField`, `requiredSpkiField`, `knownErrorCode`, `isPlausibleClockSample`) out of the class — they never touched a session — but that is headroom, not a fix | Low, but it will get worse | Unchanged: extract a `PairingController` owning the socket-facing half (`beginPairing`, `sendPairRequest`, `applyPairingStep`, `succeedPairing`, `failPairing`, `handlePairingFrame`, `activateAuthenticatedSession`). Deliberately not done alongside a security fix; it belongs in a change that is *only* that refactor |
 | 19 | **The manual `host:port` / QR fallback for blocked mDNS is not implemented.** ARCHITECTURE §4.4 scopes it to Phase 1b | Medium | It is a *discovery* feature with no security content, so it was deliberately left until after the security work. First item in §7. Problem 7 is the reason it matters |
 | 20 | **`SessionCoordinator` itself is still not directly unit-testable on either platform** — Android's needs a concrete `NsdDiscoveryController` (an Android type), and iOS's lives in the app target, which has no test target. That is precisely the gap the §2g bug hid in: a `when`/`switch` no suite could reach. It is now *mostly* closed by moving the decision into `SessionGate` (pure, mirrored, vector-pinned), leaving the coordinator a thin applier — but "thin" is a code reading, not a test | Medium | Either (a) give `NsdDiscoveryController` an interface and add an `app`-module test, or (b) add a test target to `RideLink.xcodeproj`. Do **not** let logic drift back into the coordinator in the meantime: anything with a decision in it belongs behind `SessionGate` or another pure, mirrored type |
+| 22 | **The Android WebRTC media path has no test of any kind.** `PeerConnectionFactory.initialize` requires an Android `Context`, so `WebRtcVoiceEngine` on Android cannot be exercised by a JVM unit test, and no emulator or device is available here. It compiles and is wired; that is the entire claim. The iOS side has a real two-engine media test because the XCFramework carries a macOS slice — Android has no equivalent | **High (blocks the Phase 2a gate)** | An emulator would give a first signal (`sdkmanager` + an AVD, which changes the toolchain and was not attempted without asking); the real answer is V-01…V-11 on the phones |
+| 23 | **Neither audio-session implementation has ever run.** `AndroidVoiceAudioSession` (`AudioManager`, `MODE_IN_COMMUNICATION`, `setCommunicationDevice`) and `IosVoiceAudioSession` (`AVAudioSession` two-configuration switch, all three notifications) are untestable off-device — `AVAudioSession` does not exist on macOS. Only their **pure mappers** are unit-tested | **High (blocks the Phase 2a gate)** | V-01…V-11 and A-12…A-15 |
+| 24 | **Every value in both route mappers marked `assumed` is a reasoned guess.** `TYPE_BLUETOOTH_SCO`/`.bluetoothHFP` → `duplex_wideband` assumes mSBC rather than CVSD; `input_forces_output` for all Bluetooth is ADR-016's central claim asserted, not measured; LE Audio is deliberately *not* claimed to preserve music quality. Both mappers report `confidence: assumed` and their tests **assert** that, so the tests are what will change when the measurement exists | Medium | A-12/A-13, then A-15 flips `confidence` and fills `docs/PHASE0_RESULTS.md` |
+| 25 | **`RideForegroundService` has never started.** Whether the `microphone` foreground-service type is accepted, whether capture survives a screen lock, and whether `ForegroundServiceStartNotAllowedException` fires in practice are all device facts. The code follows ARCHITECTURE §6.4's sequence and is started only from a resumed Activity | **High (blocks the Phase 2a gate)** | V-08 |
+| 26 | **APK/IPA size.** The Android AAR adds ~48 MB of native code across four ABIs; the Apple XCFramework is ~96 MB expanded and embedded in the app bundle. No ABI filtering or slice stripping is applied — the default is the safe configuration and a sideloaded personal build has no size gate | Low | Revisit if install time becomes annoying. Recorded rather than forgotten |
 | 21 | **Diagnostics now show `CONNECTING` while a six-digit code is on screen**, where they previously showed `CONNECTED`. This is deliberate and more honest (ADR-019 §5), but it is a user-visible change that has never been looked at on a real screen | Low | Confirm it reads sensibly during I-02 on the two phones; the FR-023 diagnostics screen is one of the things I-02 exercises anyway |
 
 Resolved 26 Aug 2026 session: `CLAUDE.md` in `.gitignore` (was problem 1); `.DS_Store` tracking
@@ -841,7 +1035,9 @@ ADR-010 leadership-independence rationale error (§2b).
 Only these. Everything else is a known task with a known shape.
 
 1. **Secure transport — mostly closed, one thread left.** Both platform capabilities are now demonstrated working *together* (ADR-017, ADR-018), so the "stop and review" trigger did not fire. What is left is narrower and specific: the Android half of the exporter equality was measured against **Conscrypt-on-a-laptop**, not against the phone's own TLS stack, and neither Android Keystore nor the iOS Keychain has been exercised on a device. Integration tests I-02/I-19/I-20/I-21 close it. Until they run, "the two phones show the same six digits" is a well-supported expectation, not a measurement.
-2. **Bluetooth duplex-profile coupling.** Now modelled honestly rather than wrongly, but modelling it does not fix it. Whether *any* of Modes A–E is genuinely pleasant with the real helmet unit is still unknown until Phase 0's results are recorded or Phase 6 measures it. The product's viability sits here.
+2. **Bluetooth duplex-profile coupling.** Now modelled honestly rather than wrongly, *and implemented* — each platform's route mapper is the single place ADR-016 vocabulary is produced, and both currently report `confidence: assumed` because that is the truth. Modelling it still does not fix it. Whether *any* of Modes A–E is genuinely pleasant with the real helmet unit is unknown until TEST_PLAN §6.1's A-12…A-15 run. **The product's viability sits here**, and Phase 2a moved it not at all.
+
+2a. **Voice media on a phone.** Real WebRTC media is now proven *locally* — host-only ICE, DTLS-SRTP, Opus, two real engines, deterministic. What that does not touch: any microphone, any speaker, `AVAudioSession`, `AudioManager`, a foreground service, a screen lock, and the Android media path at all. Closed by TEST_PLAN §5.1's V-01…V-11, not by more unit tests.
 3. **iOS `AVAudioEngine` scheduling precision** against the <100 ms sync target on real hardware. Measured in Phase 5, not assumable.
 4. **Hotspot behaviour on a moving motorcycle** — an idle iPhone hotspot may sleep its interface; Android hotspot behaviour is vendor-dependent. Phase 1 test I-07 is the first real data.
 
@@ -859,51 +1055,74 @@ Not blocking Phase 1. Answers needed before Phase 6.
 
 ## 7. Next exact task
 
-**Phase 1b — secure control channel. IMPLEMENTATION COMPLETE, REAL-DEVICE GATE PENDING.**
-Everything below is done and verified by the automatable tests this machine can run. What remains
-is hardware, plus one deliberately deferred feature.
+**Phase 2a — voice transport foundation. IMPLEMENTATION COMPLETE, REAL-DEVICE AUDIO GATE PENDING.**
+Everything below is done and verified by the automatable tests this machine can run. What remains is
+hardware.
 
-1. ✅ **Both ADR-007 A1 spikes** — self-signed X.509 from a platform-held keypair, and a public TLS exporter producing identical bytes across stacks. Measured, recorded, ADR'd (§2f).
-2. ✅ **Per-device identity** — P-256 in Android Keystore / the iOS Keychain, non-exportable, usable with the screen locked (ADR-017).
-3. ✅ **Self-signed X.509 identity certificates** — shared DER encoder, platform signing, ADR-012 re-issuance semantics that Android's auto-issued certificate could not have provided.
-4. ✅ **TLS 1.3 control channel** — mutual authentication, 1.3 pinned as the only enabled version, no plaintext path anywhere in production sources.
-5. ✅ **SPKI-based peer identity** — `identity_spki_sha256` derived identically on both platforms, pinned by shared vectors.
-6. ✅ **First-pair SAS verification** — PROTOCOL §4.5 exchange, code derived from the exporter for *this* handshake, never sent, never logged, never persisted; a missing exporter fails closed.
-7. ✅ **Persisted peer trust** — atomic file-backed store on both, corrupt-file tolerant, pin replacement refused without an explicit forget.
-8. ✅ **Pin mismatch rejection** — fails closed with `pin_mismatch`, surfaced as a security warning, never auto-re-paired.
-9. ✅ **Exporter interoperability** — proven across three TLS 1.3 implementations.
-10. ✅ **Plaintext removed from production paths** — deleted from `main` on both platforms, with a mechanical test that fails if it returns.
-11. ✅ **Security-focused tests and documentation** — real-handshake suites on both platforms, `protocol/vectors/identity/`, ADR-017, ADR-018, a results file, and a re-runnable spike harness.
-12. ✅ **The trust gate** ([ADR-019](DECISIONS/ADR-019-connected-means-authenticated.md), §2g) — `Connected` means the trust gate passed, not that TLS came up. An unknown peer cannot reach `CONNECTED` before SAS confirmation on both sides and trust persistence; a trusted peer still connects silently. Pinned by `protocol/vectors/session-gate/` (120 rows, both platforms) and by real-TLS session integration suites on both platforms.
+1. ✅ **WebRTC dependency spike, run before any implementation** — both distributions pinned exactly, licences confirmed, Apple's checksum verified independently, both binaries read for telemetry, release builds proven (§2i, [ADR-020](DECISIONS/ADR-020-webrtc-voice-foundation.md), [evidence](test-results/phase2a-webrtc-spike-20260828.md)).
+2. ✅ **PROTOCOL §7 specified in full** — schemas, bounds, the authentication gate, the generation guard, the offerer rule, logging rules, lifecycle. `VOICE_OFFER.ice_ufrag_hint` removed as a duplicate of a value the SDP already carries.
+3. ✅ **Signalling rides the authenticated TLS control channel** — no second socket, and `VOICE_*` is absent from the pre-authentication frame allowlist, so it is inert before the trust gate by construction rather than by a check.
+4. ✅ **The pre-authentication refusal is proven over real TLS on both platforms**, with the refusals counted so the test cannot pass vacuously.
+5. ✅ **Deterministic offerer and glare** — the ADR-010 leader always offers; a follower sends intent; the offerer's response to intent is idempotent. Asserted as a *property* over every arrival order, not one case.
+6. ✅ **Host-only ICE** — empty server list, no field that could carry a STUN/TURN server, and the gathered set asserted to be exactly `{host}` against a real stack.
+7. ✅ **Opus and DTLS-SRTP established and measured** on this machine, deterministically.
+8. ✅ **The voice state model, start/end, mute/unmute, bounds and validation, teardown, and the stale-callback guard** — all in the shared `VoiceNegotiation` table, pinned by 52 vector rows on both platforms.
+9. ✅ **Control-reconnect integration** — media drops, capture survives (ARCHITECTURE §6.3/§6.4), voice rebuilds as a fresh generation. Asserted over the whole role × status cross-product.
+10. ✅ **Audio-session and route foundations on both platforms**, with the platform→ADR-016 mapping in exactly one place per platform and both reporting `confidence: assumed`, which is the truth.
+11. ✅ **No sensitive logging** — no SDP, no candidate string, no address or port, no keying material has a log *or display* path; candidate **types** only.
+12. ✅ **Both platforms' full CI gates green** locally.
 
 **Immediately actionable next steps, in order:**
 
-1. **Get two real devices into this loop.** Unchanged from Phase 1a and now blocking two gates: (a) enable USB debugging on the OnePlus Nord 5 so `adb devices` sees it; (b) set up a development-team signing identity for the iPhone 17 Pro Max (Xcode → Signing & Capabilities → Personal Team — the user's call, not made here) and install via Xcode or `xcodebuild -destination 'platform=iOS,id=<udid>'`.
+1. **Get two real devices into this loop.** Unchanged since Phase 1a and now blocking three gates:
+   (a) enable USB debugging on the OnePlus Nord 5 so `adb devices` sees it; (b) set up a
+   development-team signing identity for the iPhone 17 Pro Max (Xcode → Signing & Capabilities →
+   Personal Team — the user's call, not made here).
 2. **Run the Phase 1a gate**: I-01, I-05, I-06, I-07, I-08, I-14, I-15, I-17, I-22.
-3. **Run the Phase 1b gate**: I-02 (the two codes match, are six digits, and pairing completes), I-03 (reconnect is silent, no code), I-04 (a doctored pin is refused), I-16 (simultaneous first meeting shows exactly one code), I-19 (certificate re-issued around the same key ⇒ silent), I-20 (key changed ⇒ `pin_mismatch`), I-21 (wrong clock ⇒ `certificate_invalid`, not an attack warning). I-19/I-20/I-21 are the ones that exercise what a laptop cannot: Android Keystore, the iOS Keychain, and device-Conscrypt's exporter.
-4. **Record every result** — pass, fail and measured numbers — in `docs/test-results/`, per the "measurements, not impressions" rule.
-5. **Then the deferred feature:** the manual `host:port` / QR fallback for blocked mDNS (ARCHITECTURE §4.4, §4 problem 19). It is Phase 1b scope, has no security content, and was left until after the security work deliberately.
-6. **Then the recorded tech debt:** extract a `PairingController` from `ControlSessionManager` (§4 problem 18), as a change that is only that refactor; and close the `SessionCoordinator` testability gap (§4 problem 20) so a decision can never again live where no suite can reach it.
+3. **Run the Phase 1b gate**: I-02, I-03, I-04, I-16, I-19, I-20, I-21. I-02 is still the single most
+   important one in the repository — it is what turns "the two phones show the same six digits" from
+   a well-supported expectation into a measurement.
+4. **Run the Phase 2a voice gate**: TEST_PLAN §5.1's **V-01…V-11**. V-04 is the on-device check that
+   host-only ICE held on a real Wi-Fi radio; V-07 is the one that proves a link blip does not
+   renegotiate the Bluetooth profile; V-08 is the screen-lock/background question, which nothing
+   about a compiling foreground service answers; V-11 is the first latency number this project will
+   ever have.
+5. **Run the audio-hardware gate**: TEST_PLAN §6.1's **A-12…A-15**, with the helmet unit and the TWS
+   earbuds. A-13 is the measurement ADR-016 exists to make checkable — whether
+   `profile_coupling: input_forces_output` is actually true of the real hardware. **The product's
+   viability sits here.**
+6. **Record every result** — pass, fail and measured numbers — in `docs/test-results/`, per the
+   "measurements, not impressions" rule. A-15 then flips `confidence` to `measured` in both route
+   mappers and fills in `docs/PHASE0_RESULTS.md`; the mapper tests currently **assert** `assumed`, so
+   they are what changes.
+7. **Then the recorded tech debt**, now overdue: extract a `PairingController` from
+   `ControlSessionManager` (§4 problem 18 — escalated to Medium this session, and the documented
+   detekt threshold is the last headroom available), and close the `SessionCoordinator` testability
+   gap (§4 problem 20). Also still outstanding from Phase 1b: the manual `host:port`/QR fallback for
+   blocked mDNS (§4 problem 19).
 
-**Gate for 1b:** I-02, I-03, I-04, I-16, I-19, I-20, I-21 pass on the two real phones;
-`vectors/sas/` and `vectors/identity/` pass on both platforms (✅ **already true**); the plaintext
-path is absent from release builds (✅ **already true, and now stronger than the gate asked for** —
-it is absent from *all* builds).
+**Gate for 2a:** V-01…V-11 pass on the two real phones; A-12…A-15 recorded with numbers;
+`voice-signal/` and `voice-fsm/` pass on both platforms (✅ **already true**); the pre-authentication
+`VOICE_*` refusal holds (✅ **already true, over real TLS on both platforms**).
 
-> **Do not treat Phase 1b as complete because the laptop tests are green.** The exporter equality
-> that the entire pairing design rests on was measured between Apple and *Conscrypt-on-a-laptop*,
-> not between an iPhone and a OnePlus. That substitution is the single most important thing for the
-> next session to close, and it is closed by I-02, not by more unit tests.
+> **Do not treat Phase 2a as complete because the laptop tests are green — including the WebRTC
+> ones.** The loopback test is real media and it is genuinely useful evidence, but it ran with no
+> microphone, no speaker, no Bluetooth and no phone, and `packetsSent = 0` says so honestly. The
+> Android media path has no test at all. Neither audio-session implementation has ever executed a
+> single line on a device. The single highest product risk — whether opening a helmet unit's
+> microphone collapses the pillion's music — is exactly as unmeasured as it was before this session.
 >
-> **And do not treat green CI as evidence about anything no test crosses.** CI run 33098708512 was
-> green over a bug that let an unknown peer reach `CONNECTED` before the six digits were displayed
-> (§2g). Every component had tests; the join between them had none, because it lived where no suite
-> could construct it. When reviewing this codebase, look for decisions in places the test suite
-> cannot reach — that is where the next one will be.
+> **And do not treat green CI as evidence about anything no test crosses.** That warning earned its
+> place in Phase 1b (CI run 33098708512 was green over the trust-gate bug) and it earned it again
+> here: three of this session's findings — ADR-016's self-contradiction, the duplicated audio
+> vocabulary that compiled cleanly because the packages differed, and the un-inspected candidate
+> gathering direction — were all in places the existing suites did not look. When reviewing this
+> codebase, look for decisions in places the test suite cannot reach.
 
-**Then Phase 2 — voice.** WebRTC/DTLS-SRTP behind `network/voice` / `RideLinkPlatform.Voice`,
-negotiated over the control channel this phase just secured. Pin the community WebRTC artifacts
-(§4 problem 5) before depending on them.
+**Then Phase 2b — the intercom as a product.** PTT/VOX gating (Phase 2a always sends
+`mode: continuous`), the five REQUIREMENTS §8 modes as one policy object, ducking, and the
+`AUDIO_STATE` message that carries the route to the peer. Not before the device gate has numbers in
+it: Phase 2b's decisions depend on what A-12…A-15 measure.
 
 ---
 

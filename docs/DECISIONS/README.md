@@ -24,6 +24,7 @@ Consequences · Alternatives considered.
 | [017](ADR-017-identity-key-and-certificate.md) | P-256 identity key, and a shared certificate encoder on both platforms | Accepted |
 | [018](ADR-018-tls-exporter-channel-binding.md) | The SAS channel binding is a TLS 1.3 exporter with an empty context | Accepted |
 | [019](ADR-019-connected-means-authenticated.md) | `Connected` means the trust gate passed, not that TLS came up | Accepted |
+| [020](ADR-020-webrtc-voice-foundation.md) | Phase 2a voice foundation: pinned WebRTC distributions, leader-is-offerer, host-only ICE, and the `stop`/`release` audio-session split | Accepted |
 
 ADRs 011–016 and the three amendments came out of the pre-Phase-1 correction pass recorded in
 [`../STATUS.md`](../STATUS.md#2-what-changed-in-the-correction-pass). ADRs 017–018 came out of the
@@ -33,6 +34,12 @@ rather than by argument — they close ADR-007 Amendment A1's two open risks. AD
 Phase 1b security-state review: every mechanism 017 and 018 specify was implemented correctly and
 then joined together by one event too few, so an unknown peer could reach `CONNECTED` before the
 six digits were shown.
+
+ADR-020 answers the four things ADR-003 left open — which WebRTC distribution, who offers, how ICE
+stays local, and what owns the microphone — and is backed by
+[`../test-results/phase2a-webrtc-spike-20260828.md`](../test-results/phase2a-webrtc-spike-20260828.md),
+including real DTLS-SRTP/Opus media measured on this machine. It also records the audio-session
+`stop`/`release` split, which is the decision ADR-003's "known Phase 2/6 risk" turned into.
 
 **Adding one:** next free number, update this table, link it from the relevant section of
 `ARCHITECTURE.md`.

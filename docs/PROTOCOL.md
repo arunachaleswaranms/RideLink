@@ -1,8 +1,11 @@
 # RideLink Peer Protocol — v1
 
-**Status:** specification baseline for Phase 1. **Wire version:** `1`.
-**Last updated:** 27 August 2026 (Phase 1b security spike — §4.5.1's exporter context wording
-corrected against measured platform behaviour; see [ADR-018](DECISIONS/ADR-018-tls-exporter-channel-binding.md)
+**Status:** specification baseline for Phases 1–2a. **Wire version:** `1`.
+**Last updated:** 28 August 2026 (Phase 2a — §7 voice negotiation specified in full: schemas,
+bounds, the authentication gate, the offerer rule and the generation guard. `VOICE_OFFER.ice_ufrag_hint`
+removed, see §12 and [ADR-020](DECISIONS/ADR-020-webrtc-voice-foundation.md). Previously
+27 August 2026, Phase 1b security spike — §4.5.1's exporter context wording corrected against
+measured platform behaviour; see [ADR-018](DECISIONS/ADR-018-tls-exporter-channel-binding.md)
 and [STATUS §2f](STATUS.md#2f-phase-1b-security-spike-27-august-2026-session)).
 Machine-readable schemas and golden vectors land in `protocol/` during Phase 1, alongside the
 codecs that consume them.
@@ -24,6 +27,8 @@ sync, playback commands, queue replication, catalogue manifests and transfer neg
 | `MAX_CONTROL_FRAME_BYTES` | **262 144** (256 KiB) — the JSON body, excluding the 4-byte prefix |
 | `MANIFEST_PAGE_SOFT_LIMIT_BYTES` | **196 608** (192 KiB) — sender-side page budget, §8.1 |
 | `MAX_ENTRIES_PER_PAGE` | **256** |
+| `MAX_VOICE_SDP_BYTES` | **16 384** (16 KiB) — one `VOICE_OFFER`/`VOICE_ANSWER` `sdp`, §7.5 |
+| `MAX_VOICE_CANDIDATE_BYTES` | **512** — one `VOICE_ICE` `candidate`, §7.5 |
 | Keepalive | `PING` every 2 s; peer declared lost after 6 s of silence |
 
 `MAX_CONTROL_FRAME_BYTES` is a defensive limit and does **not** move: a control message larger
@@ -330,7 +335,7 @@ edges of a route transition.
 | `microphone_open` | bool | Whether the capture device is *open*, not whether speech is being transmitted. PTT and VOX gate transmission, not the device (ARCHITECTURE §6.4). |
 | `effective_*_profile` | profile enum (§4.3.1) | What is *actually* active, after any coupling has taken effect |
 | `effective_*_sample_rate_hz` | int, or `null` if unknown | |
-| `media_quality` | `full` · `reduced` · `unavailable` · `unknown` | Derived, not measured: `reduced` whenever `effective_output_profile` is a duplex profile that is not `duplex_wide_stereo` |
+| `media_quality` | `full` · `reduced` · `unavailable` · `unknown` | Derived, not measured: `reduced` whenever `effective_output_profile` is a **narrowed** duplex profile — `duplex_narrowband` or `duplex_wideband`. `duplex_wide_stereo` and `builtin` are duplex but not narrowed, so they are `full` ([ADR-016 Amendment A1](DECISIONS/ADR-016-effective-audio-capability-model.md#amendment-a1--28-august-2026--correction-media_quality-is-about-narrowed-duplex-not-duplex) corrected the earlier "duplex and not `duplex_wide_stereo`" wording, which contradicted this section's own representable-states table for `builtin`) |
 | `route_state` | `stable` · `transitioning` | `transitioning` is sent at the start of a route change and superseded by `stable` when it settles. A peer must not report drift or sync failure while its own or its peer's `route_state` is `transitioning`. |
 | `intercom_mode` | `continuous` · `vox` · `ptt` · `disabled` | Mirrors `VOICE_STATE.mode`; present here so the diagnostics screen needs one message, not two |
 | `confidence` | as §4.3.1 | |
@@ -564,29 +569,259 @@ precisely the error the four-timestamp form exists to cancel.
 
 ## 7. Voice negotiation (Phase 2)
 
-The control plane is the signalling channel for WebRTC. It carries SDP and ICE and nothing else
-audio-related; media flows over DTLS-SRTP directly between the phones.
+The control plane is the **only** signalling channel for WebRTC. It carries SDP, ICE and the
+voice-session state, and nothing else audio-related; media flows over DTLS-SRTP directly between
+the phones ([ADR-003](DECISIONS/ADR-003-webrtc-voice-transport.md),
+[ADR-020](DECISIONS/ADR-020-webrtc-voice-foundation.md)). There is no second signalling socket.
 
 ```
-leader ── VOICE_OFFER  { sdp, ice_ufrag_hint }  ──► follower
-leader ◄─ VOICE_ANSWER { sdp } ──────────────────── follower
-       ◄─ VOICE_ICE    { candidate, mid } ────────►  (both, until complete)
-       ◄─ VOICE_STATE  { state, mic_muted, mode } ─►  (both, on change)
+offerer (= internal leader)                                    answerer (= follower)
+        │                                                             │
+        │  ── VOICE_STATE  { voice_session_id, state: negotiating } ──►│   (either side may ask)
+        │◄─ VOICE_STATE  { voice_session_id, state: negotiating } ─────│
+        │                                                             │
+        │  ── VOICE_OFFER  { voice_session_id, sdp } ─────────────────►│
+        │◄─ VOICE_ANSWER { voice_session_id, sdp } ────────────────────│
+        │                                                             │
+        │◄─ VOICE_ICE    { voice_session_id, candidate, … } ──────────►│  (both, trickled)
+        │◄─ VOICE_STATE  { voice_session_id, state, mic_muted, mode } ►│  (both, on change)
 ```
 
-`VOICE_STATE.state` ∈ `idle | negotiating | connecting | active | failed | closed`.
-`mode` ∈ `continuous | vox | ptt` — the modes of REQUIREMENTS §8.
+### 7.1 The authentication gate is not optional
 
-Since both peers are on the same LAN, host candidates suffice: **no STUN, no TURN, no ICE
-servers**. This is what keeps the voice path genuinely internet-free (FR-024). ICE is configured
-with an empty server list, which also removes an accidental-egress path.
+`VOICE_OFFER`, `VOICE_ANSWER`, `VOICE_ICE` and `VOICE_STATE` are **absent** from §4.1's
+pre-authentication frame list, and that is the whole of their access control. A connection that
+has completed TLS but has not passed the RideLink trust gate
+([ADR-019](DECISIONS/ADR-019-connected-means-authenticated.md)) drops every one of them exactly as
+it drops an unknown type (§2 rule 2). There is no other path to the voice subsystem: the
+microphone is never opened, no `RTCPeerConnection` is constructed, and no SDP is parsed, on behalf
+of a peer that has not been authenticated.
+
+Consequently the only legal order is:
+
+```
+mDNS discovery -> TLS 1.3 -> SPKI pin match or SAS confirmation -> trust written
+              -> session CONNECTED -> VOICE_* accepted -> DTLS-SRTP -> voice active
+```
+
+mDNS identity is **never** voice authorisation. The authenticated control session is the only
+authority, and it is the same authority for both peers.
+
+### 7.2 `voice_session_id` — the generation guard
+
+Every `VOICE_*` payload carries `voice_session_id`: **32 lowercase hex characters** (16 CSPRNG
+bytes), generated by the **offerer** when it begins a negotiation and echoed verbatim by the
+answerer in every frame of that negotiation.
+
+A receiver **drops** any `VOICE_*` frame whose `voice_session_id` is not the one it currently
+holds. That single rule is what makes the following impossible rather than merely unlikely:
+
+- a late `VOICE_ICE` from a voice session that has already been torn down reaching the next one;
+- a duplicate `VOICE_OFFER` (a retransmit, or a second control connection that briefly existed) starting a second, parallel negotiation;
+- a `VOICE_ANSWER` for the previous generation being applied to the current offer.
+
+It is regenerated for every negotiation, including the rebuild after a control reconnect. It is
+**not** derived from `session_id`, `peer_id` or the identity key — it identifies a *negotiation*,
+not a peer, and like `conn_tiebreak` it is ephemeral and never persisted.
+
+### 7.3 Who offers — deterministic, and not the TCP initiator
+
+> **The internal leader (the lexicographically smaller `peer_id`,
+> [ADR-010](DECISIONS/ADR-010-internal-leader-election.md)) is always the WebRTC offerer.**
+
+- Both peers compute it independently from `leader_peer_id`, which `HELLO_ACK` already carries and both sides already agree on (§4.1). No negotiation round, no timer, no new field.
+- It is **not** derived from which side dialled the TCP connection or which connection survived §4.2. `conn_tiebreak` and `peer_id` are uncorrelated by construction ([ADR-015 Amendment A2](DECISIONS/ADR-015-duplicate-connection-resolution.md#amendment-a2--26-august-2026--correction-connection-ownership-does-not-determine-leadership)), so an implementation that inferred the offerer from the initiator would work by coincidence and fail on a ride.
+- The leader is still never shown in the UI and still not selectable. Both users have a full "Start Voice" control.
+
+**Glare — both users press Start Voice at once.** There is no collision to resolve, because only
+one side may ever offer:
+
+| Local role | Local "Start Voice" does |
+|---|---|
+| offerer (leader) | generates `voice_session_id`, opens local audio, creates the offer, sends `VOICE_OFFER` |
+| answerer (follower) | sends `VOICE_STATE { state: "negotiating" }` — an *intent*, exactly as ADR-010 has a follower send intent to the leader — and waits for `VOICE_OFFER` |
+
+The offerer receiving `VOICE_STATE { state: "negotiating" }` while its own voice status is `idle`
+starts the negotiation as if its own user had pressed the button. Receiving it while already
+negotiating, connecting or active is **idempotent** — it changes nothing. So two simultaneous
+presses produce exactly one `voice_session_id`, one offer and one answer.
+
+An answerer that receives `VOICE_OFFER` **while it is itself the offerer** — or an offerer that
+receives `VOICE_ANSWER` while it is the answerer — has met a peer that disagrees about
+leadership. That is `ERROR { code: "leader_mismatch" }`, the same code §4.1 already defines for a
+disagreement about `leader_peer_id`, and the frame is dropped.
+
+### 7.4 Message schemas
+
+Every payload below is additive-compatible per §2 rule 1: unknown fields are ignored. Every
+field listed is **required** unless marked optional; a missing field, a wrong JSON type, or a
+value outside its bound makes the frame **malformed**, and a malformed `VOICE_*` frame is
+**dropped without ending the control connection** — the framing was intact, only this message's
+shape was wrong, exactly as for a malformed `PING` (§6). An attacker-supplied SDP string must not
+be able to end a ride's control plane, and must not be able to make the reader allocate.
+
+#### `VOICE_OFFER` — offerer → answerer
+
+```json
+{ "voice_session_id": "5e2a9c40b7f13d86e0a4c95b28f7d613",
+  "sdp": "v=0\r\no=- 4611731400430051336 2 IN IP4 127.0.0.1\r\n…" }
+```
+
+| Field | Type | Bound | Notes |
+|---|---|---|---|
+| `voice_session_id` | string | exactly 32 chars, `[0-9a-f]` only | §7.2. Uppercase hex is **rejected**, not normalised — one canonical form, as for `identity_spki_sha256` |
+| `sdp` | string | 1 … `MAX_VOICE_SDP_BYTES` UTF-8 bytes | The complete session description. Never logged (§7.7) |
+
+Sender rules: only the offerer sends it; exactly once per `voice_session_id`.
+Receiver rules: accepted only by the answerer, only while its voice status is `idle` or
+`negotiating`. A second `VOICE_OFFER` with the **same** `voice_session_id` is a retransmit and is
+ignored. One with a **different** `voice_session_id` while a negotiation is live is dropped
+(§7.2) — renegotiation in V1 means a fresh negotiation after teardown, not an in-place
+re-offer.
+
+#### `VOICE_ANSWER` — answerer → offerer
+
+```json
+{ "voice_session_id": "5e2a9c40b7f13d86e0a4c95b28f7d613", "sdp": "v=0\r\n…" }
+```
+
+Same two fields, same bounds. Sender rules: only the answerer, only after it has applied the
+offer, exactly once per `voice_session_id`. Receiver rules: accepted only by the offerer, only
+while its status is `negotiating` and only for the current `voice_session_id`; a duplicate is
+ignored.
+
+#### `VOICE_ICE` — both directions, trickled
+
+```json
+{ "voice_session_id": "5e2a9c40b7f13d86e0a4c95b28f7d613",
+  "candidate": "candidate:842163049 1 udp 1677729535 192.0.2.11 51234 typ host generation 0",
+  "sdp_mid": "0",
+  "sdp_mline_index": 0 }
+```
+
+| Field | Type | Bound |
+|---|---|---|
+| `voice_session_id` | string | as above |
+| `candidate` | string | 1 … `MAX_VOICE_CANDIDATE_BYTES` UTF-8 bytes |
+| `sdp_mid` | string, **nullable** | 0 … `MAX_VOICE_SDP_MID_BYTES` bytes when present. `null` is legal — WebRTC permits a candidate identified by index alone |
+| `sdp_mline_index` | int | 0 … `MAX_VOICE_MLINE_INDEX` |
+
+Receiver rules — trickle ICE means order is not guaranteed:
+
+- A candidate arriving **before** the remote description has been applied is **queued**, not dropped, up to `MAX_QUEUED_VOICE_CANDIDATES`. Beyond that the **oldest** queued candidate is discarded to make room, and the drop is counted in the voice diagnostics. An unbounded queue is a memory amplifier a peer controls; silently truncating without counting would hide a real fault.
+- A candidate arriving **after** the remote description has been applied is applied immediately.
+- A candidate for a `voice_session_id` that is not current is dropped (§7.2). In particular a candidate arriving after teardown cannot resurrect anything, because teardown clears the id.
+- A candidate the media stack itself rejects is logged by **type** and counted; it never fails the negotiation and never ends the control connection.
+
+#### `VOICE_STATE` — both directions, on change
+
+```json
+{ "voice_session_id": "5e2a9c40b7f13d86e0a4c95b28f7d613",
+  "state": "active", "mic_muted": false, "mode": "continuous" }
+```
+
+| Field | Type | Values |
+|---|---|---|
+| `voice_session_id` | string, **nullable** | as above. `null` exactly when the sender does not hold one: `idle`, `closed`, and the answerer's `negotiating` **intent** (§7.3), where the offerer has not created a generation yet. Whether a null id is *meaningful* for a given `state` is the negotiation table's decision, not the parser's — one rule, one place |
+| `state` | string | `idle` · `negotiating` · `connecting` · `active` · `failed` · `closed` |
+| `mic_muted` | bool | whether **this** peer is transmitting silence. Distinct from `AUDIO_STATE.microphone_open`, which is about the capture *device* (§4.4) |
+| `mode` | string | `continuous` · `vox` · `ptt` — REQUIREMENTS §8. Phase 2a always sends `continuous` |
+
+An **unrecognised** `state` or `mode` value is treated as `unknown` and the frame is otherwise
+processed, matching §4.3.1's forward-compatibility rule for audio vocabulary. It is not a
+malformed frame.
+
+`state: "closed"` is the teardown signal, and there is deliberately **no** `VOICE_END` message: a
+separate message would be a second way to say the same thing, and the two could disagree.
+Receiving `closed` for the current `voice_session_id` tears the local voice session down.
 
 `VOICE_STATE` failing must not disturb music (FR-025) — the two planes are independent by
-construction.
-
-Note the division of labour with §4.4: `VOICE_STATE` reports the *WebRTC session*;
-`AUDIO_STATE` reports the *local audio route*. They fail independently and a diagnosis usually
+construction. Note the division of labour with §4.4: `VOICE_STATE` reports the **WebRTC session**;
+`AUDIO_STATE` reports the **local audio route**. They fail independently and a diagnosis usually
 needs both.
+
+### 7.5 Bounds
+
+Defensive limits, in the same spirit as `MAX_CONTROL_FRAME_BYTES` (§1) and enforced **before** any
+SDP or candidate string is handed to the media stack.
+
+| Constant | Value | Why this number |
+|---|---|---|
+| `MAX_VOICE_SDP_BYTES` | **16 384** (16 KiB) | A measured RideLink offer — one audio m-line, host candidates, Opus — is ~1.5–3 KiB. 16 KiB is generous headroom for a future codec list and still 16× under the control-frame cap |
+| `MAX_VOICE_CANDIDATE_BYTES` | **512** | A host candidate line is ~80–160 bytes. 512 covers IPv6 with extended attributes |
+| `MAX_VOICE_SDP_MID_BYTES` | **64** | A mid is a short token (`"0"`, `"audio"`) |
+| `MAX_VOICE_MLINE_INDEX` | **31** | RideLink negotiates exactly one m-line. 31 tolerates a future peer without admitting an arbitrary integer |
+| `MAX_QUEUED_VOICE_CANDIDATES` | **64** | Host-only ICE on two interfaces produces a handful. 64 absorbs a burst; beyond it the oldest is dropped and counted |
+
+`MAX_CONTROL_FRAME_BYTES` remains authoritative and unchanged: these limits are all far below it,
+so a `VOICE_*` frame is rejected by its own bound long before the frame cap is reached.
+
+### 7.6 ICE — host candidates only, and no internet
+
+ICE is configured with an **empty server list**: no STUN, no TURN, no ICE server of any kind
+(ADR-003, ADR-020). Both peers are on the same Wi-Fi LAN or one phone's hotspot, so host
+candidates suffice, and an empty list removes an accidental-egress path rather than trusting a
+policy note.
+
+Enforcement is not merely configuration. Each peer inspects the `typ` of every candidate it
+gathers and every candidate it receives:
+
+| Candidate type | Meaning | Behaviour |
+|---|---|---|
+| `host` | a local interface address | normal |
+| `srflx`, `prflx` | discovered via a reflexive server | **reported** in the voice diagnostics as an unexpected candidate type and counted. It cannot legitimately occur with an empty server list |
+| `relay` | via TURN | as above, and never expected |
+
+The diagnostics surface the **type** only. A candidate's address is not a diagnostic value the
+ordinary log needs (§7.7).
+
+### 7.7 Logging and privacy
+
+`VOICE_*` traffic exists only inside the authenticated TLS control connection, so none of it is
+visible on the network. What matters here is what the *app* records about it.
+
+**No log path at all** — not a redacted one — for: complete or partial SDP, ICE candidate
+strings, local or peer IP addresses and ports, DTLS or SRTP keying material, and microphone audio
+in any form. `MAX_VOICE_SDP_BYTES` bounds what is parsed, not what is printed; nothing prints it.
+
+**Safe to log and to show on the diagnostics screen:** signalling state, ICE gathering state, ICE
+connection state, peer-connection state, DTLS state, the *selected candidate type* (`host`), the
+negotiated codec (`opus/48000/1`), packets sent and received, packet loss, jitter, RTT, the audio
+route vocabulary of §4.3.1, mic-muted, and the voice rebuild count. `voice_session_id` follows the
+existing rule for ephemeral hex identifiers and is redacted to its first 6 characters.
+
+mDNS TXT records are **unchanged and remain exactly `{v, dh, plat}`** (§4.1). Nothing about voice
+— not capability, not microphone state, not headset model, not activity — is advertised.
+
+### 7.8 Lifecycle, reconnect and teardown
+
+The control connection is primary and the voice session is subordinate to it. There is exactly
+one voice session per control session, and exactly one owner of it.
+
+| Control-plane event | Voice-plane consequence |
+|---|---|
+| trust gate passes (`CONNECTED`) | voice becomes *permitted*. Nothing is opened; the microphone is opened only by an explicit user action (ARCHITECTURE §6.4) |
+| `LinkLost` (network) | the **media transport** is torn down — peer connection, both tracks, ICE state — and `voice_session_id` is cleared. The **capture device and audio session stay open**: ARCHITECTURE §6.3/§6.4 opens them once while the app is foreground-visible and keeps them for the whole ride segment, because on Android there is no second legal opportunity to open the microphone once the screen is locked, so a link blip must not close it. Nothing is retried by the voice layer — §10's control ladder is the only reconnect loop in the app |
+| control reconnect succeeds, returning to `RIDE_ACTIVE` | voice is rebuilt as a **fresh negotiation** with a new `voice_session_id`. A stale ICE candidate or answer from before the loss cannot apply (§7.2) |
+| `BYE` | media torn down as above, and not rebuilt. `BYE` leads to `ENDING`, which is the state that releases the audio session (ARCHITECTURE §3 rule 3) |
+| pairing or security failure | voice can never have been alive: the trust gate never opened, so no `VOICE_*` frame was ever accepted (§7.1) |
+| `ENDING` | ARCHITECTURE §3 rule 3 — this is the only state that releases the audio session |
+
+A **deliberate** teardown — End Voice, or `ENDING` — releases the local audio track, the remote
+track, the peer connection, the ICE state, the capture device and the audio-session configuration,
+and clears `voice_session_id`. A user is present for both, so a later restart can legally reopen
+capture. An **involuntary** one — link loss, or the peer reporting `closed`/`failed` — releases
+everything except capture and the audio session, for the reason in the table above. A callback
+still in flight from a torn-down peer connection carries the old `voice_session_id` and is
+therefore inert against the next one — the same generation guard, applied to the media stack's own
+callbacks rather than to the wire.
+
+### 7.9 Test vectors
+
+`protocol/vectors/voice-signal/` pins the message layer — every field, every bound, every
+malformed shape — and `protocol/vectors/voice-fsm/` pins the negotiation table: the complete
+`(role, status, input) -> (actions, new status)` cross-product, including the offerer rule and
+glare. Both run on **both** platforms. See §11.
 
 ---
 
@@ -867,6 +1102,8 @@ incompatibility a laptop-side test failure instead of a roadside mystery
 | `identity/*.json` | SPKI hash formatting, pin match / mismatch, certificate re-issue with unchanged SPKI ⇒ still trusted |
 | `dedup/*.json` | `conn_tiebreak` pairs ⇒ which side's initiated connection survives; equal-value tie ⇒ both close |
 | `audio-state/*.json` | `AUDIO_STATE` round-trip, `revision` monotonicity, derived `media_quality`, unknown enum value tolerated as `unknown` |
+| `voice-signal/*.json` | `VOICE_*` parse/reject: every required field, wrong types, `voice_session_id` format, oversize SDP and candidate, mline-index range, nullable `sdp_mid`, unknown `state`/`mode` tolerated (§7.4, §7.5) |
+| `voice-fsm/*.json` | the complete `(role, status, input) -> (actions, new status)` negotiation table: offerer rule, glare, duplicate offer/answer, ICE before and after the remote description, teardown, generation mismatch (§7.3, §7.8) |
 
 Each is `{ "name", "input", "expected" }`, so a single table-driven runner per platform covers
 the file. A vector is added for every protocol bug found on a device — that is the regression
@@ -879,6 +1116,13 @@ discipline in the brief made concrete.
 Named now so the shape stays compatible; **not** implemented in V1:
 `TRANSFER_OFFER.have_chunks[]` (resume), partial-manifest resume
 (`MANIFEST_REQUEST.resume_from_page`), signed identity-key rotation, `VOICE_STATE.mode =
-ptt_remote`, `METRICS.thermal_state`, `CAPABILITIES.features += "le_audio"`, and group sessions
+ptt_remote`, in-place WebRTC renegotiation (V1 tears down and negotiates afresh — §7.4),
+`METRICS.thermal_state`, `CAPABILITIES.features += "le_audio"`, and group sessions
 (which would need `recipient_id` in the envelope — deliberately absent, since two-peer is the V1
 scope).
+
+**Removed rather than reserved:** `VOICE_OFFER.ice_ufrag_hint`, which appeared in this document's
+Phase 1 baseline sketch of §7. The ICE ufrag is already inside the `sdp` the same frame carries,
+so the field was a second copy of a value that could disagree with the first. It was never
+implemented and no vector referenced it. See
+[ADR-020](DECISIONS/ADR-020-webrtc-voice-foundation.md).
