@@ -1,6 +1,6 @@
 # RideLink — Status
 
-**Updated:** 2 September 2026 (Phase 2a hardening — bounded voice input mailbox and strict generation guard, seventh session)
+**Updated:** 3 September 2026 (Phase 2a mailbox hardening — conflated iOS doorbell and non-coalescible terminal peer state, eighth session)
 **Current milestone:** M1 (Private voice link) — in progress
 **Current phase:** Phase 2a — voice transport foundation.
 **Phase 2a status: IMPLEMENTATION COMPLETE — REAL-DEVICE AUDIO GATE PENDING.**
@@ -54,15 +54,16 @@ fails if a raw socket reappears there.
 open for Phase 1a and this phase does not close it: this machine has no Android device or
 emulator, and only the iOS *simulator*. Everything below is a laptop measurement. See §4 and §7.
 
-**Repository state:** Android — **324** unit tests across five modules (was 296), `test ktlintCheck
-detekt lint assembleDebug assembleRelease` all green. iOS — `RideLinkCore` **61** tests (was 39),
-`RideLinkPlatform` **139** tests (was 134), `RideLink.xcodeproj` builds in **both** Debug and Release
+**Repository state:** Android — **335** unit tests across five modules (was 324), `test ktlintCheck
+detekt lint assembleDebug assembleRelease` all green. iOS — `RideLinkCore` **69** tests (was 61),
+`RideLinkPlatform` **150** tests (was 139), `RideLink.xcodeproj` builds in **both** Debug and Release
 for the simulator with zero warnings. Shared vectors: `protocol/vectors/identity/`,
 `protocol/vectors/session-gate/` (120 rows), `protocol/vectors/voice-signal/` (70 rows) and
 `protocol/vectors/voice-fsm/` (52 rows) — every one run by **both** platforms from the same file.
-The Phase 2a hardening pass (§2j) added no new vector file: its bounded-mailbox and
-strict-generation-guard fixes are pinned by ordinary unit tests, not shared wire vectors, since
-neither has a wire shape of its own.
+Neither the Phase 2a hardening pass (§2j) nor its follow-up (§2k) added a new vector file: their
+mailbox and doorbell fixes are pinned by ordinary unit tests, not shared wire vectors, since none
+of them has a wire shape of its own — `VoiceNegotiation`'s reducer, which does, is unchanged by
+either pass.
 
 ---
 
@@ -886,7 +887,105 @@ this pass did not investigate further because it did not recur.
 
 ---
 
+## 2k. Phase 2a mailbox hardening, second pass — conflated iOS doorbell and non-coalescible
+terminal peer state (3 September 2026 session, eighth)
+
+A second, explicitly scoped hardening pass on §2j's mailbox, requested as exactly two remaining
+mailbox issues — not Phase 2b, not a redesign. Both found in review of §2j's own implementation,
+both fixed with regression coverage on both platforms where applicable. Full account:
+[ADR-020 Amendment A3](DECISIONS/ADR-020-webrtc-voice-foundation.md#amendment-a3--3-september-2026--the-doorbell-is-conflated-and-a-peers-terminal-state-gets-its-own-lane).
+
+**Finding 1 — the iOS voice doorbell was still unbounded.** `VoiceInputMailbox` itself was already
+bounded by §2j, but the wake-up `VoiceController` rings on every `offer` to notify its single
+consumer was, on iOS only, an `OrderedEventChannel<Void>` — an `AsyncStream` with the default
+**unbounded** buffering policy. Android's equivalent (`Channel<Unit>(Channel.CONFLATED)`) was
+already correct, so this was a single-platform gap. Every lane's `offer` unconditionally rang that
+unbounded doorbell regardless of which lane accepted the input, so a flood of authenticated
+`VOICE_*` traffic could still grow an unbounded backlog of pending `Void` wake-ups sitting *behind*
+the already-bounded mailbox.
+
+`OrderedEventChannel` itself is untouched and was not the fix: it exists specifically because
+`ControlSessionManager` emits `.pairingSucceeded`/`.peerTrusted` immediately followed by
+`.connected` as ordered pairs that `SessionGate` (ADR-019) depends on arriving in that order. A
+doorbell has no such requirement, so making `OrderedEventChannel` conflated globally would have
+risked reintroducing exactly the event-ordering problem §2h fixed. Instead, a dedicated new type —
+`RideLinkPlatform.ConflatedSignal`, an `AsyncStream<Void>` built with `.bufferingNewest(1)` —
+gives the same `signal()`/`stream`/`finish()` contract with at most one pending wake-up buffered
+between drains, matching Android's `Channel.CONFLATED` doorbell exactly. Each `VoiceController`
+owns exactly one, created fresh in its initializer.
+
+**Finding 2 — a peer's terminal `VOICE_STATE` could be silently coalesced away by an ordinary
+one.** `VoiceInputMailbox`'s classification put every `VoiceSignal.State` value — `negotiating`,
+`connecting`, `active`, `idle`, `closed`, `failed`, `unknown` — into the same one-slot coalesced
+lane, latest-value-wins. `closed` and `failed` are not ordinary: `VoiceNegotiation`'s reducer gives
+them teardown semantics (`teardownFromPeer`, tearing down to `idle`/`failed` respectively) that no
+other value in the enum gets. Coalescing put them in the same slot as everything else, so a peer's
+`closed` queued ahead of a later `active` update — a perfectly ordinary sequence a reconnecting peer
+could produce — could be silently replaced before the mailbox's consumer ever drained it, and the
+remote teardown signal would simply vanish with this side never learning the peer had ended its
+side of the call.
+
+Fixed with a fifth mailbox lane, `terminal_peer_state`, holding only `closed`/`failed` peer signals;
+every other `VOICE_STATE` value keeps coalescing exactly as before. Bounded FIFO, capacity **8** on
+both platforms (`VoiceInputMailbox.TERMINAL_PEER_STATE_CAPACITY`/`terminalPeerStateCapacity`) —
+sized the same way as the critical lane: one negotiation produces at most one terminal peer state
+naturally, so 8 absorbs several rapid teardown/rebuild cycles while staying far below anything a
+real ride would approach. Draining priority is now `teardown > terminal_peer_state > critical > ice
+> coalesced` — a peer's own teardown is never delayed behind an offer/answer or ICE flood, and it
+sits strictly above `coalesced` so it can never be classified alongside, and therefore overwritten
+by, an ordinary update. An overflow at this lane refuses the new input outright (not evicting an
+*earlier* terminal event) and forces `ControlLinkLost` through the always-accepting teardown lane —
+the same already-proven safe degrade a critical-lane overflow produces, applied one layer earlier.
+`VoiceNegotiation` itself needed no change: the reducer's handling of `closed`/`failed` was already
+correct whenever it actually saw them; the bug was entirely in the mailbox deciding, ahead of the
+reducer, that a terminal signal and an ordinary one were interchangeable.
+
+**Verification.** 8 new Android tests (`VoiceInputMailboxTest`, terminal-lane classification,
+priority, overflow) and 3 new Android tests (`VoiceControllerMailboxTest`, terminal state through a
+live controller) — Android's doorbell needed no change and so has no new doorbell tests. 8 new iOS
+tests (`VoiceInputMailboxTests`, mirroring Android's) and 3 new iOS tests
+(`VoiceControllerMailboxTests`, mirroring Android's), plus 8 new `ConflatedSignalTests` proving the
+doorbell semantics directly: 100,000 signals before one consume buffer at most one wake-up, one
+wake-up is enough to drain everything queued behind it, a signal after `finish()` is harmless,
+teardown leaves no pending consumer, and a fresh instance is independently functional. All of it
+proves the semantics directly rather than by measuring memory. Every new/changed suite was run **20
+consecutive times on both platforms with 0 failures** (see §3). All prior Phase 1b/2a suites remain
+green, including the real two-engine WebRTC loopback test and the pre-authentication `VOICE_*`
+refusal over real TLS.
+
+**§4 problem 28 (the intermittent `PairingSessionIntegrationTest` CI failure) remains open,
+unrelated, and untouched by this pass** — this session did not attempt to reproduce it and makes no
+claim about its status either way.
+
+---
+
 ## 3. Tests passed / pending
+
+**Passed and verified in the second Phase 2a mailbox hardening session (3 September 2026, eighth),
+by actually running the commands.** Every Gradle command was run with
+`-Dorg.gradle.java.home=/opt/homebrew/opt/openjdk@21/libexec/openjdk.jdk/Contents/Home` (§4 problem 17):
+
+- `./gradlew test ktlintCheck detekt lint assembleDebug assembleRelease` — **all green**, all five
+  Android modules. **335 tests** (was 324): `core` 184 (was 176 — +8 `VoiceInputMailboxTest`:
+  terminal-lane classification, priority over ICE/coalesced/critical, drained-unchanged, flood
+  overflow), `network` 129 (was 126 — +3 `VoiceControllerMailboxTest`: remote CLOSED/FAILED through
+  the live reducer, terminal-lane overflow degrade), `audio` 11, `app` 2, `data` 9.
+- `swift test --package-path ios/Packages/RideLinkCore` — **69/69** (was 61 — +8
+  `VoiceInputMailboxTests`, mirroring Android's terminal-lane additions).
+- `swift test --package-path ios/Packages/RideLinkPlatform` — **150/150** (was 139 — +3
+  `VoiceControllerMailboxTests` mirroring Android's, +8 new `ConflatedSignalTests` proving the
+  doorbell's conflation semantics directly), zero Swift 6 strict-concurrency warnings.
+- `xcodebuild` Debug **and** Release for the simulator — both succeed, **zero warnings**.
+- Every new/changed test class was run **20 consecutive times, 0 failures**: Android
+  `VoiceInputMailboxTest` and `VoiceControllerMailboxTest` (the latter via `:network:testDebugUnitTest
+  --tests`, not the `:network:test` lifecycle task, which does not accept a `--tests` filter on an
+  AGP library module — a CLI quirk worth recording since it looks like a real failure the first
+  time), and iOS `VoiceInputMailboxTests`, `VoiceControllerMailboxTests` and `ConflatedSignalTests`.
+  All prior Phase 1b/2a suites remain green, including the real two-engine WebRTC loopback test and
+  the pre-authentication `VOICE_*` refusal over real TLS on both platforms.
+- SwiftLint/SwiftFormat: still not installed on this machine (§4 problem 14, unchanged).
+
+---
 
 **Passed and verified in the Phase 2a hardening session (2 September 2026, seventh), by actually
 running the commands.** Every Gradle command was run with

@@ -2,13 +2,22 @@ import Foundation
 
 /// Where a `VoiceInput` is classified before it ever reaches the pure `VoiceNegotiation` table.
 ///
-/// Priority order for `VoiceInputMailbox.poll` is `.teardown` > `.critical` > `.ice` > `.coalesced`: a
-/// pending stop or link loss must never sit behind a flood of trickle-ICE or peer-state spam, and once
-/// it is applied the reducer resets to a fresh generation, so anything stale still queued below it
-/// becomes inert on its own (the existing `VoiceEngineGeneration` / `voice_session_id` guard).
+/// Priority order for `VoiceInputMailbox.poll` is `.teardown` > `.terminalPeerState` > `.critical` >
+/// `.ice` > `.coalesced`: a pending stop or link loss must never sit behind a flood of trickle-ICE or
+/// peer-state spam, and once it is applied the reducer resets to a fresh generation, so anything stale
+/// still queued below it becomes inert on its own (the existing `VoiceEngineGeneration` /
+/// `voice_session_id` guard). `.terminalPeerState` sits directly below `.teardown` and above
+/// `.critical` so a peer's own teardown signal is never delayed behind a flood of offers/answers, and
+/// strictly above `.coalesced` so it can never be classified alongside -- and therefore silently
+/// overwritten by -- an ordinary peer-state update.
 public enum VoiceMailboxLane: Sendable, Equatable {
     /// `.stopRequested` / `.controlLinkLost`. One slot, latest wins, never refused.
     case teardown
+    /// A peer's own `VOICE_STATE { state: closed | failed }`. Unlike an ordinary peer-state update
+    /// (`negotiating`/`connecting`/`active`/`idle`/`unknown`), the reducer gives these teardown
+    /// semantics (`VoiceNegotiation`'s `teardownFromPeer`), so a later ordinary update must never be
+    /// allowed to coalesce over -- and thereby erase -- one still sitting here undelivered.
+    case terminalPeerState
     /// Cannot be silently lost: local start/offer/answer/connectivity, and a peer's Offer/Answer.
     case critical
     /// ICE-candidate-shaped inputs, local or remote. Bounded exactly as PROTOCOL §7.4's own queue is.
@@ -29,6 +38,11 @@ public enum VoiceMailboxOutcome: Sendable, Equatable {
     /// a safe degrade in response — a critical input cannot simply vanish with nothing done about it,
     /// unlike `.iceEvicted` or `.coalesced`.
     case criticalOverflow
+    /// The terminal-peer-state lane was full and this input was refused outright. Exactly like
+    /// `.criticalOverflow` -- refusing a `closed`/`failed` signal outright and forcing a safe degrade
+    /// is simpler and strictly safer than evicting an *earlier* terminal event to make room for this
+    /// one, which would risk discarding the one signal the lane exists to protect.
+    case terminalOverflow
 }
 
 /// PROTOCOL §7.4/§7.8's bounded mailbox policy, extracted so a laptop test can exhaust it.
@@ -55,20 +69,34 @@ public struct VoiceInputMailbox: Sendable {
 
     private let criticalCapacity: Int
     private let iceCapacity: Int
+    private let terminalPeerStateCapacity: Int
 
     private var teardown: VoiceInput?
+    private var terminalPeerState: [VoiceInput] = []
     private var critical: [VoiceInput] = []
     private var ice: [VoiceInput] = []
     private var coalesced: [CoalesceKey: VoiceInput] = [:]
     private var coalesceOrder: [CoalesceKey] = []
 
-    /// `.iceEvicted` + `.criticalOverflow`, combined: one honest count of "a well-formed input could
-    /// not be held as it arrived."
+    /// A single negotiation produces at most one terminal peer state naturally -- `closed` xor
+    /// `failed`, once, per generation. This bounds a peer that floods repeated terminal frames (e.g.
+    /// across several rapid teardown/rebuild cycles within one control session) rather than assuming
+    /// good behaviour, while staying far larger than any real ride's handful of teardown/rebuild
+    /// cycles would ever approach.
+    public static let terminalPeerStateCapacity = 8
+
+    /// `.iceEvicted` + `.criticalOverflow` + `.terminalOverflow`, combined: one honest count of "a
+    /// well-formed input could not be held as it arrived."
     public private(set) var overflowCount = 0
 
-    public init(criticalCapacity: Int = VoiceInputMailbox.criticalCapacity, iceCapacity: Int = VoiceBounds.maxQueuedCandidates) {
+    public init(
+        criticalCapacity: Int = VoiceInputMailbox.criticalCapacity,
+        iceCapacity: Int = VoiceBounds.maxQueuedCandidates,
+        terminalPeerStateCapacity: Int = VoiceInputMailbox.terminalPeerStateCapacity
+    ) {
         self.criticalCapacity = criticalCapacity
         self.iceCapacity = iceCapacity
+        self.terminalPeerStateCapacity = terminalPeerStateCapacity
     }
 
     @discardableResult
@@ -77,6 +105,13 @@ public struct VoiceInputMailbox: Sendable {
         case .teardown:
             teardown = input
             return .accepted(lane: .teardown)
+        case .terminalPeerState:
+            if terminalPeerState.count >= terminalPeerStateCapacity {
+                overflowCount += 1
+                return .terminalOverflow
+            }
+            terminalPeerState.append(input)
+            return .accepted(lane: .terminalPeerState)
         case .critical:
             if critical.count >= criticalCapacity {
                 overflowCount += 1
@@ -108,6 +143,7 @@ public struct VoiceInputMailbox: Sendable {
             teardown = nil
             return next
         }
+        if !terminalPeerState.isEmpty { return terminalPeerState.removeFirst() }
         if !critical.isEmpty { return critical.removeFirst() }
         if !ice.isEmpty { return ice.removeFirst() }
         if let key = coalesceOrder.first {
@@ -118,16 +154,17 @@ public struct VoiceInputMailbox: Sendable {
     }
 
     public var isEmpty: Bool {
-        teardown == nil && critical.isEmpty && ice.isEmpty && coalesced.isEmpty
+        teardown == nil && terminalPeerState.isEmpty && critical.isEmpty && ice.isEmpty && coalesced.isEmpty
     }
 
     /// The whole queued backlog, for diagnostics only — nothing here decides anything from this.
     public var count: Int {
-        (teardown == nil ? 0 : 1) + critical.count + ice.count + coalesced.count
+        (teardown == nil ? 0 : 1) + terminalPeerState.count + critical.count + ice.count + coalesced.count
     }
 
     public mutating func clear() {
         teardown = nil
+        terminalPeerState.removeAll()
         critical.removeAll()
         ice.removeAll()
         coalesced.removeAll()
@@ -165,8 +202,8 @@ public struct VoiceInputMailbox: Sendable {
                 return .critical
             case .iceCandidate:
                 return .ice
-            case .state:
-                return .coalesced
+            case .state(_, let wire, _, _):
+                return isTerminal(wire) ? .terminalPeerState : .coalesced
             }
         case .localCandidateGathered:
             return .ice
@@ -175,5 +212,10 @@ public struct VoiceInputMailbox: Sendable {
         case .muteRequested:
             return .coalesced
         }
+    }
+
+    /// True for exactly the two PROTOCOL §7.4 wire states the reducer gives teardown semantics.
+    private static func isTerminal(_ wire: VoiceWireState) -> Bool {
+        wire == .closed || wire == .failed
     }
 }

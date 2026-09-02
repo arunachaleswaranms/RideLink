@@ -101,6 +101,89 @@ class VoiceControllerMailboxTest {
             )
         }
 
+    /**
+     * ADR-020 Amendment A3, acceptance criterion G: a peer's terminal `VOICE_STATE` must reach the
+     * real [VoiceNegotiation] reducer -- not be lost to a later ordinary update coalescing over it in
+     * the mailbox -- and must go through the reducer's *remote*-teardown path
+     * (`teardownFromPeer`), which is distinct from a deliberate local [VoiceController.stop]: capture
+     * survives either way, but only a local stop's [com.ridelink.core.voice.VoiceAction.ReleaseLocalAudio]
+     * can ever release it.
+     */
+    @Test
+    fun `a remote CLOSED survives a flood of ordinary ACTIVE updates and tears the session down to IDLE`() =
+        withControllerManual(isLocalLeader = true) { leader, fakes, dispatcher ->
+            leader.start()
+            dispatcher.runAll()
+            assertTrue(fakes.engine.calls.contains("createOffer"))
+
+            leader.submit(VoiceSignal.State(genAt(1), VoiceWireState.CLOSED, false, VoiceMode.CONTINUOUS))
+            repeat(FLOOD_COUNT) {
+                leader.submit(VoiceSignal.State(genAt(1), VoiceWireState.ACTIVE, false, VoiceMode.CONTINUOUS))
+            }
+            dispatcher.runAll()
+
+            assertTrue(
+                leader.diagnostics.value.status == VoiceStatus.IDLE,
+                "the terminal CLOSED must have reached the reducer despite the ACTIVE flood behind it",
+            )
+            assertFalse(
+                fakes.engine.calls.contains("release"),
+                "a remote CLOSED must go through teardownFromPeer, never the local stop's capture-release action",
+            )
+            assertTrue(fakes.audio.isOpen, "capture survives a remote teardown exactly as it survives a link loss")
+        }
+
+    /** The FAILED half of the same property, with an ordinary CONNECTING flood behind it instead. */
+    @Test
+    fun `a remote FAILED survives a flood of ordinary CONNECTING updates and yields FAILED`() =
+        withControllerManual(isLocalLeader = true) { leader, fakes, dispatcher ->
+            leader.start()
+            dispatcher.runAll()
+
+            leader.submit(VoiceSignal.State(genAt(1), VoiceWireState.FAILED, false, VoiceMode.CONTINUOUS))
+            repeat(FLOOD_COUNT) {
+                leader.submit(VoiceSignal.State(genAt(1), VoiceWireState.CONNECTING, false, VoiceMode.CONTINUOUS))
+            }
+            dispatcher.runAll()
+
+            assertTrue(
+                leader.diagnostics.value.status == VoiceStatus.FAILED,
+                "the terminal FAILED must have reached the reducer despite the CONNECTING flood behind it",
+            )
+            assertFalse(fakes.engine.calls.contains("release"))
+            assertTrue(fakes.audio.isOpen)
+        }
+
+    /**
+     * Acceptance criterion H: a flood of terminal peer states, on its own, cannot grow the mailbox
+     * without bound -- it forces the same safe, already-proven degrade a critical-lane overflow does,
+     * never releases capture, and never kills the control session.
+     */
+    @Test
+    fun `a flood of terminal peer states beyond the lane's capacity forces a safe degrade, never releasing capture`() =
+        withControllerManual(isLocalLeader = false) { follower, fakes, dispatcher ->
+            follower.start()
+            dispatcher.runAll()
+            assertTrue(fakes.audio.calls.contains("open"))
+
+            // Every one of these is submitted before the dispatcher is pumped again, so nothing can
+            // drain and free terminal-lane space between submissions -- deterministic overflow, well
+            // past VoiceInputMailbox.TERMINAL_PEER_STATE_CAPACITY (8).
+            repeat(TERMINAL_OVERFLOW_FLOOD_COUNT) { i ->
+                val wire = if (i % 2 == 0) VoiceWireState.CLOSED else VoiceWireState.FAILED
+                follower.submit(VoiceSignal.State(genAt(1), wire, false, VoiceMode.CONTINUOUS))
+            }
+            dispatcher.runAll()
+
+            val overflow = follower.diagnostics.value.droppedSignals[VoiceSignalDropReason.INPUT_MAILBOX_OVERFLOW] ?: 0
+            assertTrue(overflow > 0, "flooding $TERMINAL_OVERFLOW_FLOOD_COUNT terminal states past a capacity of 8 must overflow")
+            assertFalse(
+                fakes.engine.calls.contains("release"),
+                "a terminal-lane overflow must degrade like a link loss, never release capture",
+            )
+            assertTrue(fakes.audio.isOpen, "this user's consent for the ride segment must survive the degrade")
+        }
+
     /** Acceptance criteria A, D and E, together: overflow degrades safely, capture and control both survive. */
     @Test
     fun `an authenticated flood of distinct offers triggers a safe degrade, not a crash, and never releases capture`() =
@@ -316,6 +399,9 @@ class VoiceControllerMailboxTest {
         const val SDP = "v=0\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\na=mid:0\r\n"
         const val FLOOD_COUNT = 500
         const val OVERFLOW_FLOOD_COUNT = 200
+
+        /** Well past VoiceInputMailbox.TERMINAL_PEER_STATE_CAPACITY (8); deterministic overflow. */
+        const val TERMINAL_OVERFLOW_FLOOD_COUNT = 20
         const val CONCURRENT_THREADS = 8
 
         /** Well clear of anything [genAt] or a harness's own fresh-id counter could otherwise produce. */

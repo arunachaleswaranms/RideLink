@@ -764,14 +764,32 @@ memory just by sending frames faster than they are consumed:
 
 | Lane | Holds | Policy |
 |---|---|---|
+| teardown | a deliberate stop, or a control-link loss | one slot, always accepted, drained with top priority |
+| terminal_peer_state | a peer's own `VOICE_STATE { state: closed \| failed }` | bounded FIFO, capacity **8** (`VoiceInputMailbox.TERMINAL_PEER_STATE_CAPACITY`/`terminalPeerStateCapacity`). A single negotiation produces at most one of these naturally — `closed` xor `failed`, once — so 8 absorbs several rapid teardown/rebuild cycles within one control session while staying far below anything an ordinary ride would approach. **Never coalesced**: the reducer gives `closed`/`failed` teardown semantics (`teardownFromPeer`), so a later ordinary `VOICE_STATE` must never be allowed to replace one still queued here. A new terminal signal arriving at capacity is refused outright — rather than evicting the oldest, which risks discarding the one signal this lane exists to protect — and forces the same link-loss-style degrade a critical-lane refusal does |
 | critical | local start, engine offer/answer/connectivity callbacks, a peer's `VOICE_OFFER`/`VOICE_ANSWER` | bounded FIFO, capacity **32** (`VoiceInputMailbox.CRITICAL_CAPACITY`/`criticalCapacity`); a new input arriving at capacity is refused and forces a link-loss-style degrade (media stops; local capture and the TLS control session both survive) |
 | ice | `VOICE_ICE`, and a locally gathered candidate | bounded ring, capacity `MAX_QUEUED_VOICE_CANDIDATES` (the same constant `PendingCandidates` enforces one layer later); at capacity the oldest is evicted and counted, exactly as `PendingCandidates` already does |
-| coalesced | `VOICE_STATE`, mute, remote-track-present | one slot per kind; a newer update replaces an undelivered older one rather than queuing behind it |
-| teardown | a deliberate stop, or a control-link loss | one slot, always accepted, drained with top priority |
+| coalesced | `VOICE_STATE { state: negotiating \| connecting \| active \| idle \| unknown }`, mute, remote-track-present | one slot per kind; a newer update replaces an undelivered older one rather than queuing behind it |
 
-Draining priority is teardown > critical > ice > coalesced. A refusal at the critical lane is
-counted as `INPUT_MAILBOX_OVERFLOW` in the FR-023 diagnostics — a distinct reason from every other
-entry in the drop-reason vocabulary, because the reducer never even saw the input in this case.
+Draining priority is teardown > terminal_peer_state > critical > ice > coalesced: a peer's own
+teardown signal is never delayed behind a flood of offers/answers or trickle ICE, and it is
+classified in a lane strictly above `coalesced` so it can never be silently overwritten by an
+ordinary peer-state update that arrives after it but before it is drained. A refusal at the
+critical or terminal_peer_state lane is counted as `INPUT_MAILBOX_OVERFLOW` in the FR-023
+diagnostics — a distinct reason from every other entry in the drop-reason vocabulary, because the
+reducer never even saw the input in this case.
+
+**The wake-up between the mailbox and its single consumer is itself conflated on both platforms.**
+`VoiceController` rings a doorbell on every `offer` rather than passing the input across the
+thread/isolation boundary directly; that doorbell carries no payload, only "there is work
+available," so at most one pending wake-up is ever buffered between drains regardless of how many
+times it is rung — `kotlinx.coroutines.channels.Channel(Channel.CONFLATED)` on Android,
+`RideLinkPlatform.ConflatedSignal` (an `AsyncStream` with `.bufferingNewest(1)`) on iOS. Before the
+iOS side had this dedicated type, its doorbell was an `OrderedEventChannel<Void>` — the same FIFO
+primitive `SessionCoordinator` uses where relative event *order* is itself security-sensitive
+(§4.6) — whose unbounded default buffering let a flood of authenticated `VOICE_*` traffic grow an
+unbounded backlog of wake-ups sitting behind the already-bounded mailbox above. A doorbell has no
+ordering requirement of its own, so this is a distinct primitive from `OrderedEventChannel`, not a
+looser use of it.
 
 ### 7.6 ICE — host candidates only, and no internet
 

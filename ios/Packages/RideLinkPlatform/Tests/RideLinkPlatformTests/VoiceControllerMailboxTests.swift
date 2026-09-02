@@ -82,6 +82,79 @@ final class VoiceControllerMailboxTests: XCTestCase {
         await harness.controller.shutdown()
     }
 
+    /// ADR-020 Amendment A3, acceptance criterion G: a peer's terminal `VOICE_STATE` must reach the
+    /// real `VoiceNegotiation` reducer -- not be lost to a later ordinary update coalescing over it in
+    /// the mailbox -- and must go through the reducer's *remote*-teardown path (`teardownFromPeer`),
+    /// which is distinct from a deliberate local `stop()`: capture survives either way, but only a
+    /// local stop's `.releaseLocalAudio` action can ever release it. Kotlin mirror:
+    /// `com.ridelink.network.voice.VoiceControllerMailboxTest`'s equivalently named test.
+    func testARemoteClosedSurvivesAFloodOfOrdinaryActiveUpdatesAndTearsTheSessionDownToIdle() async throws {
+        let harness = try await Harness(isLocalLeader: true)
+        await harness.controller.start()
+        try await harness.awaitEngineCall("createOffer")
+
+        harness.controller.submit(.state(voiceSessionId: VoiceSessionId(gen1), state: .closed, micMuted: false, mode: .continuous))
+        for _ in 0..<Self.floodCount {
+            harness.controller.submit(.state(voiceSessionId: VoiceSessionId(gen1), state: .active, micMuted: false, mode: .continuous))
+        }
+        try await harness.awaitCondition { await harness.controller.currentDiagnostics().status == .idle }
+
+        let engineCalls = await harness.engine.recordedCalls()
+        XCTAssertFalse(
+            engineCalls.contains("release"),
+            "a remote CLOSED must go through teardownFromPeer, never the local stop's capture-release action"
+        )
+        let audioOpen = await harness.audio.isOpen()
+        XCTAssertTrue(audioOpen, "capture survives a remote teardown exactly as it survives a link loss")
+        await harness.controller.shutdown()
+    }
+
+    /// The FAILED half of the same property, with an ordinary CONNECTING flood behind it instead.
+    func testARemoteFailedSurvivesAFloodOfOrdinaryConnectingUpdatesAndYieldsFailed() async throws {
+        let harness = try await Harness(isLocalLeader: true)
+        await harness.controller.start()
+        try await harness.awaitEngineCall("createOffer")
+
+        harness.controller.submit(.state(voiceSessionId: VoiceSessionId(gen1), state: .failed, micMuted: false, mode: .continuous))
+        for _ in 0..<Self.floodCount {
+            harness.controller.submit(.state(voiceSessionId: VoiceSessionId(gen1), state: .connecting, micMuted: false, mode: .continuous))
+        }
+        try await harness.awaitCondition { await harness.controller.currentDiagnostics().status == .failed }
+
+        let engineCalls = await harness.engine.recordedCalls()
+        XCTAssertFalse(engineCalls.contains("release"))
+        let audioOpen = await harness.audio.isOpen()
+        XCTAssertTrue(audioOpen)
+        await harness.controller.shutdown()
+    }
+
+    /// Acceptance criterion H: a flood of terminal peer states, on its own, cannot grow the mailbox
+    /// without bound -- it forces the same safe, already-proven degrade a critical-lane overflow does,
+    /// never releases capture, and never kills the control session.
+    func testAFloodOfTerminalPeerStatesBeyondTheLanesCapacityForcesASafeDegradeNeverReleasingCapture() async throws {
+        let harness = try await Harness(isLocalLeader: false, attachImmediately: false)
+        await harness.controller.start()
+
+        // Every one of these is submitted before `attach()` is ever called, so nothing can drain and
+        // free terminal-lane space between submissions -- deterministic overflow, well past
+        // `VoiceInputMailbox.terminalPeerStateCapacity` (8).
+        for i in 0..<Self.terminalOverflowFloodCount {
+            let wire: VoiceWireState = i % 2 == 0 ? .closed : .failed
+            harness.controller.submit(.state(voiceSessionId: VoiceSessionId(gen1), state: wire, micMuted: false, mode: .continuous))
+        }
+        await harness.controller.attach()
+        try await harness.awaitAudioCall("open")
+
+        try await harness.awaitCondition {
+            (await harness.controller.currentDiagnostics().droppedSignals[.inputMailboxOverflow] ?? 0) > 0
+        }
+        let engineCalls = await harness.engine.recordedCalls()
+        XCTAssertFalse(engineCalls.contains("release"), "a terminal-lane overflow must degrade like a link loss, never release capture")
+        let audioOpen = await harness.audio.isOpen()
+        XCTAssertTrue(audioOpen, "this user's consent for the ride segment must survive the degrade")
+        await harness.controller.shutdown()
+    }
+
     /// Acceptance criteria A, D and E, together: overflow degrades safely, capture and control both
     /// survive.
     func testAnAuthenticatedFloodOfDistinctOffersTriggersASafeDegradeNotACrashAndNeverReleasesCapture() async throws {
@@ -231,6 +304,8 @@ final class VoiceControllerMailboxTests: XCTestCase {
 
     private static let floodCount = 500
     private static let overflowFloodCount = 200
+    /// Well past `VoiceInputMailbox.terminalPeerStateCapacity` (8); deterministic overflow.
+    private static let terminalOverflowFloodCount = 20
     /// Well clear of `gen1` or anything a real negotiation would otherwise use in these tests.
     private static let offset = 10_000_000
 

@@ -2,18 +2,31 @@ package com.ridelink.core.voice
 
 import com.ridelink.core.protocol.VoiceBounds
 import com.ridelink.core.protocol.VoiceSignal
+import com.ridelink.core.protocol.VoiceWireState
 
 /**
  * Where a [VoiceInput] is classified before it ever reaches the pure [VoiceNegotiation] table.
  *
- * Priority order for [VoiceInputMailbox.poll] is [TEARDOWN] > [CRITICAL] > [ICE] > [COALESCED]: a
- * pending stop or link loss must never sit behind a flood of trickle-ICE or peer-state spam, and
- * once it is applied the reducer resets to a fresh generation, so anything stale still queued below
- * it becomes inert on its own (the existing [VoiceEngineGeneration] / `voice_session_id` guard).
+ * Priority order for [VoiceInputMailbox.poll] is [TEARDOWN] > [TERMINAL_PEER_STATE] > [CRITICAL] >
+ * [ICE] > [COALESCED]: a pending stop or link loss must never sit behind a flood of trickle-ICE or
+ * peer-state spam, and once it is applied the reducer resets to a fresh generation, so anything
+ * stale still queued below it becomes inert on its own (the existing [VoiceEngineGeneration] /
+ * `voice_session_id` guard). [TERMINAL_PEER_STATE] sits directly below [TEARDOWN] and above
+ * [CRITICAL] so a peer's own teardown signal is never delayed behind a flood of offers/answers, and
+ * strictly above [COALESCED] so it can never be classified alongside — and therefore silently
+ * overwritten by — an ordinary peer-state update.
  */
 enum class VoiceMailboxLane {
     /** [VoiceInput.StopRequested] / [VoiceInput.ControlLinkLost]. One slot, latest wins, never refused. */
     TEARDOWN,
+
+    /**
+     * A peer's own `VOICE_STATE { state: closed | failed }`. Unlike an ordinary peer-state update
+     * (`negotiating`/`connecting`/`active`/`idle`/`unknown`), the reducer gives these teardown
+     * semantics ([VoiceNegotiation]'s `teardownFromPeer`), so a later ordinary update must never be
+     * allowed to coalesce over — and thereby erase — one still sitting here undelivered.
+     */
+    TERMINAL_PEER_STATE,
 
     /** Cannot be silently lost: local start/offer/answer/connectivity, and a peer's Offer/Answer. */
     CRITICAL,
@@ -44,6 +57,14 @@ sealed class VoiceMailboxOutcome {
      * about it, unlike [IceEvicted] or [Coalesced].
      */
     object CriticalOverflow : VoiceMailboxOutcome()
+
+    /**
+     * The terminal-peer-state lane was full and this input was refused outright. Exactly like
+     * [CriticalOverflow] — refusing a `closed`/`failed` signal outright and forcing a safe degrade is
+     * simpler and strictly safer than evicting an *earlier* terminal event to make room for this one,
+     * which would risk discarding the one signal the lane exists to protect.
+     */
+    object TerminalPeerStateOverflow : VoiceMailboxOutcome()
 }
 
 /**
@@ -67,15 +88,18 @@ sealed class VoiceMailboxOutcome {
 class VoiceInputMailbox(
     private val criticalCapacity: Int = CRITICAL_CAPACITY,
     private val iceCapacity: Int = VoiceBounds.MAX_QUEUED_CANDIDATES,
+    private val terminalPeerStateCapacity: Int = TERMINAL_PEER_STATE_CAPACITY,
 ) {
     private var teardown: VoiceInput? = null
+    private val terminalPeerState = ArrayDeque<VoiceInput>()
     private val critical = ArrayDeque<VoiceInput>()
     private val ice = ArrayDeque<VoiceInput>()
     private val coalesced = LinkedHashMap<CoalesceKey, VoiceInput>()
 
     /**
-     * [VoiceMailboxOutcome.IceEvicted] + [VoiceMailboxOutcome.CriticalOverflow], combined: one
-     * honest count of "a well-formed input could not be held as it arrived."
+     * [VoiceMailboxOutcome.IceEvicted] + [VoiceMailboxOutcome.CriticalOverflow] +
+     * [VoiceMailboxOutcome.TerminalPeerStateOverflow], combined: one honest count of "a well-formed
+     * input could not be held as it arrived."
      */
     var overflowCount: Int = 0
         private set
@@ -85,6 +109,15 @@ class VoiceInputMailbox(
             VoiceMailboxLane.TEARDOWN -> {
                 teardown = input
                 VoiceMailboxOutcome.Accepted(lane)
+            }
+            VoiceMailboxLane.TERMINAL_PEER_STATE -> {
+                if (terminalPeerState.size >= terminalPeerStateCapacity) {
+                    overflowCount += 1
+                    VoiceMailboxOutcome.TerminalPeerStateOverflow
+                } else {
+                    terminalPeerState.addLast(input)
+                    VoiceMailboxOutcome.Accepted(lane)
+                }
             }
             VoiceMailboxLane.CRITICAL -> {
                 if (critical.size >= criticalCapacity) {
@@ -119,19 +152,22 @@ class VoiceInputMailbox(
             teardown = null
             return it
         }
+        if (terminalPeerState.isNotEmpty()) return terminalPeerState.removeFirst()
         if (critical.isNotEmpty()) return critical.removeFirst()
         if (ice.isNotEmpty()) return ice.removeFirst()
         val key = coalesced.keys.firstOrNull() ?: return null
         return coalesced.remove(key)
     }
 
-    fun isEmpty(): Boolean = teardown == null && critical.isEmpty() && ice.isEmpty() && coalesced.isEmpty()
+    fun isEmpty(): Boolean = teardown == null && terminalPeerState.isEmpty() && critical.isEmpty() && ice.isEmpty() && coalesced.isEmpty()
 
     /** The whole queued backlog, for diagnostics only — nothing here decides anything from this. */
-    val size: Int get() = (if (teardown != null) 1 else 0) + critical.size + ice.size + coalesced.size
+    val size: Int
+        get() = (if (teardown != null) 1 else 0) + terminalPeerState.size + critical.size + ice.size + coalesced.size
 
     fun clear() {
         teardown = null
+        terminalPeerState.clear()
         critical.clear()
         ice.clear()
         coalesced.clear()
@@ -156,6 +192,18 @@ class VoiceInputMailbox(
          */
         const val CRITICAL_CAPACITY = 32
 
+        /**
+         * A single negotiation produces at most one terminal peer state naturally — `closed` xor
+         * `failed`, once, per generation. This bounds a peer that floods repeated terminal frames
+         * (e.g. across several rapid teardown/rebuild cycles within one control session) rather than
+         * assuming good behaviour, while staying far larger than any real ride's handful of
+         * teardown/rebuild cycles would ever approach.
+         */
+        const val TERMINAL_PEER_STATE_CAPACITY = 8
+
+        /** True for exactly the two PROTOCOL §7.4 wire states the reducer gives teardown semantics. */
+        private fun VoiceWireState.isTerminal(): Boolean = this == VoiceWireState.CLOSED || this == VoiceWireState.FAILED
+
         fun laneFor(input: VoiceInput): VoiceMailboxLane =
             when (input) {
                 VoiceInput.StopRequested, VoiceInput.ControlLinkLost -> VoiceMailboxLane.TEARDOWN
@@ -165,10 +213,11 @@ class VoiceInputMailbox(
                 is VoiceInput.MediaConnectivityChanged,
                 -> VoiceMailboxLane.CRITICAL
                 is VoiceInput.SignalReceived ->
-                    when (input.signal) {
+                    when (val signal = input.signal) {
                         is VoiceSignal.Offer, is VoiceSignal.Answer -> VoiceMailboxLane.CRITICAL
                         is VoiceSignal.IceCandidate -> VoiceMailboxLane.ICE
-                        is VoiceSignal.State -> VoiceMailboxLane.COALESCED
+                        is VoiceSignal.State ->
+                            if (signal.state.isTerminal()) VoiceMailboxLane.TERMINAL_PEER_STATE else VoiceMailboxLane.COALESCED
                     }
                 is VoiceInput.LocalCandidateGathered -> VoiceMailboxLane.ICE
                 is VoiceInput.RemoteTrackChanged -> VoiceMailboxLane.COALESCED

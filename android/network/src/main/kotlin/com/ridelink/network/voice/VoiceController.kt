@@ -198,8 +198,9 @@ class VoiceController(
      * is safe to call from the control read loop, a WebRTC callback thread, or the UI, exactly as
      * `Channel.trySend` was.
      *
-     * A [VoiceMailboxOutcome.CriticalOverflow] cannot simply be swallowed — a lost `VOICE_OFFER` or
-     * `VOICE_ANSWER` would wedge a negotiation with no error anywhere, the same failure mode the old
+     * A [VoiceMailboxOutcome.CriticalOverflow] or [VoiceMailboxOutcome.TerminalPeerStateOverflow]
+     * cannot simply be swallowed — a lost `VOICE_OFFER`/`VOICE_ANSWER`, or a lost peer `closed`/
+     * `failed`, would wedge a negotiation with no error anywhere, the same failure mode the old
      * unbounded channel existed to avoid. The response mirrors an actual control-link blip rather
      * than inventing a new one: force [VoiceInput.ControlLinkLost] through the always-accepting
      * teardown lane, which drops the media transport and keeps this user's local capture and the
@@ -208,7 +209,7 @@ class VoiceController(
      */
     private fun offer(input: VoiceInput) {
         val outcome = synchronized(mailboxLock) { mailbox.offer(input) }
-        if (outcome is VoiceMailboxOutcome.CriticalOverflow) {
+        if (outcome is VoiceMailboxOutcome.CriticalOverflow || outcome is VoiceMailboxOutcome.TerminalPeerStateOverflow) {
             synchronized(mailboxLock) { mailbox.offer(VoiceInput.ControlLinkLost) }
         }
         doorbell.trySend(Unit)

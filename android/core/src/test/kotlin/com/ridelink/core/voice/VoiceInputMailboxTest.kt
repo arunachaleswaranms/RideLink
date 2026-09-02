@@ -60,21 +60,53 @@ class VoiceInputMailboxTest {
     }
 
     @Test
-    fun `mute, remote-track and peer-state updates are coalesced`() {
+    fun `mute, remote-track and non-terminal peer-state updates are coalesced`() {
         assertEquals(VoiceMailboxLane.COALESCED, VoiceInputMailbox.laneFor(VoiceInput.MuteRequested(true)))
         assertEquals(
             VoiceMailboxLane.COALESCED,
             VoiceInputMailbox.laneFor(VoiceInput.RemoteTrackChanged(GEN_1, present = true)),
         )
+        val ordinaryWireStates =
+            listOf(
+                VoiceWireState.NEGOTIATING,
+                VoiceWireState.CONNECTING,
+                VoiceWireState.ACTIVE,
+                VoiceWireState.IDLE,
+                VoiceWireState.UNKNOWN,
+            )
+        for (wire in ordinaryWireStates) {
+            assertEquals(
+                VoiceMailboxLane.COALESCED,
+                VoiceInputMailbox.laneFor(VoiceInput.SignalReceived(VoiceSignal.State(GEN_1, wire, false, VoiceMode.CONTINUOUS), GEN_1)),
+                "wire state $wire must coalesce, not be treated as terminal",
+            )
+        }
+    }
+
+    @Test
+    fun `a peer's closed or failed state is the terminal-peer-state lane, not coalesced`() {
         assertEquals(
-            VoiceMailboxLane.COALESCED,
+            VoiceMailboxLane.TERMINAL_PEER_STATE,
             VoiceInputMailbox.laneFor(
-                VoiceInput.SignalReceived(VoiceSignal.State(GEN_1, VoiceWireState.ACTIVE, false, VoiceMode.CONTINUOUS), GEN_1),
+                VoiceInput.SignalReceived(VoiceSignal.State(GEN_1, VoiceWireState.CLOSED, false, VoiceMode.CONTINUOUS), GEN_1),
+            ),
+        )
+        assertEquals(
+            VoiceMailboxLane.TERMINAL_PEER_STATE,
+            VoiceInputMailbox.laneFor(
+                VoiceInput.SignalReceived(VoiceSignal.State(GEN_1, VoiceWireState.FAILED, false, VoiceMode.CONTINUOUS), GEN_1),
+            ),
+        )
+        // A null voice_session_id is legal for `closed` (PROTOCOL §7.4) and must classify the same way.
+        assertEquals(
+            VoiceMailboxLane.TERMINAL_PEER_STATE,
+            VoiceInputMailbox.laneFor(
+                VoiceInput.SignalReceived(VoiceSignal.State(null, VoiceWireState.CLOSED, false, VoiceMode.CONTINUOUS), GEN_1),
             ),
         )
     }
 
-    // --- priority: teardown > critical > ice > coalesced ------------------------------------------
+    // --- priority: teardown > terminal-peer-state > critical > ice > coalesced ---------------------
 
     @Test
     fun `poll drains teardown before anything else, regardless of arrival order`() {
@@ -82,9 +114,12 @@ class VoiceInputMailboxTest {
         mailbox.offer(VoiceInput.StartRequested(GEN_1))
         mailbox.offer(VoiceInput.LocalCandidateGathered(GEN_1, CANDIDATE, null, 0))
         mailbox.offer(VoiceInput.MuteRequested(true))
+        val closed = VoiceInput.SignalReceived(VoiceSignal.State(GEN_1, VoiceWireState.CLOSED, false, VoiceMode.CONTINUOUS), GEN_1)
+        mailbox.offer(closed)
         mailbox.offer(VoiceInput.ControlLinkLost)
 
-        assertEquals(VoiceInput.ControlLinkLost, mailbox.poll())
+        assertEquals(VoiceInput.ControlLinkLost, mailbox.poll(), "local teardown outranks even a terminal peer state")
+        assertEquals(closed, mailbox.poll())
         assertEquals(VoiceInput.StartRequested(GEN_1), mailbox.poll())
         assertEquals(VoiceInput.LocalCandidateGathered(GEN_1, CANDIDATE, null, 0), mailbox.poll())
         assertEquals(VoiceInput.MuteRequested(true), mailbox.poll())
@@ -109,6 +144,117 @@ class VoiceInputMailboxTest {
 
         assertEquals(VoiceInput.LocalOfferCreated(GEN_1, "first"), mailbox.poll())
         assertEquals(VoiceInput.LocalAnswerCreated(GEN_1, "second"), mailbox.poll())
+    }
+
+    // --- terminal peer state: never coalesced, never overtaken -------------------------------------
+
+    @Test
+    fun `a queued CLOSED is not overwritten by a later ACTIVE, and both survive as distinct entries`() {
+        val mailbox = VoiceInputMailbox()
+        val closed = VoiceInput.SignalReceived(VoiceSignal.State(GEN_1, VoiceWireState.CLOSED, false, VoiceMode.CONTINUOUS), GEN_1)
+        val active = VoiceInput.SignalReceived(VoiceSignal.State(GEN_1, VoiceWireState.ACTIVE, false, VoiceMode.CONTINUOUS), GEN_1)
+
+        mailbox.offer(closed)
+        mailbox.offer(active)
+
+        // CLOSED is drained first (higher-priority lane) and unchanged -- ACTIVE landed in the
+        // separate coalesced lane and never had the chance to replace it.
+        assertEquals(closed, mailbox.poll(), "the terminal CLOSED must survive intact")
+        assertEquals(active, mailbox.poll(), "the ordinary ACTIVE update is still delivered, just after")
+        assertEquals(null, mailbox.poll())
+    }
+
+    @Test
+    fun `a queued FAILED is not overwritten by a later CONNECTING`() {
+        val mailbox = VoiceInputMailbox()
+        val failed = VoiceInput.SignalReceived(VoiceSignal.State(GEN_1, VoiceWireState.FAILED, false, VoiceMode.CONTINUOUS), GEN_1)
+        val connecting =
+            VoiceInput.SignalReceived(VoiceSignal.State(GEN_1, VoiceWireState.CONNECTING, false, VoiceMode.CONTINUOUS), GEN_1)
+
+        mailbox.offer(failed)
+        mailbox.offer(connecting)
+
+        assertEquals(failed, mailbox.poll(), "the terminal FAILED must survive intact")
+        assertEquals(connecting, mailbox.poll())
+        assertEquals(null, mailbox.poll())
+    }
+
+    @Test
+    fun `terminal peer state is drained ahead of a large ICE backlog`() {
+        val mailbox = VoiceInputMailbox(iceCapacity = 64)
+        repeat(1_000) { i -> mailbox.offer(VoiceInput.LocalCandidateGathered(GEN_1, "c$i", null, 0)) }
+        val closed = VoiceInput.SignalReceived(VoiceSignal.State(GEN_1, VoiceWireState.CLOSED, false, VoiceMode.CONTINUOUS), GEN_1)
+        mailbox.offer(closed)
+
+        assertEquals(closed, mailbox.poll(), "a terminal peer state must never queue behind an ICE flood")
+    }
+
+    @Test
+    fun `terminal peer state is drained ahead of ordinary coalesced updates, and after critical work`() {
+        val mailbox = VoiceInputMailbox()
+        mailbox.offer(VoiceInput.MuteRequested(true))
+        mailbox.offer(VoiceInput.StartRequested(GEN_1))
+        val closed = VoiceInput.SignalReceived(VoiceSignal.State(GEN_1, VoiceWireState.CLOSED, false, VoiceMode.CONTINUOUS), GEN_1)
+        mailbox.offer(closed)
+
+        assertEquals(closed, mailbox.poll(), "terminal peer state outranks both critical and coalesced work")
+        assertEquals(VoiceInput.StartRequested(GEN_1), mailbox.poll())
+        assertEquals(VoiceInput.MuteRequested(true), mailbox.poll())
+    }
+
+    @Test
+    fun `a terminal signal is drained unchanged -- never rewritten into a local teardown input`() {
+        val mailbox = VoiceInputMailbox()
+        val closed = VoiceInput.SignalReceived(VoiceSignal.State(null, VoiceWireState.CLOSED, false, VoiceMode.CONTINUOUS), GEN_1)
+        mailbox.offer(closed)
+
+        val drained = mailbox.poll()
+        // Remote CLOSED must remain a SignalReceived carrying the original VoiceSignal.State all the
+        // way to VoiceNegotiation, which has its own, distinct remote-teardown handling
+        // (`teardownFromPeer`) -- the mailbox must not fold it into VoiceInput.StopRequested, whose
+        // reducer path has different local-lifecycle semantics (it may release local capture; a
+        // remote CLOSED must not).
+        assertIs<VoiceInput.SignalReceived>(drained)
+        assertEquals(closed, drained)
+        assertTrue(drained !is VoiceInput.StopRequested)
+    }
+
+    @Test
+    fun `flooding the terminal-peer-state lane past capacity refuses new entries, forces a safe degrade, and stays bounded`() {
+        val mailbox = VoiceInputMailbox(terminalPeerStateCapacity = 4)
+        repeat(4) { i ->
+            val outcome =
+                mailbox.offer(
+                    VoiceInput.SignalReceived(VoiceSignal.State(GEN_1, VoiceWireState.CLOSED, false, VoiceMode.CONTINUOUS), GEN_1),
+                )
+            assertIs<VoiceMailboxOutcome.Accepted>(outcome, "entry $i should still fit under capacity")
+        }
+
+        val overflow =
+            mailbox.offer(
+                VoiceInput.SignalReceived(VoiceSignal.State(GEN_1, VoiceWireState.FAILED, false, VoiceMode.CONTINUOUS), GEN_1),
+            )
+        assertIs<VoiceMailboxOutcome.TerminalPeerStateOverflow>(overflow)
+        assertEquals(1, mailbox.overflowCount)
+
+        var drained = 0
+        while (mailbox.poll() != null) drained++
+        assertEquals(4, drained, "the overflowing terminal signal must not have been silently accepted anyway")
+    }
+
+    @Test
+    fun `an authenticated flood of terminal peer states cannot grow the mailbox past the terminal bound`() {
+        val mailbox = VoiceInputMailbox(terminalPeerStateCapacity = 8)
+        var overflowed = 0
+        repeat(10_000) { i ->
+            val wire = if (i % 2 == 0) VoiceWireState.CLOSED else VoiceWireState.FAILED
+            val outcome =
+                mailbox.offer(VoiceInput.SignalReceived(VoiceSignal.State(GEN_1, wire, false, VoiceMode.CONTINUOUS), GEN_1))
+            if (outcome is VoiceMailboxOutcome.TerminalPeerStateOverflow) overflowed++
+        }
+        assertTrue(overflowed > 0, "10,000 terminal signals must eventually overflow an 8-deep lane")
+        assertEquals(8, mailbox.size, "size must never exceed the configured terminal-peer-state capacity")
+        assertEquals(overflowed, mailbox.overflowCount)
     }
 
     // --- bounded critical lane, and the forced degrade it implies ---------------------------------
@@ -224,10 +370,13 @@ class VoiceInputMailboxTest {
 
     @Test
     fun `stop remains offerable and drainable even while every other lane is completely full`() {
-        val mailbox = VoiceInputMailbox(criticalCapacity = 2, iceCapacity = 2)
+        val mailbox = VoiceInputMailbox(criticalCapacity = 2, iceCapacity = 2, terminalPeerStateCapacity = 2)
         repeat(2) { mailbox.offer(VoiceInput.StartRequested(GEN_1)) }
         repeat(2) { i -> mailbox.offer(VoiceInput.LocalCandidateGathered(GEN_1, "c$i", null, 0)) }
         mailbox.offer(VoiceInput.MuteRequested(true))
+        repeat(2) {
+            mailbox.offer(VoiceInput.SignalReceived(VoiceSignal.State(GEN_1, VoiceWireState.CLOSED, false, VoiceMode.CONTINUOUS), GEN_1))
+        }
 
         val outcome = mailbox.offer(VoiceInput.StopRequested)
         assertIs<VoiceMailboxOutcome.Accepted>(outcome)
@@ -240,6 +389,7 @@ class VoiceInputMailboxTest {
         mailbox.offer(VoiceInput.StartRequested(GEN_1))
         mailbox.offer(VoiceInput.LocalCandidateGathered(GEN_1, CANDIDATE, null, 0))
         mailbox.offer(VoiceInput.MuteRequested(true))
+        mailbox.offer(VoiceInput.SignalReceived(VoiceSignal.State(GEN_1, VoiceWireState.CLOSED, false, VoiceMode.CONTINUOUS), GEN_1))
         mailbox.offer(VoiceInput.ControlLinkLost)
 
         mailbox.clear()

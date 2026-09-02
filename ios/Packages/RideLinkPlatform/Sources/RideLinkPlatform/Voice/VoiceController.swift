@@ -84,11 +84,14 @@ public actor VoiceController: VoiceSignalSink {
     private let mailbox = VoiceInputMailboxBox()
 
     /// The only thing that crosses into actor isolation on every input now: a wake-up, not the input
-    /// itself (that lives in `mailbox`). This is the same type -- and the same reasoning -- as the
-    /// iOS control-event ordering fix (STATUS §2h): a `Task` per event preserves the order events
-    /// were *created* in, not the order they *run* in, and `mailbox`'s own lane priorities are what
-    /// make that safe to rely on even though several producers can ring this doorbell concurrently.
-    private let doorbell = OrderedEventChannel<Void>()
+    /// itself (that lives in `mailbox`). `mailbox`'s own lane priorities are what make it safe for
+    /// several producers to ring this doorbell concurrently, and `ConflatedSignal`'s at-most-one-
+    /// pending-wake-up buffering is what stops the doorbell itself becoming a second, unbounded queue
+    /// sitting behind the now-bounded mailbox -- see `ConflatedSignal`'s own doc comment for why this
+    /// is a distinct type from `OrderedEventChannel` (used elsewhere on this actor's sibling,
+    /// `SessionCoordinator`, for events whose relative order is itself security-sensitive) rather than
+    /// a second use of it.
+    private let doorbell = ConflatedSignal()
     private var consumerTask: Task<Void, Never>?
     private var diagnosticsPollTask: Task<Void, Never>?
 
@@ -416,14 +419,14 @@ private final class VoiceInputMailboxBox: @unchecked Sendable {
     private let lock = NSLock()
     private var mailbox = VoiceInputMailbox()
 
-    /// Offers `input`, forces a safe degrade on a critical-lane overflow, and always rings `doorbell`
-    /// -- mirrors `VoiceController.offer` on Android exactly. Never suspends and never blocks its
-    /// caller for any meaningful time: every critical section here is an in-memory deque/dictionary
-    /// operation.
-    func offer(_ input: VoiceInput, doorbell: OrderedEventChannel<Void>) {
+    /// Offers `input`, forces a safe degrade on a critical-lane or terminal-peer-state-lane overflow,
+    /// and always rings `doorbell` -- mirrors `VoiceController.offer` on Android exactly. Never
+    /// suspends and never blocks its caller for any meaningful time: every critical section here is an
+    /// in-memory deque/dictionary operation.
+    func offer(_ input: VoiceInput, doorbell: ConflatedSignal) {
         lock.lock()
         let outcome = mailbox.offer(input)
-        if outcome == .criticalOverflow {
+        if outcome == .criticalOverflow || outcome == .terminalOverflow {
             // A well-formed, authenticated input could not be held. Forcing a link-loss-style
             // degrade -- media stops, local capture and the TLS control session both survive -- is
             // the same safe response an actual control-link blip already produces, applied one layer
@@ -431,7 +434,7 @@ private final class VoiceInputMailboxBox: @unchecked Sendable {
             _ = mailbox.offer(.controlLinkLost)
         }
         lock.unlock()
-        doorbell.send(())
+        doorbell.signal()
     }
 
     func poll() -> VoiceInput? {

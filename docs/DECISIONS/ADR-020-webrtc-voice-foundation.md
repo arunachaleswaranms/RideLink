@@ -378,3 +378,81 @@ lanes and their bounds. The design choices worth recording:
 untouched. `INPUT_MAILBOX_OVERFLOW` is a new `VoiceSignalDropReason` value, but it is never produced
 by the reducer — `VoiceController` counts it directly, one layer earlier than every reason the table
 itself can produce — so no existing vector needed to change to add it.
+
+---
+
+## Amendment A3 — 3 September 2026 — the doorbell is conflated, and a peer's terminal state gets its
+own lane
+
+**Status of the ADR: still Accepted.** Both fixes are corrections to Amendment A2's mailbox, found in
+a follow-up hardening pass explicitly scoped to the mailbox and nothing else. Neither touches
+`VoiceNegotiation`'s table, the offerer rule, glare handling, `voice_session_id` generation,
+host-only ICE, or the ADR-019 pre-authentication gate.
+
+### Finding 1: the iOS doorbell was still unbounded
+
+Amendment A2 bounded every lane of `VoiceInputMailbox`, but the wake-up signal `VoiceController`
+rings on every `offer` — separate from the mailbox itself — was, on iOS, an
+`OrderedEventChannel<Void>`: an `AsyncStream` with the default **unbounded** buffering policy.
+Android's equivalent doorbell was already correct (`kotlinx.coroutines.channels.Channel<Unit>(Channel.CONFLATED)`),
+so this was a single-platform gap, not a design gap in the mailbox itself. Every lane's `offer`
+unconditionally rang that unbounded doorbell regardless of which lane accepted the input, so a flood
+of authenticated `VOICE_*` traffic could still grow an arbitrarily large backlog of pending `Void`
+wake-ups sitting *behind* the now-bounded mailbox — no single wake-up carried a payload, but nothing
+stopped an unconsumed pile of them from accumulating.
+
+`OrderedEventChannel` was not the fix, and is not made conflated globally: it exists specifically
+because `ControlSessionManager` emits `.pairingSucceeded`/`.peerTrusted` immediately followed by
+`.connected` as **ordered pairs**, and `SessionGate` (ADR-019) depends on that order surviving
+delivery. A doorbell has no such requirement — it means only "there is work available," never "this
+is a distinct occurrence" — so collapsing a flood of rings into one pending wake-up loses nothing
+`VoiceController`'s own drain-to-empty consumer loop needs.
+
+The fix is a new, dedicated primitive: `RideLinkPlatform.ConflatedSignal`, an `AsyncStream<Void>`
+built with `.bufferingNewest(1)`, exposing the same `signal()`/`stream`/`finish()` contract
+`OrderedEventChannel` already gives (safe to call from any isolation context including
+concurrently, no `Task` per call, harmless after `finish()`). At most one pending wake-up survives
+between drains regardless of how many times `signal()` is called — proven directly with 100,000
+calls before one consume — matching Android's `Channel.CONFLATED` doorbell exactly. Each
+`VoiceController` owns exactly one, created fresh in its initializer, so a new voice session never
+inherits an already-finished signal from a previous one.
+
+### Finding 2: a peer's terminal `VOICE_STATE` could be coalesced away by an ordinary one
+
+`VoiceInputMailbox`'s classification put every `VoiceSignal.State` — `negotiating`, `connecting`,
+`active`, `idle`, `closed`, `failed`, `unknown` — into the same one-slot-per-kind coalesced lane,
+latest-value-wins. That is correct for the five ordinary, informational values, but `closed` and
+`failed` are not ordinary: `VoiceNegotiation`'s reducer gives them **teardown** semantics
+(`teardownFromPeer`, tearing down to `idle` or `failed` respectively), distinct from every other
+value in the enum. Coalescing put them in the same slot as everything else, so a peer's `closed`
+queued ahead of a later, otherwise-unremarkable `active` update could be silently replaced before
+the mailbox's single consumer ever drained it — the remote teardown signal would simply vanish,
+and this side would never learn the peer had ended its side of the call.
+
+The fix adds a fifth lane, `terminal_peer_state`, holding only `SignalReceived` inputs whose
+`VoiceSignal.State.state` is `closed` or `failed`; every other wire value keeps coalescing exactly
+as before. It is a bounded FIFO — capacity **8** on both platforms
+(`VoiceInputMailbox.TERMINAL_PEER_STATE_CAPACITY` / `VoiceInputMailbox.terminalPeerStateCapacity`),
+sized from the same reasoning as the critical lane: a single negotiation produces at most one
+terminal peer state naturally (`closed` xor `failed`, once), so 8 absorbs several rapid
+teardown/rebuild cycles within one control session while staying far below anything a real ride
+would approach. It sits directly below `teardown` and above `critical` in draining priority — a
+peer's own teardown must never queue behind a flood of offers/answers or trickle ICE — and strictly
+above `coalesced`, which is what makes it impossible to classify a terminal signal alongside, and
+therefore be overwritten by, an ordinary one. An overflow at this lane is handled exactly like a
+critical-lane overflow: the new input is refused outright (not evicting an *earlier* terminal event
+to make room, which would risk discarding the one signal the lane exists to protect) and forces
+`ControlLinkLost` through the always-accepting teardown lane — the same already-proven safe degrade,
+applied one layer earlier.
+
+`VoiceNegotiation` itself needed no change: the reducer already treated `closed`/`failed` correctly
+whenever it actually saw them. The bug was entirely in the mailbox deciding, before the reducer ever
+ran, that a terminal signal and an ordinary one were interchangeable.
+
+### What did not change (this amendment)
+
+`VoiceNegotiation`'s table and `protocol/vectors/voice-fsm/` are untouched — every terminal-state
+vector already existed and continues to pass unmodified, because the reducer's own handling of
+`closed`/`failed` was already correct; only the mailbox's classification in front of it was wrong.
+The critical and ICE lanes, their capacities, and their overflow behaviour are unchanged. The
+generation guard (Amendment A2, finding 1) is unchanged and its tests remain green.
