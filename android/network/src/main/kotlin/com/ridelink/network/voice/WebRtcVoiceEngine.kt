@@ -13,6 +13,7 @@ import com.ridelink.core.voice.VoiceEngineConfig
 import com.ridelink.core.voice.VoiceEngineDiagnostics
 import com.ridelink.core.voice.VoiceEngineError
 import com.ridelink.core.voice.VoiceEngineEvent
+import com.ridelink.core.voice.VoiceEngineGeneration
 import com.ridelink.core.voice.VoiceStatsMapping
 import kotlinx.coroutines.suspendCancellableCoroutine
 import org.webrtc.AudioSource
@@ -146,7 +147,12 @@ class WebRtcVoiceEngine(
                     audioProcessing = requestedProcessingStatus(config.audioProcessing),
                 )
         }.onFailure { failure ->
-            emit(config.voiceSessionId, VoiceEngineEvent.Failed(config.voiceSessionId, platformFailure(failure)))
+            // Not a media callback: this is start() reporting its own outcome, synchronously, and
+            // must be delivered even though `generation` was never installed for this attempt —
+            // the strict guard in `emit` exists for the *peer connection's* callbacks, which by
+            // definition cannot exist yet if `start` itself failed. Reporting it through `emit`
+            // would silently drop every start failure, which is the mistake §9 warns against.
+            sink?.invoke(VoiceEngineEvent.Failed(config.voiceSessionId, platformFailure(failure)))
         }
     }
 
@@ -355,8 +361,12 @@ class WebRtcVoiceEngine(
         event: VoiceEngineEvent,
     ) {
         // Every emission is generation-checked at the source as well as in the table, so a callback
-        // from a torn-down connection cannot even reach the controller's queue.
-        if (generation != null && generation != expected) return
+        // from a torn-down connection cannot even reach the controller's queue. Strict on purpose
+        // (com.ridelink.core.voice.VoiceEngineGeneration): after `stop()`, `generation` is `null`,
+        // and a callback naming any generation — including a real one that used to be current — must
+        // be inert then. This is for *peer-connection callbacks only*; `start()` reports its own
+        // failure directly through `sink`, never through this method (see `start`'s `onFailure`).
+        if (!VoiceEngineGeneration.accepts(generation, expected)) return
         sink?.invoke(event)
     }
 

@@ -756,6 +756,23 @@ SDP or candidate string is handed to the media stack.
 `MAX_CONTROL_FRAME_BYTES` remains authoritative and unchanged: these limits are all far below it,
 so a `VOICE_*` frame is rejected by its own bound long before the frame cap is reached.
 
+**The input mailbox is bounded one layer earlier than any of the above.** Every `VOICE_*` frame
+that reaches `VoiceController` (both platforms) still passes through a classified mailbox before
+the reducer ever sees it (`com.ridelink.core.voice.VoiceInputMailbox` /
+`RideLinkCore.VoiceInputMailbox`), so that an authenticated peer cannot grow this controller's
+memory just by sending frames faster than they are consumed:
+
+| Lane | Holds | Policy |
+|---|---|---|
+| critical | local start, engine offer/answer/connectivity callbacks, a peer's `VOICE_OFFER`/`VOICE_ANSWER` | bounded FIFO, capacity **32** (`VoiceInputMailbox.CRITICAL_CAPACITY`/`criticalCapacity`); a new input arriving at capacity is refused and forces a link-loss-style degrade (media stops; local capture and the TLS control session both survive) |
+| ice | `VOICE_ICE`, and a locally gathered candidate | bounded ring, capacity `MAX_QUEUED_VOICE_CANDIDATES` (the same constant `PendingCandidates` enforces one layer later); at capacity the oldest is evicted and counted, exactly as `PendingCandidates` already does |
+| coalesced | `VOICE_STATE`, mute, remote-track-present | one slot per kind; a newer update replaces an undelivered older one rather than queuing behind it |
+| teardown | a deliberate stop, or a control-link loss | one slot, always accepted, drained with top priority |
+
+Draining priority is teardown > critical > ice > coalesced. A refusal at the critical lane is
+counted as `INPUT_MAILBOX_OVERFLOW` in the FR-023 diagnostics — a distinct reason from every other
+entry in the drop-reason vocabulary, because the reducer never even saw the input in this case.
+
 ### 7.6 ICE — host candidates only, and no internet
 
 ICE is configured with an **empty server list**: no STUN, no TURN, no ICE server of any kind
@@ -814,7 +831,12 @@ capture. An **involuntary** one — link loss, or the peer reporting `closed`/`f
 everything except capture and the audio session, for the reason in the table above. A callback
 still in flight from a torn-down peer connection carries the old `voice_session_id` and is
 therefore inert against the next one — the same generation guard, applied to the media stack's own
-callbacks rather than to the wire.
+callbacks rather than to the wire. The guard is strict: once a generation is torn down (no
+generation active) **every** callback is inert, not only the ones naming a generation the engine
+happens to still remember (ADR-020 Amendment A2) — the extracted, independently unit-tested rule is
+`com.ridelink.core.voice.VoiceEngineGeneration` / `RideLinkCore.VoiceEngineGeneration`. A media
+engine reporting that `start()` itself failed is not a callback in this sense and is reported
+unconditionally, since the generation it would have named was never installed.
 
 ### 7.9 Test vectors
 

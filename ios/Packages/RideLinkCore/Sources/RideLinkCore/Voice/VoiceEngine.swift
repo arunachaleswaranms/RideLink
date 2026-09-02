@@ -276,16 +276,22 @@ public protocol VoiceSignalTransport: Sendable {
 
 /// Where a `VOICE_*` frame that has already passed the trust gate is delivered.
 ///
-/// `submit` must be **non-blocking and non-dropping**: it is called from the control read loop, so it
-/// cannot block that loop, and it cannot discard a signal either — losing an offer would wedge a
-/// negotiation with no error anywhere. Implementations enqueue to an unbounded in-process channel
-/// drained by exactly one consumer, which is also what preserves arrival order.
+/// `submit` must be **non-blocking and never block the caller**: it is called from the control read
+/// loop, so it cannot suspend that loop even under a flood of frames from an authenticated peer. It is
+/// not, however, dropping in the sense that mattered before `VoiceInputMailbox` existed: an offer or
+/// answer cannot silently vanish. Implementations enqueue into a bounded, classified mailbox drained by
+/// exactly one consumer — critical inputs (an offer, an answer) held in a bounded FIFO that forces a
+/// safe voice-only degrade if it fills, ICE candidates bounded exactly as `PendingCandidates` already
+/// bounds them post-negotiation, and repeated state-style updates coalesced to their latest value —
+/// rather than an unbounded queue an authenticated-but-compromised peer could grow without limit just
+/// by sending frames faster than they are consumed.
 ///
 /// Ordering is not a nicety here. `VOICE_OFFER` then `VOICE_ICE` must be handled in that order or the
 /// candidate is queued when it did not need to be; `VOICE_STATE { closed }` arriving before a late
 /// `VOICE_ICE` is what makes the generation guard work. This is the same lesson as the iOS
 /// control-event ordering fix (STATUS §2h): a task per event preserves the order events were *created*
-/// in, not the order they *run* in.
+/// in, not the order they *run* in. The mailbox preserves FIFO order **within** each of its lanes; only
+/// the coalesced lane deliberately collapses everything but the newest value.
 public protocol VoiceSignalSink: Sendable {
     func submit(_ signal: VoiceSignal)
 }

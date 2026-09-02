@@ -130,6 +130,20 @@ confirm.
 `VoiceControllerTest`/`VoiceControllerTests` drive the controller against **fakes**. They prove the
 controller's effects and lifecycle; they say nothing about the codec, and the files say so.
 
+`VoiceInputMailboxTest[s]` exhausts the bounded input mailbox (PROTOCOL §7.5, ADR-020 Amendment A2)
+in isolation — lane classification, priority draining, the critical/ICE bounds, coalescing — with
+no controller and no coroutine/actor involved. `VoiceEngineGenerationTest[s]` exhausts the strict
+generation guard the same way, since neither real `WebRtcVoiceEngine` can be constructed in a host
+unit test to prove it directly. `VoiceControllerMailboxTest[s]` proves the wiring: that flooding a
+live controller cannot grow its memory past either bound, that a critical-lane overflow degrades
+safely without releasing capture or killing the control session, and that `stop`/`onControlLinkLost`
+remain processable under a saturated mailbox. Several of its scenarios deliberately flood the
+mailbox **before** the consumer exists (`ManualDispatcher` on Android; a deferred `attach()` on
+iOS) rather than racing a live one, because whether an overflow is guaranteed or merely likely
+depends on how fast the consumer happens to be scheduled — the mailbox's own bound is
+enforced synchronously regardless, but a *test* asserting overflow occurred needs the flood to win
+deterministically, not by chance on a fast machine.
+
 ### 3.1 The secure control channel — what is proven on a laptop, and what is not
 
 Phase 1b's security path is exercised end to end by `TlsControlChannelTest` (Android) and

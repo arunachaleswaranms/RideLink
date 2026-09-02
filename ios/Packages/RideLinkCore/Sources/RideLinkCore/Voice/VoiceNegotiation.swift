@@ -120,6 +120,11 @@ public enum VoiceSignalDropReason: String, Sendable, Equatable {
     case unexpectedForStatus = "UNEXPECTED_FOR_STATUS"
     /// A callback from a peer connection that has already been torn down (PROTOCOL §7.8).
     case staleEngineCallback = "STALE_ENGINE_CALLBACK"
+    /// A well-formed, already-authenticated input could not be held by `VoiceInputMailbox` — its
+    /// critical lane was full, or its ICE lane evicted an older candidate to make room for this one.
+    /// Never produced by this table: `VoiceNegotiation` never sees the input at all in this case, so
+    /// `VoiceController` counts it directly, one layer earlier than every other reason here.
+    case inputMailboxOverflow = "INPUT_MAILBOX_OVERFLOW"
 }
 
 /// What the driver is asked to do. Every payload is a plain value (see `VoiceSignal`'s note).

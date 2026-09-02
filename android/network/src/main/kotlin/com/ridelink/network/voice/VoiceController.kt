@@ -18,6 +18,8 @@ import com.ridelink.core.voice.VoiceEngineConfig
 import com.ridelink.core.voice.VoiceEngineDiagnostics
 import com.ridelink.core.voice.VoiceEngineEvent
 import com.ridelink.core.voice.VoiceInput
+import com.ridelink.core.voice.VoiceInputMailbox
+import com.ridelink.core.voice.VoiceMailboxOutcome
 import com.ridelink.core.voice.VoiceNegotiation
 import com.ridelink.core.voice.VoiceNegotiationState
 import com.ridelink.core.voice.VoiceRole
@@ -28,6 +30,7 @@ import com.ridelink.core.voice.VoiceStatus
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.channels.consumeEach
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -115,21 +118,31 @@ class VoiceController(
     val diagnostics: StateFlow<VoiceDiagnostics> = _diagnostics.asStateFlow()
 
     /**
-     * Unbounded and drained by exactly one consumer. Both properties are load-bearing: [submit] is
-     * called from the control read loop, so it must not suspend it, and a dropped `VOICE_OFFER`
-     * would wedge a negotiation with no error recorded anywhere. Single consumer is what preserves
-     * arrival order — the same reasoning as iOS's `OrderedEventChannel` (STATUS §2h).
+     * Guards [mailbox], which is a plain (not thread-safe) data structure mutated from whatever
+     * thread produced an input — the control read loop, a WebRTC callback, the UI — while [poll]
+     * happens only on [consumerJob]. Every critical section here is an in-memory deque/map
+     * operation, so this lock is never held across a suspension point and never blocks its caller
+     * for any meaningful time — the property [submit] always had as an unbounded `Channel`.
      */
-    private val inputs = Channel<VoiceInput>(Channel.UNLIMITED)
+    private val mailboxLock = Any()
+    private val mailbox = VoiceInputMailbox()
+
+    /**
+     * The only thing sent across threads now: a wake-up, not the input itself (that lives in
+     * [mailbox]). Conflated, so a flood of producers rings the bell at most once between drains —
+     * [consumerJob] always drains [mailbox] to empty on each wake, so nothing is lost by coalescing
+     * the ring itself.
+     */
+    private val doorbell = Channel<Unit>(Channel.CONFLATED)
     private var consumerJob: Job? = null
     private var diagnosticsPollJob: Job? = null
 
     init {
-        engine.setEventSink { event -> inputs.trySend(engineEventToInput(event)) }
+        engine.setEventSink { event -> offer(engineEventToInput(event)) }
         audioSession.setRouteSink { snapshot -> publishRoute(snapshot) }
         consumerJob =
             scope.launch {
-                for (input in inputs) apply(input)
+                doorbell.consumeEach { drainMailbox() }
             }
     }
 
@@ -137,16 +150,16 @@ class VoiceController(
 
     /** The user pressed Start Voice, or a control reconnect is rebuilding voice (PROTOCOL §7.8). */
     fun start() {
-        inputs.trySend(VoiceInput.StartRequested(newVoiceSessionId()))
+        offer(VoiceInput.StartRequested(newVoiceSessionId()))
     }
 
     /** The user pressed End Voice, or the session is entering `ENDING`. */
     fun stop() {
-        inputs.trySend(VoiceInput.StopRequested)
+        offer(VoiceInput.StopRequested)
     }
 
     fun setMicrophoneMuted(muted: Boolean) {
-        inputs.trySend(VoiceInput.MuteRequested(muted))
+        offer(VoiceInput.MuteRequested(muted))
     }
 
     /**
@@ -156,7 +169,7 @@ class VoiceController(
      * pass fixed for the control plane.
      */
     fun onControlLinkLost() {
-        inputs.trySend(VoiceInput.ControlLinkLost)
+        offer(VoiceInput.ControlLinkLost)
     }
 
     /**
@@ -165,7 +178,7 @@ class VoiceController(
      * reach this method (PROTOCOL §7.1).
      */
     override fun submit(signal: VoiceSignal) {
-        inputs.trySend(VoiceInput.SignalReceived(signal, newVoiceSessionId()))
+        offer(VoiceInput.SignalReceived(signal, newVoiceSessionId()))
     }
 
     /** Releases every task this controller owns. After this, no callback can mutate anything. */
@@ -173,8 +186,39 @@ class VoiceController(
         apply(VoiceInput.StopRequested)
         diagnosticsPollJob?.cancel()
         consumerJob?.cancel()
-        inputs.close()
+        doorbell.close()
+        synchronized(mailboxLock) { mailbox.clear() }
         pending.reset()
+    }
+
+    // --- the mailbox ------------------------------------------------------------------------
+
+    /**
+     * Never suspends and never blocks: [mailboxLock] guards only in-memory deque/map work, so this
+     * is safe to call from the control read loop, a WebRTC callback thread, or the UI, exactly as
+     * `Channel.trySend` was.
+     *
+     * A [VoiceMailboxOutcome.CriticalOverflow] cannot simply be swallowed — a lost `VOICE_OFFER` or
+     * `VOICE_ANSWER` would wedge a negotiation with no error anywhere, the same failure mode the old
+     * unbounded channel existed to avoid. The response mirrors an actual control-link blip rather
+     * than inventing a new one: force [VoiceInput.ControlLinkLost] through the always-accepting
+     * teardown lane, which drops the media transport and keeps this user's local capture and the
+     * TLS control session both untouched (ARCHITECTURE §6.3/§6.4) — a safe, already-proven-correct
+     * degrade, not a new failure path.
+     */
+    private fun offer(input: VoiceInput) {
+        val outcome = synchronized(mailboxLock) { mailbox.offer(input) }
+        if (outcome is VoiceMailboxOutcome.CriticalOverflow) {
+            synchronized(mailboxLock) { mailbox.offer(VoiceInput.ControlLinkLost) }
+        }
+        doorbell.trySend(Unit)
+    }
+
+    private suspend fun drainMailbox() {
+        while (true) {
+            val next = synchronized(mailboxLock) { mailbox.poll() } ?: break
+            apply(next)
+        }
     }
 
     // --- the driver ----------------------------------------------------------------------------
@@ -362,6 +406,13 @@ class VoiceController(
     }
 
     private fun publishDiagnostics() {
+        val mailboxOverflows = synchronized(mailboxLock) { mailbox.overflowCount }
+        val droppedSignals =
+            if (mailboxOverflows > 0) {
+                dropCounts + (VoiceSignalDropReason.INPUT_MAILBOX_OVERFLOW to mailboxOverflows)
+            } else {
+                dropCounts.toMap()
+            }
         _diagnostics.value =
             _diagnostics.value.copy(
                 status = state.status,
@@ -375,7 +426,7 @@ class VoiceController(
                 engine = engine.diagnostics,
                 queuedCandidates = pending.size,
                 droppedQueuedCandidates = pending.droppedCount,
-                droppedSignals = dropCounts.toMap(),
+                droppedSignals = droppedSignals,
                 rebuildCount = rebuildCount,
                 unexpectedCandidateTypeSeen = unexpectedCandidateSeen,
             )

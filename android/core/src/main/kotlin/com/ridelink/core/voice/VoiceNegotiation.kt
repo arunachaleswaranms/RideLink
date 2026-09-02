@@ -201,6 +201,14 @@ enum class VoiceSignalDropReason {
 
     /** A callback from a peer connection that has already been torn down (PROTOCOL §7.8). */
     STALE_ENGINE_CALLBACK,
+
+    /**
+     * A well-formed, already-authenticated input could not be held by [VoiceInputMailbox] — its
+     * critical lane was full, or its ICE lane evicted an older candidate to make room for this one.
+     * Never produced by this table: [VoiceNegotiation] never sees the input at all in this case,
+     * so `VoiceController` counts it directly, one layer earlier than every other reason here.
+     */
+    INPUT_MAILBOX_OVERFLOW,
 }
 
 /** What drives the table. [VoiceInput.freshVoiceSessionId] exists because the table is pure. */

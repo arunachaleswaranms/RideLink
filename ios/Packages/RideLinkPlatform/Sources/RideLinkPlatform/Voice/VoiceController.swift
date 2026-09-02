@@ -76,14 +76,19 @@ public actor VoiceController: VoiceSignalSink {
     private var diagnostics = VoiceDiagnostics()
     private var onDiagnosticsChanged: (@Sendable (VoiceDiagnostics) -> Void)?
 
-    /// Unbounded and drained by exactly one consumer. Both properties are load-bearing: `submit` is
-    /// called from the control read loop, so it must not suspend it, and a dropped `VOICE_OFFER` would
-    /// wedge a negotiation with no error recorded anywhere.
-    ///
-    /// This is the same type — and the same reasoning — as the iOS control-event ordering fix
-    /// (STATUS §2h): a `Task` per event preserves the order events were *created* in, not the order
-    /// they *run* in, and `VOICE_OFFER` before `VOICE_ICE` is exactly an order that must survive.
-    private let inputs = OrderedEventChannel<VoiceInput>()
+    /// Where every input actually lives; bounded by lane rather than sitting in one unbounded queue.
+    /// `mailbox.offer` is called from `submit` and from the engine's own event sink, both of which run
+    /// outside actor isolation, so the storage itself has to be a plain `Sendable` box with its own
+    /// lock -- exactly the reason `OrderedEventChannel`, which this replaces, needed no lock of its
+    /// own either: it is a `let` on the actor, safely reachable from a `nonisolated` context.
+    private let mailbox = VoiceInputMailboxBox()
+
+    /// The only thing that crosses into actor isolation on every input now: a wake-up, not the input
+    /// itself (that lives in `mailbox`). This is the same type -- and the same reasoning -- as the
+    /// iOS control-event ordering fix (STATUS §2h): a `Task` per event preserves the order events
+    /// were *created* in, not the order they *run* in, and `mailbox`'s own lane priorities are what
+    /// make that safe to rely on even though several producers can ring this doorbell concurrently.
+    private let doorbell = OrderedEventChannel<Void>()
     private var consumerTask: Task<Void, Never>?
     private var diagnosticsPollTask: Task<Void, Never>?
 
@@ -109,19 +114,20 @@ public actor VoiceController: VoiceSignalSink {
     /// Starts the single consumer and attaches the engine and route sinks. Separate from `init` because
     /// an actor cannot hand `self` to an escaping closure during initialisation.
     public func attach() async {
-        let channel = inputs
+        let box = mailbox
+        let bell = doorbell
         await engine.setEventSink { event in
-            // Reduced to a table input at the boundary, so nothing WebRTC-shaped reaches the queue —
-            // and, on this platform, so nothing non-`Sendable` has to cross an isolation domain.
-            channel.send(Self.inputFor(event))
+            // Reduced to a table input at the boundary, so nothing WebRTC-shaped reaches the mailbox
+            // -- and, on this platform, so nothing non-`Sendable` has to cross an isolation domain.
+            box.offer(Self.inputFor(event), doorbell: bell)
         }
         await audioSession.setRouteSink { [weak self] snapshot in
             Task { await self?.publishRoute(snapshot) }
         }
         consumerTask = Task { [weak self] in
-            guard let self else { return }
-            for await input in channel.stream {
-                await self.apply(input)
+            for await _ in bell.stream {
+                guard let self else { return }
+                await self.drainMailbox()
             }
         }
     }
@@ -137,16 +143,16 @@ public actor VoiceController: VoiceSignalSink {
 
     /// The user pressed Start Voice, or a control reconnect is rebuilding voice (PROTOCOL §7.8).
     public func start() {
-        inputs.send(.startRequested(freshVoiceSessionId: newVoiceSessionId()))
+        mailbox.offer(.startRequested(freshVoiceSessionId: newVoiceSessionId()), doorbell: doorbell)
     }
 
     /// The user pressed End Voice, or the session is entering `ENDING`.
     public func stop() {
-        inputs.send(.stopRequested)
+        mailbox.offer(.stopRequested, doorbell: doorbell)
     }
 
     public func setMicrophoneMuted(_ muted: Bool) {
-        inputs.send(.muteRequested(muted: muted))
+        mailbox.offer(.muteRequested(muted: muted), doorbell: doorbell)
     }
 
     /// The control plane was lost. Media goes; capture stays open for the ride segment
@@ -154,16 +160,18 @@ public actor VoiceController: VoiceSignalSink {
     /// loop in the app, and a second one competing with it is the bug the §2e hardening pass fixed for
     /// the control plane.
     public func onControlLinkLost() {
-        inputs.send(.controlLinkLost)
+        mailbox.offer(.controlLinkLost, doorbell: doorbell)
     }
 
     /// A `VOICE_*` frame that has **already** passed the ADR-019 trust gate. There is no other entry
     /// point: an unauthenticated peer's frame is dropped by `ControlSessionManager` before it can reach
     /// this method (PROTOCOL §7.1).
     ///
-    /// `nonisolated` and non-async so the control read loop is never blocked by it.
+    /// `nonisolated` and non-async so the control read loop is never blocked by it, even under a flood
+    /// of frames from an authenticated peer -- `mailbox.offer` only ever touches an in-memory,
+    /// lock-guarded deque/dictionary, never suspends, and never grows without bound.
     public nonisolated func submit(_ signal: VoiceSignal) {
-        inputs.send(.signalReceived(signal: signal, freshVoiceSessionId: newVoiceSessionId()))
+        mailbox.offer(.signalReceived(signal: signal, freshVoiceSessionId: newVoiceSessionId()), doorbell: doorbell)
     }
 
     /// Releases every task this controller owns. After this, no callback can mutate anything.
@@ -173,8 +181,26 @@ public actor VoiceController: VoiceSignalSink {
         diagnosticsPollTask = nil
         consumerTask?.cancel()
         consumerTask = nil
-        inputs.finish()
+        doorbell.finish()
+        mailbox.clear()
         pending.reset()
+    }
+
+    // MARK: - the mailbox
+
+    /// Drains `mailbox` to empty, in `VoiceMailboxLane` priority order.
+    ///
+    /// A `.criticalOverflow` cannot simply be swallowed -- a lost `VOICE_OFFER` or `VOICE_ANSWER`
+    /// would wedge a negotiation with no error anywhere, the same failure mode the old unbounded
+    /// channel existed to avoid. `VoiceInputMailboxBox.offer` already responded to that by forcing
+    /// `.controlLinkLost` through the always-accepting teardown lane before this method ever runs --
+    /// which mirrors an actual control-link blip rather than inventing a new failure path: it drops
+    /// the media transport and keeps this user's local capture and the TLS control session both
+    /// untouched (ARCHITECTURE §6.3/§6.4).
+    private func drainMailbox() async {
+        while let next = mailbox.poll() {
+            await apply(next)
+        }
     }
 
     // MARK: - the driver
@@ -371,9 +397,58 @@ public actor VoiceController: VoiceSignalSink {
         diagnostics.localAudioOpen = state.localAudioOpen
         diagnostics.queuedCandidates = pending.count
         diagnostics.droppedQueuedCandidates = pending.droppedCount
-        diagnostics.droppedSignals = dropCounts
+        let mailboxOverflows = mailbox.overflowCount
+        var droppedSignals = dropCounts
+        if mailboxOverflows > 0 { droppedSignals[.inputMailboxOverflow] = mailboxOverflows }
+        diagnostics.droppedSignals = droppedSignals
         diagnostics.rebuildCount = rebuildCount
         diagnostics.unexpectedCandidateTypeSeen = unexpectedCandidateSeen
         onDiagnosticsChanged?(diagnostics)
+    }
+}
+
+/// A thread-safe wrapper around the pure `VoiceInputMailbox`, since `submit` and the engine's own
+/// event sink both call in from outside actor isolation -- the same reason `OrderedEventChannel` needs
+/// none of its own locking either, just from the other direction (there, delivery itself is lock-free;
+/// here, the mailbox's bounding logic needs a lock because `VoiceInputMailbox` is a plain, non-atomic
+/// value type).
+private final class VoiceInputMailboxBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var mailbox = VoiceInputMailbox()
+
+    /// Offers `input`, forces a safe degrade on a critical-lane overflow, and always rings `doorbell`
+    /// -- mirrors `VoiceController.offer` on Android exactly. Never suspends and never blocks its
+    /// caller for any meaningful time: every critical section here is an in-memory deque/dictionary
+    /// operation.
+    func offer(_ input: VoiceInput, doorbell: OrderedEventChannel<Void>) {
+        lock.lock()
+        let outcome = mailbox.offer(input)
+        if outcome == .criticalOverflow {
+            // A well-formed, authenticated input could not be held. Forcing a link-loss-style
+            // degrade -- media stops, local capture and the TLS control session both survive -- is
+            // the same safe response an actual control-link blip already produces, applied one layer
+            // earlier. The teardown lane always accepts.
+            _ = mailbox.offer(.controlLinkLost)
+        }
+        lock.unlock()
+        doorbell.send(())
+    }
+
+    func poll() -> VoiceInput? {
+        lock.lock()
+        defer { lock.unlock() }
+        return mailbox.poll()
+    }
+
+    var overflowCount: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return mailbox.overflowCount
+    }
+
+    func clear() {
+        lock.lock()
+        defer { lock.unlock() }
+        mailbox.clear()
     }
 }

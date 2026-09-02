@@ -296,3 +296,85 @@ Mitigations considered:
 The Android side is unaffected: Maven Central does not permit deleting a published artifact, so
 `io.github.webrtc-sdk:android:144.7559.14` cannot vanish the same way. That asymmetry is now a
 recorded property of the two distributions rather than an assumption.
+
+---
+
+## Amendment A2 — 2 September 2026 — a bounded input mailbox, and the generation guard made strict
+
+**Status of the ADR: still Accepted.** Both decisions this amendment records are corrections to how
+§4 (the generation guard) and the effects around it were *implemented*, not changes to what §4
+decided. Found and fixed in the same hardening pass, on both platforms.
+
+### Finding 1: the generation guard's `nil` case was backwards
+
+Both engines' `emit`/callback-forwarding function was, in effect:
+
+```
+if generation != null && generation != expected: drop
+```
+
+Read quickly this looks like "reject a mismatch." It does not: the moment `generation` is `null` —
+which is exactly the state right after `stop()` — the left-hand side of the `&&` is `false`, so the
+whole condition is `false`, and the callback is **delivered**. A stale callback from an
+already-torn-down peer connection could reach `VoiceController` after all, precisely in the window
+§4 exists to close.
+
+The fix is the strict form the prose always implied — `generation != expected` (equivalently,
+`generation == expected` to accept) — extracted as a pure, independently unit-tested rule rather
+than re-inlined on both platforms a second time: `com.ridelink.core.voice.VoiceEngineGeneration` /
+`RideLinkCore.VoiceEngineGeneration`. Neither `WebRtcVoiceEngine` can be constructed in a host unit
+test (one needs an Android `Context`, the other the Apple audio stack — see §2 above), so the rule
+being pure and separate is what makes it testable anywhere at all; before this amendment it was
+inline logic no test suite could reach on either platform.
+
+Extracting the rule surfaced a second question the inline version had blurred: a media engine
+reporting that `start()` itself **failed** is not a peer-connection callback — no peer connection
+exists yet for it to name — so gating it behind the same strict check would silently swallow every
+start failure (`generation` is never installed on a failing `start()`). Both engines now report a
+start failure directly, unconditionally, through the same event sink but bypassing the generation
+check entirely; PROTOCOL §7.8 records the distinction.
+
+### Finding 2: the per-negotiation input queue was unbounded
+
+`VoiceController.submit` (and `start`/`stop`/`setMicrophoneMuted`/`onControlLinkLost`, and the
+engine's own event sink) fed an unbounded `Channel`/`AsyncStream` ahead of the pure
+`VoiceNegotiation` reducer. PROTOCOL §7.5's bounds — SDP size, candidate size,
+`MAX_QUEUED_VOICE_CANDIDATES` — all apply *after* a frame is already sitting in that queue. An
+authenticated peer past the ADR-019 trust gate could still grow this controller's memory without
+limit simply by sending `VOICE_*` frames faster than the single consumer drained them; nothing
+downstream would ever see the backlog to bound it.
+
+The fix is `VoiceInputMailbox` (`com.ridelink.core.voice.VoiceInputMailbox` /
+`RideLinkCore.VoiceInputMailbox`): pure, mirrored, vector-independent (it has no wire shape of its
+own, so it needs no protocol vectors) but exhaustively unit-tested on both platforms, sitting
+between the wire/engine-callback boundary and the reducer. PROTOCOL §7.5 now documents its four
+lanes and their bounds. The design choices worth recording:
+
+- **Classification by kind, not one bound for everything.** An offer or answer cannot be dropped
+  without wedging a negotiation with no error anywhere — the exact failure `VoiceSignalSink`'s own
+  doc comment already warned about — so those, plus local start/engine-callback inputs, get a
+  bounded FIFO lane that is refused-not-evicted at capacity. ICE candidates get the existing
+  `MAX_QUEUED_VOICE_CANDIDATES` bound applied one layer earlier, so the two bounds describe one
+  policy instead of two that could quietly disagree. Repeated `VOICE_STATE`/mute/remote-track
+  updates coalesce to their latest value, since only the newest is ever meaningful.
+- **A stop or link loss cannot be starved.** They share a dedicated single-slot lane that is always
+  accepted and always drained first, regardless of how full everything else is.
+- **A critical-lane refusal is not swallowed.** It forces `ControlLinkLost` through the
+  always-accepting teardown lane — reusing that input's already-correct, already-tested effect
+  (media transport stops; local capture and the TLS control session both survive) rather than
+  inventing a new failure path. `VoiceNegotiation` itself needed no change for this: the existing
+  table already had the right answer for "something about voice signalling failed, degrade safely."
+- **The bound is enforced synchronously, at the producer.** `offer()` is called from the control
+  read loop, a WebRTC callback, or the UI, and never suspends and never blocks its caller — the
+  property `submit` always had. Consuming the mailbox happens on a single drain loop woken by a
+  conflated signal (`Channel<Unit>` on Android; a second `OrderedEventChannel<Void>` on iOS,
+  alongside a small lock-guarded box around the otherwise non-thread-safe `VoiceInputMailbox` value
+  type), so ordering *within* a lane is preserved exactly as it was before this amendment.
+
+### What did not change
+
+`VoiceNegotiation`'s table, `protocol/vectors/voice-fsm/`, the offerer rule, glare handling,
+`voice_session_id` generation, host-only ICE, and the ADR-019 pre-authentication gate are all
+untouched. `INPUT_MAILBOX_OVERFLOW` is a new `VoiceSignalDropReason` value, but it is never produced
+by the reducer — `VoiceController` counts it directly, one layer earlier than every reason the table
+itself can produce — so no existing vector needed to change to add it.

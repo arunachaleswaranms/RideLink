@@ -84,7 +84,13 @@ public actor WebRtcVoiceEngine: VoiceEngine {
                 delegate: observer
             )
         else {
-            return .failure(.platformFailure("peerConnection returned nil"))
+            let error = VoiceEngineError.platformFailure("peerConnection returned nil")
+            // Not a media callback: start() reporting its own failed outcome must not be suppressed
+            // by the generation guard, since `generation` is only installed on success (mirrors
+            // Android's WebRtcVoiceEngine.start()). Delivered directly through `sink`, never through
+            // `emit`, which is for peer-connection callbacks only.
+            sink?(.failed(voiceSessionId: config.voiceSessionId, error: error))
+            return .failure(error)
         }
         peerConnection = connection
 
@@ -272,8 +278,12 @@ public actor WebRtcVoiceEngine: VoiceEngine {
 
     private func emit(expected: VoiceSessionId, _ event: VoiceEngineEvent) {
         // Generation-checked at the source as well as in the table, so a callback from a torn-down
-        // connection cannot even reach the controller's queue.
-        if let generation, generation != expected { return }
+        // connection cannot even reach the controller's queue. Strict on purpose
+        // (RideLinkCore.VoiceEngineGeneration): after `stop()`, `generation` is `nil`, and a callback
+        // naming any generation -- including a real one that used to be current -- must be inert
+        // then. This is for *peer-connection callbacks only*; `start()` reports its own failure
+        // directly through `sink`, never through this method.
+        guard VoiceEngineGeneration.accepts(active: generation, expected: expected) else { return }
         sink?(event)
     }
 

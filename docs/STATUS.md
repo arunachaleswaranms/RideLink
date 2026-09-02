@@ -1,6 +1,6 @@
 # RideLink — Status
 
-**Updated:** 28 August 2026 (Phase 2a — WebRTC voice transport foundation, sixth session)
+**Updated:** 2 September 2026 (Phase 2a hardening — bounded voice input mailbox and strict generation guard, seventh session)
 **Current milestone:** M1 (Private voice link) — in progress
 **Current phase:** Phase 2a — voice transport foundation.
 **Phase 2a status: IMPLEMENTATION COMPLETE — REAL-DEVICE AUDIO GATE PENDING.**
@@ -54,13 +54,15 @@ fails if a raw socket reappears there.
 open for Phase 1a and this phase does not close it: this machine has no Android device or
 emulator, and only the iOS *simulator*. Everything below is a laptop measurement. See §4 and §7.
 
-**Repository state:** Android — **296** unit tests across five modules (was 253), `test ktlintCheck
-detekt lint assembleDebug assembleRelease` all green. iOS — `RideLinkCore` **39** tests (was 27),
-`RideLinkPlatform` **134** tests (was 99), `RideLink.xcodeproj` builds in **both** Debug and Release
+**Repository state:** Android — **324** unit tests across five modules (was 296), `test ktlintCheck
+detekt lint assembleDebug assembleRelease` all green. iOS — `RideLinkCore` **61** tests (was 39),
+`RideLinkPlatform` **139** tests (was 134), `RideLink.xcodeproj` builds in **both** Debug and Release
 for the simulator with zero warnings. Shared vectors: `protocol/vectors/identity/`,
-`protocol/vectors/session-gate/` (120 rows), and new this session `protocol/vectors/voice-signal/`
-(70 rows) and `protocol/vectors/voice-fsm/` (52 rows) — every one run by **both** platforms from the
-same file.
+`protocol/vectors/session-gate/` (120 rows), `protocol/vectors/voice-signal/` (70 rows) and
+`protocol/vectors/voice-fsm/` (52 rows) — every one run by **both** platforms from the same file.
+The Phase 2a hardening pass (§2j) added no new vector file: its bounded-mailbox and
+strict-generation-guard fixes are pinned by ordinary unit tests, not shared wire vectors, since
+neither has a wire shape of its own.
 
 ---
 
@@ -811,7 +813,107 @@ kind.
 
 ---
 
+## 2j. Phase 2a hardening — bounded voice input mailbox and strict generation guard (2 September 2026 session, seventh)
+
+A focused hardening pass on Phase 2a's implementation, requested explicitly as hardening rather than
+Phase 2b or Bluetooth tuning. Two real defects found in an independent review, both fixed with
+regression coverage on both platforms. Neither touches `VoiceNegotiation`'s table, the offerer rule,
+glare handling, `voice_session_id` generation, host-only ICE, Opus/DTLS-SRTP, mute behaviour, or the
+ADR-019 pre-authentication gate — all confirmed unchanged. Full account:
+[ADR-020 Amendment A2](DECISIONS/ADR-020-webrtc-voice-foundation.md#amendment-a2--2-september-2026--a-bounded-input-mailbox-and-the-generation-guard-made-strict).
+
+**Finding 1 — the per-negotiation input channel was unbounded.** `VoiceController.submit` (and
+`start`/`stop`/`setMicrophoneMuted`/`onControlLinkLost`, and the engine's own event sink) fed an
+unbounded `Channel`/`AsyncStream` ahead of the pure reducer. PROTOCOL §7.5's bounds — SDP size,
+candidate size, `MAX_QUEUED_VOICE_CANDIDATES` — all apply only *after* a frame is already sitting in
+that queue, so an authenticated peer past the ADR-019 trust gate could grow this controller's
+memory without limit just by sending `VOICE_*` frames faster than the single consumer drained them.
+
+Fixed with `VoiceInputMailbox` (`com.ridelink.core.voice.VoiceInputMailbox` /
+`RideLinkCore.VoiceInputMailbox`) — pure, mirrored, exhaustively unit-tested, sitting between the
+wire/engine-callback boundary and the reducer. Four lanes, priority `teardown > critical > ice >
+coalesced`:
+
+- **critical** (start, engine offer/answer/connectivity callbacks, a peer's offer/answer): bounded
+  FIFO, capacity 32. A new input arriving at capacity is refused and forces `ControlLinkLost`
+  through the teardown lane — reusing that input's already-correct, already-tested effect (media
+  stops; local capture and the TLS control session both survive) rather than inventing a new
+  failure path.
+- **ice** (a peer's `VOICE_ICE`, a locally gathered candidate): bounded ring at
+  `MAX_QUEUED_VOICE_CANDIDATES` — the same constant `PendingCandidates` already enforces one layer
+  later, so the two bounds are one policy rather than two that could disagree. Oldest evicted and
+  counted at capacity.
+- **coalesced** (`VOICE_STATE`, mute, remote-track-present): one slot per kind, latest value wins.
+- **teardown** (a deliberate stop, a control-link loss): one slot, always accepted, drained first.
+
+A critical-lane refusal is counted as the new `INPUT_MAILBOX_OVERFLOW` `VoiceSignalDropReason` —
+never produced by `VoiceNegotiation` itself, since the reducer never sees a refused input; the
+controller counts it directly. PROTOCOL §7.5 now documents all four lanes.
+
+**Finding 2 — the generation guard's `nil` case was backwards.** Both engines' callback-forwarding
+function was, in effect, `if generation != null && generation != expected: drop` — which reads as
+"reject a mismatch" but actually *accepts* the moment `generation` is `null`, exactly the state
+right after `stop()`. A stale callback from an already-torn-down peer connection could reach
+`VoiceController` after all, in precisely the window the generation guard exists to close.
+
+Fixed to the strict form the prose always implied, extracted as a pure, independently
+unit-tested rule rather than re-inlined a second time on each platform:
+`com.ridelink.core.voice.VoiceEngineGeneration` / `RideLinkCore.VoiceEngineGeneration`. Neither real
+`WebRtcVoiceEngine` can be constructed in a host unit test (§4 problems 22/23), so extracting the
+rule is what makes it testable at all — before this fix it was inline logic no test suite on either
+platform could reach. Fixing it surfaced a second, adjacent gap the strict check would otherwise
+have broken: a media engine reporting that `start()` itself failed is not a peer-connection
+callback (no peer connection exists yet to name one), so both engines now report a start failure
+directly and unconditionally through the event sink, bypassing the generation check entirely —
+PROTOCOL §7.8 records the distinction. On iOS this closed a genuine pre-existing gap rather than
+only fixing the guard: `WebRtcVoiceEngine.start()`'s failure path previously reported nothing to the
+controller at all.
+
+**Verification.** 28 new Android tests (`VoiceInputMailboxTest` 18, `VoiceEngineGenerationTest` 4,
+`VoiceControllerMailboxTest` 6) and 27 new iOS tests (`VoiceInputMailboxTests` 18,
+`VoiceEngineGenerationTests` 4, `VoiceControllerMailboxTests` 5), covering: the mailbox never grows
+past either bound under a simulated flood; a critical-lane overflow forces a safe degrade that never
+releases capture and never kills the control session; `stop`/`onControlLinkLost` remain processable
+under a fully saturated mailbox; a stale-generation callback is rejected and a callback from
+generation N cannot affect generation N+1; and a fresh Start Voice after an overflow-induced degrade
+begins a genuinely clean negotiation. The new mailbox/generation test classes were run **20
+consecutive times on both platforms with 0 failures** (see §3). All prior Phase 1b and Phase 2a
+suites remain green, including the real two-engine WebRTC loopback test.
+
+**§4 problem 28 (the intermittent `PairingSessionIntegrationTest` CI failure) is unrelated and
+still open** — not reproduced, not touched, and not claimed fixed. It is an existing Phase 1b issue
+this pass did not investigate further because it did not recur.
+
+---
+
 ## 3. Tests passed / pending
+
+**Passed and verified in the Phase 2a hardening session (2 September 2026, seventh), by actually
+running the commands.** Every Gradle command was run with
+`-Dorg.gradle.java.home=/opt/homebrew/opt/openjdk@21/libexec/openjdk.jdk/Contents/Home` (§4 problem 17):
+
+- `./gradlew test ktlintCheck detekt lint assembleDebug assembleRelease` — **all green**, all five
+  Android modules. **324 tests** (was 296): `core` 176 (was 154 — +18 `VoiceInputMailboxTest`, +4
+  `VoiceEngineGenerationTest`), `network` 126 (was 120 — +6 `VoiceControllerMailboxTest`), `audio`
+  11, `app` 2, `data` 9.
+- `swift test --package-path ios/Packages/RideLinkCore` — **61/61** (was 39 — +18
+  `VoiceInputMailboxTests`, +4 `VoiceEngineGenerationTests`).
+- `swift test --package-path ios/Packages/RideLinkPlatform` — **139/139** (was 134 — +5
+  `VoiceControllerMailboxTests`), zero Swift 6 strict-concurrency warnings.
+- `xcodebuild` Debug **and** Release for the simulator — both succeed, **zero warnings**.
+- The three new test classes per platform (`VoiceInputMailboxTest[s]`, `VoiceEngineGenerationTest[s]`,
+  `VoiceControllerMailboxTest[s]`) were each run **20 consecutive times, 0 failures**, since several
+  of them concern flooding/overflow behaviour whose determinism matters more than usual — one of
+  them (an "authenticated flood of offers" scenario) was reworked mid-session specifically because
+  a real, unconstrained coroutine/actor dispatcher let the consumer occasionally keep pace with a
+  200-item flood and never actually overflow, which would have made the test's proof accidental.
+  The fix — flood before the consumer exists (a `ManualDispatcher` on Android; deferring
+  `attach()` on iOS), not a bigger flood count — is what makes the overflow scenario deterministic
+  rather than probabilistic. All other Phase 1b/2a suites remain green, including the real
+  two-engine WebRTC loopback test and the pre-authentication `VOICE_*` refusal over real TLS.
+- SwiftLint/SwiftFormat: still not installed on this machine (§4 problem 14, unchanged).
+
+---
 
 **Passed and verified in the security-state fix session (27 August 2026, fourth), by actually
 running the commands.** Every Gradle command was run with
