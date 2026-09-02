@@ -27,7 +27,24 @@ final class PingRaceAndReconnectTests: XCTestCase {
     /// the single-drop floor (~3.2s) while staying far below the 5s connect timeout and the
     /// multi-second reconnect-ladder waits elsewhere in this file, so a burst that is *actually*
     /// stuck (not just slow) still fails this test rather than hanging silently.
-    private let clockBurstConvergenceTimeoutSeconds: Double = 4.0
+    /// **Raised 4.0s -> 8.0s in Phase 2a, and the reason is a change of environment rather than a
+    /// change of opinion.** This ceiling was measured when this test binary contained control-plane
+    /// code only. It now also links a ~96 MB WebRTC framework and, a few tests earlier in the same
+    /// process, stands up two real `RTCPeerConnectionFactory` instances with their own worker threads
+    /// and audio units (`VoiceEngineLoopbackTests`). On a three-core hosted runner that is real
+    /// contention for the same actor executor this test's waiters live on.
+    ///
+    /// CI run 33607112656 tripped 4.0s with the *identical* signature the paragraph above describes:
+    /// `elapsed 4.129s`, `pendingPings=1`, and `rttMs=3.0` — 3.0 **milliseconds**, i.e. the wire was
+    /// perfectly healthy and a PONG had been measured; one waiter was simply not resumed before its
+    /// own 3s `pingTimeoutMs` fired. Scheduling latency, not a protocol or lifecycle bug.
+    ///
+    /// Why 8.0s specifically: `runClockBurst` attempts all 11 samples before `ClockSync.applyWindow`
+    /// can publish an offset, so a *single* dropped PONG costs the full 3.0s `pingTimeoutMs` on top of
+    /// the ~0.6s healthy burst — a ~3.6s floor before any contention is counted. 8.0s clears that with
+    /// margin for a loaded runner while staying below the 10s resync interval, so a burst that is
+    /// genuinely stuck rather than merely slow still fails this test instead of hanging.
+    private let clockBurstConvergenceTimeoutSeconds: Double = 8.0
 
     private func clock() -> @Sendable () -> Int64 {
         let counter = LockedCounter(1_000_000)
