@@ -1249,6 +1249,17 @@ commands.** Every Gradle command was run with
 - **All prior gates remain green locally**, including the Phase 1 security suites, the problem-28
   regression test, the Phase 2a bounded-mailbox suites, and the real two-engine WebRTC loopback test
   (real DTLS-SRTP, real Opus, host-only candidates).
+- **CI green on the first run** — [33802909356](https://github.com/arunachaleswaranms/RideLink/actions/runs/33802909356),
+  commit `a4c548d`. Android: `core unit tests`, `all unit tests`, `ktlintCheck`, `detekt`, `lint`,
+  `assembleDebug`, `assembleRelease` — **all seven green**. iOS: `RideLinkCore` tests,
+  `RideLinkPlatform` tests, unsigned Debug **and** Release simulator builds — **all four green**.
+  Nothing was re-run, and no step was skipped except the failure-only report upload. The one
+  annotation is GitHub's own Node 20 deprecation notice on `actions/checkout@v4`, which is unrelated
+  to this repository's code and pre-dates this session.
+
+  **This says nothing about a phone.** CI run 33098708512 was green over the Phase 1b trust-gate bug,
+  and that warning has earned its place twice since. Green CI means the suites that exist pass; it is
+  not evidence about anything no test crosses, and every hardware gate in §7 is still open.
 
 **What none of this is evidence about:** any phone, any microphone, any speaker, any Bluetooth
 endpoint, any foreground service, any lock screen, or any latency. See §2m's "Explicitly not done"
