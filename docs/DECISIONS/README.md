@@ -24,7 +24,8 @@ Consequences · Alternatives considered.
 | [017](ADR-017-identity-key-and-certificate.md) | P-256 identity key, and a shared certificate encoder on both platforms | Accepted |
 | [018](ADR-018-tls-exporter-channel-binding.md) | The SAS channel binding is a TLS 1.3 exporter with an empty context | Accepted |
 | [019](ADR-019-connected-means-authenticated.md) | `Connected` means the trust gate passed, not that TLS came up | Accepted |
-| [020](ADR-020-webrtc-voice-foundation.md) | Phase 2a voice foundation: pinned WebRTC distributions, leader-is-offerer, host-only ICE, and the `stop`/`release` audio-session split | Accepted |
+| [020](ADR-020-webrtc-voice-foundation.md) | Phase 2a voice foundation: pinned WebRTC distributions, leader-is-offerer, host-only ICE, and the `stop`/`release` audio-session split | Accepted · **amended A1** (2 Sep 2026 — the Apple pin moves to M152 because upstream deleted M151) · **A2** (2 Sep 2026 — the generation guard is strict) |
+| [021](ADR-021-intercom-transmission-and-capture-ownership.md) | Phase 2b intercom: one capture owner, one policy object, transmission gated at the audio track and never at the device | Accepted |
 
 ADRs 011–016 and the three amendments came out of the pre-Phase-1 correction pass recorded in
 [`../STATUS.md`](../STATUS.md#2-what-changed-in-the-correction-pass). ADRs 017–018 came out of the
@@ -40,6 +41,15 @@ stays local, and what owns the microphone — and is backed by
 [`../test-results/phase2a-webrtc-spike-20260828.md`](../test-results/phase2a-webrtc-spike-20260828.md),
 including real DTLS-SRTP/Opus media measured on this machine. It also records the audio-session
 `stop`/`release` split, which is the decision ADR-003's "known Phase 2/6 risk" turned into.
+
+ADR-021 answers the question Phase 2a deferred — *what interprets* ARCHITECTURE §6.3's policy object
+— and makes the product's largest risk structural rather than described: the transmission gate's
+action vocabulary has no way to open or close the capture device, so PTT and VOX cannot thrash a
+Bluetooth endpoint between its profiles even by accident. It also moves the whole
+`AVAudioSession`/`AudioManager` decision surface into a shared pure reducer, because neither can be
+executed off a device; records the resolution of a contradiction in PROTOCOL §4.4's own wording about
+`intercom_mode`; and states plainly which parts are **not** done — VOX has no level source on either
+platform, no route `confidence` moved from `assumed`, and nothing in the phase ran on a phone.
 
 **Adding one:** next free number, update this table, link it from the relevant section of
 `ARCHITECTURE.md`.

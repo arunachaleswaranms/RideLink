@@ -3,6 +3,7 @@ package com.ridelink.network.voice
 import com.ridelink.core.audiopolicy.AudioProfile
 import com.ridelink.core.audiopolicy.AudioRouteSnapshot
 import com.ridelink.core.audiopolicy.EndpointClass
+import com.ridelink.core.audiopolicy.IntercomPolicy
 import com.ridelink.core.audiopolicy.ProfileCoupling
 import com.ridelink.core.protocol.VoiceBounds
 import com.ridelink.core.protocol.VoiceSessionId
@@ -51,11 +52,25 @@ class VoiceControllerTest {
 
             assertEquals(listOf("open"), fakes.audio.calls, "the capture path is opened exactly once")
             assertTrue(fakes.engine.calls.contains("start(${GEN_1})"), "the peer connection names the generation")
+            // Phase 2b: the intercom gate is the single source of `VOICE_STATE.mic_muted`, so opening the
+            // capture path changes that field and sends a second `negotiating` frame saying so. Both
+            // frames are truthful — before capture opened this side genuinely was transmitting silence —
+            // and PROTOCOL §7.4 sends `VOICE_STATE` on change, so the count is not the invariant. What
+            // this test is about is that the **offerer offers and the follower does not**, so it asserts
+            // the state values rather than how many frames carried them.
             assertEquals(
-                listOf(VoiceWireState.NEGOTIATING),
+                setOf(VoiceWireState.NEGOTIATING),
                 fakes.transport.sent
                     .filterIsInstance<VoiceSignal.State>()
-                    .map { it.state },
+                    .map { it.state }
+                    .toSet(),
+            )
+            assertEquals(
+                listOf(true, false),
+                fakes.transport.sent
+                    .filterIsInstance<VoiceSignal.State>()
+                    .map { it.micMuted },
+                "mic_muted goes true (capture not yet open) then false (open, full duplex)",
             )
             assertEquals(VoiceStatus.NEGOTIATING, leader.diagnostics.value.status)
             assertEquals(VoiceRole.OFFERER, leader.diagnostics.value.role)
@@ -189,11 +204,19 @@ class VoiceControllerTest {
     @Test
     fun `mute disables the sender and unmute restores it, and the peer is told both times`() =
         withController(isLocalLeader = true) { leader, fakes ->
+            // Phase 2b: mute now flows through the intercom gate, so the policy decides what unmuting
+            // *means*. The harness runs these under full duplex (see `withController`), where it means
+            // exactly what it meant in Phase 2a — the sender is re-enabled. Under PTT it does not, and
+            // `VoiceControllerIntercomTest` states that separately.
             leader.start()
             fakes.awaitEngineCall("createOffer")
 
+            // Awaited on the observable state rather than on an engine call name. Phase 2b tells the
+            // engine the gate's value whenever a peer connection is built (so the track's enabled state
+            // is a consequence of the policy, not of a constructor default), which means both call names
+            // are already in the log by this point and a name-based await would prove nothing.
             leader.setMicrophoneMuted(true)
-            fakes.awaitEngineCall("setMicrophoneMuted(true)")
+            fakes.await { leader.diagnostics.value.micMuted }
             assertEquals(true, fakes.engine.muted)
             assertTrue(
                 fakes.transport.sent
@@ -202,9 +225,8 @@ class VoiceControllerTest {
             )
 
             leader.setMicrophoneMuted(false)
-            fakes.awaitEngineCall("setMicrophoneMuted(false)")
+            fakes.await { !leader.diagnostics.value.micMuted }
             assertEquals(false, fakes.engine.muted)
-            assertFalse(leader.diagnostics.value.micMuted)
         }
 
     // --- teardown, and the difference between the two kinds -------------------------------------
@@ -440,6 +462,20 @@ class VoiceControllerTest {
             }
         }
 
+        /**
+         * Awaits an observable condition rather than an engine call name.
+         *
+         * Needed wherever the same call name can legitimately appear more than once — Phase 2b tells the
+         * engine the intercom gate's value whenever a peer connection is built, so
+         * `setMicrophoneMuted(true)` is in the log before a test's own mute ever runs, and a name-based
+         * await there would return immediately and assert nothing.
+         */
+        suspend fun await(condition: () -> Boolean) {
+            withTimeout(TIMEOUT_MS) {
+                while (!condition()) delay(POLL_MS)
+            }
+        }
+
         suspend fun awaitQueued(
             controller: VoiceController,
             count: Int,
@@ -459,9 +495,23 @@ class VoiceControllerTest {
         }
     }
 
+    /**
+     * **[policy] defaults to Mode A (full duplex), not to the production default.**
+     *
+     * These tests are about the negotiation table's *wiring* — who offers, what reaches the engine,
+     * what a stale callback cannot do — and full duplex is the policy in which "Start Voice, then
+     * talk" has exactly the shape Phase 2a's assertions describe: capture opens and outbound audio
+     * flows, so `VOICE_STATE.mic_muted` never changes and the frame counts below are literal.
+     *
+     * Under the production default (Mode C, PTT — ARCHITECTURE §6.3) capture opening leaves this side
+     * transmitting nothing, so the gate correctly sends one more `VOICE_STATE` to say so. That is
+     * Phase 2b behaviour and `VoiceControllerIntercomTest` is where it is asserted, rather than
+     * blurring it into these.
+     */
     private fun withController(
         isLocalLeader: Boolean,
         audioOpens: Boolean = true,
+        policy: IntercomPolicy = IntercomPolicy.MODE_A,
         body: suspend (VoiceController, Fakes) -> Unit,
     ) = runBlocking {
         val scope = CoroutineScope(SupervisorJob())
@@ -481,6 +531,9 @@ class VoiceControllerTest {
                     localTrackId = "ridelink-voice",
                     newVoiceSessionId = ids::next,
                 )
+            // Offered before the body runs, and the mailbox drains intercom commands ahead of voice
+            // inputs, so the policy is in force before the body's first `start()` is reduced.
+            controller.selectPolicy(policy)
             body(controller, Fakes(engine, audio, transport))
             controller.shutdown()
         } finally {

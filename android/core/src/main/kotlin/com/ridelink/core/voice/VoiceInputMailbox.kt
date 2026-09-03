@@ -173,11 +173,12 @@ class VoiceInputMailbox(
         coalesced.clear()
     }
 
-    private enum class CoalesceKey { MUTE, PEER_STATE, REMOTE_TRACK }
+    private enum class CoalesceKey { MUTE, MODE, PEER_STATE, REMOTE_TRACK }
 
     private fun coalesceKeyFor(input: VoiceInput): CoalesceKey =
         when (input) {
             is VoiceInput.MuteRequested -> CoalesceKey.MUTE
+            is VoiceInput.ModeSelected -> CoalesceKey.MODE
             is VoiceInput.RemoteTrackChanged -> CoalesceKey.REMOTE_TRACK
             is VoiceInput.SignalReceived -> CoalesceKey.PEER_STATE
             else -> error("$input is not a coalesced input")
@@ -222,6 +223,9 @@ class VoiceInputMailbox(
                 is VoiceInput.LocalCandidateGathered -> VoiceMailboxLane.ICE
                 is VoiceInput.RemoteTrackChanged -> VoiceMailboxLane.COALESCED
                 is VoiceInput.MuteRequested -> VoiceMailboxLane.COALESCED
+                // Absolute, like mute: only the newest selected mode is meaningful, and losing an
+                // intermediate one loses nothing the peer needed to be told.
+                is VoiceInput.ModeSelected -> VoiceMailboxLane.COALESCED
             }
     }
 }

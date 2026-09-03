@@ -1,10 +1,26 @@
 # RideLink — Status
 
-**Updated:** 3 September 2026 (problem 28 fixed — `PairingSessionIntegrationTest` harness synchronization race, ninth session)
+**Updated:** 4 September 2026 (Phase 2b — intercom integration and audio lifecycle, tenth session)
 **Current milestone:** M1 (Private voice link) — in progress
-**Current phase:** Phase 2a — voice transport foundation.
-**Phase 2a status: IMPLEMENTATION COMPLETE — REAL-DEVICE AUDIO GATE PENDING.**
+**Current phase:** Phase 2b — intercom integration and audio lifecycle.
+**Phase 2b status: IMPLEMENTATION COMPLETE — REAL-DEVICE INTERCOM GATE PENDING.**
+**Phase 2a status: IMPLEMENTATION COMPLETE — REAL-DEVICE AUDIO GATE PENDING (unchanged).**
 **Phase 1b status: IMPLEMENTATION COMPLETE — REAL-DEVICE GATE PENDING (unchanged).**
+**The overall "2 Intercom" milestone is NOT complete** — TEST_PLAN A-01, A-02, A-04, A-09 and
+V-01…V-11 are hardware gates and none of them has run.
+
+> **What is genuinely new this session, and what is not.** Phase 2b is the intercom *as an app*: the
+> five REQUIREMENTS §8 modes as one interpreted policy object, transmission gated at the WebRTC audio
+> track and **never** at the capture device, `AUDIO_STATE` implemented on the authenticated path, the
+> whole `AVAudioSession`/`AudioManager` decision surface moved into a shared pure reducer, and
+> software setup-timing instrumentation. All of it is green on both platforms, and three of those are
+> pinned by new shared vector sets.
+>
+> **Nothing in it ran on a phone.** No microphone, no speaker, no Bluetooth, no foreground service,
+> no lock screen. The Android WebRTC media path still has no test of any kind. Every `assumed` value
+> in the two route mappers is still assumed. **No latency figure exists** — the setup timings added
+> this session measure how long the *app* took to bring voice up, include no Bluetooth hop and no
+> jitter buffer, and mouth-to-ear latency cannot be inferred from them or from network RTT.
 
 > **What is genuinely new evidence this session, and what is not.** Real WebRTC media *was*
 > established and measured on this machine: two real `WebRtcVoiceEngine`s, host candidates only,
@@ -54,12 +70,14 @@ fails if a raw socket reappears there.
 open for Phase 1a and this phase does not close it: this machine has no Android device or
 emulator, and only the iOS *simulator*. Everything below is a laptop measurement. See §4 and §7.
 
-**Repository state:** Android — **335** unit tests across five modules (was 324), `test ktlintCheck
-detekt lint assembleDebug assembleRelease` all green. iOS — `RideLinkCore` **69** tests (was 61),
-`RideLinkPlatform` **150** tests (was 139), `RideLink.xcodeproj` builds in **both** Debug and Release
+**Repository state:** Android — **436** unit tests across five modules (was 336), `test ktlintCheck
+detekt lint assembleDebug assembleRelease` all green. iOS — `RideLinkCore` **142** tests (was 69),
+`RideLinkPlatform` **178** tests (was 150), `RideLink.xcodeproj` builds in **both** Debug and Release
 for the simulator with zero warnings. Shared vectors: `protocol/vectors/identity/`,
-`protocol/vectors/session-gate/` (120 rows), `protocol/vectors/voice-signal/` (70 rows) and
-`protocol/vectors/voice-fsm/` (52 rows) — every one run by **both** platforms from the same file.
+`protocol/vectors/session-gate/` (120 rows), `protocol/vectors/voice-signal/` (70 rows),
+`protocol/vectors/voice-fsm/` (**59** rows, was 52 — Phase 2b's `ModeSelected`),
+`protocol/vectors/intercom/` (58 rows, new) and `protocol/vectors/audio-state/` (74 rows across five
+groups, new) — every one run by **both** platforms from the same file.
 Neither the Phase 2a hardening pass (§2j) nor its follow-up (§2k) added a new vector file: their
 mailbox and doorbell fixes are pinned by ordinary unit tests, not shared wire vectors, since none
 of them has a wire shape of its own — `VoiceNegotiation`'s reducer, which does, is unchanged by
@@ -78,7 +96,8 @@ either pass.
 | **Phase 1a — control-plane skeleton** | ✅ **IMPLEMENTATION COMPLETE — REAL-DEVICE GATE PENDING** | Protocol vectors, Android + iOS discovery, plaintext control transport, clock sync, diagnostics UI, hardening pass (§2e). Real-device gate still open — see §7. Its plaintext transport has since been **deleted** (§2f) |
 | **Phase 1b — secure control channel** | ✅ **IMPLEMENTATION COMPLETE — REAL-DEVICE GATE PENDING** | Both ADR-007 A1 spikes closed with measurements; identity, TLS 1.3, pinning, SAS pairing, trust persistence and UI on both platforms (§2f). The trust-gate security bug found afterwards is fixed and vector-pinned (§2g, ADR-019) |
 | **Phase 2a — voice transport foundation** | ✅ **IMPLEMENTATION COMPLETE — REAL-DEVICE AUDIO GATE PENDING** | WebRTC pinned and reviewed on both platforms, PROTOCOL §7 specified in full, the negotiation table shared and vector-pinned, the pre-authentication `VOICE_*` refusal proven over real TLS on both platforms, and **real DTLS-SRTP/Opus media measured on this machine** (§2i, [ADR-020](DECISIONS/ADR-020-webrtc-voice-foundation.md)). No audio captured or played anywhere; the Android media path is untested even locally |
-| Phases 2b–8 | ⬜ Not started | The earlier commits named "init phase 2a" and "phase 2a" (`d709c45`, `90cbe12`) were Phase 1b work under a misleading name. Phase 2a proper is the sixth session, §2i |
+| **Phase 2b — intercom integration / audio lifecycle** | ✅ **IMPLEMENTATION COMPLETE — REAL-DEVICE INTERCOM GATE PENDING** | The five modes as one interpreted policy object; transmission gated at the audio track and never at the capture device; `AUDIO_STATE` implemented with no wire change; the platform audio lifecycle as a shared pure reducer; readiness as a shared pure decision; setup-timing instrumentation (§2m, [ADR-021](DECISIONS/ADR-021-intercom-transmission-and-capture-ownership.md)). Nothing ran on a phone; VOX has no level source; no latency figure exists |
+| Phases 3–8 | ⬜ Not started | The earlier commits named "init phase 2a" and "phase 2a" (`d709c45`, `90cbe12`) were Phase 1b work under a misleading name. Phase 2a proper is the sixth session, §2i |
 
 `protocol/schema/` and `protocol/vectors/` now exist (§2c). `android/` is a real five-module
 Gradle project that builds. `ios/` now has all three pieces ARCHITECTURE §9.2 describes:
@@ -1046,7 +1065,196 @@ audio gate for Phase 2a is neither opened nor claimed opened here.
 
 ---
 
+## 2m. Phase 2b — intercom integration and audio lifecycle (4 September 2026 session, tenth)
+
+Phase 2a made voice *work*. Phase 2b makes it an **intercom**: something with a policy, a gate, a
+readiness rule, a lifecycle and a report to the peer. The whole of it is
+[ADR-021](DECISIONS/ADR-021-intercom-transmission-and-capture-ownership.md).
+
+### The decision this phase exists for
+
+**The transmission gate cannot touch the capture device, and that is now structural rather than
+described.**
+
+ARCHITECTURE §6.3 has said since the correction pass that `mic_always_open: false` refers to whether
+*speech is transmitted*, not to whether the microphone is repeatedly opened and closed. Nothing
+enforced it. The obvious implementation — "PTT down opens the mic, PTT up closes it" — would violate
+both of the constraints that sentence exists for, simultaneously:
+
+1. it thrashes a Bluetooth endpoint between its media and duplex profiles per utterance, which is the
+   single worst thing this product can do to music and the exact failure Phase 0 was built to
+   measure; and
+2. it would try to open a microphone from the background on Android, which is illegal
+   (ARCHITECTURE §6.4) and has no second legal opportunity once the screen is locked.
+
+So gating happens at the **WebRTC audio track** — `AudioTrack.setEnabled` / `RTCAudioTrack.isEnabled`
+— and the decision lives in `IntercomTransmission`, a pure mirrored reducer whose action vocabulary
+has three cases and **no capture case at all**. The absence is the enforcement; the shared vector file
+asserts it over every row; `VoiceControllerIntercomTest[s]` counts 50 press/release cycles against
+**1** capture open and **0** capture closes, with no `PeerConnection` rebuild and no change of
+`voice_session_id`. TEST_PLAN **A-10** is the same assertion against a real helmet unit's recorded
+output and is **pending**.
+
+### What was built
+
+**Shared pure layer (`core.audiopolicy` / `RideLinkCore.AudioPolicy`, mirrored line for line):**
+
+| Type | What it decides | Pinned by |
+|---|---|---|
+| `IntercomPolicy` | ARCHITECTURE §6.3's object, with Modes A–E as five *values* and no code branching on a mode id | `protocol/vectors/intercom/` presets |
+| `IntercomTransmission` | `transmitting = captureOpen && !interrupted && !userMuted && gateOpen(...)`, as a `(state, input) -> (state, actions)` reducer | `protocol/vectors/intercom/` — 58 rows |
+| `IntercomCommandMailbox` | the intercom command queue, **bounded by construction** at one slot per kind, with a drain order chosen so a batch containing any reason not to transmit lands with transmission off | `IntercomCommandMailboxTest[s]` |
+| `AudioSessionLifecycle` + `RouteTransitionTracker` | the platform audio session: `stable -> transitioning -> stable` with a measured duration, `shouldResume`, a media-services reset, and a strict generation guard | `AudioSessionLifecycleTest[s]` |
+| `RideStartPolicy` | ARCHITECTURE §6.4's readiness sequence as one decision, with `Allowed` carrying the service and capture flags **separately** because the order between them is the platform rule | `RideStartPolicyTest[s]`, over the whole 2^7 cross-product |
+| `VoiceFailure` | ten named failure reasons instead of one "connection failed" bucket | every suite above |
+| `AudioStateMessage` / `AudioStateCodec` / `AudioStatePublisher` / `AudioStateInbox` | PROTOCOL §4.4 in full: the field set, both bounds, the monotonic `revision` on the sending side and the drop-anything-not-greater rule on the receiving side | `protocol/vectors/audio-state/` — 74 rows across five groups |
+| `VoiceSetupTimeline` / `VoiceSetupTimer` | software setup timings, first-write-wins per milestone, monotonic microseconds only | `VoiceSetupTimelineTest[s]` |
+
+**One addition to the Phase 2a negotiation table:** `VoiceInput.ModeSelected`, so
+`VOICE_STATE.mode` reports the selected gate instead of always `continuous`. Seven new
+`voice-fsm/` rows and two new stated invariants — a mode change emits only `SendVoiceState`, and it
+never touches the status or local audio.
+
+**Both platforms' controllers, sessions, services and UI:**
+
+- `VoiceController` gained the gate, the intercom mailbox drained by its **existing** single consumer,
+  the setup timeline, and named failures. The two inputs the gate produces (`MuteRequested`,
+  `ModeSelected`) are applied **directly** rather than offered, because they are produced by the
+  consumer *on* the consumer — routing them through the mailbox would reintroduce its lane priorities
+  and put the previous policy's mode and a stale `mic_muted` on the wire.
+- `AndroidVoiceAudioSession` was rewritten around the shared reducer: named failures, a route
+  transition that settles on `AudioManager.OnCommunicationDeviceChangedListener` (API 31+) rather than
+  on a sleep, a timeout that is *counted* as failure protection, and a pure
+  `AndroidCommunicationDeviceSelector` so the endpoint comes from explicit intent.
+- `IosVoiceAudioSession` likewise, plus `AudioSessionSignalBox`: **one ordered, bounded path** from
+  `NotificationCenter` into the actor, replacing a `Task` per notification. `shouldResume` is now read
+  from the interruption option rather than assumed.
+- `RideForegroundService` gained the two lock-screen actions ARCHITECTURE §6.4 requires (mute,
+  end-intercom) and an ongoing notification that reflects mute state. `MainActivity` owns foreground
+  visibility, requests permissions in context, runs `RideStartPolicy` before starting anything, starts
+  the service **before** capture, and releases the PTT gate in `onPause`.
+- Both `SessionCoordinator`s own the `AudioStatePublisher`, publish at `CONNECTED` and on every
+  observable change, and hold the peer's state behind the shared inbox. Both UIs gained mode
+  selection, a press-and-hold PTT control with every cancellation path mapped to "not held", the
+  peer's `AUDIO_STATE`, the setup timings labelled **"not latency"**, and a named refusal banner.
+- **One `AndroidVoiceAudioSession` per process**, not per voice session — ADR-021 §2. Two instances
+  would be two objects that each believe they own `AudioManager`'s mode, focus and communication
+  device across a reconnect.
+
+### Two real defects the tests found, both fixed
+
+1. **A gated policy's local track started enabled.** Both engines call `setEnabled(true)` when they
+   build the track, which is right for full duplex and wrong for PTT: a reconnect rebuild would have
+   gone live before the first press. The controller now pushes the gate's value immediately after
+   every successful `engine.start`. Found by `under PTT nothing is transmitted until the button is
+   held`, which had no engine call to await because the reconciliation was a no-op.
+2. **`localAudioOpen` meant different things on the two platforms.** Android AND-ed the user's consent
+   with the session's real state; iOS reported consent alone, so a denied microphone still rendered as
+   "mic: open". Both now read the gate's own view of the capture path, so the field cannot disagree
+   with `transmitting`. Found by the iOS mirror of the denied-microphone test.
+
+### A test race the stress pass found, and one specification contradiction resolved
+
+**The race.** `switching policy announces the new mode on the wire without rebuilding anything`
+awaited a wire frame and then asserted the diagnostics. `transport.send` happens inside the action
+loop and `publishDiagnostics` runs after it, so the frame is observable a few instructions before the
+diagnostics that describe it — the assertion lost about one run in ten. It failed **2 of the first 20**
+stress runs, was reproduced deliberately, and now awaits both observables. **No production code
+changed for this one**; 40 subsequent runs across two independent passes are clean.
+
+**The contradiction.** PROTOCOL §4.4 described `intercom_mode` as mirroring `VOICE_STATE.mode` while
+listing **four** values against that field's **three**. ADR-021 §3 resolves it: `intercom_mode` is a
+**superset**, because it describes *local audio state* — meaningful with no voice session at all, which
+Mode E is — while `VOICE_STATE.mode` describes the gate of a *live session*. Mode E reports
+`intercom_mode: "disabled"` and `mode: "ptt"`, which is what ARCHITECTURE §6.3's "ptt-disabled"
+spelling always meant. **No wire field, value or bound changed.**
+
+### Two Phase 2a tests were updated, and why that is not weakening them
+
+- `the leader offers on Start Voice and the follower only states intent` asserted **exactly one**
+  `VOICE_STATE`. A gated-or-not policy now sends a second one when capture opens, because the gate is
+  the single source of `mic_muted` and that field genuinely changes: before capture opened this side
+  *was* transmitting silence. Both frames are truthful and PROTOCOL §7.4 sends `VOICE_STATE` on
+  change. The test now asserts the state **values** and the `mic_muted` progression `[true, false]` —
+  strictly more than it asserted before, and about the property its name describes.
+- `mute disables the sender and unmute restores it` awaited engine **call names** that Phase 2b now
+  also produces at engine-start time. It awaits the observable state instead. Both platforms'
+  harnesses now select Mode A explicitly, with a comment saying why: Phase 2a's assertions are about
+  the negotiation table's wiring, and full duplex is the policy in which "start, then talk" has
+  literally that shape.
+
+### Explicitly not done
+
+- **Nothing ran on a phone.** No microphone, no speaker, no Bluetooth, no foreground service, no lock
+  screen, no route change on real hardware.
+- **VOX cannot open its gate.** Neither pinned WebRTC distribution exposes a fast per-frame input
+  level (the only level either offers is on a 2 s statistics poll), and ADR-021 §6 declines to
+  hand-write a detector to fill the gap — the same reasoning ADR-003 uses to decline custom echo/noise
+  DSP. `voxLevelSourceAvailable` is `false`, and the intercom card says so on screen.
+  **PENDING REAL AUDIO INPUT / LATER HARDENING.**
+- **No route `confidence` moved.** Both mappers still report `assumed` and their tests still assert
+  it. A-12/A-13 are what change that, and A-15 is what flips it.
+- **No music, no ducking, no player.** `IntercomPolicy.onSpeech` is the policy a Phase 3+ player will
+  read; there is nothing to duck yet, and no fake playback was created to satisfy foreground-service
+  semantics.
+- **No latency figure.** See the header.
+
+---
+
 ## 3. Tests passed / pending
+
+**Passed and verified in the Phase 2b session (4 September 2026, tenth), by actually running the
+commands.** Every Gradle command was run with
+`-Dorg.gradle.java.home=/opt/homebrew/opt/openjdk@21/libexec/openjdk.jdk/Contents/Home` (§4 problem 17):
+
+- `./gradlew test ktlintCheck detekt lint assembleDebug assembleRelease` — **all green**, all five
+  Android modules. **436 tests** (was 336): `core` **257** (was 185 — +14 `IntercomVectorTest`,
+  +10 `IntercomTransmissionTest`, +11 `IntercomCommandMailboxTest`, +12 `AudioSessionLifecycleTest`,
+  +11 `RideStartPolicyTest`, +8 `VoiceSetupTimelineTest`, +10 `AudioStateVectorTest`), `network`
+  **148** (was 130 — +15 `VoiceControllerIntercomTest`, +3 `VoiceAuthenticationGateTest` for
+  `AUDIO_STATE` over real TLS), `audio` **20** (was 11 — +9
+  `AndroidCommunicationDeviceSelectorTest`), `app` 2, `data` 9.
+- `swift test --package-path ios/Packages/RideLinkCore` — **142/142** (was 69; the same seven
+  mirrored suites).
+- `swift test --package-path ios/Packages/RideLinkPlatform` — **178/178** (was 150 — +15
+  `VoiceControllerIntercomTests`, +10 `AudioSessionSignalBoxTests`, +3 `VoiceAuthenticationGateTests`
+  for `AUDIO_STATE`), zero Swift 6 strict-concurrency warnings.
+- `xcodebuild` Debug **and** Release for the simulator — both succeed, **zero warnings**.
+- **Detekt found 12 real issues and every one was fixed rather than suppressed by a threshold
+  change.** Two are worth recording because the fix improved the code rather than the metric:
+  `ControlSessionManager.handleFrame` hit the cyclomatic-complexity ceiling when the `AUDIO_STATE`
+  branch went in, so `PING` and `PONG` were extracted into named handlers (`docs/STATUS.md` §4
+  problem 18's lesson, applied one function down); and `SessionCoordinator`'s constructor exceeded the
+  parameter limit, so its three environment readings were grouped into `SessionEnvironment`. The four
+  `@Suppress("ReturnCount")` annotations added each carry the same justification the codebase already
+  uses for codec field rules — one early-out per spec rule, in spec order.
+- **Stress validation (this phase's brief §52), all run locally and deliberately, with no
+  rerun-until-green anywhere:**
+
+| Suite set | Runs | Passed | Failed |
+|---|---|---|---|
+| Android pure intercom/lifecycle (`Intercom*`, `AudioSessionLifecycle`, `RideStartPolicy`, `VoiceSetupTimeline`, `AudioStateVector`), each run with `--rerun-tasks` | 50 | **50** | 0 |
+| iOS pure intercom/lifecycle (the seven mirrors) | 50 | **50** | 0 |
+| Android async/integration (`VoiceControllerIntercomTest`, `VoiceAuthenticationGateTest` over real TLS, `VoiceControllerMailboxTest`, `VoiceControllerTest`) — **after** the race fix below | 20 + 20 | **40** | 0 |
+| iOS async/integration (the mirrors plus `AudioSessionSignalBoxTests`) | 20 + 20 | **40** | 0 |
+
+  **The Android async pass failed 2 of its first 20 runs, and that is recorded rather than smoothed
+  over.** Root cause: `switching policy announces the new mode on the wire without rebuilding
+  anything` awaited a wire frame and then asserted the diagnostics, but `transport.send` happens
+  inside the action loop while `publishDiagnostics` runs after it — so the frame is observable a few
+  instructions before the state that describes it. Reproduced deliberately (12 attempts, hit on the
+  second), fixed by awaiting both observables, and **no production code changed for it**. The two
+  clean 20-run passes above are the two independent confirmations.
+- SwiftLint/SwiftFormat: still not installed on this machine (§4 problem 14, unchanged).
+- **All prior gates remain green locally**, including the Phase 1 security suites, the problem-28
+  regression test, the Phase 2a bounded-mailbox suites, and the real two-engine WebRTC loopback test
+  (real DTLS-SRTP, real Opus, host-only candidates).
+
+**What none of this is evidence about:** any phone, any microphone, any speaker, any Bluetooth
+endpoint, any foreground service, any lock screen, or any latency. See §2m's "Explicitly not done"
+and §7.
+
+---
 
 **Passed and verified in the second Phase 2a mailbox hardening session (3 September 2026, eighth),
 by actually running the commands.** Every Gradle command was run with
@@ -1328,10 +1536,12 @@ session and route), and integration tests I-01…I-25. Full list in `docs/TEST_P
 | ~~18-old~~ | **(previous wording, kept for history)** `ControlSessionManager` is the largest class in the codebase and has now absorbed the trust-gate wiring on top of the PROTOCOL §4.5 pairing wiring. The 27 Aug (fourth) session pushed it back under the existing `detekt` thresholds *without raising them*, by moving the pure payload readers (`requiredLongField`, `requiredBooleanField`, `requiredSpkiField`, `knownErrorCode`, `isPlausibleClockSample`) out of the class — they never touched a session — but that is headroom, not a fix | Low, but it will get worse | Unchanged: extract a `PairingController` owning the socket-facing half (`beginPairing`, `sendPairRequest`, `applyPairingStep`, `succeedPairing`, `failPairing`, `handlePairingFrame`, `activateAuthenticatedSession`). Deliberately not done alongside a security fix; it belongs in a change that is *only* that refactor |
 | 19 | **The manual `host:port` / QR fallback for blocked mDNS is not implemented.** ARCHITECTURE §4.4 scopes it to Phase 1b | Medium | It is a *discovery* feature with no security content, so it was deliberately left until after the security work. First item in §7. Problem 7 is the reason it matters |
 | 20 | **`SessionCoordinator` itself is still not directly unit-testable on either platform** — Android's needs a concrete `NsdDiscoveryController` (an Android type), and iOS's lives in the app target, which has no test target. That is precisely the gap the §2g bug hid in: a `when`/`switch` no suite could reach. It is now *mostly* closed by moving the decision into `SessionGate` (pure, mirrored, vector-pinned), leaving the coordinator a thin applier — but "thin" is a code reading, not a test | Medium | Either (a) give `NsdDiscoveryController` an interface and add an `app`-module test, or (b) add a test target to `RideLink.xcodeproj`. Do **not** let logic drift back into the coordinator in the meantime: anything with a decision in it belongs behind `SessionGate` or another pure, mirrored type |
+| 30 | **VOX has no microphone-driven level source on either platform.** The threshold/hangover state machine is implemented, deterministic and vector-pinned; nothing supplies it a level. Neither pinned WebRTC distribution exposes a fast per-frame input level through public API — the only level either offers is `audioLevel`/`totalAudioEnergy` on the statistics report, which RideLink polls every 2 s, three orders of magnitude too slow to gate speech. [ADR-021 §6](DECISIONS/ADR-021-intercom-transmission-and-capture-ownership.md) declines to hand-write a detector to fill the gap, for the same reason ADR-003 declines custom echo/noise DSP: an unmeasured detector is worse than an honest gap. **Selecting Mode B today means the gate cannot open**, `voxLevelSourceAvailable` is `false`, and the intercom card says so on screen | Medium | Two options when it matters: an `AudioDeviceModule` raw-PCM samples callback plus a *measured* detector (Android has `JavaAudioDeviceModule.setSamplesReadyCallback`; Apple has no public equivalent), or accept PTT/continuous as the shipped gates. **Do not implement either before A-14** — the threshold that matters is the one a helmet unit sees at 100 km/h, and nothing has measured it |
+| 31 | **`assertEquals` immediately after an await on a *different* observable is a race, and this codebase now has three examples of it.** Phase 2b's stress pass caught one (§3: a wire frame is visible a few instructions before the diagnostics describing it); problem 28 was two more, in a different subsystem. The shape is always the same: two independently-published values, one awaited, the other asserted | Low | A discipline, not a fix: when a test awaits X and asserts Y, await Y too. Worth a `tools/` lint if it recurs a fourth time |
 | 22 | **The Android WebRTC media path has no test of any kind.** `PeerConnectionFactory.initialize` requires an Android `Context`, so `WebRtcVoiceEngine` on Android cannot be exercised by a JVM unit test, and no emulator or device is available here. It compiles and is wired; that is the entire claim. The iOS side has a real two-engine media test because the XCFramework carries a macOS slice — Android has no equivalent | **High (blocks the Phase 2a gate)** | An emulator would give a first signal (`sdkmanager` + an AVD, which changes the toolchain and was not attempted without asking); the real answer is V-01…V-11 on the phones |
-| 23 | **Neither audio-session implementation has ever run.** `AndroidVoiceAudioSession` (`AudioManager`, `MODE_IN_COMMUNICATION`, `setCommunicationDevice`) and `IosVoiceAudioSession` (`AVAudioSession` two-configuration switch, all three notifications) are untestable off-device — `AVAudioSession` does not exist on macOS. Only their **pure mappers** are unit-tested | **High (blocks the Phase 2a gate)** | V-01…V-11 and A-12…A-15 |
-| 24 | **Every value in both route mappers marked `assumed` is a reasoned guess.** `TYPE_BLUETOOTH_SCO`/`.bluetoothHFP` → `duplex_wideband` assumes mSBC rather than CVSD; `input_forces_output` for all Bluetooth is ADR-016's central claim asserted, not measured; LE Audio is deliberately *not* claimed to preserve music quality. Both mappers report `confidence: assumed` and their tests **assert** that, so the tests are what will change when the measurement exists | Medium | A-12/A-13, then A-15 flips `confidence` and fills `docs/PHASE0_RESULTS.md` |
-| 25 | **`RideForegroundService` has never started.** Whether the `microphone` foreground-service type is accepted, whether capture survives a screen lock, and whether `ForegroundServiceStartNotAllowedException` fires in practice are all device facts. The code follows ARCHITECTURE §6.4's sequence and is started only from a resumed Activity | **High (blocks the Phase 2a gate)** | V-08 |
+| 23 | **Neither audio-session implementation has ever run.** `AndroidVoiceAudioSession` (`AudioManager`, `MODE_IN_COMMUNICATION`, `setCommunicationDevice`) and `IosVoiceAudioSession` (`AVAudioSession` two-configuration switch, all three notifications) are untestable off-device — `AVAudioSession` does not exist on macOS. **Narrowed by Phase 2b, not closed:** every *decision* either of them used to make now lives in `AudioSessionLifecycle`, a shared pure reducer with mirrored suites on both platforms (§2m), and both route mappers and Android's device selector are pure and tested. What remains untested is the **API calls themselves** — whether `setCategory`/`setActive` actually provoke a `.categoryChange` notification, whether `setCommunicationDevice` reaches a helmet unit, whether the duplex configuration yields a duplex route, and how long the switch takes | **High (blocks the Phase 2a/2b gates)** | V-01…V-11, IA-01…IA-09 and A-12…A-15 |
+| 24 | **Every value in both route mappers marked `assumed` is a reasoned guess.** *(Unchanged by Phase 2b — no hardware was measured, so nothing moved off `assumed` and both mappers' tests still assert it.)* `TYPE_BLUETOOTH_SCO`/`.bluetoothHFP` → `duplex_wideband` assumes mSBC rather than CVSD; `input_forces_output` for all Bluetooth is ADR-016's central claim asserted, not measured; LE Audio is deliberately *not* claimed to preserve music quality. Both mappers report `confidence: assumed` and their tests **assert** that, so the tests are what will change when the measurement exists | Medium | A-12/A-13, then A-15 flips `confidence` and fills `docs/PHASE0_RESULTS.md` |
+| 25 | **`RideForegroundService` has never started.** Whether the `microphone` foreground-service type is accepted, whether capture survives a screen lock, whether the notification's mute/end actions work from a lock screen, and whether `ForegroundServiceStartNotAllowedException` fires in practice are all device facts. **Narrowed by Phase 2b, not closed:** the *decision* to start is `RideStartPolicy`, pure and exhausted over its whole 2^7 request cross-product including "no decision ever opens capture from the background" (§2m), and the service gained the two lock-screen actions ARCHITECTURE §6.4 requires. The platform behaviour is still entirely unverified | **High (blocks the Phase 2a/2b gates)** | V-08, AF-01, AF-05 |
 | 27 | **The Apple WebRTC dependency has a single point of failure outside this project's control, and it fired within five days.** Phase 2a pinned `stasel/WebRTC` `151.0.0` with its SHA-256 verified byte-for-byte; on 2 Sep upstream **deleted that release** ("accidentally", their words) and the phase's first CI run failed with a hard 404 on the binary. `151.0.1` is not a usable replacement — its manifest points at the deleted `151.0.0` URL while carrying the new checksum, so it fails with either a 404 (cold cache) or a checksum mismatch (warm). Re-pinned to `152.0.0` and re-validated from scratch. **A checksum protects integrity, not availability**: integrity held perfectly — the mismatch was *detected* — and the build broke anyway ([ADR-020 Amendment A1](DECISIONS/ADR-020-webrtc-voice-foundation.md#amendment-a1--2-september-2026--the-apple-pin-moves-to-m152-because-upstream-deleted-the-m151-release)) | **High** | It will happen again. Re-pinning is the cheap response and is what was done; **vendoring the ~45 MB XCFramework is the only option that removes the failure mode** and should be reconsidered on the next occurrence. Android is unaffected — Maven Central does not permit deleting a published artifact, and that asymmetry between the two distributions is now a recorded property rather than an assumption |
 | 28 | ~~**A CI-only test failure was not diagnosable from the CI log.**~~ **Resolved 3 September 2026 (ninth session) — a test-harness synchronization race, not a production bug.** The 3 Sep run's diagnosable failure (`exactly one SAS prompt per device ==> expected: <1> but was: <0>` at `PairingSessionIntegrationTest.kt:60`) named the exact assertion: it counted `ControlEvent.PairingRequired` in `FsmSession.recorded` immediately after `awaitPairingPrompt()` returned. `awaitPairingPrompt()` observes `pairingPrompt`, a conflated `StateFlow`, which always hands a late observer its current value; the count is drawn from `events`, a **zero-replay** `SharedFlow` collected by `FsmSession.collectInto`. Production sets the prompt and emits `PairingRequired` back-to-back, but nothing ordered *this test's two observers* of those two flows relative to each other, so the count could run before the events collector had processed the emission into `recorded` — reproducing the exact assertion seen in CI. A second, related but more severe latent race existed alongside it: `collectInto` launched its collector with default coroutine dispatch, which only *schedules* the subscribe rather than performing it — on a zero-replay flow, a fast enough handshake could emit before any subscriber existed at all, losing the event permanently rather than merely delaying it. `DuplicateConnectionResolutionTest` already used `CoroutineStart.UNDISPATCHED` against this same `events` flow for this same reason; `collectInto` now does too, and the failing test now waits for the actual `PairingRequired` event before counting it, instead of inferring readiness from an unrelated flow. **No production code changed** — `ControlSessionManager`'s emit order (`_pairingPrompt.value = …` then `_events.tryEmit(PairingRequired(...))`) is untouched, and the trust-gate invariant (no unknown peer reaches `CONNECTED` before both-side SAS confirmation and trust persistence, ADR-019) was re-verified unchanged. A new regression test, `collectInto subscribes before returning, so a fast handshake cannot drop its events`, proves the subscription-ordering guarantee deterministically (a manually-pumped test dispatcher lets a real loopback handshake reach `CONNECTED` before the collector's dispatcher is ever pumped) and was confirmed to fail if the `collectInto` fix is reverted. `PairingSessionIntegrationTest` run **100 consecutive times locally: 100 passed, 0 failed**. Fresh CI (run [33698452022](https://github.com/arunachaleswaranms/RideLink/actions/runs/33698452022), commit `eae366c`): Android — `core unit tests`, `all unit tests` (336 tests, up from 335), `ktlintCheck`, `detekt`, `lint`, `assembleDebug`, `assembleRelease` all green; iOS — `RideLinkCore` 69/69, `RideLinkPlatform` 150/150, Debug and Release simulator builds all green | ~~High~~ — | **Kept for history, not deleted:** the two prior occurrences (27 Aug's missing-`Connected` signature and 3 Sep's missing-SAS-prompt signature) are exactly this same race manifesting as two different assertions, not two different bugs — both are downstream of the same unordered-observer gap now closed. If a third, differently-shaped failure ever appears in this test, treat it as a new problem, not a recurrence of this one |
 | 29 | **A Phase 1b timing test tripped its ceiling in CI because Phase 2a changed what shares its process.** `PingRaceAndReconnectTests.testRepeatedClockBurstsAllCompleteQuickly` asserts an 11-sample clock burst converges within a fixed budget. That budget (4.0s) was measured when the `RideLinkPlatform` test binary held control-plane code only; it now also links a ~96 MB WebRTC framework and, a few tests earlier in the same process, stands up two real `RTCPeerConnectionFactory` instances with their own worker threads. CI run 33607112656 tripped it with the signature the test's own comment predicts — `elapsed 4.129s`, `pendingPings=1`, `rttMs=3.0` (three **milliseconds**: the wire was healthy and a PONG was measured; one waiter was not resumed before its own 3s `pingTimeoutMs` fired). Actor-scheduling starvation on a three-core hosted runner, not a protocol or lifecycle bug — `PingRequestRegistry`'s own tests cover the bookkeeping | Low | Ceiling raised to 8.0s with the arithmetic written down: a single dropped PONG costs the full 3.0s timeout on top of a ~0.6s healthy burst, so ~3.6s is the floor before contention. 8.0s clears it with margin and stays below the 10s resync interval, so a genuinely stuck burst still fails. **The underlying fragility is not removed:** a wall-clock assertion sharing a process with a real media stack will always be environment-sensitive. The durable fix is to assert the invariant (every ping resolves, no stale waiter) and measure the timing separately — a Phase 1b test-design change, not a Phase 2a one |
@@ -1349,9 +1559,11 @@ ADR-010 leadership-independence rationale error (§2b).
 Only these. Everything else is a known task with a known shape.
 
 1. **Secure transport — mostly closed, one thread left.** Both platform capabilities are now demonstrated working *together* (ADR-017, ADR-018), so the "stop and review" trigger did not fire. What is left is narrower and specific: the Android half of the exporter equality was measured against **Conscrypt-on-a-laptop**, not against the phone's own TLS stack, and neither Android Keystore nor the iOS Keychain has been exercised on a device. Integration tests I-02/I-19/I-20/I-21 close it. Until they run, "the two phones show the same six digits" is a well-supported expectation, not a measurement.
-2. **Bluetooth duplex-profile coupling.** Now modelled honestly rather than wrongly, *and implemented* — each platform's route mapper is the single place ADR-016 vocabulary is produced, and both currently report `confidence: assumed` because that is the truth. Modelling it still does not fix it. Whether *any* of Modes A–E is genuinely pleasant with the real helmet unit is unknown until TEST_PLAN §6.1's A-12…A-15 run. **The product's viability sits here**, and Phase 2a moved it not at all.
+2. **Bluetooth duplex-profile coupling.** Now modelled honestly rather than wrongly, *and implemented* — each platform's route mapper is the single place ADR-016 vocabulary is produced, and both currently report `confidence: assumed` because that is the truth. Modelling it still does not fix it. Whether *any* of Modes A–E is genuinely pleasant with the real helmet unit is unknown until TEST_PLAN §6.1's A-12…A-15 run. **The product's viability sits here**, and neither Phase 2a nor Phase 2b moved it. What Phase 2b did add is that the worst *self-inflicted* form of this risk — thrashing the endpoint per utterance — is now structurally impossible rather than merely discouraged (ADR-021 §4). That removes a way the app could make the problem worse; it says nothing about whether the problem exists on this hardware.
 
 2a. **Voice media on a phone.** Real WebRTC media is now proven *locally* — host-only ICE, DTLS-SRTP, Opus, two real engines, deterministic. What that does not touch: any microphone, any speaker, `AVAudioSession`, `AudioManager`, a foreground service, a screen lock, and the Android media path at all. Closed by TEST_PLAN §5.1's V-01…V-11, not by more unit tests.
+
+2b. **The intercom lifecycle on a phone.** Phase 2b narrowed this risk in a specific and useful way rather than closing it: every *decision* the platform audio layer used to make is now in a shared pure reducer with mirrored tests, so what is left untested is the API calls themselves. That is a real improvement — a wrong decision now fails a laptop test — but it is not evidence about `AVAudioSession`, `AudioManager`, a foreground service or a lock screen, and the enforcement it added (the transmission gate cannot touch capture) is a guarantee about *this code*, not a measurement of *that hardware*. Closed by A-10, IA-01…IA-03, AF-01/AF-03/AF-05 and V-05/V-06/V-09.
 3. **iOS `AVAudioEngine` scheduling precision** against the <100 ms sync target on real hardware. Measured in Phase 5, not assumable.
 4. **Hotspot behaviour on a moving motorcycle** — an idle iPhone hotspot may sleep its interface; Android hotspot behaviour is vendor-dependent. Phase 1 test I-07 is the first real data.
 
@@ -1361,7 +1573,7 @@ Only these. Everything else is a known task with a known shape.
 
 Not blocking Phase 1. Answers needed before Phase 6.
 
-1. **Phase 0 results** — which intercom mode (A–E) was validated? Helmet unit make/model? Most stable network topology (common Wi-Fi / Android hotspot / iPhone hotspot)? Measured end-to-end voice latency? Any surprises?
+1. **Phase 0 results** — which intercom mode (A–E) was validated? Helmet unit make/model? Most stable network topology (common Wi-Fi / Android hotspot / iPhone hotspot)? Measured end-to-end voice latency? Any surprises? **This is now more actionable than it was:** all five modes are implemented and selectable from the intercom card, so the answer changes one constant (`IntercomPolicy.DEFAULT`) and two assertions rather than any behaviour. Until it arrives, Mode C is the default *by architecture* (ARCHITECTURE §6.3, ADR-008 §4, ADR-021 §3) and is documented everywhere as not a measurement.
 2. **Library size** — roughly how many tracks, and which formats? Determines whether FLAC matters and how hard to push on index performance. It also sets the realistic manifest page count.
 3. **iPhone cache cap** default (DOCX §24)? Suggest 8 GB with a user control.
 
@@ -1369,74 +1581,103 @@ Not blocking Phase 1. Answers needed before Phase 6.
 
 ## 7. Next exact task
 
-**Phase 2a — voice transport foundation. IMPLEMENTATION COMPLETE, REAL-DEVICE AUDIO GATE PENDING.**
-Everything below is done and verified by the automatable tests this machine can run. What remains is
-hardware.
+**Phase 2b — intercom integration and audio lifecycle. IMPLEMENTATION COMPLETE, REAL-DEVICE INTERCOM
+GATE PENDING.** Everything below is done and verified by the automatable tests this machine can run.
+What remains is hardware.
 
-1. ✅ **WebRTC dependency spike, run before any implementation** — both distributions pinned exactly, licences confirmed, Apple's checksum verified independently, both binaries read for telemetry, release builds proven (§2i, [ADR-020](DECISIONS/ADR-020-webrtc-voice-foundation.md), [evidence](test-results/phase2a-webrtc-spike-20260828.md)).
-2. ✅ **PROTOCOL §7 specified in full** — schemas, bounds, the authentication gate, the generation guard, the offerer rule, logging rules, lifecycle. `VOICE_OFFER.ice_ufrag_hint` removed as a duplicate of a value the SDP already carries.
-3. ✅ **Signalling rides the authenticated TLS control channel** — no second socket, and `VOICE_*` is absent from the pre-authentication frame allowlist, so it is inert before the trust gate by construction rather than by a check.
-4. ✅ **The pre-authentication refusal is proven over real TLS on both platforms**, with the refusals counted so the test cannot pass vacuously.
-5. ✅ **Deterministic offerer and glare** — the ADR-010 leader always offers; a follower sends intent; the offerer's response to intent is idempotent. Asserted as a *property* over every arrival order, not one case.
-6. ✅ **Host-only ICE** — empty server list, no field that could carry a STUN/TURN server, and the gathered set asserted to be exactly `{host}` against a real stack.
-7. ✅ **Opus and DTLS-SRTP established and measured** on this machine, deterministically.
-8. ✅ **The voice state model, start/end, mute/unmute, bounds and validation, teardown, and the stale-callback guard** — all in the shared `VoiceNegotiation` table, pinned by 52 vector rows on both platforms.
-9. ✅ **Control-reconnect integration** — media drops, capture survives (ARCHITECTURE §6.3/§6.4), voice rebuilds as a fresh generation. Asserted over the whole role × status cross-product.
-10. ✅ **Audio-session and route foundations on both platforms**, with the platform→ADR-016 mapping in exactly one place per platform and both reporting `confidence: assumed`, which is the truth.
-11. ✅ **No sensitive logging** — no SDP, no candidate string, no address or port, no keying material has a log *or display* path; candidate **types** only.
-12. ✅ **Both platforms' full CI gates green** locally.
+1. ✅ **The intercom policy is one interpreted object**, not five code paths — `IntercomPolicy` +
+   `IntercomTransmission`, mirrored and pinned by `protocol/vectors/intercom/` (58 rows on both
+   platforms).
+2. ✅ **Full duplex is represented as the no-gate policy** and remains the primary capability; PTT and
+   VOX are fallbacks over the same live capture path and the same WebRTC session.
+3. ✅ **The transmission gate cannot touch the capture device**, structurally: the action vocabulary
+   has no capture case. 50 press/release cycles ⇒ 1 capture open, 0 closes, no `PeerConnection`
+   rebuild, `voice_session_id` unchanged.
+4. ✅ **Mute does not rebuild media**, and the gate is the single source of `VOICE_STATE.mic_muted`.
+5. ✅ **One app-level capture/audio-session owner**, one instance per process, documented in
+   [ADR-021 §2](DECISIONS/ADR-021-intercom-transmission-and-capture-ownership.md).
+6. ✅ **Android audio session wired** — `MODE_IN_COMMUNICATION`, `setCommunicationDevice` (API 31+,
+   no deprecated SCO path anywhere), focus with our own ducking control, named failures, and a route
+   transition that settles on the platform's own callback.
+7. ✅ **Android foreground microphone lifecycle wired** — the readiness decision is pure and
+   exhausted; the service carries the two lock-screen actions; `START_NOT_STICKY`; no orphan service;
+   no fake media session.
+8. ✅ **A first mic start requires foreground-visible intent**, asserted over the whole 2^7 request
+   cross-product — and a reconnect with capture already open is allowed *without* reopening it.
+9. ✅ **iOS `.playAndRecord`/`.voiceChat` lifecycle wired**, with the two-configuration model intact
+   and `.allowBluetoothHFP` (never the deprecated spelling).
+10. ✅ **iOS route/interruption/reset lifecycle represented** — all three notifications, through one
+    ordered bounded mailbox, with `shouldResume` read rather than assumed.
+11. ✅ **`AUDIO_STATE` generated from runtime state**, with monotonic revisions, the
+    `stable -> transitioning -> stable` sequence, and no platform vocabulary on the wire — proven by
+    both platforms scanning the shared vector data.
+12. ✅ **The pre-authentication `AUDIO_STATE` refusal is proven over real TLS on both platforms**,
+    with the refusals counted so the test cannot pass vacuously.
+13. ✅ **Control reconnect does not create a competing WebRTC loop**; a rebuild is a new generation
+    and reuses the open capture device.
+14. ✅ **Stale audio/media callbacks cannot affect a new generation** — the ADR-020 Amendment A2 rule
+    applied to the audio session as well as the media stack.
+15. ✅ **Every new queue is bounded**, both by construction (`IntercomCommandMailbox`,
+    `AudioSessionSignalBox`), and no `Task`-per-event ordering path was introduced.
+16. ✅ **Diagnostics and monotonic setup-timing instrumentation** sufficient for the physical phase.
+17. ✅ **Both platforms' full CI gates green locally**, plus the §52 stress passes recorded in §3.
 
 **Immediately actionable next steps, in order:**
 
-1. **Get two real devices into this loop.** Unchanged since Phase 1a and now blocking three gates:
+1. **Get two real devices into this loop.** Unchanged since Phase 1a and now blocking four gates:
    (a) enable USB debugging on the OnePlus Nord 5 so `adb devices` sees it; (b) set up a
    development-team signing identity for the iPhone 17 Pro Max (Xcode → Signing & Capabilities →
    Personal Team — the user's call, not made here).
 2. **Run the Phase 1a gate**: I-01, I-05, I-06, I-07, I-08, I-14, I-15, I-17, I-22.
 3. **Run the Phase 1b gate**: I-02, I-03, I-04, I-16, I-19, I-20, I-21. I-02 is still the single most
-   important one in the repository — it is what turns "the two phones show the same six digits" from
-   a well-supported expectation into a measurement.
-4. **Run the Phase 2a voice gate**: TEST_PLAN §5.1's **V-01…V-11**. V-04 is the on-device check that
-   host-only ICE held on a real Wi-Fi radio; V-07 is the one that proves a link blip does not
-   renegotiate the Bluetooth profile; V-08 is the screen-lock/background question, which nothing
-   about a compiling foreground service answers; V-11 is the first latency number this project will
-   ever have.
-5. **Run the audio-hardware gate**: TEST_PLAN §6.1's **A-12…A-15**, with the helmet unit and the TWS
-   earbuds. A-13 is the measurement ADR-016 exists to make checkable — whether
-   `profile_coupling: input_forces_output` is actually true of the real hardware. **The product's
-   viability sits here.**
-6. **Record every result** — pass, fail and measured numbers — in `docs/test-results/`, per the
-   "measurements, not impressions" rule. A-15 then flips `confidence` to `measured` in both route
-   mappers and fills in `docs/PHASE0_RESULTS.md`; the mapper tests currently **assert** `assumed`, so
-   they are what changes.
-7. **Then the recorded tech debt**, now overdue: extract a `PairingController` from
-   `ControlSessionManager` (§4 problem 18 — escalated to Medium this session, and the documented
-   detekt threshold is the last headroom available), and close the `SessionCoordinator` testability
-   gap (§4 problem 20). Also still outstanding from Phase 1b: the manual `host:port`/QR fallback for
-   blocked mDNS (§4 problem 19).
+   important test in the repository.
+4. **Run the Phase 2a voice gate**: TEST_PLAN §5.1's **V-01…V-11**.
+5. **Run the Phase 2b intercom gate**, which is the new work this session created:
+   - **A-10** — 50 PTT presses over 10 minutes with music playing, recorded on an external recorder.
+     This is the hardware form of the invariant Phase 2b made structural; the laptop half already
+     passes, and A-10 is what proves the *hardware* never sees a profile switch.
+   - **IA-01, IA-02, IA-03** — the two iOS configurations and the **measured** transition duration.
+     The instrumentation exists; the number does not. Record it in `docs/test-results/`.
+   - **AF-01, AF-03, AF-05** — the Android service actually starting with the `microphone` type, a
+     denied microphone degrading to music-only, and capture surviving 30 minutes of screen lock.
+   - **V-05, V-06, V-09** — mute audibly working, capture actually released on a deliberate stop, and
+     a real Android permission denial.
+6. **Run the audio-hardware gate**: **A-12…A-15**, with the helmet unit and the TWS earbuds. A-13 is
+   the measurement ADR-016 exists to make checkable. **The product's viability sits here.**
+7. **Record every result** — pass, fail and measured numbers — in `docs/test-results/`. A-15 then
+   flips `confidence` to `measured` in both route mappers and fills in `docs/PHASE0_RESULTS.md`; both
+   mappers' tests currently **assert** `assumed`, so they are what changes. A-12/A-13 also decide
+   whether Mode C stays the default (§4 problem 3, ADR-021 §3).
+8. **Then the recorded tech debt**, now well overdue: extract a `PairingController` from
+   `ControlSessionManager` (§4 problem 18), close the `SessionCoordinator` testability gap (§4
+   problem 20), and the manual `host:port`/QR fallback for blocked mDNS (§4 problem 19).
 
-**Gate for 2a:** V-01…V-11 pass on the two real phones; A-12…A-15 recorded with numbers;
-`voice-signal/` and `voice-fsm/` pass on both platforms (✅ **already true**); the pre-authentication
-`VOICE_*` refusal holds (✅ **already true, over real TLS on both platforms**).
+**Gate for 2b:** A-10 recorded with a measurement; IA-01…IA-03 with IA-03's duration written down;
+AF-01/AF-03/AF-05; V-05/V-06/V-09; `intercom/` and `audio-state/` passing on both platforms
+(✅ **already true**); the pre-authentication `AUDIO_STATE` refusal holding (✅ **already true, over
+real TLS on both platforms**).
 
-> **Do not treat Phase 2a as complete because the laptop tests are green — including the WebRTC
-> ones.** The loopback test is real media and it is genuinely useful evidence, but it ran with no
-> microphone, no speaker, no Bluetooth and no phone, and `packetsSent = 0` says so honestly. The
-> Android media path has no test at all. Neither audio-session implementation has ever executed a
-> single line on a device. The single highest product risk — whether opening a helmet unit's
-> microphone collapses the pillion's music — is exactly as unmeasured as it was before this session.
+**Gate for the overall "2 Intercom" milestone:** A-01, A-02, A-04 and **A-09** on the full four-device
+chain, plus V-01…V-11. **A-09 is the first latency number this project will ever have**, and it cannot
+be inferred from WebRTC RTT or from any figure Phase 2b added.
+
+> **Do not treat Phase 2b as complete because the laptop tests are green.** They prove the tables,
+> the mailboxes, the codec, the readiness policy and the wiring — and two of the four things they
+> caught this session were real defects, so they are worth having. What they do not touch: any
+> microphone, any speaker, any Bluetooth endpoint, any foreground service, any lock screen, any route
+> change on real hardware, and any latency. The single highest product risk — whether opening a
+> helmet unit's microphone collapses the pillion's music — is **exactly as unmeasured as it was
+> before this session**. Phase 2b made that risk enforceable in code; it did not measure it.
 >
-> **And do not treat green CI as evidence about anything no test crosses.** That warning earned its
-> place in Phase 1b (CI run 33098708512 was green over the trust-gate bug) and it earned it again
-> here: three of this session's findings — ADR-016's self-contradiction, the duplicated audio
-> vocabulary that compiled cleanly because the packages differed, and the un-inspected candidate
-> gathering direction — were all in places the existing suites did not look. When reviewing this
-> codebase, look for decisions in places the test suite cannot reach.
+> **And do not read the setup timings as latency.** They are how long the app took to bring voice up.
+> Mouth-to-ear latency includes two Bluetooth hops, an encoder, a jitter buffer and a decoder, and
+> A-09 is the only thing that will produce it.
 
-**Then Phase 2b — the intercom as a product.** PTT/VOX gating (Phase 2a always sends
-`mode: continuous`), the five REQUIREMENTS §8 modes as one policy object, ducking, and the
-`AUDIO_STATE` message that carries the route to the peer. Not before the device gate has numbers in
-it: Phase 2b's decisions depend on what A-12…A-15 measure.
+**Then Phase 3 — local music.** MediaStore indexing on Android, document-picker import on iOS, the
+track database, hashing, and the player. **Do not start it before the Phase 2b device gate has
+numbers in it**, for the same reason Phase 2b should not have started before Phase 2a's: the ducking
+policy `IntercomPolicy.onSpeech` already carries is a decision A-03/A-08 measure, and building a
+player against an unmeasured coexistence story is how the product's largest risk gets discovered last.
 
 ---
 

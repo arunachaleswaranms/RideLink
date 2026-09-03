@@ -173,6 +173,7 @@ public struct VoiceInputMailbox: Sendable {
 
     private enum CoalesceKey: Hashable {
         case mute
+        case mode
         case peerState
         case remoteTrack
     }
@@ -181,6 +182,8 @@ public struct VoiceInputMailbox: Sendable {
         switch input {
         case .muteRequested:
             return .mute
+        case .modeSelected:
+            return .mode
         case .remoteTrackChanged:
             return .remoteTrack
         case .signalReceived:
@@ -210,6 +213,10 @@ public struct VoiceInputMailbox: Sendable {
         case .remoteTrackChanged:
             return .coalesced
         case .muteRequested:
+            return .coalesced
+        // Absolute, like mute: only the newest selected mode is meaningful, and losing an intermediate one
+        // loses nothing the peer needed to be told.
+        case .modeSelected:
             return .coalesced
         }
     }

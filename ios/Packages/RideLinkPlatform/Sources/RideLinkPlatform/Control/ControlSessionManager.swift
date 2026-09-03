@@ -189,6 +189,24 @@ public actor ControlSessionManager {
         authenticatedWriter: { [weak self] in await self?.authenticatedWriter() }
     )
 
+    /// The `AUDIO_STATE` half of the control plane (PROTOCOL §4.4), extracted for the same reason `voice`
+    /// is: `docs/STATUS.md` §4 problem 18, and nothing here touches the session, the handshake, pairing,
+    /// reconnect or the clock.
+    ///
+    /// `AUDIO_STATE` is **absent** from `preAuthenticationFrameTypes`, so an unauthenticated peer's is
+    /// dropped before `handleFrame`'s dispatch can reach the relay — the same construction that makes
+    /// `VOICE_*` inert before the trust gate (PROTOCOL §7.1), applied to the message §4.1's handshake
+    /// diagram puts on the trusted path.
+    public func audioStateRelay() -> AudioStateRelay { audioState }
+
+    private lazy var audioState: AudioStateRelay = AudioStateRelay(
+        localPeerId: localPeerId,
+        monotonicNowUs: monotonicNowUs,
+        nextSeq: { [seqCounter] in seqCounter.nextSeq() },
+        activeSessionId: { [weak self] in await self?.currentSessionId() ?? SessionId("n/a") },
+        authenticatedWriter: { [weak self] in await self?.authenticatedWriter() }
+    )
+
     private func currentSessionId() -> SessionId { activeSessionId }
 
     /// Non-nil only while the surviving connection has passed the trust gate. Returning a closure rather
@@ -668,6 +686,9 @@ public actor ControlSessionManager {
             // Counted rather than merely dropped when it is a voice frame: PROTOCOL §7.1's whole point
             // is that VOICE_* is inert before the trust gate, and "it never happened" and "it happened
             // and was refused" are different facts on a diagnostics screen.
+            if envelope.type == AudioStateMessageTypes.audioState {
+                await audioState.countPreAuthenticationDrop()
+            }
             if VoiceMessageTypes.all.contains(envelope.type) {
                 await voice.countPreAuthenticationDrop()
             }
@@ -701,6 +722,9 @@ public actor ControlSessionManager {
         case "PAIR_REQUEST", "PAIR_CONFIRM", "PAIR_RESULT":
             await handlePairingFrame(socket: socket, type: envelope.type, payload: envelope.payload)
         // Reachable only past the guard above, so only for an authenticated peer (PROTOCOL §7.1).
+        case AudioStateMessageTypes.audioState:
+            // Reachable only past the guard above, so only for an authenticated peer (PROTOCOL §4.1).
+            await audioState.deliver(payload: payload)
         case VoiceMessageTypes.offer, VoiceMessageTypes.answer, VoiceMessageTypes.ice, VoiceMessageTypes.state:
             await voice.deliver(type: envelope.type, payload: envelope.payload)
         case "BYE":
@@ -933,6 +957,7 @@ public actor ControlSessionManager {
         // the voice sink. The coordinator also detaches it, and doing both is deliberate: neither
         // teardown path may depend on the other having run.
         await voice.reset()
+        await audioState.reset()
         pendingActivation = nil
         updatePairingPrompt(nil)
         endedDeliberately = true

@@ -1,9 +1,11 @@
 # RideLink — Architecture
 
-**Status:** baseline for Phases 1–2a. **Last updated:** 28 August 2026 (Phase 2a — WebRTC
-distributions pinned and reviewed, `core`/`RideLinkCore` package listings brought up to date, and
-the community-artifact risk closed with evidence. See
-[ADR-020](DECISIONS/ADR-020-webrtc-voice-foundation.md)).
+**Status:** baseline for Phases 1–2b. **Last updated:** 4 September 2026 (Phase 2b — the intercom
+policy interpreted (§6.3.1), ARCHITECTURE §6.4's readiness sequence expressed as a shared pure
+decision, `AUDIO_STATE` implemented on the authenticated path (§6.5.1), and the layer-3 type table
+in §2. See [ADR-021](DECISIONS/ADR-021-intercom-transmission-and-capture-ownership.md)).
+Previously 28 August 2026 (Phase 2a — WebRTC distributions pinned and reviewed and the
+community-artifact risk closed with evidence, [ADR-020](DECISIONS/ADR-020-webrtc-voice-foundation.md)).
 Requirement IDs (`FR-nnn`, `NFR-nn`) refer to [`REQUIREMENTS.md`](REQUIREMENTS.md).
 Binding decisions live in [`DECISIONS/`](DECISIONS/). What changed in the correction pass and
 why is recorded in [`STATUS.md`](STATUS.md).
@@ -130,6 +132,25 @@ the boundary is enforced by the module being a plain JVM / plain Swift library, 
 SDK is not even on its compile classpath.
 
 Layer 1 is the only place allowed to know that Bluetooth exists.
+
+**The layer-3 types the intercom is made of**, all pure, all mirrored, all laptop-testable — this is
+what "everything difficult lives there" means in practice for Phase 2b:
+
+| Type | Decides |
+|---|---|
+| `SessionFsm` | the session state machine (Phase 1a) |
+| `SessionGate` | which FSM event a control event implies — the trust gate ([ADR-019](DECISIONS/ADR-019-connected-means-authenticated.md)) |
+| `VoiceNegotiation` | who offers, what a stale callback may do, when capture is released ([ADR-020](DECISIONS/ADR-020-webrtc-voice-foundation.md)) |
+| `IntercomTransmission` | whether outbound audio leaves this phone ([ADR-021](DECISIONS/ADR-021-intercom-transmission-and-capture-ownership.md) §4) |
+| `AudioSessionLifecycle` | the platform audio session's route transitions, interruptions, resets and generation guard (ADR-021 §5) |
+| `RideStartPolicy` | whether an intercom start is legal (§6.4) |
+| `AudioStatePublisher` / `AudioStateInbox` | PROTOCOL §4.4's monotonic `revision`, on both sides |
+| `VoiceSetupTimeline` | software setup timings — **not** latency (ADR-021 §9) |
+
+Every one of them is driven by inputs and a caller-supplied monotonic clock, and every one has a
+mirrored suite on both platforms. Four are pinned by shared vector files as well
+(`session-gate/`, `voice-fsm/`, `intercom/`, `audio-state/`), which is what makes a divergence
+between the two phones a laptop unit-test failure rather than something a ride discovers.
 
 ---
 
@@ -380,9 +401,57 @@ Two independent reasons force this, and they agree:
 2. **Platform rules.** On Android, first-time microphone capture cannot legally begin from the background (§6.4). A PTT press with the screen locked must not be the moment the mic is first opened.
 
 **Open input:** the mode Phase 0 actually validated. Until recorded in
-[`PHASE0_RESULTS.md`](PHASE0_RESULTS.md), Phase 6 defaults to **Mode C (PTT)** as the safest
+[`PHASE0_RESULTS.md`](PHASE0_RESULTS.md), the default is **Mode C (PTT)** as the safest
 assumption, because it is the only mode that cannot be broken by a duplex-profile switch
-mid-utterance.
+mid-utterance. That is an *architecture* default, not a measurement, and
+[ADR-021 §3](DECISIONS/ADR-021-intercom-transmission-and-capture-ownership.md) records it as one:
+`IntercomPolicy.DEFAULT`, the shared vector file, the mirrored tests and the intercom card all say
+which mode it is and why, and nothing in Phase 2b may be read as evidence that Mode C was validated
+on hardware.
+
+#### 6.3.1 How the policy is interpreted (Phase 2b, [ADR-021](DECISIONS/ADR-021-intercom-transmission-and-capture-ownership.md))
+
+The policy object above is `IntercomPolicy` in `core.audiopolicy` / `RideLinkCore.AudioPolicy`, and
+**no code branches on a mode id** — the five presets exist for the UI and the diagnostics screen.
+What interprets it is `IntercomTransmission`, a pure `(state, input) -> (state, actions)` reducer
+mirrored on both platforms and pinned by `protocol/vectors/intercom/`. Its whole rule is:
+
+```
+transmitting = capture_open && !interrupted && !user_muted && gate_open(policy, ptt_held, vox_open)
+```
+
+**Gating happens at the WebRTC audio-track level and nowhere else** — `AudioTrack.setEnabled` on
+Android, `RTCAudioTrack.isEnabled` on Apple. The capture device, the platform audio session and the
+`PeerConnection` are all untouched by a press, a mute or a mode change, and `voice_session_id` does
+not move. The enforcement is structural rather than reviewed: the reducer's action vocabulary has
+three cases and none of them can open or close capture. TEST_PLAN **A-10** is the hardware form of
+the same assertion; `VoiceControllerIntercomTest[s]` is the laptop form, counting capture operations
+across 50 presses.
+
+`VOICE_STATE.mic_muted` (PROTOCOL §7.4 — "this peer is transmitting silence") is exactly
+`!transmitting`, and the gate is its single source. There is deliberately no second path to the
+media stack's mute.
+
+**Full duplex remains the primary capability.** `gate: none` is the no-gate policy (Modes A and D);
+PTT and VOX are fallbacks layered over the *same* live capture path and the *same* WebRTC session,
+never a different transport and never a downgrade of the media plane's ability to send and receive at
+once.
+
+**Two mode vocabularies, differing by one value.** `VOICE_STATE.mode` has three values because it
+describes the gate of a *live voice session*; `AUDIO_STATE.intercom_mode` has four because it
+describes *local audio state*, which is meaningful with no voice session at all. Mode E therefore
+reports `intercom_mode: "disabled"` and `mode: "ptt"` — it is a PTT policy whose button is never
+released, which is what "ptt-disabled" above means. ADR-021 §3 records this as the resolution of a
+contradiction in PROTOCOL §4.4's own wording; no wire value or bound changed.
+
+**VOX: the gate is implemented, its level source is not.** The threshold/hangover state machine is
+real, deterministic and vector-pinned. Neither pinned WebRTC distribution exposes a fast per-frame
+input level through public API — the only level either offers is on the statistics report, which
+RideLink polls every 2 s, three orders of magnitude too slow to gate speech — and ADR-021 §6 declines
+to hand-write a detector to fill the gap, for the same reason ADR-003 declines custom echo/noise DSP.
+So selecting Mode B today means the gate cannot open; `voxLevelSourceAvailable` is `false`, the
+intercom card says so on screen, and this is marked **PENDING REAL AUDIO INPUT / LATER HARDENING**.
+The −35 dBFS / 700 ms defaults are reasoned starting points for TEST_PLAN A-14, not tuned values.
 
 ### 6.4 Android ride lifecycle and the background-microphone rule
 
@@ -413,6 +482,36 @@ stop.
 
 Step 6 is why the capture device stays open for the whole segment (§6.3): there is no second
 legal opportunity to open it once the app is no longer visible.
+
+**Steps 1–3 are a shared pure decision, not a sequence of `if`s** (Phase 2b,
+[ADR-021](DECISIONS/ADR-021-intercom-transmission-and-capture-ownership.md)). `RideStartPolicy` in
+`core.audiopolicy` / `RideLinkCore.AudioPolicy` takes a `RideStartRequest` — foreground visibility,
+the two permissions, whether the trust gate has passed, whether an endpoint exists, whether capture
+is *already* open, whether the intercom is enabled at all — and returns `Allowed`, `Refused(reason)`
+or `IntercomDisabled`. Three things follow:
+
+- **The background rule outranks the permission and endpoint checks.** "Bring RideLink to the front"
+  is the actionable answer even when a permission is also missing, because a permission dialog cannot
+  be shown from the background either.
+- **`captureAlreadyOpen` short-circuits the whole thing.** That is the control-reconnect case
+  (PROTOCOL §7.8): the media transport must be rebuilt while the screen is locked, and capture must
+  **not** be reopened — so the decision is `Allowed(openCapture = false)` and foreground visibility
+  is not consulted.
+- **`Allowed` carries two separate flags**, `startForegroundServiceWithMicrophone` and `openCapture`,
+  because the order between them *is* the platform rule. The caller starts the service while still
+  visible and only then opens capture; expressing it as two flags rather than one boolean is what
+  keeps that ordering visible at the call site.
+
+Only a resumed `Activity` can honestly claim `appForegroundVisible`, so it is a parameter rather than
+something the policy could look up — and the coordinator, which cannot know, never supplies it. The
+policy is exhausted by a laptop test on both platforms (`RideStartPolicyTest[s]`, including the whole
+2^7 request cross-product asserting that **no** decision ever opens capture from the background);
+what remains untested off-device is the platform call itself, which is AF-01/AF-03/AF-04/AF-09.
+
+The ride notification carries the two lock-screen actions ARCHITECTURE requires — mute and
+end-intercom — dispatched to the session owner through a single direct handler with no queue, because
+a notification tap with no session to act on should be dropped rather than buffered. **End intercom
+is not end session:** PROTOCOL §7.8 keeps those separate, and the control session survives.
 
 **Manifest surface**
 
@@ -468,6 +567,40 @@ The old model listed an output route and an input route as independent fields. T
 the ordinary Bluetooth case and wrong in exactly the place the product is most fragile. The
 correction is a single explicit field, `profile_coupling`, plus effective state rather than
 per-direction wishes.
+
+#### 6.5.1 `AUDIO_STATE` as implemented (Phase 2b, [ADR-021 §7](DECISIONS/ADR-021-intercom-transmission-and-capture-ownership.md))
+
+`AUDIO_STATE` has been specified since Phase 1's correction pass; Phase 2b implements it. **No wire
+field, value or bound changed.** What exists now is the code, the bounds enforcement, the revision
+rule on both sides, and `protocol/vectors/audio-state/` running on both platforms.
+
+| Property | Where it lives |
+|---|---|
+| Absent from PROTOCOL §4.1's pre-authentication frame list, so an unauthenticated peer's frame never reaches the app | `ControlSessionManager`'s allowlist, with the refusal *counted*; proven over real TLS with two real unpaired peers |
+| A malformed frame is dropped and the control connection survives | `AudioStateCodec` — total and non-throwing, mirroring `VoiceSignalCodec` |
+| `revision` strictly increasing per sender per session, **not** reset by a reconnect or a voice rebuild | `AudioStatePublisher`, which returns nothing when the state is unchanged — so `revision` means "the state changed", not "a callback fired" |
+| A lower or equal revision is dropped | `AudioStateInbox` |
+| No platform vocabulary on the wire | The codec has an explicit field list, and both platforms' tests scan the shared vector data for `a2dp`, `hfp`, `sco`, `AVAudioSession`, `AudioManager`, a device name and a headset model |
+
+**A route change is observable state with a measured duration.** The
+`stable -> transitioning -> stable` sequence is `AudioSessionLifecycle`'s — a pure reducer shared by
+both platforms, because neither `AVAudioSession` nor `AudioManager` can be executed off a device and
+a decision that cannot be tested is a decision that will be wrong. It settles on the **platform's own
+callback** (`OnCommunicationDeviceChangedListener` on Android, `routeChangeNotification` with
+`.categoryChange` on iOS), never on elapsed time; a timeout exists only so a platform that never
+confirms cannot latch `transitioning` for the rest of a ride, and every use of it is counted so a
+timer-derived number is never mistaken for a measurement. The measured duration lands in
+`AudioRouteSnapshot.lastTransitionDurationUs` — diagnostics only, absent from §4.4's field table and
+therefore off the wire — which is what TEST_PLAN IA-03 asks for.
+
+The same reducer owns `shouldResume` (read, not assumed — an interruption that ends without it leaves
+the session inactive) and a **strict generation guard**: a media-services reset increments the
+generation and every callback naming any other generation is inert, including a real one that used to
+be current. That is ADR-020 Amendment A2's rule applied one layer out.
+
+**`AudioRouteSnapshot` is a superset of the wire message.** `interrupted`, `lastChangeReason` and
+`lastTransitionDurationUs` are diagnostics §4.4 does not carry, and the codec's explicit field list is
+what keeps them off the wire rather than a reviewer noticing.
 
 ---
 

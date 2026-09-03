@@ -144,9 +144,12 @@ public enum AudioRouteChangeReason: String, Sendable, Equatable, CaseIterable {
 /// a duplex profile at 16 kHz with `.reduced` media quality — and both users can see it. The old model
 /// could only produce a false reassurance.
 ///
-/// Phase 2a populates this from each platform's route layer and shows it on the diagnostics screen.
-/// The `AUDIO_STATE` **message** that carries it to the peer is Phase 2b/6 work; this is the shared
-/// type it will be built from, so the two cannot drift.
+/// Each platform's route layer populates this and the diagnostics screen shows it. Phase 2b added the
+/// `AUDIO_STATE` **message** that carries it to the peer: `AudioStateMessage` is its strict wire
+/// projection, built from this type, so the two cannot drift. This type is deliberately a **superset** —
+/// `interrupted`, `lastChangeReason` and `lastTransitionDurationUs` are diagnostics PROTOCOL §4.4's
+/// field table does not carry, and `AudioStateCodec`'s explicit field list is what keeps them off the
+/// wire.
 public struct AudioRouteSnapshot: Sendable, Equatable {
     public var endpointClass: EndpointClass
     public var microphoneOpen: Bool
@@ -164,6 +167,14 @@ public struct AudioRouteSnapshot: Sendable, Equatable {
     /// A short, platform-neutral reason for the last route change, for the diagnostics screen. Never a
     /// device name and never free text from the platform — see `AudioRouteChangeReason`.
     public var lastChangeReason: AudioRouteChangeReason
+    /// How long the most recently settled route transition actually took, in monotonic microseconds
+    /// (`RouteTransitionState.lastDurationUs`). TEST_PLAN IA-03 asks for a measurement, and this is where
+    /// it lands; nil means no transition has settled on this device yet.
+    ///
+    /// **Diagnostics only, and never encoded.** Like `interrupted` and `lastChangeReason` it is absent
+    /// from PROTOCOL §4.4's field table, so `AudioStateCodec` — which has an explicit field list — cannot
+    /// put it on the wire.
+    public var lastTransitionDurationUs: Int64?
 
     public init(
         endpointClass: EndpointClass = .unknown,
@@ -176,7 +187,8 @@ public struct AudioRouteSnapshot: Sendable, Equatable {
         profileCoupling: ProfileCoupling = .unknown,
         confidence: AudioConfidence = .assumed,
         interrupted: Bool = false,
-        lastChangeReason: AudioRouteChangeReason = .unknown
+        lastChangeReason: AudioRouteChangeReason = .unknown,
+        lastTransitionDurationUs: Int64? = nil
     ) {
         self.endpointClass = endpointClass
         self.microphoneOpen = microphoneOpen
@@ -189,6 +201,7 @@ public struct AudioRouteSnapshot: Sendable, Equatable {
         self.confidence = confidence
         self.interrupted = interrupted
         self.lastChangeReason = lastChangeReason
+        self.lastTransitionDurationUs = lastTransitionDurationUs
     }
 
     /// ADR-016, as corrected by its Amendment A1: `reduced` whenever the effective output profile is a

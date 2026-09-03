@@ -3,6 +3,7 @@ package com.ridelink.network.control
 import com.ridelink.core.model.PeerId
 import com.ridelink.core.model.SessionId
 import com.ridelink.core.model.SpkiHash
+import com.ridelink.core.protocol.AudioStateMessageTypes
 import com.ridelink.core.protocol.Envelope
 import com.ridelink.core.protocol.VoiceMessageTypes
 import com.ridelink.core.security.PinDecision
@@ -265,6 +266,32 @@ class ControlSessionManager(
      */
     val voice: VoiceSignalRelay =
         VoiceSignalRelay(
+            localPeerId = localPeerId,
+            monotonicNowUs = monotonicNowUs,
+            nextSeq = { seqCounter.nextSeq() },
+            activeSessionId = { activeSessionId },
+            authenticatedWriter = {
+                val socket = activeSocket
+                if (socket == null || !authenticated) {
+                    null
+                } else {
+                    AuthenticatedFrameWriter { envelope -> socket.writeFrame(envelope) }
+                }
+            },
+        )
+
+    /**
+     * The `AUDIO_STATE` half of the control plane (PROTOCOL §4.4), extracted for the same reason
+     * [voice] is: `docs/STATUS.md` §4 problem 18, and nothing here touches the session, the handshake,
+     * pairing, reconnect or the clock.
+     *
+     * `AUDIO_STATE` is **absent** from [PRE_AUTHENTICATION_FRAME_TYPES], so an unauthenticated peer's
+     * is dropped before [handleFrame]'s dispatch can reach the relay — the same construction that makes
+     * `VOICE_*` inert before the trust gate (PROTOCOL §7.1), applied to the message §4.1's handshake
+     * diagram puts on the trusted path.
+     */
+    val audioState: AudioStateRelay =
+        AudioStateRelay(
             localPeerId = localPeerId,
             monotonicNowUs = monotonicNowUs,
             nextSeq = { seqCounter.nextSeq() },
@@ -749,40 +776,18 @@ class ControlSessionManager(
             // point is that VOICE_* is inert before the trust gate, and "it never happened" and
             // "it happened and was refused" are different facts on a diagnostics screen.
             if (frame.envelope.type in VoiceMessageTypes.ALL) voice.countPreAuthenticationDrop()
+            if (frame.envelope.type == AudioStateMessageTypes.AUDIO_STATE) audioState.countPreAuthenticationDrop()
             return
         }
         when (frame.envelope.type) {
-            "PING" -> {
-                // A malformed/missing field is dropped, not fatal: the framing was intact (this
-                // frame decoded fine), only this message's PROTOCOL §6-specific shape is invalid.
-                // Silently ignoring one bad PING costs nothing — the sender's own keepalive
-                // timeout (PROTOCOL §1) is what actually detects a truly broken peer.
-                val t1 = requiredLongField(payload, "t1_mono_us") ?: return
-                val t2 = monotonicNowUs()
-                val t3 = monotonicNowUs()
-                socket.writeFrame(ControlMessages.pong(localPeerId, sessionId, seqCounter.nextSeq(), monotonicNowUs(), t1, t2, t3))
-            }
-            "PONG" -> {
-                val t1 = requiredLongField(payload, "t1_mono_us") ?: return
-                val t2 = requiredLongField(payload, "t2_mono_us") ?: return
-                val t3 = requiredLongField(payload, "t3_mono_us") ?: return
-                val t4 = monotonicNowUs()
-                // t2/t3 are peer-controlled; an adversarial or badly broken peer could pick
-                // values that overflow the rtt/offset arithmetic. Kotlin Long subtraction wraps
-                // silently on overflow rather than throwing, so a naive computation could turn a
-                // garbage sample into a plausible-looking (wrong) clock offset that then corrupts
-                // synchronised playback. Reject it here, before ClockSync ever sees it, the same
-                // way a malformed field is dropped above (this session's brief §11) — the shared
-                // estimator's own algorithm and vectors are untouched.
-                if (!isPlausibleClockSample(t1, t2, t3, t4)) return
-                lastPongAtMonoUs = t4
-                pendingPings.remove(t1)?.complete(ClockSync.Sample(t1, t2, t3, t4))
-                _diagnostics.update { it.copy(rttMs = ((t4 - t1) - (t3 - t2)) / MICROS_PER_MS) }
-            }
+            "PING" -> handlePing(socket, sessionId, payload)
+            "PONG" -> handlePong(payload)
             "PAIR_REQUEST", "PAIR_CONFIRM", "PAIR_RESULT" -> handlePairingFrame(socket, frame.envelope.type, payload)
             // Reachable only past the guard above, so only for an authenticated peer (PROTOCOL §7.1).
             VoiceMessageTypes.OFFER, VoiceMessageTypes.ANSWER, VoiceMessageTypes.ICE, VoiceMessageTypes.STATE ->
                 voice.deliver(frame.envelope.type, payload)
+            // Reachable only past the guard above, so only for an authenticated peer (PROTOCOL §4.1).
+            AudioStateMessageTypes.AUDIO_STATE -> audioState.deliver(payload)
             "BYE" -> endConnection(socket, LinkLossReason.BYE)
             "ERROR" -> {
                 if (requiredBooleanField(payload, "fatal") != true) return
@@ -797,6 +802,49 @@ class ControlSessionManager(
             }
             else -> Unit // PROTOCOL §2 rule 2: unknown types ignored, logged, not fatal
         }
+    }
+
+    /**
+     * PROTOCOL §6's `PING`. A malformed or missing field is dropped, not fatal: the framing was intact
+     * (this frame decoded fine), only this message's §6-specific shape is invalid. Silently ignoring
+     * one bad `PING` costs nothing — the sender's own keepalive timeout (§1) is what actually detects
+     * a truly broken peer.
+     *
+     * Extracted from [handleFrame] rather than inlined, because adding the `AUDIO_STATE` branch took
+     * that function to detekt's cyclomatic-complexity ceiling and the answer to that is to extract,
+     * not to raise the ceiling (`docs/STATUS.md` §4 problem 18's lesson, applied one function down).
+     */
+    private suspend fun handlePing(
+        socket: ControlSocket,
+        sessionId: SessionId,
+        payload: JsonObject,
+    ) {
+        val t1 = requiredLongField(payload, "t1_mono_us") ?: return
+        val t2 = monotonicNowUs()
+        val t3 = monotonicNowUs()
+        socket.writeFrame(ControlMessages.pong(localPeerId, sessionId, seqCounter.nextSeq(), monotonicNowUs(), t1, t2, t3))
+    }
+
+    /**
+     * PROTOCOL §6's `PONG`, and the peer-controlled-value guard that goes with it.
+     *
+     * `t2`/`t3` are peer-controlled; an adversarial or badly broken peer could pick values that
+     * overflow the rtt/offset arithmetic. Kotlin `Long` subtraction wraps silently on overflow rather
+     * than throwing, so a naive computation could turn a garbage sample into a plausible-looking
+     * (wrong) clock offset that then corrupts synchronised playback. Rejected here, before `ClockSync`
+     * ever sees it, the same way a malformed field is dropped — the shared estimator's own algorithm
+     * and vectors are untouched.
+     */
+    @Suppress("ReturnCount") // one early-out per §6 field, then the plausibility guard
+    private fun handlePong(payload: JsonObject) {
+        val t1 = requiredLongField(payload, "t1_mono_us") ?: return
+        val t2 = requiredLongField(payload, "t2_mono_us") ?: return
+        val t3 = requiredLongField(payload, "t3_mono_us") ?: return
+        val t4 = monotonicNowUs()
+        if (!isPlausibleClockSample(t1, t2, t3, t4)) return
+        lastPongAtMonoUs = t4
+        pendingPings.remove(t1)?.complete(ClockSync.Sample(t1, t2, t3, t4))
+        _diagnostics.update { it.copy(rttMs = ((t4 - t1) - (t3 - t2)) / MICROS_PER_MS) }
     }
 
     /**
@@ -1001,6 +1049,7 @@ class ControlSessionManager(
         // the voice sink. The coordinator also detaches it, and doing both is deliberate: neither
         // teardown path may depend on the other having run.
         voice.reset()
+        audioState.reset()
         pendingActivation = null
         _pairingPrompt.value = null
         endedDeliberately = true

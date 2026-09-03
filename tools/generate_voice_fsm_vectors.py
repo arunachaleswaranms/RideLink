@@ -774,6 +774,107 @@ def build() -> list[dict]:
     )
 
     # =========================================================================================
+    # §7.4 `mode` — Phase 2b. The intercom policy chooses the gate; the peer is told which one.
+    #
+    # A mode change is not a state transition of the voice session, so the status is re-sent
+    # unchanged. And it is announced only when there is a generation to name: with no live
+    # negotiation there is nothing to report the mode *of*, and the next VOICE_STATE this side
+    # sends will carry the new value anyway.
+    # =========================================================================================
+    rows.append(
+        row(
+            "mode-selected-while-active-tells-the-peer-without-changing-status",
+            state(OFFERER, ACTIVE, VSID_A, local_audio_open=True, remote_description_applied=True),
+            {"kind": "ModeSelected", "mode": "PTT"},
+            [send_state(VSID_A, "active", mode="PTT")],
+            state(
+                OFFERER,
+                ACTIVE,
+                VSID_A,
+                local_audio_open=True,
+                remote_description_applied=True,
+                mode="PTT",
+            ),
+        )
+    )
+    rows.append(
+        row(
+            "mode-selected-while-negotiating-tells-the-peer-with-the-negotiating-status",
+            state(ANSWERER, NEGOTIATING, VSID_A, local_audio_open=True),
+            {"kind": "ModeSelected", "mode": "VOX"},
+            [send_state(VSID_A, "negotiating", mode="VOX")],
+            state(ANSWERER, NEGOTIATING, VSID_A, local_audio_open=True, mode="VOX"),
+        )
+    )
+    rows.append(
+        row(
+            "mode-selected-carries-the-current-mute-value-unchanged",
+            state(
+                OFFERER,
+                ACTIVE,
+                VSID_A,
+                local_audio_open=True,
+                remote_description_applied=True,
+                mic_muted=True,
+            ),
+            {"kind": "ModeSelected", "mode": "PTT"},
+            [send_state(VSID_A, "active", mic_muted=True, mode="PTT")],
+            state(
+                OFFERER,
+                ACTIVE,
+                VSID_A,
+                local_audio_open=True,
+                remote_description_applied=True,
+                mic_muted=True,
+                mode="PTT",
+            ),
+        )
+    )
+    rows.append(
+        row(
+            "mode-selected-to-the-same-value-is-a-no-op",
+            state(OFFERER, ACTIVE, VSID_A, local_audio_open=True, remote_description_applied=True),
+            {"kind": "ModeSelected", "mode": "CONTINUOUS"},
+            [],
+            state(OFFERER, ACTIVE, VSID_A, local_audio_open=True, remote_description_applied=True),
+        )
+    )
+    rows.append(
+        row(
+            "mode-selected-with-no-generation-records-the-preference-only",
+            state(OFFERER, IDLE),
+            {"kind": "ModeSelected", "mode": "PTT"},
+            [],
+            state(OFFERER, IDLE, mode="PTT"),
+        )
+    )
+    rows.append(
+        row(
+            "mode-selected-with-capture-open-but-no-generation-still-sends-nothing",
+            state(ANSWERER, NEGOTIATING, None, local_audio_open=True),
+            {"kind": "ModeSelected", "mode": "PTT"},
+            [],
+            state(ANSWERER, NEGOTIATING, None, local_audio_open=True, mode="PTT"),
+        )
+    )
+    rows.append(
+        row(
+            "mode-selected-never-releases-or-opens-local-audio",
+            state(OFFERER, CONNECTING, VSID_A, local_audio_open=True, remote_description_applied=True),
+            {"kind": "ModeSelected", "mode": "PTT"},
+            [send_state(VSID_A, "connecting", mode="PTT")],
+            state(
+                OFFERER,
+                CONNECTING,
+                VSID_A,
+                local_audio_open=True,
+                remote_description_applied=True,
+                mode="PTT",
+            ),
+        )
+    )
+
+    # =========================================================================================
     # §7.8 — teardown. Deliberate releases capture; involuntary does not.
     # =========================================================================================
     rows.append(
@@ -958,6 +1059,8 @@ def main() -> None:
             "No row where the input's voice_session_id differs from the state's may produce any action other than RecordDroppedSignal. That is the §7.2 generation guard.",
             "ControlLinkLost must never emit ReleaseLocalAudio: the capture device survives a link blip (ARCHITECTURE §6.3/§6.4).",
             "ControlLinkLost must never emit SendVoiceState: there is no link to send it on.",
+            "No ModeSelected row may emit any action other than SendVoiceState, and none may change the status: choosing a gate is a local policy change, not a state transition of the voice session (PROTOCOL §7.4, ADR-021).",
+            "No ModeSelected row may emit StartLocalAudio or ReleaseLocalAudio. PTT and VOX gate transmission, never the capture device (ARCHITECTURE §6.3).",
             "No row whose input is a received signal may start a negotiation (CreateOffer/CreateAnswer) when local_audio_open is false. The microphone is never opened because a *peer* asked — only a local StartRequested, which is how consent arrives, may open it (ARCHITECTURE §6.4).",
         ],
         "_test_values_only": "Every SDP, candidate and voice_session_id here is fabricated.",

@@ -9,7 +9,7 @@ import XCTest
 /// two simultaneous Start Voice presses produce one negotiation, that a stale callback cannot touch the
 /// next session, and that a link blip does not close a microphone Android would not let us reopen.
 final class VoiceNegotiationVectorTests: XCTestCase {
-    private let expectedMinimumRows = 52
+    private let expectedMinimumRows = 59
     private let vsidA = "5e2a9c40b7f13d86e0a4c95b28f7d613"
     private let vsidFresh = "ffeeddccbbaa99887766554433221100"
 
@@ -202,6 +202,8 @@ final class VoiceNegotiationVectorTests: XCTestCase {
             return .controlLinkLost
         case "MuteRequested":
             return .muteRequested(muted: spec.boolVal("muted"))
+        case "ModeSelected":
+            return .modeSelected(mode: mode(spec.str("mode")))
         case "SignalReceived":
             return .signalReceived(
                 signal: signal(spec.dict("signal")),

@@ -31,22 +31,30 @@ import com.ridelink.network.control.ControlState
 import com.ridelink.network.control.PairingPrompt
 
 /**
- * Deliberately developer-oriented (CLAUDE.md Phase 2a scope): device identity, connection status,
- * the six-digit pairing prompt, security warnings, control diagnostics, and — new in Phase 2a — a
- * voice card with Start/End, mute, and the FR-023 media diagnostics.
+ * Deliberately developer-oriented (CLAUDE.md Phase 2a/2b scope): device identity, connection status,
+ * the six-digit pairing prompt, security warnings, control diagnostics, and — new in Phase 2b — an
+ * intercom card with Start/Stop, mute, a PTT control, mode selection, the FR-023 media and route
+ * diagnostics, and the peer's `AUDIO_STATE`.
  *
  * **No Ride Mode UI belongs here yet.** This is a diagnostics surface, which ADR-020 says is what
- * Phase 2a's UI should be: enough to drive and observe voice on two phones, and no design decisions
- * about a real riding screen made before anyone has ridden with it.
+ * this phase's UI should be: enough to drive and observe the intercom on two phones, and no design
+ * decisions about a real riding screen made before anyone has ridden with it.
  *
  * Nothing here renders an SDP, a candidate string, an IP address or a port — PROTOCOL §7.7 gives
- * those no display path any more than a log path.
+ * those no display path any more than a log path — and nothing renders a device name or a Bluetooth
+ * address, which ADR-016 forbids for the same reason.
  */
 @Composable
 fun MainScreen(
     coordinator: SessionCoordinator,
     deviceDescription: String,
-    onStartVoice: () -> Unit = coordinator::startVoice,
+    /**
+     * Routed through the Activity on purpose. ARCHITECTURE §6.4 steps 4–6: the microphone foreground
+     * service must be started while the app is foreground-visible, and only a resumed Activity can
+     * honestly claim that — a composable cannot.
+     */
+    onStartIntercom: () -> Unit,
+    onStopIntercom: () -> Unit,
 ) {
     val state by coordinator.state.collectAsState()
     val peers by coordinator.discoveredPeers.collectAsState()
@@ -55,6 +63,9 @@ fun MainScreen(
     val pairingPrompt by coordinator.pairingPrompt.collectAsState()
     val securityAlert by coordinator.securityAlert.collectAsState()
     val voice by coordinator.voiceDiagnostics.collectAsState()
+    val policy by coordinator.intercomPolicy.collectAsState()
+    val peerAudioState by coordinator.peerAudioState.collectAsState()
+    val intercomRefusal by coordinator.lastIntercomRefusal.collectAsState()
 
     Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
         Column(
@@ -94,9 +105,16 @@ fun MainScreen(
             if (state.status == SessionStatus.CONNECTED || state.status == SessionStatus.RIDE_ACTIVE) {
                 VoiceCard(
                     voice = voice,
-                    onStartVoice = onStartVoice,
-                    onEndVoice = coordinator::endVoice,
-                    onToggleMute = { coordinator.setMicrophoneMuted(!voice.micMuted) },
+                    policy = policy,
+                    peerAudioState = peerAudioState,
+                    refusal = intercomRefusal,
+                    onStartIntercom = onStartIntercom,
+                    onStopIntercom = onStopIntercom,
+                    // The user's own Mute latch, not the wire's `mic_muted` — under PTT the latter is
+                    // true whenever the button is not held, and toggling from it would be a coin flip.
+                    onToggleMute = { coordinator.setMicrophoneMuted(!voice.userMuted) },
+                    onPushToTalkHeld = coordinator::setPushToTalkHeld,
+                    onSelectPolicy = coordinator::selectIntercomPolicy,
                 )
             }
 

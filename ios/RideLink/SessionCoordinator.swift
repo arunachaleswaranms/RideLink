@@ -2,9 +2,22 @@ import Foundation
 import Observation
 import RideLinkCore
 import RideLinkPlatform
+#if canImport(AVFAudio)
+import AVFAudio
+#endif
 #if canImport(UIKit)
 import UIKit
 #endif
+
+/// Adapts a closure to `AudioStateSink`, whose `submit` is called from the control read loop and must
+/// therefore not block. The hop onto the main actor is the only work it does.
+private struct PeerAudioStateSink: AudioStateSink {
+    let onMessage: @Sendable (AudioStateMessage) -> Void
+
+    func submit(_ message: AudioStateMessage) {
+        onMessage(message)
+    }
+}
 
 /// The single owner of session state (CLAUDE.md rule 8 / ARCHITECTURE §3 rule 4). No SwiftUI view
 /// holds connection state of its own; every screen observes this coordinator directly.
@@ -40,6 +53,29 @@ public final class SessionCoordinator {
 
     /// FR-023 voice diagnostics. Empty until an authenticated session exists (PROTOCOL §7.1).
     public private(set) var voiceDiagnostics = VoiceDiagnostics()
+
+    /// ARCHITECTURE §6.3's selected policy. Owned here rather than in the voice controller because it
+    /// outlives any one voice session: a user's choice of gate is a property of the ride, and
+    /// `AUDIO_STATE.intercom_mode` has to be reportable before the intercom has ever been started.
+    ///
+    /// **Mode C by default, by architecture rather than by measurement** — see `IntercomPolicy`.
+    public private(set) var intercomPolicy: IntercomPolicy = .default
+
+    /// The peer's latest `AUDIO_STATE` (PROTOCOL §4.4), after the revision rule has been applied.
+    public private(set) var peerAudioState: AudioStateMessage?
+
+    /// Why the last Start Intercom was refused, by name. FR-025: the ride is not over, the session is not
+    /// over, and the user is told which of permission, endpoint, background or authentication was the
+    /// problem rather than "connection failed" (this phase's brief §41).
+    public private(set) var lastIntercomRefusal: VoiceFailure?
+
+    private var audioStatePublisher = AudioStatePublisher()
+    private var peerAudioStateInbox = AudioStateInbox()
+
+    /// Whether the app is foreground-active. The only honest source for
+    /// `RideStartRequest.appForegroundVisible`, and the reason the scene phase is reported in rather
+    /// than looked up here.
+    private var appForegroundVisible = true
 
     private let discovery = BonjourDiscovery()
     private let trustedPeers: any TrustedPeerStore
@@ -150,6 +186,12 @@ public final class SessionCoordinator {
         connectAttempted = false
         discoveredPeers = []
         discoveryCount = 0
+        // PROTOCOL §4.4's revision is per sender per **session**, so a new discovery session restarts the
+        // numbering — and the peer's held state goes with it, since it belonged to the old one.
+        audioStatePublisher.resetForNewSession()
+        peerAudioStateInbox.reset()
+        peerAudioState = nil
+        lastIntercomRefusal = nil
 
         let manager = controlSessionManager
         let discoverySession = discovery
@@ -260,15 +302,49 @@ public final class SessionCoordinator {
 
     // MARK: - Phase 2a voice (PROTOCOL §7)
 
-    /// The user pressed Start Voice. A no-op when there is no authenticated session, because the
+    /// **The readiness gate, as a pure decision** (ARCHITECTURE §6.4, `RideStartPolicy`).
+    ///
+    /// No side effects. iOS has no equivalent of Android's microphone foreground-service rule — a
+    /// background-audio app keeps its session — but the *policy* is shared on purpose: it is the same
+    /// decision, expressed once, so a permission or endpoint refusal is named identically on both
+    /// phones and neither platform can quietly grow a different answer.
+    @discardableResult
+    public func evaluateIntercomStart() -> RideStartDecision {
+        let decision = RideStartPolicy.decide(
+            RideStartRequest(
+                appForegroundVisible: appForegroundVisible,
+                // Read from the platform rather than assumed: a denial is FR-025 graceful degradation,
+                // and the request itself is what triggers the system prompt when undetermined.
+                micPermissionGranted: Self.microphonePermissionPlausible(),
+                // iOS has no notification permission in this path: the lock-screen surface is the
+                // now-playing controls, which Phase 3 adds with the player.
+                notificationsPermissionGranted: true,
+                // "Is voice allowed?" is answered by whether the controller exists — it is built only
+                // for a session that has passed the ADR-019 trust gate (PROTOCOL §7.1).
+                sessionAuthenticated: voice != nil,
+                audioEndpointPresent: Self.audioEndpointPresent(),
+                captureAlreadyOpen: voiceDiagnostics.localAudioOpen,
+                intercomEnabled: intercomPolicy.intercomEnabled
+            )
+        )
+        if case .refused(let failure) = decision {
+            lastIntercomRefusal = failure
+            logger.warn("SessionCoordinator", "intercom start refused: \(failure.rawValue)")
+        } else {
+            lastIntercomRefusal = nil
+        }
+        return decision
+    }
+
+    /// The user pressed Start Intercom. A no-op when there is no authenticated session, because the
     /// controller only exists once the trust gate has passed — there is no state to consult, which is
     /// the point: "is voice allowed?" is answered by whether the object exists.
-    public func startVoice() {
-        guard let voice else { return }
+    public func startIntercom() {
+        guard case .allowed = evaluateIntercomStart(), let voice else { return }
         Task { await voice.start() }
     }
 
-    public func endVoice() {
+    public func endIntercom() {
         guard let voice else { return }
         Task { await voice.stop() }
     }
@@ -276,6 +352,37 @@ public final class SessionCoordinator {
     public func setMicrophoneMuted(_ muted: Bool) {
         guard let voice else { return }
         Task { await voice.setMicrophoneMuted(muted) }
+    }
+
+    /// The PTT control's current position. Gates the outbound WebRTC track and **nothing else** — no
+    /// capture reopen, no peer-connection rebuild, no new `voice_session_id` (ADR-021 §4).
+    ///
+    /// Called synchronously, with no `Task`: `setPushToTalkHeld` is `nonisolated` on the controller and
+    /// offers straight into its bounded mailbox, so a press and its release keep their order (this
+    /// phase's brief §39).
+    public func setPushToTalkHeld(_ held: Bool) {
+        voice?.setPushToTalkHeld(held)
+    }
+
+    /// Selects one of ARCHITECTURE §6.3's five modes. Announced to the peer on both planes.
+    public func selectIntercomPolicy(_ policy: IntercomPolicy) {
+        intercomPolicy = policy
+        voice?.selectPolicy(policy)
+        // With no controller there is no diagnostics change to ride on, so the mode change is published
+        // here — `AUDIO_STATE.intercom_mode` is meaningful before the intercom has ever started (Mode E
+        // is exactly that case).
+        publishAudioState(force: false)
+    }
+
+    /// The app's scene phase changed.
+    ///
+    /// Leaving the foreground releases the PTT gate — this phase's brief §25: a press still outstanding
+    /// must not leave transmission stuck on. Capture is deliberately untouched: the ride segment
+    /// continues, and the whole reason the gate and the device are separate things is that a link blip
+    /// or a lock screen must not close a microphone.
+    public func setAppForegroundVisible(_ visible: Bool) {
+        appForegroundVisible = visible
+        if !visible { voice?.onAppBackgrounded() }
     }
 
     /// Creates the voice subsystem for a session that has **just** passed the trust gate, and only then.
@@ -309,10 +416,21 @@ public final class SessionCoordinator {
             guard let self else { return }
             self.voice = controller
             await controller.attach()
+            controller.selectPolicy(self.intercomPolicy)
             await controller.setOnDiagnosticsChanged { diagnostics in
-                Task { @MainActor in self.voiceDiagnostics = diagnostics }
+                Task { @MainActor in
+                    self.voiceDiagnostics = diagnostics
+                    // Every observable audio change publishes, and the publisher itself decides whether
+                    // there is anything new to say — which is what makes `revision` mean "the state
+                    // changed" rather than "a callback fired".
+                    self.publishAudioState(force: false)
+                }
             }
             await relay.setSink(controller)
+            let audioRelay = await manager.audioStateRelay()
+            await audioRelay.setSink(PeerAudioStateSink { message in
+                Task { @MainActor in self.acceptPeerAudioState(message) }
+            })
             self.logger.info("SessionCoordinator", "voice subsystem attached (offerer=\(isLocalLeader))")
         }
     }
@@ -326,8 +444,62 @@ public final class SessionCoordinator {
         let manager = controlSessionManager
         Task {
             await manager.voiceRelay().setSink(nil)
+            await manager.audioStateRelay().setSink(nil)
             await controller.shutdown()
         }
+    }
+
+    /// PROTOCOL §4.4's revision rule lives in the shared `AudioStateInbox`: anything not strictly greater
+    /// than what we hold is dropped, so reordering cannot resurrect a stale route and a retransmit
+    /// changes nothing.
+    private func acceptPeerAudioState(_ message: AudioStateMessage) {
+        if peerAudioStateInbox.accept(message) { peerAudioState = message }
+    }
+
+    /// Sends `AUDIO_STATE` if there is anything new to say (PROTOCOL §4.4).
+    ///
+    /// The `revision` is `AudioStatePublisher`'s — strictly increasing, per sender per session, and
+    /// **not** reset by a reconnect or a voice rebuild, so a peer can always tell a newer route from an
+    /// older one. `force` is for the two moments §4.4 names explicitly: reaching `CONNECTED`, and ride
+    /// start.
+    ///
+    /// The route comes from the voice controller's diagnostics when one exists and is the default unknown
+    /// snapshot otherwise, which is the honest answer before the intercom has been started: the platform
+    /// has told us nothing about a route we have not asked for.
+    private func publishAudioState(force: Bool) {
+        let route = voice == nil ? AudioRouteSnapshot() : voiceDiagnostics.route
+        let mode = intercomPolicy.intercomWireMode
+        let message: AudioStateMessage?
+        if force {
+            message = audioStatePublisher.forceNext(snapshot: route, intercomMode: mode)
+        } else {
+            message = audioStatePublisher.next(snapshot: route, intercomMode: mode)
+        }
+        guard let message else { return }
+        let manager = controlSessionManager
+        Task { _ = await manager.audioStateRelay().send(message) }
+    }
+
+    /// Whether the platform has not refused the microphone. `.undetermined` counts as plausible: the
+    /// request itself is what triggers the system prompt, and refusing before asking would make the first
+    /// Start Intercom fail for a user who would have said yes.
+    private static func microphonePermissionPlausible() -> Bool {
+        #if canImport(AVFAudio)
+        return AVAudioApplication.shared.recordPermission != .denied
+        #else
+        return true
+        #endif
+    }
+
+    /// Whether there is any audio route at all. On iOS the session always reports *something* once
+    /// configured, so this is about the case where it reports nothing — which is a named refusal rather
+    /// than a silent start with nowhere to speak (this phase's brief §41).
+    private static func audioEndpointPresent() -> Bool {
+        #if canImport(AVFAudio) && os(iOS)
+        return !AVAudioSession.sharedInstance().currentRoute.outputs.isEmpty
+        #else
+        return true
+        #endif
     }
 
     /// Side effects first, then the one transition `SessionGate` says this event implies.
@@ -363,6 +535,10 @@ public final class SessionCoordinator {
             logger.warn("SessionCoordinator", "handshake refused: \(code)")
         case .connected(_, _, let isLocalLeader):
             attachVoice(isLocalLeader: isLocalLeader)
+            // PROTOCOL §4.4 names `CONNECTED` as one of the two moments an `AUDIO_STATE` is sent
+            // regardless of whether anything changed: a peer that has just connected has never seen any
+            // of our state, so "nothing changed" is not a reason to stay silent.
+            publishAudioState(force: true)
         case .linkLost(let reason):
             // PROTOCOL §7.8: media goes, the capture device stays (ARCHITECTURE §6.3/§6.4), and nothing
             // is retried here — §10's control ladder is the app's only reconnect loop.

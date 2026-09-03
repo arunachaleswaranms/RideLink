@@ -31,8 +31,19 @@ final class VoiceControllerTests: XCTestCase {
         XCTAssertEqual(audioCalls, ["open"], "the capture path is opened exactly once")
         let engineCalls = await harness.engine.recordedCalls()
         XCTAssertTrue(engineCalls.contains("start(\(gen1))"), "the peer connection names the generation")
+        // Phase 2b: the intercom gate is the single source of `VOICE_STATE.mic_muted`, so opening the
+        // capture path changes that field and sends a second `negotiating` frame saying so. Both frames
+        // are truthful — before capture opened this side genuinely was transmitting silence — and
+        // PROTOCOL §7.4 sends `VOICE_STATE` on change, so the count is not the invariant. What this test
+        // is about is that the **offerer offers and the follower does not**, so it asserts the state
+        // values rather than how many frames carried them.
         let states = await harness.sentStates()
-        XCTAssertEqual(states.map(\.0), [.negotiating])
+        XCTAssertEqual(Set(states.map(\.0)), [.negotiating])
+        XCTAssertEqual(
+            states.map(\.2),
+            [true, false],
+            "mic_muted goes true (capture not yet open) then false (open, full duplex)"
+        )
         let diagnostics = await harness.controller.currentDiagnostics()
         XCTAssertEqual(diagnostics.status, .negotiating)
         XCTAssertEqual(diagnostics.role, .offerer)
@@ -158,19 +169,21 @@ final class VoiceControllerTests: XCTestCase {
         await harness.controller.start()
         try await harness.awaitEngineCall("createOffer")
 
+        // Awaited on the observable state rather than on an engine call name. Phase 2b tells the engine
+        // the gate's value whenever a peer connection is built (so the track's enabled state is a
+        // consequence of the policy, not of a constructor default), which means both call names are
+        // already in the log by this point and a name-based await would prove nothing.
         await harness.controller.setMicrophoneMuted(true)
-        try await harness.awaitEngineCall("setMicrophoneMuted(true)")
+        try await harness.awaitCondition { await harness.controller.currentDiagnostics().micMuted }
         let mutedTrue = await harness.engine.mutedState()
         XCTAssertEqual(mutedTrue, true)
         let mutedStates = await harness.sentStates()
         XCTAssertTrue(mutedStates.contains { $0.2 }, "the peer is told the mic is muted")
 
         await harness.controller.setMicrophoneMuted(false)
-        try await harness.awaitEngineCall("setMicrophoneMuted(false)")
+        try await harness.awaitCondition { await !harness.controller.currentDiagnostics().micMuted }
         let mutedFalse = await harness.engine.mutedState()
         XCTAssertEqual(mutedFalse, false)
-        let afterUnmute = await harness.controller.currentDiagnostics()
-        XCTAssertFalse(afterUnmute.micMuted)
         await harness.controller.shutdown()
     }
 
@@ -345,11 +358,27 @@ final class VoiceControllerTests: XCTestCase {
         let audio: FakeVoiceAudioSession
         let transport: RecordingVoiceTransport
 
-        init(isLocalLeader: Bool, ids: String..., audioOpens: Bool = true) async throws {
+        /// **`policy` defaults to Mode A (full duplex), not to the production default.**
+        ///
+        /// These tests are about the negotiation table's *wiring* — who offers, what reaches the engine,
+        /// what a stale callback cannot do — and full duplex is the policy in which "Start Voice, then
+        /// talk" has exactly the shape Phase 2a's assertions describe: capture opens and outbound audio
+        /// flows, so `VOICE_STATE.mic_muted` never changes and the frame counts below are literal.
+        ///
+        /// Under the production default (Mode C, PTT — ARCHITECTURE §6.3) capture opening leaves this
+        /// side transmitting nothing, so the gate correctly sends one more `VOICE_STATE` to say so. That
+        /// is Phase 2b behaviour and `VoiceControllerIntercomTests` is where it is asserted, rather than
+        /// blurring it into these.
+        init(
+            isLocalLeader: Bool,
+            ids: String...,
+            audioOpens: Bool = true,
+            policy: IntercomPolicy = .modeA
+        ) async throws {
             engine = FakeVoiceEngine()
             audio = FakeVoiceAudioSession()
             if !audioOpens {
-                await audio.setOpenResult(.failure(.notStarted("microphone permission not granted")))
+                await audio.setOpenResult(.failure(VoiceAudioSessionError(.micPermissionDenied)))
             }
             transport = RecordingVoiceTransport()
             let generator = SequencedVoiceSessionIds(ids[0], ids[1], ids[2])
@@ -362,6 +391,9 @@ final class VoiceControllerTests: XCTestCase {
                 newVoiceSessionId: { generator.next() }
             )
             await controller.attach()
+            // Offered before any test body runs, and the mailbox drains intercom commands ahead of voice
+            // inputs, so the policy is in force before the body's first `start()` is reduced.
+            controller.selectPolicy(policy)
         }
 
         /// `(state, voiceSessionId, micMuted)` for every `VOICE_STATE` the controller decided to send.

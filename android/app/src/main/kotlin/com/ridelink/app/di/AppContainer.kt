@@ -3,8 +3,13 @@ package com.ridelink.app.di
 import android.content.Context
 import android.os.Build
 import android.os.SystemClock
+import com.ridelink.app.service.RideCommand
+import com.ridelink.app.service.RideCommandBus
+import com.ridelink.app.service.RideForegroundService
 import com.ridelink.app.session.SessionCoordinator
+import com.ridelink.app.session.SessionEnvironment
 import com.ridelink.audio.route.AndroidVoiceAudioSession
+import com.ridelink.audio.route.AudioEndpointPreference
 import com.ridelink.core.logging.InMemoryLogSink
 import com.ridelink.core.security.TrustedPeerStore
 import com.ridelink.core.security.UtcTime
@@ -101,6 +106,26 @@ class AppContainer(
             trustedPeers = trustedPeers,
         )
 
+    /**
+     * **One `AndroidVoiceAudioSession` for the whole process, and that is the point.**
+     *
+     * ADR-021 §2 makes app-level capture and audio-session lifecycle the responsibility of exactly one
+     * object. Constructing a fresh one per voice session would give two things that both believe they
+     * own `AudioManager`'s mode, focus and communication device across a reconnect — and the whole
+     * reason `VoiceEngine.stop()` and `release()` are separate calls is that the audio session must
+     * survive a control-plane blip (ARCHITECTURE §6.2/§6.3). It is also what lets the readiness gate
+     * ask whether an endpoint exists *before* an intercom has ever been started.
+     *
+     * `AUTO_PREFER_BLUETOOTH` because starting the intercom for a ride **is** the explicit intent to
+     * use the helmet unit (this phase's brief §9). Nothing scans, pairs or connects a device.
+     */
+    private val voiceAudioSession =
+        AndroidVoiceAudioSession(
+            context = context,
+            endpointPreference = AudioEndpointPreference.AUTO_PREFER_BLUETOOTH,
+            monotonicNowUs = monotonicNowUs,
+        )
+
     val sessionCoordinator: SessionCoordinator
 
     init {
@@ -112,11 +137,38 @@ class AppContainer(
                 localIdentity = localIdentity,
                 scope = appScope,
                 logSink = logSink,
-                monotonicNowUs = monotonicNowUs,
                 trustedPeers = trustedPeers,
-                nowEpochSeconds = { System.currentTimeMillis() / MILLIS_PER_SECOND },
+                environment =
+                    SessionEnvironment(
+                        monotonicNowUs = monotonicNowUs,
+                        nowEpochSeconds = { System.currentTimeMillis() / MILLIS_PER_SECOND },
+                        audioEndpointPresent = { voiceAudioSession.hasUsableEndpoint },
+                    ),
                 buildVoiceController = ::voiceController,
             )
+        installRideNotificationCommands()
+    }
+
+    /**
+     * Wires the ride notification's two actions — the lock-screen control surface
+     * (ARCHITECTURE §6.4) — to the one object that owns session state.
+     *
+     * A direct dispatch with no queue (`RideCommandBus`), because a notification tap with no session
+     * to act on should be dropped rather than buffered. `END_INTERCOM` deliberately ends the
+     * *intercom*, never the control session: PROTOCOL §7.8 keeps those separate, and "End Voice" is
+     * not "Forget peer".
+     */
+    private fun installRideNotificationCommands() {
+        RideCommandBus.handler = { command ->
+            when (command) {
+                RideCommand.TOGGLE_MUTE -> {
+                    val muted = !sessionCoordinator.voiceDiagnostics.value.userMuted
+                    sessionCoordinator.setMicrophoneMuted(muted)
+                    RideForegroundService.updateMuteState(context, muted)
+                }
+                RideCommand.END_INTERCOM -> sessionCoordinator.endIntercom()
+            }
+        }
     }
 
     /**
@@ -132,11 +184,12 @@ class AppContainer(
         VoiceController(
             scope = appScope,
             engine = WebRtcVoiceEngine(context),
-            audioSession = AndroidVoiceAudioSession(context),
+            audioSession = voiceAudioSession,
             transport = controlSessionManager.voice,
             isLocalLeader = isLocalLeader,
             // One audio track per peer (ADR-003). A fixed, non-identifying id: a track id crosses the
             // wire inside the SDP, so it must not carry a device name.
             localTrackId = VOICE_TRACK_ID,
+            monotonicNowUs = monotonicNowUs,
         )
 }

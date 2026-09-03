@@ -1,8 +1,16 @@
 package com.ridelink.app.session
 
+import com.ridelink.core.audiopolicy.AudioRouteSnapshot
+import com.ridelink.core.audiopolicy.IntercomPolicy
+import com.ridelink.core.audiopolicy.RideStartDecision
+import com.ridelink.core.audiopolicy.RideStartPolicy
+import com.ridelink.core.audiopolicy.RideStartRequest
+import com.ridelink.core.audiopolicy.VoiceFailure
 import com.ridelink.core.logging.LogSink
 import com.ridelink.core.logging.StructuredLogger
 import com.ridelink.core.model.DiscoveredPeer
+import com.ridelink.core.protocol.AudioStateMessage
+import com.ridelink.core.protocol.AudioStatePublisher
 import com.ridelink.core.security.TrustedPeer
 import com.ridelink.core.security.TrustedPeerStore
 import com.ridelink.core.sessionfsm.Effect
@@ -11,6 +19,8 @@ import com.ridelink.core.sessionfsm.FsmState
 import com.ridelink.core.sessionfsm.SessionEvent
 import com.ridelink.core.sessionfsm.SessionFsm
 import com.ridelink.core.sessionfsm.SessionStatus
+import com.ridelink.network.control.AudioStateInboxHolder
+import com.ridelink.network.control.AudioStateSink
 import com.ridelink.network.control.ControlDiagnostics
 import com.ridelink.network.control.ControlEvent
 import com.ridelink.network.control.ControlSessionManager
@@ -28,6 +38,29 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import com.ridelink.network.control.LinkLossReason as ControlLinkLossReason
+
+/**
+ * The environment readings [SessionCoordinator] needs, grouped so the constructor stays legible.
+ *
+ * All three are suppliers rather than values, and deliberately: a monotonic clock has to be read at
+ * the moment of use (CLAUDE.md rule 5), and a helmet unit connects and disconnects, so the readiness
+ * gate has to ask about an endpoint when the user taps rather than when the app started.
+ */
+data class SessionEnvironment(
+    /** Monotonic microseconds. The only clock anything timing-related may read (CLAUDE.md rule 5). */
+    val monotonicNowUs: () -> Long,
+    /**
+     * Wall-clock seconds, used **only** to stamp `last_seen_at` on a trusted-peer record — the same
+     * single permitted exception `UtcTime` documents for X.509 validity.
+     */
+    val nowEpochSeconds: () -> Long,
+    /**
+     * Whether the platform lists any endpoint usable for communication. Feeds
+     * [com.ridelink.core.audiopolicy.RideStartRequest.audioEndpointPresent], so "nothing to speak
+     * into" is a named refusal rather than a silent start.
+     */
+    val audioEndpointPresent: () -> Boolean,
+)
 
 /**
  * The single owner of session state (CLAUDE.md rule 8 / ARCHITECTURE §3 rule 4). No view model
@@ -51,9 +84,9 @@ class SessionCoordinator(
     private val localIdentity: LocalHandshakeIdentity,
     private val scope: CoroutineScope,
     logSink: LogSink,
-    monotonicNowUs: () -> Long,
     private val trustedPeers: TrustedPeerStore,
-    private val nowEpochSeconds: () -> Long,
+    /** The three environment readings this coordinator needs. See [SessionEnvironment]. */
+    private val environment: SessionEnvironment,
     /**
      * Phase 2a. Built per authenticated session by [buildVoiceController] and torn down with it, so
      * there is exactly one per two-person session and none at all before the trust gate has passed
@@ -65,7 +98,7 @@ class SessionCoordinator(
      */
     private val buildVoiceController: (isLocalLeader: Boolean) -> VoiceController,
 ) {
-    private val logger = StructuredLogger(logSink, monotonicNowUs)
+    private val logger = StructuredLogger(logSink, environment.monotonicNowUs)
 
     private val _state = MutableStateFlow(FsmState.INITIAL)
     val state: StateFlow<FsmState> = _state.asStateFlow()
@@ -116,21 +149,125 @@ class SessionCoordinator(
     private var voice: VoiceController? = null
     private var voiceDiagnosticsJob: Job? = null
 
+    private val _intercomPolicy = MutableStateFlow(IntercomPolicy.DEFAULT)
+
     /**
-     * Phase 2a's user actions. Each is a no-op when there is no authenticated session, because the
-     * controller only exists once the trust gate has passed — there is no state to consult, which is
-     * the point: "is voice allowed?" is answered by whether the object exists.
+     * ARCHITECTURE §6.3's selected policy. Owned here rather than in the voice controller because it
+     * outlives any one voice session: a user's choice of gate is a property of the ride, and
+     * `AUDIO_STATE.intercom_mode` has to be reportable before the intercom has ever been started.
+     *
+     * **Mode C by default, by architecture rather than by measurement** — see [IntercomPolicy].
      */
-    fun startVoice() {
+    val intercomPolicy: StateFlow<IntercomPolicy> = _intercomPolicy.asStateFlow()
+
+    private val _peerAudioState = MutableStateFlow<AudioStateMessage?>(null)
+
+    /** The peer's latest `AUDIO_STATE` (PROTOCOL §4.4), after the revision rule has been applied. */
+    val peerAudioState: StateFlow<AudioStateMessage?> = _peerAudioState.asStateFlow()
+
+    private val _lastIntercomRefusal = MutableStateFlow<RideStartDecision.Refused?>(null)
+
+    /**
+     * Why the last Start Intercom was refused, by name. FR-025: the ride is not over, the session is
+     * not over, and the user is told which of permission, endpoint, background or authentication was
+     * the problem rather than "connection failed" (this phase's brief §41).
+     */
+    val lastIntercomRefusal: StateFlow<RideStartDecision.Refused?> = _lastIntercomRefusal.asStateFlow()
+
+    private val audioStatePublisher = AudioStatePublisher()
+    private val peerAudioStateInbox = AudioStateInboxHolder()
+
+    /**
+     * **The readiness gate, as a pure decision** (ARCHITECTURE §6.4, `RideStartPolicy`).
+     *
+     * No side effects: the caller is expected to be a resumed Activity, which is the only thing that
+     * can honestly claim [appForegroundVisible], and it must start the microphone foreground service
+     * itself — while still visible — before calling [startIntercom]. That ordering is the platform
+     * rule, not a preference, so it is expressed as two calls rather than hidden inside one.
+     */
+    fun evaluateIntercomStart(
+        appForegroundVisible: Boolean,
+        micPermissionGranted: Boolean,
+        notificationsPermissionGranted: Boolean,
+    ): RideStartDecision {
+        val decision =
+            RideStartPolicy.decide(
+                RideStartRequest(
+                    appForegroundVisible = appForegroundVisible,
+                    micPermissionGranted = micPermissionGranted,
+                    notificationsPermissionGranted = notificationsPermissionGranted,
+                    // "Is voice allowed?" is answered by whether the controller exists — it is built
+                    // only for a session that has passed the ADR-019 trust gate (PROTOCOL §7.1).
+                    sessionAuthenticated = voice != null,
+                    audioEndpointPresent = environment.audioEndpointPresent(),
+                    captureAlreadyOpen = _voiceDiagnostics.value.localAudioOpen,
+                    intercomEnabled = _intercomPolicy.value.intercomEnabled,
+                ),
+            )
+        _lastIntercomRefusal.value = decision as? RideStartDecision.Refused
+        if (decision is RideStartDecision.Refused) {
+            logger.warn("SessionCoordinator", "intercom start refused: ${decision.failure}")
+        }
+        return decision
+    }
+
+    /**
+     * Phase 2a's user actions, now behind the Phase 2b readiness gate. Each is a no-op when there is no
+     * authenticated session, because the controller only exists once the trust gate has passed — there
+     * is no state to consult, which is the point.
+     *
+     * Call [evaluateIntercomStart] first and start the foreground service on an `Allowed` decision:
+     * ARCHITECTURE §6.4 requires the service to be up **before** the capture path opens.
+     */
+    fun startIntercom() {
         voice?.start()
     }
 
-    fun endVoice() {
+    fun endIntercom() {
         voice?.stop()
     }
 
     fun setMicrophoneMuted(muted: Boolean) {
         voice?.setMicrophoneMuted(muted)
+    }
+
+    /**
+     * The PTT control's current position. Gates the outbound WebRTC track and **nothing else** — no
+     * capture reopen, no peer-connection rebuild, no new `voice_session_id` (ADR-021 §4).
+     */
+    fun setPushToTalkHeld(held: Boolean) {
+        voice?.setPushToTalkHeld(held)
+    }
+
+    /**
+     * The app left the foreground. This phase's brief §25: a PTT press still outstanding must not leave
+     * transmission stuck on. Capture is untouched — the ride segment continues and ARCHITECTURE §6.4
+     * gives no second chance to reopen a microphone once the screen is locked.
+     */
+    fun onAppBackgrounded() {
+        voice?.onAppBackgrounded()
+    }
+
+    /**
+     * The ride foreground service could not be started (ARCHITECTURE §6.4's failure table).
+     *
+     * Recorded as a named refusal so the UI can say "could not start the ride — open RideLink and try
+     * again" rather than a generic failure, and **nothing is retried**: a silent retry from the
+     * background is precisely what `ForegroundServiceStartNotAllowedException` exists to refuse.
+     */
+    fun onForegroundServiceStartFailed() {
+        _lastIntercomRefusal.value = RideStartDecision.Refused(VoiceFailure.FOREGROUND_SERVICE_START_FAILED)
+        logger.warn("SessionCoordinator", "ride foreground service refused to start")
+    }
+
+    /** Selects one of ARCHITECTURE §6.3's five modes. Announced to the peer on both planes. */
+    fun selectIntercomPolicy(policy: IntercomPolicy) {
+        _intercomPolicy.value = policy
+        voice?.selectPolicy(policy)
+        // With no controller there is no diagnostics change to ride on, so the mode change is
+        // published here — `AUDIO_STATE.intercom_mode` is meaningful before the intercom has ever
+        // started (Mode E is exactly that case).
+        publishAudioState(force = false)
     }
 
     private var sessionJob: Job? = null
@@ -143,6 +280,12 @@ class SessionCoordinator(
         connectAttempted = false
         _discoveredPeers.value = emptyList()
         _discoveryCount.value = 0
+        // PROTOCOL §4.4's revision is per sender per **session**, so a new discovery session restarts
+        // the numbering — and the peer's held state goes with it, since it belonged to the old one.
+        audioStatePublisher.resetForNewSession()
+        peerAudioStateInbox.reset()
+        _peerAudioState.value = null
+        _lastIntercomRefusal.value = null
 
         sessionJob =
             scope.launch {
@@ -241,7 +384,7 @@ class SessionCoordinator(
                 // PairingExchange already wrote the pin, exactly once and only after both users
                 // confirmed; this refreshes `last_seen_at` on that same record (TrustedPeerStore
                 // refuses to replace a pin, so it can never become a second, different one).
-                trustedPeers.remember(event.peer.copy(lastSeenAtEpochSeconds = nowEpochSeconds()))
+                trustedPeers.remember(event.peer.copy(lastSeenAtEpochSeconds = environment.nowEpochSeconds()))
                 logger.info("SessionCoordinator", "paired with ${event.peer.peerId} (${event.peer.identitySpkiSha256})")
             }
             is ControlEvent.PairingFailed -> _securityAlert.value = event.code
@@ -252,7 +395,13 @@ class SessionCoordinator(
                 _securityAlert.value = event.code
                 logger.warn("SessionCoordinator", "handshake refused: ${event.code}")
             }
-            is ControlEvent.Connected -> attachVoice(event.isLocalLeader)
+            is ControlEvent.Connected -> {
+                attachVoice(event.isLocalLeader)
+                // PROTOCOL §4.4 names `CONNECTED` as one of the two moments an `AUDIO_STATE` is sent
+                // regardless of whether anything changed: a peer that has just connected has never
+                // seen any of our state, so "nothing changed" is not a reason to stay silent.
+                publishAudioState(force = true)
+            }
             is ControlEvent.LinkLost -> {
                 // PROTOCOL §7.8: media goes, the capture device stays (ARCHITECTURE §6.3/§6.4), and
                 // nothing is retried here — §10's control ladder is the app's only reconnect loop.
@@ -281,8 +430,24 @@ class SessionCoordinator(
         val controller = buildVoiceController(isLocalLeader)
         voice = controller
         controlSessionManager.voice.sink = controller
+        controlSessionManager.audioState.sink =
+            AudioStateSink { message ->
+                // PROTOCOL §4.4's revision rule lives in the shared `AudioStateInbox`: anything not
+                // strictly greater than what we hold is dropped, so reordering cannot resurrect a
+                // stale route and a retransmit changes nothing.
+                if (peerAudioStateInbox.accept(message)) _peerAudioState.value = message
+            }
+        controller.selectPolicy(_intercomPolicy.value)
         voiceDiagnosticsJob =
-            scope.launch { controller.diagnostics.collect { _voiceDiagnostics.value = it } }
+            scope.launch {
+                controller.diagnostics.collect { diagnostics ->
+                    _voiceDiagnostics.value = diagnostics
+                    // Every observable audio change publishes, and the publisher itself decides
+                    // whether there is anything new to say — which is what makes `revision` mean "the
+                    // state changed" rather than "a callback fired".
+                    publishAudioState(force = false)
+                }
+            }
         logger.info("SessionCoordinator", "voice subsystem attached (offerer=$isLocalLeader)")
     }
 
@@ -294,10 +459,35 @@ class SessionCoordinator(
         val controller = voice ?: return
         voice = null
         controlSessionManager.voice.sink = null
+        controlSessionManager.audioState.sink = null
         voiceDiagnosticsJob?.cancel()
         voiceDiagnosticsJob = null
         scope.launch { controller.shutdown() }
         _voiceDiagnostics.value = VoiceDiagnostics()
+    }
+
+    /**
+     * Sends `AUDIO_STATE` if there is anything new to say (PROTOCOL §4.4).
+     *
+     * The `revision` is [AudioStatePublisher]'s — strictly increasing, per sender per session, and
+     * **not** reset by a reconnect or a voice rebuild, so a peer can always tell a newer route from an
+     * older one. `force` is for the two moments §4.4 names explicitly: reaching `CONNECTED`, and ride
+     * start.
+     *
+     * The route comes from the voice controller's diagnostics when one exists and is the default
+     * unknown snapshot otherwise, which is the honest answer before the intercom has been started:
+     * the platform has told us nothing about a route we have not asked for.
+     */
+    private fun publishAudioState(force: Boolean) {
+        val route = voice?.let { _voiceDiagnostics.value.route } ?: AudioRouteSnapshot()
+        val mode = _intercomPolicy.value.intercomWireMode
+        val message =
+            if (force) {
+                audioStatePublisher.forceNext(route, mode)
+            } else {
+                audioStatePublisher.next(route, mode) ?: return
+            }
+        scope.launch { controlSessionManager.audioState.send(message) }
     }
 
     private fun beginReconnectIfPossible() {

@@ -1,5 +1,13 @@
 package com.ridelink.network.voice
 
+import com.ridelink.core.audiopolicy.AudioConfidence
+import com.ridelink.core.audiopolicy.AudioProfile
+import com.ridelink.core.audiopolicy.EndpointClass
+import com.ridelink.core.audiopolicy.IntercomMode
+import com.ridelink.core.audiopolicy.MediaQuality
+import com.ridelink.core.audiopolicy.RouteState
+import com.ridelink.core.protocol.AudioStateMessage
+import com.ridelink.core.protocol.AudioStateMessageTypes
 import com.ridelink.core.protocol.VoiceMessageTypes
 import com.ridelink.core.protocol.VoiceMode
 import com.ridelink.core.protocol.VoiceSessionId
@@ -7,6 +15,7 @@ import com.ridelink.core.protocol.VoiceSignal
 import com.ridelink.core.protocol.VoiceWireState
 import com.ridelink.core.sessionfsm.SessionEvent
 import com.ridelink.core.sessionfsm.SessionStatus
+import com.ridelink.network.control.AudioStateSink
 import com.ridelink.network.control.ControlEvent
 import com.ridelink.network.control.ControlMessages
 import com.ridelink.network.control.ControlSessionManager
@@ -22,9 +31,11 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.json.JsonObjectBuilder
 import kotlinx.serialization.json.put
+import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.atomic.AtomicLong
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 /**
@@ -43,6 +54,10 @@ import kotlin.test.assertTrue
  * unpaired first meeting, and asserts against the sink the voice subsystem would actually receive on.
  */
 class VoiceAuthenticationGateTest {
+    /** What the receiver's `AUDIO_STATE` sink actually got. Cleared per harness run. */
+    private val audioSinkA = CopyOnWriteArrayList<AudioStateMessage>()
+    private val audioSinkB = CopyOnWriteArrayList<AudioStateMessage>()
+
     private val clock = AtomicLong(1_000_000L)
     private val monotonicNowUs: () -> Long = { clock.addAndGet(1_000) }
 
@@ -150,6 +165,84 @@ class VoiceAuthenticationGateTest {
         }
 
     /**
+     * The same gate, for `AUDIO_STATE`. §4.1's handshake diagram puts it on the **trusted** path and
+     * §4.1's pre-authentication list does not contain it, so an unpaired peer's route report must not
+     * reach the app either — a peer that has not been authenticated has no business telling this
+     * device what its audio is doing.
+     */
+    @Test
+    fun `an unauthenticated peer's AUDIO_STATE never reaches the app`() =
+        twoUnpairedPhones { a, b, _, _ ->
+            a.awaitPairingPrompt()
+            b.awaitPairingPrompt()
+            assertEquals(SessionStatus.PAIRING, a.status)
+            assertNoConnected(a, b)
+
+            b.sendRawAudioState(revision = 1)
+            delay(SETTLE_MS)
+
+            assertEquals(emptyList(), audioSinkA.toList(), "an unauthenticated peer reached the audio state")
+            assertTrue(
+                a.manager.audioState.droppedPreAuthentication > 0,
+                "the frame must be counted as refused, not merely absent",
+            )
+            assertTrue(a.trustStore.all().isEmpty(), "no pin may have been written")
+        }
+
+    /** And the other half, so the test above is not satisfied by `AUDIO_STATE` being broken outright. */
+    @Test
+    fun `the same peer's AUDIO_STATE is delivered once the trust gate has passed`() =
+        twoUnpairedPhones { a, b, _, _ ->
+            a.awaitPairingPrompt()
+            b.awaitPairingPrompt()
+            a.manager.confirmPairing(true)
+            b.manager.confirmPairing(true)
+            a.awaitEvent { it is ControlEvent.Connected }
+            a.awaitStatus(SessionStatus.CONNECTED)
+
+            b.sendRawAudioState(revision = 7)
+            withTimeout(FsmSession.TIMEOUT_MS) {
+                while (audioSinkA.isEmpty()) delay(POLL_MS)
+            }
+            assertEquals(7L, audioSinkA.first().revision)
+            assertEquals(EndpointClass.BLUETOOTH, audioSinkA.first().endpointClass)
+        }
+
+    /**
+     * PROTOCOL §4.4 carries no "end the connection" outcome, exactly as §7.4 does not: a malformed
+     * frame is dropped and the control plane survives.
+     */
+    @Test
+    fun `a malformed AUDIO_STATE is dropped without ending the control connection`() =
+        twoUnpairedPhones { a, b, _, _ ->
+            a.awaitPairingPrompt()
+            b.awaitPairingPrompt()
+            a.manager.confirmPairing(true)
+            b.manager.confirmPairing(true)
+            a.awaitEvent { it is ControlEvent.Connected }
+            a.awaitStatus(SessionStatus.CONNECTED)
+
+            b.sendRawFrame(AudioStateMessageTypes.AUDIO_STATE) { put("revision", -1) }
+            b.sendRawFrame(AudioStateMessageTypes.AUDIO_STATE) { put("endpoint_class", "bluetooth") }
+            delay(SETTLE_MS)
+
+            assertEquals(emptyList(), audioSinkA.toList(), "a malformed frame must not be delivered")
+            assertTrue(
+                a.manager.audioState.rejectionCounts.values
+                    .sum() >= 2,
+                "both must be counted",
+            )
+            assertEquals(SessionStatus.CONNECTED, a.status, "the control connection must survive")
+
+            // And a well-formed one still gets through afterwards, so the connection is genuinely
+            // usable rather than merely still nominally open.
+            b.sendRawAudioState(revision = 3)
+            withTimeout(FsmSession.TIMEOUT_MS) {
+                while (audioSinkA.isEmpty()) delay(POLL_MS)
+            }
+        }
+
+    /**
      * A property over the frame-type allowlist itself, to complement the behavioural tests: no
      * `VOICE_*` type may be in the pre-authentication set. Cheap, and it fails on the *addition* of a
      * voice type to that list rather than waiting for a behavioural test to notice.
@@ -162,6 +255,10 @@ class VoiceAuthenticationGateTest {
             emptyList(),
             offenders,
             "PROTOCOL §7.1: VOICE_* must be inert before the trust gate. Adding one here is a security change",
+        )
+        assertFalse(
+            AudioStateMessageTypes.AUDIO_STATE in allowlist,
+            "PROTOCOL §4.1 puts AUDIO_STATE on the trusted path; adding it here is a security change",
         )
         // And the allowlist is still exactly PROTOCOL §4.1's list, so this test also fails if some
         // *other* Phase 2 type is quietly added.
@@ -188,6 +285,13 @@ class VoiceAuthenticationGateTest {
                 val sinkB = VoiceSignalSpy()
                 sessionA.manager.voice.sink = sinkA
                 sessionB.manager.voice.sink = sinkB
+                // `AUDIO_STATE` (PROTOCOL §4.4) is on the same trusted path and is absent from the
+                // same allowlist, so it is gated by the same construction and tested with the same
+                // harness rather than a second one that could drift.
+                sessionA.manager.audioState.sink = AudioStateSink { audioSinkA.add(it) }
+                sessionB.manager.audioState.sink = AudioStateSink { audioSinkB.add(it) }
+                audioSinkA.clear()
+                audioSinkB.clear()
 
                 val portA = sessionA.manager.startListening(a.local)
                 val portB = sessionB.manager.startListening(b.local)
@@ -284,6 +388,35 @@ class VoiceAuthenticationGateTest {
             build: JsonObjectBuilder.() -> Unit,
         ) {
             manager.writeRawFrame(rawEnvelope(peer.peerId, type, build))
+        }
+
+        /**
+         * Writes a well-formed `AUDIO_STATE` straight onto the socket, bypassing the coordinator's
+         * publisher entirely — the question is what the *receiver's* read loop does with a frame a
+         * hostile or buggy peer chose to send.
+         */
+        suspend fun sendRawAudioState(revision: Long) {
+            manager.writeRawFrame(
+                ControlMessages.audioState(
+                    peer.peerId,
+                    SESSION,
+                    revision,
+                    revision,
+                    AudioStateMessage(
+                        revision = revision,
+                        endpointClass = EndpointClass.BLUETOOTH,
+                        microphoneOpen = true,
+                        effectiveOutputProfile = AudioProfile.DUPLEX_WIDEBAND,
+                        effectiveInputProfile = AudioProfile.DUPLEX_WIDEBAND,
+                        effectiveOutputSampleRateHz = 16_000,
+                        effectiveInputSampleRateHz = 16_000,
+                        mediaQuality = MediaQuality.REDUCED,
+                        routeState = RouteState.STABLE,
+                        intercomMode = IntercomMode.PTT,
+                        confidence = AudioConfidence.ASSUMED,
+                    ),
+                ),
+            )
         }
 
         suspend fun awaitVoiceSignals(

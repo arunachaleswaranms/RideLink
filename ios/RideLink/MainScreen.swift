@@ -2,9 +2,13 @@ import RideLinkCore
 import RideLinkPlatform
 import SwiftUI
 
-/// Deliberately developer-oriented (CLAUDE.md Phase 1b scope): device identity, connection status,
-/// the six-digit pairing prompt, security warnings, and diagnostics (peer, RTT, clock
+/// Deliberately developer-oriented (CLAUDE.md Phase 2b scope): device identity, connection status, the
+/// six-digit pairing prompt, security warnings, the intercom card, and diagnostics (peer, RTT, clock
 /// offset/jitter, reconnect count, discovery count, transport). No Ride Mode UI belongs here yet.
+///
+/// The scene phase is reported into the coordinator rather than looked up there: it is the only honest
+/// source for "the app is foreground-visible", which `RideStartPolicy` needs, and leaving the foreground
+/// releases the PTT gate (this phase's brief §25).
 struct MainScreen: View {
     let coordinator: SessionCoordinator
     let deviceDescription: String
@@ -47,11 +51,18 @@ struct MainScreen: View {
                 if coordinator.state.status == .connected || coordinator.state.status == .rideActive {
                     VoiceCard(
                         voice: coordinator.voiceDiagnostics,
+                        policy: coordinator.intercomPolicy,
+                        peerAudioState: coordinator.peerAudioState,
+                        refusal: coordinator.lastIntercomRefusal,
                         // Routed through the coordinator, which owns the controller's lifetime — the
                         // view never touches `VoiceController` directly (CLAUDE.md rule 8).
-                        onStartVoice: { coordinator.startVoice() },
-                        onEndVoice: { coordinator.endVoice() },
-                        onToggleMute: { coordinator.setMicrophoneMuted(!coordinator.voiceDiagnostics.micMuted) }
+                        onStartIntercom: { coordinator.startIntercom() },
+                        onStopIntercom: { coordinator.endIntercom() },
+                        // The user's own Mute latch, not the wire's `mic_muted` — under PTT the latter is
+                        // true whenever the button is not held, and toggling from it would be a coin flip.
+                        onToggleMute: { coordinator.setMicrophoneMuted(!coordinator.voiceDiagnostics.userMuted) },
+                        onPushToTalkHeld: { coordinator.setPushToTalkHeld($0) },
+                        onSelectPolicy: { coordinator.selectIntercomPolicy($0) }
                     )
                 }
 
@@ -65,7 +76,12 @@ struct MainScreen: View {
             .padding(24)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
+        .onChange(of: scenePhase) { _, phase in
+            coordinator.setAppForegroundVisible(phase == .active)
+        }
     }
+
+    @Environment(\.scenePhase) private var scenePhase
 }
 
 /// Green once the link is TLS 1.3, because the banner's job is to be *accurate*: the Phase 1a

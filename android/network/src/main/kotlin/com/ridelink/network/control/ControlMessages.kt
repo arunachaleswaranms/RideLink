@@ -4,6 +4,8 @@ import com.ridelink.core.model.ConnTiebreak
 import com.ridelink.core.model.PeerId
 import com.ridelink.core.model.SessionId
 import com.ridelink.core.model.SpkiHash
+import com.ridelink.core.protocol.AudioStateMessage
+import com.ridelink.core.protocol.AudioStateMessageTypes
 import com.ridelink.core.protocol.Envelope
 import com.ridelink.core.protocol.ProtocolVersion
 import com.ridelink.core.protocol.VoiceMessageTypes
@@ -253,6 +255,31 @@ object ControlMessages {
             }
         return envelope(localPeerId, type, sessionId, seq, sentAtMonoUs, payload)
     }
+
+    /**
+     * PROTOCOL §4.4 — `AUDIO_STATE`, the effective runtime audio state.
+     *
+     * The payload is built by [audioStatePayload] from [com.ridelink.core.protocol.AudioStateCodec]'s
+     * own field list rather than spelled out here, for the same reason [voiceSignal] defers to
+     * `VoiceSignalCodec`: the shape lives in `core`, shared with iOS and pinned by
+     * `protocol/vectors/audio-state/`, so a second hand-written builder would be a second place for
+     * the two platforms to disagree.
+     */
+    fun audioState(
+        localPeerId: PeerId,
+        sessionId: SessionId,
+        seq: Long,
+        sentAtMonoUs: Long,
+        message: AudioStateMessage,
+    ): Envelope =
+        envelope(
+            localPeerId = localPeerId,
+            type = AudioStateMessageTypes.AUDIO_STATE,
+            sessionId = sessionId,
+            seq = seq,
+            sentAtMonoUs = sentAtMonoUs,
+            payload = audioStatePayload(message),
+        )
 
     fun ping(
         localPeerId: PeerId,

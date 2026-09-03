@@ -233,6 +233,20 @@ sealed class VoiceInput {
     ) : VoiceInput()
 
     /**
+     * The intercom policy's `VOICE_STATE.mode` changed (PROTOCOL §7.4) — Phase 2b, where Phase 2a
+     * always sent `continuous`.
+     *
+     * The mode is a property of *this* peer's policy, not a negotiated value: each user chooses
+     * their own gate and each tells the other what theirs is, so the diagnostics screen can say
+     * "your peer is on push-to-talk" rather than leaving a silent peer ambiguous. Nothing about the
+     * media plane depends on the peer's mode, which is why this changes no status and touches no
+     * generation.
+     */
+    data class ModeSelected(
+        val mode: VoiceMode,
+    ) : VoiceInput()
+
+    /**
      * A `VOICE_*` frame that has already passed the trust gate (PROTOCOL §7.1) **and** the codec's
      * bounds ([com.ridelink.core.protocol.VoiceSignalCodec]).
      *
@@ -314,6 +328,7 @@ object VoiceNegotiation {
             is VoiceInput.StartRequested -> start(state, input.freshVoiceSessionId)
             VoiceInput.StopRequested -> stop(state)
             is VoiceInput.MuteRequested -> mute(state, input.muted)
+            is VoiceInput.ModeSelected -> modeSelected(state, input.mode)
             is VoiceInput.SignalReceived -> signal(state, input.signal, input.freshVoiceSessionId)
             is VoiceInput.LocalOfferCreated -> localOfferCreated(state, input.voiceSessionId, input.sdp)
             is VoiceInput.LocalAnswerCreated -> localAnswerCreated(state, input.voiceSessionId, input.sdp)
@@ -419,6 +434,28 @@ object VoiceNegotiation {
             actions += VoiceAction.SendVoiceState(it, state.status.wire, muted, state.mode)
         }
         return VoiceOutcome(state.copy(micMuted = muted), actions)
+    }
+
+    /**
+     * PROTOCOL §7.4's `mode`, changed by the local intercom policy. Idempotent, and it announces
+     * itself only when there is a generation to name: with no live negotiation there is nothing to
+     * report the mode *of*, and the next `VOICE_STATE` this side sends will carry the new value
+     * anyway.
+     *
+     * The status is deliberately unchanged and re-sent as-is: switching from PTT to continuous is
+     * not a state transition of the voice session, and treating it as one would put a spurious
+     * `negotiating` on the wire.
+     */
+    private fun modeSelected(
+        state: VoiceNegotiationState,
+        mode: VoiceMode,
+    ): VoiceOutcome {
+        if (state.mode == mode) return VoiceOutcome(state, emptyList())
+        val actions =
+            state.voiceSessionId?.let {
+                listOf(VoiceAction.SendVoiceState(it, state.status.wire, state.micMuted, mode))
+            } ?: emptyList()
+        return VoiceOutcome(state.copy(mode = mode), actions)
     }
 
     // --- control-plane lifecycle --------------------------------------------------------------

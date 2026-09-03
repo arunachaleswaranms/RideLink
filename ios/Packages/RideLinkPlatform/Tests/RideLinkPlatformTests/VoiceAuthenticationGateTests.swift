@@ -143,6 +143,76 @@ final class VoiceAuthenticationGateTests: XCTestCase {
         }
     }
 
+    /// The same gate, for `AUDIO_STATE`. §4.1's handshake diagram puts it on the **trusted** path and
+    /// §4.1's pre-authentication list does not contain it, so an unpaired peer's route report must not
+    /// reach the app either — a peer that has not been authenticated has no business telling this device
+    /// what its audio is doing.
+    func testAnUnauthenticatedPeersAudioStateNeverReachesTheApp() async throws {
+        try await twoUnpairedPhones { a, b, _, _, audioA, _ in
+            try await a.awaitPairingPrompt()
+            try await b.awaitPairingPrompt()
+            XCTAssertEqual(a.status, .pairing)
+
+            try await Self.sendAudioState(from: b, revision: 1)
+            try await Task.sleep(nanoseconds: 400_000_000)
+
+            XCTAssertEqual(audioA.received.count, 0, "an unauthenticated peer reached the audio state")
+            let drops = await a.manager.audioStateRelay().droppedPreAuthentication()
+            XCTAssertGreaterThan(drops, 0, "the frame must be counted as refused, not merely absent")
+            XCTAssertTrue(a.trustStore.all().isEmpty, "no pin may have been written")
+        }
+    }
+
+    /// And the other half, so the test above is not satisfied by `AUDIO_STATE` being broken outright.
+    func testTheSamePeersAudioStateIsDeliveredOnceTheTrustGateHasPassed() async throws {
+        try await twoUnpairedPhones { a, b, _, _, audioA, _ in
+            try await a.awaitPairingPrompt()
+            try await b.awaitPairingPrompt()
+            await a.manager.confirmPairing(accepted: true)
+            await b.manager.confirmPairing(accepted: true)
+            try await a.awaitStatus(.connected)
+
+            try await Self.sendAudioState(from: b, revision: 7)
+            try await Self.awaitAudioState(audioA, 1)
+            XCTAssertEqual(audioA.received.first?.revision, 7)
+            XCTAssertEqual(audioA.received.first?.endpointClass, .bluetooth)
+        }
+    }
+
+    /// PROTOCOL §4.4 carries no "end the connection" outcome, exactly as §7.4 does not: a malformed frame
+    /// is dropped and the control plane survives.
+    func testAMalformedAudioStateIsDroppedWithoutEndingTheControlConnection() async throws {
+        try await twoUnpairedPhones { a, b, _, _, audioA, _ in
+            try await a.awaitPairingPrompt()
+            try await b.awaitPairingPrompt()
+            await a.manager.confirmPairing(accepted: true)
+            await b.manager.confirmPairing(accepted: true)
+            try await a.awaitStatus(.connected)
+
+            _ = await b.manager.writeRawFrame(
+                Self.rawEnvelope(from: b, type: AudioStateMessageTypes.audioState, payload: ["revision": .number(-1)])
+            )
+            _ = await b.manager.writeRawFrame(
+                Self.rawEnvelope(
+                    from: b,
+                    type: AudioStateMessageTypes.audioState,
+                    payload: ["endpoint_class": .string("bluetooth")]
+                )
+            )
+            try await Task.sleep(nanoseconds: 400_000_000)
+
+            XCTAssertEqual(audioA.received.count, 0, "a malformed frame must not be delivered")
+            let rejections = await a.manager.audioStateRelay().rejectionCounts()
+            XCTAssertGreaterThanOrEqual(rejections.values.reduce(0, +), 2, "both must be counted")
+            XCTAssertEqual(a.status, .connected, "the control connection must survive")
+
+            // And a well-formed one still gets through afterwards, so the connection is genuinely usable
+            // rather than merely still nominally open.
+            try await Self.sendAudioState(from: b, revision: 3)
+            try await Self.awaitAudioState(audioA, 1)
+        }
+    }
+
     /// A property over the frame-type allowlist itself, to complement the behavioural tests: no `VOICE_*`
     /// type may be in the pre-authentication set. Cheap, and it fails on the *addition* of a voice type
     /// to that list rather than waiting for a behavioural test to notice.
@@ -152,6 +222,10 @@ final class VoiceAuthenticationGateTests: XCTestCase {
         XCTAssertEqual(
             offenders, [],
             "PROTOCOL §7.1: VOICE_* must be inert before the trust gate. Adding one here is a security change"
+        )
+        XCTAssertFalse(
+            allowlist.contains(AudioStateMessageTypes.audioState),
+            "PROTOCOL §4.1 puts AUDIO_STATE on the trusted path; adding it here is a security change"
         )
         // And the allowlist is still exactly PROTOCOL §4.1's list, so this test also fails if some
         // *other* Phase 2 type is quietly added.
@@ -212,6 +286,42 @@ final class VoiceAuthenticationGateTests: XCTestCase {
         )
     }
 
+    /// Writes a well-formed `AUDIO_STATE` straight onto the socket, bypassing the coordinator's publisher
+    /// entirely — the question is what the *receiver's* read loop does with a frame a hostile or buggy
+    /// peer chose to send.
+    private static func sendAudioState(from phone: FsmSession, revision: Int64) async throws {
+        _ = await phone.manager.writeRawFrame(
+            ControlMessages.audioState(
+                localPeerId: phone.peer.peerId,
+                sessionId: SessionId("test-session"),
+                seq: revision,
+                sentAtMonoUs: revision,
+                message: AudioStateMessage(
+                    revision: revision,
+                    endpointClass: .bluetooth,
+                    microphoneOpen: true,
+                    effectiveOutputProfile: .duplexWideband,
+                    effectiveInputProfile: .duplexWideband,
+                    effectiveOutputSampleRateHz: 16_000,
+                    effectiveInputSampleRateHz: 16_000,
+                    mediaQuality: .reduced,
+                    routeState: .stable,
+                    intercomMode: .ptt,
+                    confidence: .assumed
+                )
+            )
+        )
+    }
+
+    private static func awaitAudioState(_ spy: AudioStateSpy, _ expected: Int) async throws {
+        let deadline = Date().addingTimeInterval(5)
+        while Date() < deadline {
+            if spy.received.count >= expected { return }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        XCTFail("expected \(expected) AUDIO_STATE frames, got \(spy.received.count)")
+    }
+
     private static func awaitCount(_ spy: VoiceSignalSpy, _ expected: Int) async throws {
         let deadline = Date().addingTimeInterval(15.0)
         while Date() < deadline {
@@ -223,6 +333,17 @@ final class VoiceAuthenticationGateTests: XCTestCase {
 
     private func twoUnpairedPhones(
         _ body: (FsmSession, FsmSession, VoiceSignalSpy, VoiceSignalSpy) async throws -> Void
+    ) async throws {
+        try await twoUnpairedPhones { a, b, voiceA, voiceB, _, _ in
+            try await body(a, b, voiceA, voiceB)
+        }
+    }
+
+    /// The same harness, with the `AUDIO_STATE` sinks exposed. `AUDIO_STATE` (PROTOCOL §4.4) is on the
+    /// same trusted path and is absent from the same allowlist, so it is gated by the same construction
+    /// and tested with the same harness rather than a second one that could drift.
+    private func twoUnpairedPhones(
+        _ body: (FsmSession, FsmSession, VoiceSignalSpy, VoiceSignalSpy, AudioStateSpy, AudioStateSpy) async throws -> Void
     ) async throws {
         let clock = GateClock(1_000_000)
         let a = try TestSessions.unpairedPeer("aaaaaaaaaaaaaaaa", name: "A")
@@ -236,6 +357,10 @@ final class VoiceAuthenticationGateTests: XCTestCase {
         let sinkB = VoiceSignalSpy()
         await sessionA.manager.voiceRelay().setSink(sinkA)
         await sessionB.manager.voiceRelay().setSink(sinkB)
+        let audioA = AudioStateSpy()
+        let audioB = AudioStateSpy()
+        await sessionA.manager.audioStateRelay().setSink(audioA)
+        await sessionB.manager.audioStateRelay().setSink(audioB)
 
         let portA = try await sessionA.manager.startListening(local: a.local)
         let portB = try await sessionB.manager.startListening(local: b.local)
@@ -246,7 +371,7 @@ final class VoiceAuthenticationGateTests: XCTestCase {
         await sessionA.manager.connectTo(host: "127.0.0.1", port: portB, local: a.local)
         await sessionB.manager.connectTo(host: "127.0.0.1", port: portA, local: b.local)
 
-        try await body(sessionA, sessionB, sinkA, sinkB)
+        try await body(sessionA, sessionB, sinkA, sinkB, audioA, audioB)
 
         await sessionA.manager.shutdown()
         await sessionB.manager.shutdown()

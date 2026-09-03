@@ -234,6 +234,20 @@ public protocol VoiceEngine: Sendable {
     func setEventSink(_ sink: @escaping @Sendable (VoiceEngineEvent) -> Void) async
 }
 
+/// Why `VoiceAudioSession.open` refused, by name.
+///
+/// A distinct type from `VoiceEngineError`: that one is about the *media stack*, this one about the
+/// *platform audio session*, and the two fail for entirely different reasons with entirely different
+/// things for the user to do about them. Collapsing both into one "connection failed" is exactly what
+/// this phase's brief §41 forbids, and what the FR-023 diagnostics screen exists to distinguish.
+public struct VoiceAudioSessionError: Error, Sendable, Equatable {
+    public let failure: VoiceFailure
+
+    public init(_ failure: VoiceFailure) {
+        self.failure = failure
+    }
+}
+
 /// The capture device and the platform audio session, kept deliberately separate from `VoiceEngine`.
 ///
 /// The split is not tidiness. ARCHITECTURE §6.3/§6.4: the capture device is opened once while the app
@@ -247,7 +261,7 @@ public protocol VoiceAudioSession: Sendable {
     ///
     /// Returns a failure — never traps, and never silently proceeds without a microphone — if the
     /// permission is absent or the platform refuses.
-    func open() async -> Result<Void, VoiceEngineError>
+    func open() async -> Result<Void, VoiceAudioSessionError>
 
     /// Releases capture and restores the non-duplex configuration. Idempotent.
     func close() async

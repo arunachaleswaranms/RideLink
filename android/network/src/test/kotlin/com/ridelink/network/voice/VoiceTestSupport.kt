@@ -145,10 +145,27 @@ class FakeVoiceEngine : VoiceEngine {
     }
 }
 
-/** A [VoiceAudioSession] that records open/close without touching a real audio route. */
+/**
+ * A [VoiceAudioSession] that records open/close without touching a real audio route.
+ *
+ * [openCaptureCount] and [closeCaptureCount] exist for one specific test:
+ * `VoiceControllerIntercomTest` presses PTT fifty times and asserts they stay at 1 and 0. That is the
+ * laptop half of TEST_PLAN A-10, which asserts the same invariant against a real helmet unit's
+ * recorded output — the capture device is opened once for a ride segment, and PTT gates transmission
+ * rather than hardware (ARCHITECTURE §6.3).
+ */
 class FakeVoiceAudioSession : VoiceAudioSession {
     val calls = CopyOnWriteArrayList<String>()
     var openResult: Result<Unit> = Result.success(Unit)
+
+    /** How many times the capture path was **actually** opened (a no-op re-open does not count). */
+    @Volatile
+    var openCaptureCount: Int = 0
+        private set
+
+    @Volatile
+    var closeCaptureCount: Int = 0
+        private set
 
     override var isOpen: Boolean = false
         private set
@@ -169,12 +186,21 @@ class FakeVoiceAudioSession : VoiceAudioSession {
 
     override suspend fun open(): Result<Unit> {
         calls.add("open")
-        if (openResult.isSuccess) isOpen = true
+        // The real sessions are idempotent — `AndroidVoiceAudioSession.open` returns early when
+        // already open, and `IosVoiceAudioSession` likewise — so an already-open session does not
+        // count as a second capture open. Mirroring that here is what makes the A-10 counters mean
+        // the same thing as the hardware measurement will.
+        if (isOpen) return Result.success(Unit)
+        if (openResult.isSuccess) {
+            isOpen = true
+            openCaptureCount += 1
+        }
         return openResult
     }
 
     override suspend fun close() {
         calls.add("close")
+        if (isOpen) closeCaptureCount += 1
         isOpen = false
     }
 }

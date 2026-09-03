@@ -22,8 +22,9 @@ subscription and no telemetry — the app is expected to work with mobile data s
 
 ## Status
 
-**Phase 0 (hardware feasibility) is done. Phases 1a, 1b and 2a are implementation-complete; the
-real-device gate is pending for all three.**
+**Phase 0 (hardware feasibility) is done. Phases 1a, 1b, 2a and 2b are implementation-complete; the
+real-device gate is pending for all four.** The overall "2 Intercom" milestone is **not** complete —
+its hardware gates have not run.
 
 Phase 1b's two open security risks are closed with measurements rather than argument: a
 hand-encoded self-signed X.509 certificate that Apple's parser, BoringSSL and OpenSSL all accept,
@@ -49,11 +50,25 @@ Real WebRTC media *has* been established and measured on the build machine — t
 host-only candidates, DTLS connected, `audio/opus` at 48 kHz — because the Apple WebRTC XCFramework
 carries a macOS slice, so `swift test` links the same binary an iPhone build would.
 
+**Phase 2b turns that transport into an intercom:** REQUIREMENTS §8's five modes as one interpreted
+policy object rather than five code paths, with transmission gated at the **WebRTC audio track** and
+never at the capture device — so push-to-talk cannot thrash a Bluetooth endpoint between its media
+and duplex profiles, which is the single worst thing this product could do to music. That is
+structural rather than described: the gate's action vocabulary has no way to open or close capture,
+and a laptop test counts 50 presses against exactly one capture open and zero closes. It also
+implements `AUDIO_STATE` (no wire change), moves the whole `AVAudioSession`/`AudioManager` decision
+surface into a shared pure reducer, and adds monotonic setup-timing instrumentation. Decisions:
+[`ADR-021`](docs/DECISIONS/ADR-021-intercom-transmission-and-capture-ownership.md).
+
 **None of it has run on the two real phones, and no audio has been captured or played anywhere.**
 This environment has no Android device or emulator and only an iOS simulator; the Android media path
-has no test at all, and neither audio-session implementation has ever executed on a device. No
-latency figure exists. See [`docs/STATUS.md`](docs/STATUS.md) for exactly what is verified and what
-is not, and [`docs/TEST_PLAN.md`](docs/TEST_PLAN.md) §3.1a for the line drawn item by item.
+has no test at all, and neither audio-session implementation has ever executed on a device.
+Microphone-driven VOX has no level source on either platform, so selecting that mode cannot open the
+gate yet — the app says so on screen. **No latency figure exists**, and the setup timings above
+measure how long the app took to bring voice up: they contain no Bluetooth hop and no jitter buffer,
+and mouth-to-ear latency cannot be inferred from them. See [`docs/STATUS.md`](docs/STATUS.md) for
+exactly what is verified and what is not, and [`docs/TEST_PLAN.md`](docs/TEST_PLAN.md) §3.1a/§3.1b
+for the line drawn item by item.
 
 ## Repository layout
 

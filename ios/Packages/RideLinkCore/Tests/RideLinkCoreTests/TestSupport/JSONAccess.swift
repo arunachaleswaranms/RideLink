@@ -13,5 +13,8 @@ extension Dictionary where Key == String, Value == Any {
     func intOpt(_ key: String) -> Int? { (self[key] as? NSNumber)?.intValue }
     func boolVal(_ key: String) -> Bool { (self[key] as! NSNumber).boolValue } // swiftlint:disable:this force_cast
     func boolOpt(_ key: String) -> Bool? { (self[key] as? NSNumber)?.boolValue }
+    func int64(_ key: String) -> Int64 { (self[key] as! NSNumber).int64Value } // swiftlint:disable:this force_cast
+    func int64Opt(_ key: String) -> Int64? { (self[key] as? NSNumber)?.int64Value }
+    func doubleVal(_ key: String) -> Double { (self[key] as! NSNumber).doubleValue } // swiftlint:disable:this force_cast
     func hasKey(_ key: String) -> Bool { self[key] != nil }
 }

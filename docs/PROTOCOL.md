@@ -1,9 +1,15 @@
 # RideLink Peer Protocol — v1
 
-**Status:** specification baseline for Phases 1–2a. **Wire version:** `1`.
-**Last updated:** 28 August 2026 (Phase 2a — §7 voice negotiation specified in full: schemas,
+**Status:** specification baseline for Phases 1–2b. **Wire version:** `1`.
+**Last updated:** 4 September 2026 (Phase 2b — §4.4 gained §4.4.1: the `revision` and sample-rate
+bounds, what does and does not move the revision, and the authentication gate `AUDIO_STATE` shares
+with `VOICE_*`. §4.4's `intercom_mode` is now stated as a **superset** of §7.4's `mode` rather than a
+mirror of it — the resolution of a contradiction in this document's own wording — and §7.4's `mode`
+is no longer always `continuous`. **No wire field, value or existing bound changed**; see
+[ADR-021](DECISIONS/ADR-021-intercom-transmission-and-capture-ownership.md).
+Previously 28 August 2026 (Phase 2a — §7 voice negotiation specified in full: schemas,
 bounds, the authentication gate, the offerer rule and the generation guard. `VOICE_OFFER.ice_ufrag_hint`
-removed, see §12 and [ADR-020](DECISIONS/ADR-020-webrtc-voice-foundation.md). Previously
+removed, see §12 and [ADR-020](DECISIONS/ADR-020-webrtc-voice-foundation.md)). Previously
 27 August 2026, Phase 1b security spike — §4.5.1's exporter context wording corrected against
 measured platform behaviour; see [ADR-018](DECISIONS/ADR-018-tls-exporter-channel-binding.md)
 and [STATUS §2f](STATUS.md#2f-phase-1b-security-spike-27-august-2026-session)).
@@ -331,13 +337,13 @@ edges of a route transition.
 
 | Field | Values / type | Notes |
 |---|---|---|
-| `revision` | uint64, strictly increasing per sender per session | Receiver drops a lower revision. Reordering cannot resurrect a stale route. |
+| `revision` | uint64, strictly increasing per sender per session, and **bounded at `MAX_AUDIO_STATE_REVISION`** | Receiver drops a lower **or equal** revision — an equal one is a retransmit. Reordering cannot resurrect a stale route. `revision` counts *observable changes*, not callbacks: a sender that has nothing new to say does not move it (§4.4.1). |
 | `microphone_open` | bool | Whether the capture device is *open*, not whether speech is being transmitted. PTT and VOX gate transmission, not the device (ARCHITECTURE §6.4). |
 | `effective_*_profile` | profile enum (§4.3.1) | What is *actually* active, after any coupling has taken effect |
 | `effective_*_sample_rate_hz` | int, or `null` if unknown | |
 | `media_quality` | `full` · `reduced` · `unavailable` · `unknown` | Derived, not measured: `reduced` whenever `effective_output_profile` is a **narrowed** duplex profile — `duplex_narrowband` or `duplex_wideband`. `duplex_wide_stereo` and `builtin` are duplex but not narrowed, so they are `full` ([ADR-016 Amendment A1](DECISIONS/ADR-016-effective-audio-capability-model.md#amendment-a1--28-august-2026--correction-media_quality-is-about-narrowed-duplex-not-duplex) corrected the earlier "duplex and not `duplex_wide_stereo`" wording, which contradicted this section's own representable-states table for `builtin`) |
 | `route_state` | `stable` · `transitioning` | `transitioning` is sent at the start of a route change and superseded by `stable` when it settles. A peer must not report drift or sync failure while its own or its peer's `route_state` is `transitioning`. |
-| `intercom_mode` | `continuous` · `vox` · `ptt` · `disabled` | Mirrors `VOICE_STATE.mode`; present here so the diagnostics screen needs one message, not two |
+| `intercom_mode` | `continuous` · `vox` · `ptt` · `disabled` | Present here so the diagnostics screen needs one message, not two. A **superset** of `VOICE_STATE.mode`'s three values by one: `disabled` describes the *absence* of a voice session, which §7.4's field never has to describe. Mode E therefore reports `intercom_mode: "disabled"` **and** `mode: "ptt"` — it is a PTT policy whose button is never released ([ADR-021 §3](DECISIONS/ADR-021-intercom-transmission-and-capture-ownership.md), which records this as the resolution of this table's own earlier "mirrors `VOICE_STATE.mode`" wording) |
 | `confidence` | as §4.3.1 | |
 
 Representable states, all of which the FR-023 diagnostics screen must render for **both** peers:
@@ -350,6 +356,42 @@ Representable states, all of which the FR-023 diagnostics screen must render for
 | Nothing attached | `builtin_speaker` | `true` | `builtin` | `full` |
 | Mid route change | any | any | previous value | previous value, `route_state: transitioning` |
 | Platform gave us nothing | `unknown` | `false` | `unknown` | `unknown` |
+
+#### 4.4.1 Bounds, the revision rule, and the authentication gate
+
+| Constant | Value | Why this number |
+|---|---|---|
+| `MAX_AUDIO_STATE_REVISION` | **9 007 199 254 740 991** (2^53 − 1) | A JSON number is a double in one of the two platform decoders, so a larger `revision` could not round-trip identically on both phones. A bound both platforms enforce beats a range only one can represent — the same reasoning as `MAX_VOICE_MLINE_INDEX` (§7.5). A revision counts observable audio-state changes within one session, so this is roughly 285 million years at one change per microsecond |
+| `MAX_AUDIO_STATE_SAMPLE_RATE_HZ` | **768 000** | Beyond any audio endpoint that exists. Bounds the field without guessing at a real maximum; a negative or absurd rate is rejected rather than shown on a diagnostics screen |
+
+**The revision means "the state changed", not "a callback fired."** A sender computes the §4.4
+projection of its current audio state and sends it only when that projection differs from the last
+one it sent; the revision does not move otherwise. Two consequences are worth stating because they
+are easy to get wrong in the other direction:
+
+- Changing something §4.4 does **not** carry — a platform interruption flag, a route-change reason, a
+  measured transition duration — produces **no** frame and no new revision. Those are local
+  diagnostics; the peer's view is unchanged, so saying so again would be noise.
+- Reaching `CONNECTED` and starting a ride send a frame **regardless**, because a peer that has just
+  connected has never seen any of this sender's state and "nothing changed" is not a reason to stay
+  silent.
+
+The revision is **not** reset by a duplicate-connection resolution, a control reconnect or a voice
+rebuild — it is per sender per *session* — so a peer can always order two reports it receives.
+
+**`AUDIO_STATE` is absent from §4.1's pre-authentication frame list, and that absence is its access
+control** — the same construction §7.1 gives `VOICE_*`. A connection that has completed TLS but not
+passed the RideLink trust gate ([ADR-019](DECISIONS/ADR-019-connected-means-authenticated.md)) drops
+it exactly as it drops an unknown type (§2 rule 2), and the refusal is counted, because "it never
+happened" and "it happened and was refused" are different facts. A peer that has not been
+authenticated has no business telling this device what its audio is doing, and §4.1's handshake
+diagram already puts `AUDIO_STATE` on the trusted path.
+
+A **malformed** `AUDIO_STATE` is dropped and the control connection **survives**: a missing field, a
+wrong JSON type, a negative revision or an out-of-range sample rate makes the message unusable, not
+the connection — exactly as for a malformed `PING` (§6) or `VOICE_*` (§7.4). An **unrecognised**
+enum value is tolerated as `unknown` (or `stable`, for `route_state`) per §4.3.1's
+forward-compatibility rule, and is not malformed.
 
 ### 4.5 Pairing — first meeting only
 
@@ -724,8 +766,8 @@ Receiver rules — trickle ICE means order is not guaranteed:
 |---|---|---|
 | `voice_session_id` | string, **nullable** | as above. `null` exactly when the sender does not hold one: `idle`, `closed`, and the answerer's `negotiating` **intent** (§7.3), where the offerer has not created a generation yet. Whether a null id is *meaningful* for a given `state` is the negotiation table's decision, not the parser's — one rule, one place |
 | `state` | string | `idle` · `negotiating` · `connecting` · `active` · `failed` · `closed` |
-| `mic_muted` | bool | whether **this** peer is transmitting silence. Distinct from `AUDIO_STATE.microphone_open`, which is about the capture *device* (§4.4) |
-| `mode` | string | `continuous` · `vox` · `ptt` — REQUIREMENTS §8. Phase 2a always sends `continuous` |
+| `mic_muted` | bool | whether **this** peer is transmitting silence. Distinct from `AUDIO_STATE.microphone_open`, which is about the capture *device* (§4.4). Under a gated policy it is `true` whenever the gate is shut — so a PTT peer reports `mic_muted: true` between presses with its microphone wide open, which is the honest reading of both fields (ADR-021 §4) |
+| `mode` | string | `continuous` · `vox` · `ptt` — REQUIREMENTS §8. Reports **this** peer's own intercom gate, not a negotiated value: each user chooses their own and each tells the other, so a silent peer is not ambiguous. Nothing about the media plane depends on the peer's mode. Phase 2a always sent `continuous`; from Phase 2b it is the selected policy's gate ([ADR-021 §3](DECISIONS/ADR-021-intercom-transmission-and-capture-ownership.md)), and `disabled` is deliberately **not** a value here — see §4.4's `intercom_mode` |
 
 An **unrecognised** `state` or `mode` value is treated as `unknown` and the frame is otherwise
 processed, matching §4.3.1's forward-compatibility rule for audio vocabulary. It is not a
@@ -1141,7 +1183,9 @@ incompatibility a laptop-side test failure instead of a roadside mystery
 | `sas/*.json` | fixed 32-byte exporter output ⇒ expected 6-digit SAS, per the table in §4.5.2 (test-only secrets) |
 | `identity/*.json` | SPKI hash formatting, pin match / mismatch, certificate re-issue with unchanged SPKI ⇒ still trusted |
 | `dedup/*.json` | `conn_tiebreak` pairs ⇒ which side's initiated connection survives; equal-value tie ⇒ both close |
-| `audio-state/*.json` | `AUDIO_STATE` round-trip, `revision` monotonicity, derived `media_quality`, unknown enum value tolerated as `unknown` |
+| `session-gate/*.json` | the complete trust-gate table (ADR-019): every `ControlEvent` × every session status ⇒ the `SessionEvent` it implies, including the row that must never exist — `Connected` implying pairing success |
+| `audio-state/*.json` | `AUDIO_STATE` encode against §4.4's representable-states table, every field missing and every field wrong-typed, both bounds at and past their edges, explicit-null versus absent nullable fields, derived `media_quality` for every profile value, unknown enum tolerated as `unknown`, the publisher's monotonic `revision` (including the states that must **not** move it), and the receiver dropping anything not strictly greater. Also scanned by both platforms for platform audio vocabulary, which must appear nowhere in it (§4.4.1, ADR-016) |
+| `intercom/*.json` | ARCHITECTURE §6.3's transmission gate: `(policy, state, input) -> (state, actions)` across all five modes, the five presets field for field, both wire-mode mappings, and the invariant that **no action can open or close capture** (ADR-021 §4) |
 | `voice-signal/*.json` | `VOICE_*` parse/reject: every required field, wrong types, `voice_session_id` format, oversize SDP and candidate, mline-index range, nullable `sdp_mid`, unknown `state`/`mode` tolerated (§7.4, §7.5) |
 | `voice-fsm/*.json` | the complete `(role, status, input) -> (actions, new status)` negotiation table: offerer rule, glare, duplicate offer/answer, ICE before and after the remote description, teardown, generation mismatch (§7.3, §7.8) |
 

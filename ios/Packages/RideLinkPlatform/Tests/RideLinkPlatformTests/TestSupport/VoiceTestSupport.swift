@@ -3,6 +3,24 @@ import RideLinkCore
 @testable import RideLinkPlatform
 
 /// Records what an authenticated peer's `VOICE_*` frames actually deliver.
+/// Records what the receiver's `AUDIO_STATE` sink actually got (PROTOCOL §4.4).
+final class AudioStateSpy: AudioStateSink, @unchecked Sendable {
+    private let lock = NSLock()
+    private var log: [AudioStateMessage] = []
+
+    var received: [AudioStateMessage] {
+        lock.lock()
+        defer { lock.unlock() }
+        return log
+    }
+
+    func submit(_ message: AudioStateMessage) {
+        lock.lock()
+        defer { lock.unlock() }
+        log.append(message)
+    }
+}
+
 final class VoiceSignalSpy: VoiceSignalSink, @unchecked Sendable {
     private let lock = NSLock()
     private var log: [VoiceSignal] = []
@@ -40,6 +58,10 @@ actor FakeVoiceEngine: VoiceEngine {
     }
 
     func recordedCalls() -> [String] { calls }
+
+    /// Empties the call log, so an assertion about what happened *after* a point is not satisfied by
+    /// something that happened before it.
+    func clearCalls() { calls.removeAll() }
 
     func mutedState() -> Bool? { muted }
 
@@ -105,18 +127,30 @@ actor FakeVoiceEngine: VoiceEngine {
 }
 
 /// A `VoiceAudioSession` that records open/close without touching a real audio route.
+///
+/// `openCaptureCount` and `closeCaptureCount` exist for one specific test:
+/// `VoiceControllerIntercomTests` presses PTT fifty times and asserts they stay at 1 and 0. That is the
+/// laptop half of TEST_PLAN A-10, which asserts the same invariant against a real TWS set's recorded
+/// output — the capture device is opened once for a ride segment, and PTT gates transmission rather than
+/// hardware (ARCHITECTURE §6.3).
 actor FakeVoiceAudioSession: VoiceAudioSession {
     private(set) var calls: [String] = []
     private var open = false
     private var snapshot = AudioRouteSnapshot()
     private var sink: (@Sendable (AudioRouteSnapshot) -> Void)?
-    var openResult: Result<Void, VoiceEngineError> = .success(())
+    var openResult: Result<Void, VoiceAudioSessionError> = .success(())
+
+    /// How many times the capture path was **actually** opened (a no-op re-open does not count).
+    private(set) var openCaptureCount = 0
+    private(set) var closeCaptureCount = 0
 
     init() {}
 
     func recordedCalls() -> [String] { calls }
 
-    func setOpenResult(_ result: Result<Void, VoiceEngineError>) { openResult = result }
+    func captureCounts() -> (opened: Int, closed: Int) { (openCaptureCount, closeCaptureCount) }
+
+    func setOpenResult(_ result: Result<Void, VoiceAudioSessionError>) { openResult = result }
 
     func isOpen() async -> Bool { open }
 
@@ -129,14 +163,23 @@ actor FakeVoiceAudioSession: VoiceAudioSession {
         sink?(next)
     }
 
-    func open() async -> Result<Void, VoiceEngineError> {
+    func open() async -> Result<Void, VoiceAudioSessionError> {
         calls.append("open")
-        if case .success = openResult { open = true }
+        // The real sessions are idempotent — `IosVoiceAudioSession.open` returns early when already
+        // open, and `AndroidVoiceAudioSession` likewise — so an already-open session does not count as a
+        // second capture open. Mirroring that here is what makes the A-10 counters mean the same thing
+        // as the hardware measurement will.
+        if open { return .success(()) }
+        if case .success = openResult {
+            open = true
+            openCaptureCount += 1
+        }
         return openResult
     }
 
     func close() async {
         calls.append("close")
+        if open { closeCaptureCount += 1 }
         open = false
     }
 }

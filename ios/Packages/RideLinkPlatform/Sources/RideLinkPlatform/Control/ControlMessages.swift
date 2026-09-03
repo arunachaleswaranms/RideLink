@@ -247,6 +247,29 @@ public enum ControlMessages {
         )
     }
 
+    /// PROTOCOL §4.4 — `AUDIO_STATE`, the effective runtime audio state.
+    ///
+    /// The payload comes from `AudioStateCodec.encode`, whose field list lives in `RideLinkCore`, is
+    /// shared with Android and is pinned by `protocol/vectors/audio-state/`. That is the same reason
+    /// `voiceSignal` above defers to `VoiceSignalCodec`: a second hand-written builder would be a second
+    /// place for the two platforms to disagree.
+    public static func audioState(
+        localPeerId: PeerId,
+        sessionId: SessionId,
+        seq: Int64,
+        sentAtMonoUs: Int64,
+        message: AudioStateMessage
+    ) -> Envelope {
+        envelope(
+            localPeerId: localPeerId,
+            type: AudioStateMessageTypes.audioState,
+            sessionId: sessionId,
+            seq: seq,
+            sentAtMonoUs: sentAtMonoUs,
+            payload: AudioStateCodec.encode(message)
+        )
+    }
+
     private static func envelope(
         localPeerId: PeerId,
         type: String,

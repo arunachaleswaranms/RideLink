@@ -6,6 +6,8 @@
     "No row where the input's voice_session_id differs from the state's may produce any action other than RecordDroppedSignal. That is the \u00a77.2 generation guard.",
     "ControlLinkLost must never emit ReleaseLocalAudio: the capture device survives a link blip (ARCHITECTURE \u00a76.3/\u00a76.4).",
     "ControlLinkLost must never emit SendVoiceState: there is no link to send it on.",
+    "No ModeSelected row may emit any action other than SendVoiceState, and none may change the status: choosing a gate is a local policy change, not a state transition of the voice session (PROTOCOL \u00a77.4, ADR-021).",
+    "No ModeSelected row may emit StartLocalAudio or ReleaseLocalAudio. PTT and VOX gate transmission, never the capture device (ARCHITECTURE \u00a76.3).",
     "No row whose input is a received signal may start a negotiation (CreateOffer/CreateAnswer) when local_audio_open is false. The microphone is never opened because a *peer* asked \u2014 only a local StartRequested, which is how consent arrives, may open it (ARCHITECTURE \u00a76.4)."
   ],
   "_test_values_only": "Every SDP, candidate and voice_session_id here is fabricated.",
@@ -1802,6 +1804,276 @@
           "held_remote_offer": null,
           "mic_muted": true,
           "mode": "CONTINUOUS"
+        }
+      }
+    },
+    {
+      "name": "mode-selected-while-active-tells-the-peer-without-changing-status",
+      "state": {
+        "role": "OFFERER",
+        "status": "ACTIVE",
+        "voice_session_id": "5e2a9c40b7f13d86e0a4c95b28f7d613",
+        "local_audio_open": true,
+        "remote_description_applied": true,
+        "peer_voice_enabled": false,
+        "peer_reported_state": "IDLE",
+        "held_remote_offer": null,
+        "mic_muted": false,
+        "mode": "CONTINUOUS"
+      },
+      "input": {
+        "kind": "ModeSelected",
+        "mode": "PTT"
+      },
+      "expect": {
+        "actions": [
+          {
+            "kind": "SendVoiceState",
+            "voice_session_id": "5e2a9c40b7f13d86e0a4c95b28f7d613",
+            "state": "active",
+            "mic_muted": false,
+            "mode": "PTT"
+          }
+        ],
+        "state": {
+          "role": "OFFERER",
+          "status": "ACTIVE",
+          "voice_session_id": "5e2a9c40b7f13d86e0a4c95b28f7d613",
+          "local_audio_open": true,
+          "remote_description_applied": true,
+          "peer_voice_enabled": false,
+          "peer_reported_state": "IDLE",
+          "held_remote_offer": null,
+          "mic_muted": false,
+          "mode": "PTT"
+        }
+      }
+    },
+    {
+      "name": "mode-selected-while-negotiating-tells-the-peer-with-the-negotiating-status",
+      "state": {
+        "role": "ANSWERER",
+        "status": "NEGOTIATING",
+        "voice_session_id": "5e2a9c40b7f13d86e0a4c95b28f7d613",
+        "local_audio_open": true,
+        "remote_description_applied": false,
+        "peer_voice_enabled": false,
+        "peer_reported_state": "IDLE",
+        "held_remote_offer": null,
+        "mic_muted": false,
+        "mode": "CONTINUOUS"
+      },
+      "input": {
+        "kind": "ModeSelected",
+        "mode": "VOX"
+      },
+      "expect": {
+        "actions": [
+          {
+            "kind": "SendVoiceState",
+            "voice_session_id": "5e2a9c40b7f13d86e0a4c95b28f7d613",
+            "state": "negotiating",
+            "mic_muted": false,
+            "mode": "VOX"
+          }
+        ],
+        "state": {
+          "role": "ANSWERER",
+          "status": "NEGOTIATING",
+          "voice_session_id": "5e2a9c40b7f13d86e0a4c95b28f7d613",
+          "local_audio_open": true,
+          "remote_description_applied": false,
+          "peer_voice_enabled": false,
+          "peer_reported_state": "IDLE",
+          "held_remote_offer": null,
+          "mic_muted": false,
+          "mode": "VOX"
+        }
+      }
+    },
+    {
+      "name": "mode-selected-carries-the-current-mute-value-unchanged",
+      "state": {
+        "role": "OFFERER",
+        "status": "ACTIVE",
+        "voice_session_id": "5e2a9c40b7f13d86e0a4c95b28f7d613",
+        "local_audio_open": true,
+        "remote_description_applied": true,
+        "peer_voice_enabled": false,
+        "peer_reported_state": "IDLE",
+        "held_remote_offer": null,
+        "mic_muted": true,
+        "mode": "CONTINUOUS"
+      },
+      "input": {
+        "kind": "ModeSelected",
+        "mode": "PTT"
+      },
+      "expect": {
+        "actions": [
+          {
+            "kind": "SendVoiceState",
+            "voice_session_id": "5e2a9c40b7f13d86e0a4c95b28f7d613",
+            "state": "active",
+            "mic_muted": true,
+            "mode": "PTT"
+          }
+        ],
+        "state": {
+          "role": "OFFERER",
+          "status": "ACTIVE",
+          "voice_session_id": "5e2a9c40b7f13d86e0a4c95b28f7d613",
+          "local_audio_open": true,
+          "remote_description_applied": true,
+          "peer_voice_enabled": false,
+          "peer_reported_state": "IDLE",
+          "held_remote_offer": null,
+          "mic_muted": true,
+          "mode": "PTT"
+        }
+      }
+    },
+    {
+      "name": "mode-selected-to-the-same-value-is-a-no-op",
+      "state": {
+        "role": "OFFERER",
+        "status": "ACTIVE",
+        "voice_session_id": "5e2a9c40b7f13d86e0a4c95b28f7d613",
+        "local_audio_open": true,
+        "remote_description_applied": true,
+        "peer_voice_enabled": false,
+        "peer_reported_state": "IDLE",
+        "held_remote_offer": null,
+        "mic_muted": false,
+        "mode": "CONTINUOUS"
+      },
+      "input": {
+        "kind": "ModeSelected",
+        "mode": "CONTINUOUS"
+      },
+      "expect": {
+        "actions": [],
+        "state": {
+          "role": "OFFERER",
+          "status": "ACTIVE",
+          "voice_session_id": "5e2a9c40b7f13d86e0a4c95b28f7d613",
+          "local_audio_open": true,
+          "remote_description_applied": true,
+          "peer_voice_enabled": false,
+          "peer_reported_state": "IDLE",
+          "held_remote_offer": null,
+          "mic_muted": false,
+          "mode": "CONTINUOUS"
+        }
+      }
+    },
+    {
+      "name": "mode-selected-with-no-generation-records-the-preference-only",
+      "state": {
+        "role": "OFFERER",
+        "status": "IDLE",
+        "voice_session_id": null,
+        "local_audio_open": false,
+        "remote_description_applied": false,
+        "peer_voice_enabled": false,
+        "peer_reported_state": "IDLE",
+        "held_remote_offer": null,
+        "mic_muted": false,
+        "mode": "CONTINUOUS"
+      },
+      "input": {
+        "kind": "ModeSelected",
+        "mode": "PTT"
+      },
+      "expect": {
+        "actions": [],
+        "state": {
+          "role": "OFFERER",
+          "status": "IDLE",
+          "voice_session_id": null,
+          "local_audio_open": false,
+          "remote_description_applied": false,
+          "peer_voice_enabled": false,
+          "peer_reported_state": "IDLE",
+          "held_remote_offer": null,
+          "mic_muted": false,
+          "mode": "PTT"
+        }
+      }
+    },
+    {
+      "name": "mode-selected-with-capture-open-but-no-generation-still-sends-nothing",
+      "state": {
+        "role": "ANSWERER",
+        "status": "NEGOTIATING",
+        "voice_session_id": null,
+        "local_audio_open": true,
+        "remote_description_applied": false,
+        "peer_voice_enabled": false,
+        "peer_reported_state": "IDLE",
+        "held_remote_offer": null,
+        "mic_muted": false,
+        "mode": "CONTINUOUS"
+      },
+      "input": {
+        "kind": "ModeSelected",
+        "mode": "PTT"
+      },
+      "expect": {
+        "actions": [],
+        "state": {
+          "role": "ANSWERER",
+          "status": "NEGOTIATING",
+          "voice_session_id": null,
+          "local_audio_open": true,
+          "remote_description_applied": false,
+          "peer_voice_enabled": false,
+          "peer_reported_state": "IDLE",
+          "held_remote_offer": null,
+          "mic_muted": false,
+          "mode": "PTT"
+        }
+      }
+    },
+    {
+      "name": "mode-selected-never-releases-or-opens-local-audio",
+      "state": {
+        "role": "OFFERER",
+        "status": "CONNECTING",
+        "voice_session_id": "5e2a9c40b7f13d86e0a4c95b28f7d613",
+        "local_audio_open": true,
+        "remote_description_applied": true,
+        "peer_voice_enabled": false,
+        "peer_reported_state": "IDLE",
+        "held_remote_offer": null,
+        "mic_muted": false,
+        "mode": "CONTINUOUS"
+      },
+      "input": {
+        "kind": "ModeSelected",
+        "mode": "PTT"
+      },
+      "expect": {
+        "actions": [
+          {
+            "kind": "SendVoiceState",
+            "voice_session_id": "5e2a9c40b7f13d86e0a4c95b28f7d613",
+            "state": "connecting",
+            "mic_muted": false,
+            "mode": "PTT"
+          }
+        ],
+        "state": {
+          "role": "OFFERER",
+          "status": "CONNECTING",
+          "voice_session_id": "5e2a9c40b7f13d86e0a4c95b28f7d613",
+          "local_audio_open": true,
+          "remote_description_applied": true,
+          "peer_voice_enabled": false,
+          "peer_reported_state": "IDLE",
+          "held_remote_offer": null,
+          "mic_muted": false,
+          "mode": "PTT"
         }
       }
     },

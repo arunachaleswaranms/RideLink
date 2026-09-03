@@ -199,6 +199,7 @@ class VoiceNegotiationVectorTest {
             "StopRequested" -> VoiceInput.StopRequested
             "ControlLinkLost" -> VoiceInput.ControlLinkLost
             "MuteRequested" -> VoiceInput.MuteRequested(spec.bool("muted"))
+            "ModeSelected" -> VoiceInput.ModeSelected(VoiceMode.valueOf(spec.string("mode")))
             "SignalReceived" ->
                 VoiceInput.SignalReceived(
                     signal(spec["signal"]!!.jsonObject),
@@ -319,7 +320,7 @@ class VoiceNegotiationVectorTest {
         val GENERATION_GUARD_REASONS =
             setOf(VoiceSignalDropReason.GENERATION_MISMATCH, VoiceSignalDropReason.STALE_ENGINE_CALLBACK)
 
-        const val EXPECTED_MINIMUM_ROWS = 52
+        const val EXPECTED_MINIMUM_ROWS = 59
         const val VSID_A = "5e2a9c40b7f13d86e0a4c95b28f7d613"
         const val VSID_FRESH = "ffeeddccbbaa99887766554433221100"
     }

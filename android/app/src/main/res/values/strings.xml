@@ -7,5 +7,13 @@
     <string name="ride_channel_name">Ride session</string>
     <string name="ride_channel_description">Keeps the intercom and the peer link running while the screen is locked.</string>
     <string name="ride_notification_title">RideLink intercom active</string>
+    <!--
+        The notification is a lock-screen surface, visible to anyone holding the phone, so it names no
+        peer and no device (ARCHITECTURE §11) — the same rule that governs an mDNS TXT record.
+    -->
     <string name="ride_notification_text">Microphone open for the intercom.</string>
+    <string name="ride_notification_text_muted">Microphone open, muted.</string>
+    <string name="ride_action_mute">Mute</string>
+    <string name="ride_action_unmute">Unmute</string>
+    <string name="ride_action_end_intercom">End intercom</string>
 </resources>
