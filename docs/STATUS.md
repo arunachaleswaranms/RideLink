@@ -1,6 +1,6 @@
 # RideLink — Status
 
-**Updated:** 3 September 2026 (Phase 2a mailbox hardening — conflated iOS doorbell and non-coalescible terminal peer state, eighth session)
+**Updated:** 3 September 2026 (problem 28 fixed — `PairingSessionIntegrationTest` harness synchronization race, ninth session)
 **Current milestone:** M1 (Private voice link) — in progress
 **Current phase:** Phase 2a — voice transport foundation.
 **Phase 2a status: IMPLEMENTATION COMPLETE — REAL-DEVICE AUDIO GATE PENDING.**
@@ -959,6 +959,93 @@ claim about its status either way.
 
 ---
 
+## 2l. Problem 28 fixed — a pairing-integration test-harness race, not a production bug (3 September 2026 session, ninth)
+
+Scope was deliberately one CI-hardening fix, per this session's brief: prove the diagnosis before
+touching anything, and change production code only if a real production bug turned up. Neither did.
+
+### The diagnosis
+
+The 3 Sep run's assertion text (`exactly one SAS prompt per device ==> expected: <1> but was: <0>`
+at `PairingSessionIntegrationTest.kt:60`) named the exact site: `PairingSessionIntegrationTest`
+called `a.awaitPairingPrompt()`, then immediately asserted
+`a.countOf { it is ControlEvent.PairingRequired } == 1`. `awaitPairingPrompt()` observes
+`ControlSessionManager.pairingPrompt`, a **conflated `StateFlow`** — any observer, however late,
+receives its current value. The count is drawn from `FsmSession.recorded`, populated by a
+**separate** collector of `ControlSessionManager.events`, a **zero-replay `SharedFlow`**
+(`_events = MutableSharedFlow<ControlEvent>(extraBufferCapacity = 16)`, no `replay`). Production
+sets the prompt and emits `PairingRequired` back-to-back (`ControlSessionManager.kt` lines
+585/591), but nothing in the test ordered *its own two observers* of those two flows relative to
+each other — so the prompt could become visible and the test could resume and assert before the
+events collector had processed the emission into `recorded`. That reproduces the CI failure
+exactly, with no need to touch TLS, SAS, or the trust gate.
+
+A second, related but more severe latent race sat underneath it: `FsmSession.collectInto` launched
+its collector with the default (dispatched) `CoroutineStart`, which only *schedules* the
+subscribe — it does not perform it before `collectInto` returns. Against a zero-replay flow, a fast
+enough real handshake could emit `PeerTrusted`/`Connected` before any subscriber had registered at
+all, which is not a delay but a permanent loss (there is no replay buffer for a subscriber that
+arrives afterward). `DuplicateConnectionResolutionTest` already carries a comment explaining exactly
+this and already uses `CoroutineStart.UNDISPATCHED` against this same `events` flow for exactly this
+reason; `PairingSessionSupport.kt`'s `FsmSession.collectInto` was the one place that hadn't caught
+up. That existing precedent is strong corroborating evidence this is a harness gap, not a novel
+production concern.
+
+### The fix — test harness only
+
+1. **`PairingSessionIntegrationTest`**'s failing test now calls `a.awaitEvent { it is
+   ControlEvent.PairingRequired }` / `b.awaitEvent { ... }` — waiting on the actual condition the
+   count assertion depends on — before counting, instead of inferring readiness from the unrelated
+   `pairingPrompt` flow settling.
+2. **`FsmSession.collectInto`** now launches with `CoroutineStart.UNDISPATCHED`, so the coroutine
+   runs synchronously up to its subscribe point before `collectInto` returns — matching
+   `DuplicateConnectionResolutionTest`'s existing idiom against the same flow.
+3. A new regression test, `collectInto subscribes before returning, so a fast handshake cannot drop
+   its events`, makes the subscription-ordering guarantee a checked fact rather than an assumption:
+   it runs the collector on a hand-pumped `CoroutineDispatcher` that never runs anything on its own,
+   lets a real loopback TLS handshake between two pre-trusted peers reach `CONNECTED` (confirmed
+   independently via `ControlSessionManager.diagnostics`, a StateFlow, so this check does not depend
+   on the collector under test), *then* drains the dispatcher and confirms `PeerTrusted`/`Connected`
+   still arrived in full. Reverting the `collectInto` fix makes this new test fail deterministically
+   (verified by hand before committing) — proof the test guards the right thing, not just decoration.
+
+No arbitrary `delay`/`Thread.sleep` was added anywhere in this fix; the pre-existing `SETTLE_MS`
+delays in the two negative-space tests ("this/the peer confirming alone pairs nothing") are
+unrelated — they wait to observe that nothing happens, which is a different problem than the one
+here, and were not touched.
+
+### Production code: unchanged
+
+`ControlSessionManager`'s pairing/trust-gate ordering — `_pairingPrompt.value = …` followed by
+`_events.tryEmit(ControlEvent.PairingRequired(...))`, `PeerTrusted`/`Connected` only from
+`activateAuthenticatedSession()`, `PairingSucceeded` only after both-side confirmation — is
+byte-for-byte the same as before this session. The invariant this whole test file exists to prove
+was re-checked, not assumed: **an unknown peer still cannot reach `CONNECTED` before both-side SAS
+confirmation and trust persistence** (ADR-019). No `VOICE_*`/mailbox/WebRTC code (Phase 2a) and no
+clock-burst timing test (problem 29) was touched.
+
+### Verification
+
+- `PairingSessionIntegrationTest` alone, run **100 consecutive times** (`--rerun` each time, fresh
+  Gradle daemon invocation, real loopback TCP/TLS every run): **100 passed, 0 failed**.
+- `./gradlew clean test ktlintCheck detekt lint assembleDebug assembleRelease` — all green, all five
+  Android modules. **336 unit tests** (was 335 — +1, the new `collectInto` regression test):
+  `core` 184, `network` 130 (was 129), `audio` 11, `app` 2, `data` 9.
+- Fresh CI, this session's push, commit `eae366c`, run
+  [33698452022](https://github.com/arunachaleswaranms/RideLink/actions/runs/33698452022) — **not a
+  re-run of the failed run**, a genuinely new push, per the brief's explicit instruction: `android` —
+  `core unit tests`, `all unit tests`, `ktlintCheck`, `detekt`, `lint`, `assembleDebug`,
+  `assembleRelease` all green; `ios` — `RideLinkCore` 69/69, `RideLinkPlatform` 150/150, Debug and
+  Release simulator builds all green.
+- Not run this session: real-device validation for either platform (unchanged — see §7); iOS
+  SwiftLint/SwiftFormat (still not installed, problem 14, unchanged).
+
+**Phase 2a status is unchanged by this session: IMPLEMENTATION COMPLETE — REAL-DEVICE AUDIO GATE
+PENDING.** This was a Phase 1b/CI-hardening fix, not Phase 2a or Phase 2b work, and the real-device
+audio gate for Phase 2a is neither opened nor claimed opened here.
+
+---
+
 ## 3. Tests passed / pending
 
 **Passed and verified in the second Phase 2a mailbox hardening session (3 September 2026, eighth),
@@ -1246,7 +1333,7 @@ session and route), and integration tests I-01…I-25. Full list in `docs/TEST_P
 | 24 | **Every value in both route mappers marked `assumed` is a reasoned guess.** `TYPE_BLUETOOTH_SCO`/`.bluetoothHFP` → `duplex_wideband` assumes mSBC rather than CVSD; `input_forces_output` for all Bluetooth is ADR-016's central claim asserted, not measured; LE Audio is deliberately *not* claimed to preserve music quality. Both mappers report `confidence: assumed` and their tests **assert** that, so the tests are what will change when the measurement exists | Medium | A-12/A-13, then A-15 flips `confidence` and fills `docs/PHASE0_RESULTS.md` |
 | 25 | **`RideForegroundService` has never started.** Whether the `microphone` foreground-service type is accepted, whether capture survives a screen lock, and whether `ForegroundServiceStartNotAllowedException` fires in practice are all device facts. The code follows ARCHITECTURE §6.4's sequence and is started only from a resumed Activity | **High (blocks the Phase 2a gate)** | V-08 |
 | 27 | **The Apple WebRTC dependency has a single point of failure outside this project's control, and it fired within five days.** Phase 2a pinned `stasel/WebRTC` `151.0.0` with its SHA-256 verified byte-for-byte; on 2 Sep upstream **deleted that release** ("accidentally", their words) and the phase's first CI run failed with a hard 404 on the binary. `151.0.1` is not a usable replacement — its manifest points at the deleted `151.0.0` URL while carrying the new checksum, so it fails with either a 404 (cold cache) or a checksum mismatch (warm). Re-pinned to `152.0.0` and re-validated from scratch. **A checksum protects integrity, not availability**: integrity held perfectly — the mismatch was *detected* — and the build broke anyway ([ADR-020 Amendment A1](DECISIONS/ADR-020-webrtc-voice-foundation.md#amendment-a1--2-september-2026--the-apple-pin-moves-to-m152-because-upstream-deleted-the-m151-release)) | **High** | It will happen again. Re-pinning is the cheap response and is what was done; **vendoring the ~45 MB XCFramework is the only option that removes the failure mode** and should be reconsidered on the next occurrence. Android is unaffected — Maven Central does not permit deleting a published artifact, and that asymmetry between the two distributions is now a recorded property rather than an assumption |
-| 28 | **A CI-only test failure was not diagnosable from the CI log.** `PairingSessionIntegrationTest > an unknown peer holds the session in PAIRING…` (a **Phase 1b** test) failed on the same run, and Gradle's default `SHORT` exception format printed only `AssertionFailedError at PairingSessionIntegrationTest.kt:314` — a line that is the body lambda's call site and therefore names no assertion. It does not reproduce locally: attempted under 8-way CPU load, and with the duplicate-connection grace period forced from 300 ms to 1 ms (which disproved the first hypothesis, that asymmetric grace-period expiry lets the two sides promote different connections). **Root cause not yet established.** It did **not** recur on runs 33607112656 or 33654431951, both of which had Android fully green. **It recurred on run 33693052138** (3 September 2026, §2k's push — a mailbox-only change nowhere near pairing) with the diagnosability fix now paying off: `org.opentest4j.AssertionFailedError: exactly one SAS prompt per device ==> expected: <1> but was: <0>` at `PairingSessionIntegrationTest.kt:60`, 1 of 129 `network` tests failing. Every voice-mailbox test in the same run — the actual subject of that session, including 11 new ones — passed; `ios` was fully green (Debug and Release). This is the strongest evidence yet that it is genuinely intermittent rather than fixed, and — per this repository's own rule against treating CI flakiness as a green light — that run's result was recorded as failing rather than re-run | **High** | Now has two independent failure signatures across two runs (a missing-Connected assertion on 27 Aug per §2g's original repro context, and a missing-SAS-prompt assertion here) — worth comparing once a third occurrence gives a pattern. Do **not** re-run until green — that is the flaky-skip the brief forbids. Root-causing this is Phase 1b work, out of scope for a mailbox-only session |
+| 28 | ~~**A CI-only test failure was not diagnosable from the CI log.**~~ **Resolved 3 September 2026 (ninth session) — a test-harness synchronization race, not a production bug.** The 3 Sep run's diagnosable failure (`exactly one SAS prompt per device ==> expected: <1> but was: <0>` at `PairingSessionIntegrationTest.kt:60`) named the exact assertion: it counted `ControlEvent.PairingRequired` in `FsmSession.recorded` immediately after `awaitPairingPrompt()` returned. `awaitPairingPrompt()` observes `pairingPrompt`, a conflated `StateFlow`, which always hands a late observer its current value; the count is drawn from `events`, a **zero-replay** `SharedFlow` collected by `FsmSession.collectInto`. Production sets the prompt and emits `PairingRequired` back-to-back, but nothing ordered *this test's two observers* of those two flows relative to each other, so the count could run before the events collector had processed the emission into `recorded` — reproducing the exact assertion seen in CI. A second, related but more severe latent race existed alongside it: `collectInto` launched its collector with default coroutine dispatch, which only *schedules* the subscribe rather than performing it — on a zero-replay flow, a fast enough handshake could emit before any subscriber existed at all, losing the event permanently rather than merely delaying it. `DuplicateConnectionResolutionTest` already used `CoroutineStart.UNDISPATCHED` against this same `events` flow for this same reason; `collectInto` now does too, and the failing test now waits for the actual `PairingRequired` event before counting it, instead of inferring readiness from an unrelated flow. **No production code changed** — `ControlSessionManager`'s emit order (`_pairingPrompt.value = …` then `_events.tryEmit(PairingRequired(...))`) is untouched, and the trust-gate invariant (no unknown peer reaches `CONNECTED` before both-side SAS confirmation and trust persistence, ADR-019) was re-verified unchanged. A new regression test, `collectInto subscribes before returning, so a fast handshake cannot drop its events`, proves the subscription-ordering guarantee deterministically (a manually-pumped test dispatcher lets a real loopback handshake reach `CONNECTED` before the collector's dispatcher is ever pumped) and was confirmed to fail if the `collectInto` fix is reverted. `PairingSessionIntegrationTest` run **100 consecutive times locally: 100 passed, 0 failed**. Fresh CI (run [33698452022](https://github.com/arunachaleswaranms/RideLink/actions/runs/33698452022), commit `eae366c`): Android — `core unit tests`, `all unit tests` (336 tests, up from 335), `ktlintCheck`, `detekt`, `lint`, `assembleDebug`, `assembleRelease` all green; iOS — `RideLinkCore` 69/69, `RideLinkPlatform` 150/150, Debug and Release simulator builds all green | ~~High~~ — | **Kept for history, not deleted:** the two prior occurrences (27 Aug's missing-`Connected` signature and 3 Sep's missing-SAS-prompt signature) are exactly this same race manifesting as two different assertions, not two different bugs — both are downstream of the same unordered-observer gap now closed. If a third, differently-shaped failure ever appears in this test, treat it as a new problem, not a recurrence of this one |
 | 29 | **A Phase 1b timing test tripped its ceiling in CI because Phase 2a changed what shares its process.** `PingRaceAndReconnectTests.testRepeatedClockBurstsAllCompleteQuickly` asserts an 11-sample clock burst converges within a fixed budget. That budget (4.0s) was measured when the `RideLinkPlatform` test binary held control-plane code only; it now also links a ~96 MB WebRTC framework and, a few tests earlier in the same process, stands up two real `RTCPeerConnectionFactory` instances with their own worker threads. CI run 33607112656 tripped it with the signature the test's own comment predicts — `elapsed 4.129s`, `pendingPings=1`, `rttMs=3.0` (three **milliseconds**: the wire was healthy and a PONG was measured; one waiter was not resumed before its own 3s `pingTimeoutMs` fired). Actor-scheduling starvation on a three-core hosted runner, not a protocol or lifecycle bug — `PingRequestRegistry`'s own tests cover the bookkeeping | Low | Ceiling raised to 8.0s with the arithmetic written down: a single dropped PONG costs the full 3.0s timeout on top of a ~0.6s healthy burst, so ~3.6s is the floor before contention. 8.0s clears it with margin and stays below the 10s resync interval, so a genuinely stuck burst still fails. **The underlying fragility is not removed:** a wall-clock assertion sharing a process with a real media stack will always be environment-sensitive. The durable fix is to assert the invariant (every ping resolves, no stale waiter) and measure the timing separately — a Phase 1b test-design change, not a Phase 2a one |
 | 26 | **APK/IPA size.** The Android AAR adds ~48 MB of native code across four ABIs; the Apple XCFramework is ~96 MB expanded and embedded in the app bundle. No ABI filtering or slice stripping is applied — the default is the safe configuration and a sideloaded personal build has no size gate | Low | Revisit if install time becomes annoying. Recorded rather than forgotten |
 | 21 | **Diagnostics now show `CONNECTING` while a six-digit code is on screen**, where they previously showed `CONNECTED`. This is deliberate and more honest (ADR-019 §5), but it is a user-visible change that has never been looked at on a real screen | Low | Confirm it reads sensibly during I-02 on the two phones; the FR-023 diagnostics screen is one of the things I-02 exercises anyway |
