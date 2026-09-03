@@ -4,13 +4,16 @@ import com.ridelink.core.security.InMemoryTrustedPeerStore
 import com.ridelink.core.sessionfsm.SessionEvent
 import com.ridelink.core.sessionfsm.SessionStatus
 import com.ridelink.network.security.TestTlsSupport
+import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
 import java.util.concurrent.atomic.AtomicLong
+import kotlin.coroutines.CoroutineContext
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -55,6 +58,17 @@ class PairingSessionIntegrationTest {
             assertEquals(promptA.sas6, promptB.sas6, "a man-in-the-middle is what two different codes look like")
             assertEquals(6, promptA.sas6.length)
             assertTrue(promptA.sas6.all(Char::isDigit))
+
+            // `pairingPrompt` (a StateFlow) and `events` (a zero-replay SharedFlow) are two
+            // independent flows that production sets/emits from one after the other but with no
+            // ordering guarantee about when each one's *observer* gets around to acting on it.
+            // `awaitPairingPrompt` resuming only proves the prompt is visible — it says nothing
+            // about whether this session's `events` collector has yet processed the
+            // `PairingRequired` emission into `recorded`. Wait for that fact explicitly, on the
+            // actual condition the count assertion below depends on, rather than assuming it from
+            // an unrelated flow settling.
+            a.awaitEvent { it is ControlEvent.PairingRequired }
+            b.awaitEvent { it is ControlEvent.PairingRequired }
 
             // PROTOCOL §4.2: one prompt per device even though two connections were dialled.
             assertEquals(1, a.countOf { it is ControlEvent.PairingRequired }, "exactly one SAS prompt per device")
@@ -259,6 +273,90 @@ class PairingSessionIntegrationTest {
                 )
             }
         }
+
+    // ---------------------------------------------------------------- harness synchronization
+
+    /**
+     * The regression test for the *other* half of problem 28: `collectInto` must register as a
+     * subscriber to `manager.events` (a zero-replay `SharedFlow`) before it returns, not merely
+     * schedule that registration for later. If it only scheduled it, a fast real handshake could
+     * complete and emit `PeerTrusted`/`Connected` while nothing was subscribed yet — and a
+     * zero-replay flow does not hand a past emission to a subscriber that arrives afterward, so the
+     * events would be lost forever, not just delayed.
+     *
+     * This is made deterministic, not probabilistic, by giving the collector its own scope on a
+     * dispatcher this test controls by hand: the collector's `launch` still runs synchronously up
+     * to its subscribe point (via `collectInto`'s `CoroutineStart.UNDISPATCHED`), but nothing else
+     * about it executes until the test explicitly pumps the dispatcher — which it deliberately does
+     * only *after* independently confirming, via the manager's own `diagnostics` StateFlow, that the
+     * real handshake already reached `CONNECTED`. The manager itself runs on an ordinary live
+     * `Dispatchers.IO` scope throughout, so the handshake is real, not simulated.
+     */
+    @Test
+    fun `collectInto subscribes before returning, so a fast handshake cannot drop its events`() =
+        runBlocking {
+            val liveScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+            val manualDispatcher = ManualDispatcher()
+            val collectorScope = CoroutineScope(SupervisorJob() + manualDispatcher)
+            try {
+                val (a, b) = TestSessions.pairedPeers("2020202020202020", "4040404040404040")
+                val peerA = a.manager(liveScope, monotonicNowUs)
+                val peerB = b.manager(liveScope, monotonicNowUs)
+                val sessionA = FsmSession(a, peerA)
+
+                sessionA.collectInto(collectorScope)
+                sessionA.apply(SessionEvent.StartDiscovery)
+                sessionA.apply(SessionEvent.PeerSelected)
+
+                val portA = peerA.startListening(a.local)
+                val portB = peerB.startListening(b.local)
+                peerA.connectTo("127.0.0.1", portB, a.local)
+                peerB.connectTo("127.0.0.1", portA, b.local)
+
+                // Confirmed independently of the collector under test: the real handshake finished
+                // while `collectorScope`'s dispatcher was never once pumped.
+                withTimeout(5_000) {
+                    while (peerA.diagnostics.value.controlState != ControlState.CONNECTED) delay(10)
+                }
+
+                // Only now does the deliberately-deferred collector coroutine get to run.
+                manualDispatcher.runAll()
+
+                withTimeout(2_000) {
+                    while (sessionA.status != SessionStatus.CONNECTED) delay(10)
+                }
+                assertEquals(
+                    listOf("PeerTrusted", "Connected"),
+                    sessionA.events.mapNotNull(::gateName),
+                    "a handshake that finished before the collector's dispatcher was ever pumped must still be observed in full",
+                )
+
+                peerA.shutdown()
+                peerB.shutdown()
+            } finally {
+                liveScope.cancel()
+                collectorScope.cancel()
+            }
+        }
+
+    /** A dispatcher that only ever runs what [runAll] explicitly drains — never on its own. */
+    private class ManualDispatcher : CoroutineDispatcher() {
+        private val tasks = ArrayDeque<Runnable>()
+
+        override fun dispatch(
+            context: CoroutineContext,
+            block: Runnable,
+        ) {
+            synchronized(tasks) { tasks.addLast(block) }
+        }
+
+        fun runAll() {
+            while (true) {
+                val next = synchronized(tasks) { if (tasks.isEmpty()) null else tasks.removeFirst() }
+                next?.run() ?: break
+            }
+        }
+    }
 
     // ---------------------------------------------------------------- helpers
 

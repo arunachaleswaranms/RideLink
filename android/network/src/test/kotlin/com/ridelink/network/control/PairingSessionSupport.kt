@@ -6,6 +6,7 @@ import com.ridelink.core.sessionfsm.SessionEvent
 import com.ridelink.core.sessionfsm.SessionFsm
 import com.ridelink.core.sessionfsm.SessionStatus
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
@@ -59,8 +60,20 @@ class FsmSession(
         SessionGate.sessionEventFor(event, status)?.let { apply(it) }
     }
 
+    /**
+     * `manager.events` is a zero-replay `SharedFlow` (see [ControlSessionManager]'s `_events`), so
+     * a subscriber that starts collecting even microseconds after an emission never sees it — there
+     * is no buffer of history to catch up on. A plain `scope.launch { ... }` only *schedules* the
+     * collect; it can return before the coroutine has actually run far enough to register as a
+     * subscriber, leaving a window in which a fast handshake (real loopback TCP, no exotic timing
+     * needed) emits and loses events before anything is listening. `CoroutineStart.UNDISPATCHED`
+     * runs this coroutine body synchronously, on the caller's thread, up to `collect`'s first
+     * suspension point — which is the point at which it becomes a registered subscriber — so by the
+     * time this function returns, subscription has already happened. `DuplicateConnectionResolutionTest`
+     * uses the same idiom against the same flow for the same reason.
+     */
     fun collectInto(scope: CoroutineScope) {
-        scope.launch { manager.events.collect(::onControlEvent) }
+        scope.launch(start = CoroutineStart.UNDISPATCHED) { manager.events.collect(::onControlEvent) }
     }
 
     fun countOf(predicate: (ControlEvent) -> Boolean): Int = events.count(predicate)
