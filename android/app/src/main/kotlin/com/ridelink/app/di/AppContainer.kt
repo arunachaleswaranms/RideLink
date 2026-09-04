@@ -6,6 +6,7 @@ import android.os.SystemClock
 import com.ridelink.app.service.RideCommand
 import com.ridelink.app.service.RideCommandBus
 import com.ridelink.app.service.RideForegroundService
+import com.ridelink.app.session.ForegroundServiceController
 import com.ridelink.app.session.SessionCoordinator
 import com.ridelink.app.session.SessionEnvironment
 import com.ridelink.audio.route.AndroidVoiceAudioSession
@@ -22,6 +23,7 @@ import com.ridelink.network.discovery.NsdDiscoveryController
 import com.ridelink.network.security.AndroidKeystoreIdentityStore
 import com.ridelink.network.security.DeviceIdentity
 import com.ridelink.network.security.TlsControlChannel
+import com.ridelink.network.voice.StopReleaseResult
 import com.ridelink.network.voice.VoiceController
 import com.ridelink.network.voice.WebRtcVoiceEngine
 import kotlinx.coroutines.CoroutineScope
@@ -145,6 +147,11 @@ class AppContainer(
                         nowEpochSeconds = { System.currentTimeMillis() / MILLIS_PER_SECOND },
                         audioEndpointPresent = { voiceAudioSession.hasUsableEndpoint },
                     ),
+                // problem 32: the one place `RideForegroundService.stop` is reachable from the FSM's
+                // own `ENDING` effect, so a peer BYE (or any other legitimate ENDING path) cannot
+                // leave the service orphaned the way `MainActivity`'s in-app button alone could not
+                // reach.
+                foregroundService = ForegroundServiceController { RideForegroundService.stop(context) },
                 buildVoiceController = ::voiceController,
             )
         installRideNotificationCommands()
@@ -177,8 +184,13 @@ class AppContainer(
                 }
                 RideCommand.END_INTERCOM ->
                     appScope.launch {
-                        sessionCoordinator.endIntercomAndAwaitRelease()
-                        RideForegroundService.stop(context)
+                        // This phase's final hardening pass (Issue 2): a timed-out release must not be
+                        // treated as proof the microphone is safe to reclaim — the stop is skipped, and
+                        // the diagnostics card already shows the stalled route transition to explain why.
+                        when (sessionCoordinator.endIntercomAndAwaitRelease()) {
+                            StopReleaseResult.Released, StopReleaseResult.AlreadyReleased -> RideForegroundService.stop(context)
+                            StopReleaseResult.TimedOut -> Unit
+                        }
                     }
             }
         }

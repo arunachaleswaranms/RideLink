@@ -1,6 +1,6 @@
 # RideLink — Status
 
-**Updated:** 4 September 2026 (Phase 2b final hardening pass, eleventh session)
+**Updated:** 4 September 2026 (Phase 2b final hardening pass, twelfth session — see §2o)
 **Current milestone:** M1 (Private voice link) — in progress
 **Current phase:** Phase 2b — intercom integration and audio lifecycle.
 **Phase 2b status: IMPLEMENTATION COMPLETE — REAL-DEVICE INTERCOM GATE PENDING.**
@@ -1292,6 +1292,93 @@ rules table needed no new row.
 
 ---
 
+## 2o. Phase 2b final hardening, second pass — the five gaps §2n named but did not fix, plus
+problem 32 (4 September 2026 session, twelfth)
+
+A second independent review, run specifically over what §2n's own account flagged as out of scope
+("two things this pass found but deliberately did not touch") plus the open problem 32, named five
+candidate issues. All five were verified against the actual code before anything changed — none was
+patched on the review's say-so alone — and all five were **confirmed real**. Full account, finding by
+finding: [ADR-021 Amendment
+A2](DECISIONS/ADR-021-intercom-transmission-and-capture-ownership.md#amendment-a2--4-september-2026--the-five-gaps-amendment-a1-named-but-did-not-fix-plus-problem-32).
+
+**1 — the route transition began after the platform call, not before, on both platforms.** A
+synchronous (or very-shortly-after) confirming callback landing between the platform call and the
+event that was supposed to *begin* tracking it found `RouteTransitionTracker.settle` a no-op — it only
+ever acts on an already-`transitioning` state — so the confirmation was silently dropped and the
+transition settled only via §2n's five-second timeout instead. `AudioSessionLifecycle` gained
+`OpenRequested`/`CloseRequested` (begin the transition only, before the platform call) and
+`OpenAborted` (the platform call refused; settles immediately rather than waiting for the timeout);
+`Opened`/`Closed` no longer begin a transition themselves, so a settle that already happened in
+between cannot be resurrected into a fresh, spurious `TRANSITIONING`. Both platform classes now apply
+the `*Requested` event before the platform call and the confirming event after.
+
+**2 — `stopAndAwaitRelease()`'s timeout was indistinguishable from success.** The result of
+`withTimeoutOrNull` was discarded, so a caller could not tell a proven release from one that merely
+gave up waiting, and a timed-out waiter was never removed from `pendingStopCompletions` — a leak, one
+entry per stall. `stopAndAwaitRelease()` now returns an explicit `StopReleaseResult`
+(`Released`/`AlreadyReleased`/`TimedOut`); every caller (`SessionCoordinator`, `MainActivity`,
+`AppContainer`) stops the Android microphone foreground service only on the first two, never on
+`TimedOut`, and a timed-out waiter is always removed.
+
+**3 — problem 32 is fixed.** `SessionFsm`'s `ENDING` effect
+(`Effect.ReleaseAudioAndStopForegroundService`) promised a foreground-service stop that
+`SessionCoordinator.runEffect` never actually performed — confirmed exactly as problem 32 and §2n's
+own account described it, and reachable in practice by a peer `BYE`. Fixed with one new seam,
+`ForegroundServiceController` (a one-method `fun interface`, supplied by `AppContainer`, no `Context`
+inside `SessionCoordinator`), and one new owner: `runEffect` now awaits capture release
+(`releaseVoiceAndAwait`, using Finding 2's `StopReleaseResult`) before calling
+`foregroundService.stop()` — never on a timeout — and always tears down the control session
+afterward regardless. The eager, uncoordinated release `applySideEffects` used to perform on a
+`BYE`-reasoned `LinkLost` is gone; the `ENDING` effect is now the one place release happens for that
+path. Proving this needed `SessionCoordinator` buildable in a JVM test for the first time — a
+`DiscoveryController` interface extracted from `NsdDiscoveryController` (no behaviour change) and
+`applyEvent`/`handleControlEvent` widened to `internal` as an explicit test seam — and
+`SessionCoordinatorEndingEffectTest` (new, `app` module, the first test to exercise
+`SessionCoordinator` itself) proves the release-before-stop-before-teardown order, that a timeout
+never stops the service, that a `NETWORK` link loss never releases capture or stops the service, and
+that repeated `ENDING` cannot double-fire the effect.
+
+**4 — iOS route snapshots reached `VoiceController` through a Task per callback.** The same
+`Task`-per-event shape §2n's Finding G fixed for voice diagnostics, left unfixed here at the time.
+Replaced with `routeChannel`, an `OrderedEventChannel<AudioRouteSnapshot>` created fresh in `attach()`
+and torn down in `shutdown()` exactly like `SessionCoordinator`'s own diagnostics channel.
+
+**5 — the iOS engine-event Task, traced through rather than left alone.** §2n named
+`noteEngineEvent`'s `Task` as narrower and safer than Finding G and deliberately did not touch it.
+Traced through this session: `VoiceSetupTimer.mark` has no generation guard, so a stale mark from a
+superseded negotiation, still in flight when `VoiceController.start()` resets the timeline for a new
+one, could land as the *new* generation's own first-write-wins entry — a real (diagnostic-only, never
+security- or negotiation-affecting) corruption of the V-01 setup-timing measurement. Fixed for free:
+`noteEngineEvent` is deleted, and the same marks/failure are derived from the `VoiceInput` `apply()`
+is about to reduce anyway, in the same ordered call.
+
+**New regression coverage.** Android:
+`AudioSessionLifecycleTest` +5 (the `OpenRequested`/`CloseRequested`/`OpenAborted` proofs),
+`VoiceControllerStopAwaitTest` +2 (timeout-not-success, waiter-count-to-zero), and
+`SessionCoordinatorEndingEffectTest` +5 (new file, problem 32's integration boundary). iOS:
+`AudioSessionLifecycleTests` +5 (mirrors), `VoiceControllerRouteOrderingTests` +2 (new file, Finding
+4). Stress, no rerun-until-green: the three new/changed Android JVM suites run **20 consecutive times,
+0 failures** each, in isolation; the two iOS suites run **50 consecutive times, 0 failures** each. An
+early attempt at the Android stress runs produced spurious failures from running two `./gradlew`
+invocations against this project concurrently (Kotlin daemon compilation contention) — reproduced,
+root-caused, and re-run in isolation rather than smoothed over; none of the failures were in test
+logic.
+
+**Verification.** Android: **455 tests** (was 443 — +12: core 262, network 157, audio 20, app 7, data
+9), `test ktlintCheck detekt lint assembleDebug assembleRelease` all green. iOS: `RideLinkCore`
+**147/147** (was 142), `RideLinkPlatform` **187/187** (was 185), `xcodebuild` Debug and Release both
+succeed for the simulator, zero warnings beyond the pre-existing benign notice. No production wire
+shape, security property, module boundary or platform baseline changed. `docs/DECISIONS/ADR-021.md`
+gained Amendment A2; this file's problem 32 (§4) is now recorded FIXED.
+
+**Still true, unchanged by this pass:** nothing here ran on a phone. No microphone, no speaker, no
+Bluetooth, no foreground service, no lock screen, no latency figure. Every finding and fix above is a
+laptop-only correctness proof; the real-device intercom gate (§7) is exactly as open as it was before
+this session.
+
+---
+
 ## 3. Tests passed / pending
 
 **Passed and verified in the Phase 2b session (4 September 2026, tenth), by actually running the
@@ -1355,6 +1442,32 @@ commands.** Every Gradle command was run with
 **What none of this is evidence about:** any phone, any microphone, any speaker, any Bluetooth
 endpoint, any foreground service, any lock screen, or any latency. See §2m's "Explicitly not done"
 and §7.
+
+**Passed and verified in the Phase 2b final hardening session, second pass (4 September 2026,
+twelfth) — see §2o for the five findings this verifies:**
+
+- `./gradlew test ktlintCheck detekt lint assembleDebug assembleRelease` — **all green**, all five
+  Android modules. **455 tests** (was 443): `core` **262** (was 257 — +5 `AudioSessionLifecycleTest`),
+  `network` **157** (was 155 — +2 `VoiceControllerStopAwaitTest`), `audio` 20 (unchanged), `app` **7**
+  (was 2 — +5 `SessionCoordinatorEndingEffectTest`, new file), `data` 9 (unchanged).
+- `swift test --package-path ios/Packages/RideLinkCore` — **147/147** (was 142 — +5
+  `AudioSessionLifecycleTests` mirrors).
+- `swift test --package-path ios/Packages/RideLinkPlatform` — **187/187** (was 185 — +2
+  `VoiceControllerRouteOrderingTests`, new file), zero Swift 6 strict-concurrency warnings.
+- `xcodebuild` Debug **and** Release for the simulator — both succeed, **zero warnings** beyond the
+  pre-existing benign "no AppIntents.framework dependency" notice.
+- **Stress validation, no rerun-until-green:** `AudioSessionLifecycleTest`, `VoiceControllerStopAwaitTest`
+  and `SessionCoordinatorEndingEffectTest` (Android, each run in isolation) run **20 consecutive times,
+  0 failures** each; `AudioSessionLifecycleTests` and `VoiceControllerRouteOrderingTests` (iOS) run **50
+  consecutive times, 0 failures** each. An early attempt at the Android counts produced spurious
+  failures from two concurrent `./gradlew` invocations against this project contending for the same
+  Kotlin daemon — reproduced, root-caused as build-tooling contention rather than test logic, and
+  re-run in isolation.
+- **All prior suites remain green**, including every Phase 1b/2a/2b test named above this paragraph —
+  this session ran the full local gate, not only the new tests.
+- CI: see the commit this pass lands as, recorded once pushed and green.
+
+---
 
 **Passed and verified in the Phase 2b final hardening session (4 September 2026, eleventh) — see §2n
 for the eight findings this verifies:**
@@ -1677,7 +1790,7 @@ session and route), and integration tests I-01…I-25. Full list in `docs/TEST_P
 | 29 | **A Phase 1b timing test tripped its ceiling in CI because Phase 2a changed what shares its process.** `PingRaceAndReconnectTests.testRepeatedClockBurstsAllCompleteQuickly` asserts an 11-sample clock burst converges within a fixed budget. That budget (4.0s) was measured when the `RideLinkPlatform` test binary held control-plane code only; it now also links a ~96 MB WebRTC framework and, a few tests earlier in the same process, stands up two real `RTCPeerConnectionFactory` instances with their own worker threads. CI run 33607112656 tripped it with the signature the test's own comment predicts — `elapsed 4.129s`, `pendingPings=1`, `rttMs=3.0` (three **milliseconds**: the wire was healthy and a PONG was measured; one waiter was not resumed before its own 3s `pingTimeoutMs` fired). Actor-scheduling starvation on a three-core hosted runner, not a protocol or lifecycle bug — `PingRequestRegistry`'s own tests cover the bookkeeping | Low | Ceiling raised to 8.0s with the arithmetic written down: a single dropped PONG costs the full 3.0s timeout on top of a ~0.6s healthy burst, so ~3.6s is the floor before contention. 8.0s clears it with margin and stays below the 10s resync interval, so a genuinely stuck burst still fails. **The underlying fragility is not removed:** a wall-clock assertion sharing a process with a real media stack will always be environment-sensitive. The durable fix is to assert the invariant (every ping resolves, no stale waiter) and measure the timing separately — a Phase 1b test-design change, not a Phase 2a one |
 | 26 | **APK/IPA size.** The Android AAR adds ~48 MB of native code across four ABIs; the Apple XCFramework is ~96 MB expanded and embedded in the app bundle. No ABI filtering or slice stripping is applied — the default is the safe configuration and a sideloaded personal build has no size gate | Low | Revisit if install time becomes annoying. Recorded rather than forgotten |
 | 21 | **Diagnostics now show `CONNECTING` while a six-digit code is on screen**, where they previously showed `CONNECTED`. This is deliberate and more honest (ADR-019 §5), but it is a user-visible change that has never been looked at on a real screen | Low | Confirm it reads sensibly during I-02 on the two phones; the FR-023 diagnostics screen is one of the things I-02 exercises anyway |
-| 32 | **`Effect.ReleaseAudioAndStopForegroundService`'s name promises an Android foreground-service stop it has never actually performed.** Found during the eleventh session's hardening pass (§2n, ADR-021 Amendment A1 Finding F) while fixing the *other* place capture and the service could get out of order: `SessionCoordinator.runEffect` handles this FSM effect by calling `releaseVoice()` and `teardownSession()` only — neither touches `RideForegroundService`, and grepping the whole app confirms `MainActivity.stopIntercom()` remains the **only** caller of `RideForegroundService.stop()` anywhere. So a BYE from the peer, or any other route to the FSM's `ENDING` state that is not the user's own Stop Intercom tap, releases capture correctly but leaves the foreground service running with nothing left to hold | Medium | Give `SessionCoordinator` a way to reach `RideForegroundService.stop()` — it currently has no `Context` — or move the decision to stop the service into a `state`-observing point in `MainActivity`/`AppContainer` the way `RideCommandBus`'s `END_INTERCOM` handler now does (§2n). Not fixed in the same pass because it is a distinct gap from the one under review, not a regression from that pass's fix |
+| 32 | **FIXED (twelfth session, §2o, ADR-021 Amendment A2 Finding 3).** `Effect.ReleaseAudioAndStopForegroundService`'s name promised an Android foreground-service stop `SessionCoordinator.runEffect` never actually performed — confirmed exactly as originally recorded here. Fixed with a `ForegroundServiceController` seam (no `Context` inside `SessionCoordinator`) and one owner: `runEffect` awaits capture release (`StopReleaseResult`) before calling `foregroundService.stop()` — never on a timeout — and always tears down the control session afterward. `SessionCoordinatorEndingEffectTest` (new) proves the order at the integration boundary, including that a peer BYE, a timed-out release, a `NETWORK` link loss and a repeated `ENDING` all behave correctly. Kept in this table with its resolution noted rather than deleted, per this file's own discipline | ~~Medium~~ Fixed | ~~Give `SessionCoordinator` a way to reach `RideForegroundService.stop()`...~~ Done — see §2o |
 
 Resolved 26 Aug 2026 session: `CLAUDE.md` in `.gitignore` (was problem 1); `.DS_Store` tracking
 (was problem 7 — the claim was incorrect; the files are untracked and now ignored); the ADR-015/

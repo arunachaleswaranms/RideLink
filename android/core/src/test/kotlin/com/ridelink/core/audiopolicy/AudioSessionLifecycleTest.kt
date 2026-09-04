@@ -29,6 +29,9 @@ class AudioSessionLifecycleTest {
     @Test
     fun `opening publishes transitioning and the platform's confirmation publishes stable`() {
         var state = AudioSessionState()
+        // `OpenRequested` begins the transition; `Opened` (the platform call it precedes actually
+        // succeeding) only confirms the session — this phase's final hardening pass, Issue 1.
+        state = AudioSessionLifecycle.reduce(state, AudioSessionEvent.OpenRequested(0, atMonoUs = 1_000_000)).state
         val opened = AudioSessionLifecycle.reduce(state, AudioSessionEvent.Opened(0, atMonoUs = 1_000_000))
         state = opened.state
         assertTrue(state.open)
@@ -80,6 +83,91 @@ class AudioSessionLifecycleTest {
         assertEquals(3_000L, transition.lastDurationUs, "so the whole transition is measured, not its tail")
     }
 
+    // --- OpenRequested / CloseRequested / OpenAborted (this phase's final hardening pass, Issue 1) --
+
+    /**
+     * The whole point of [AudioSessionEvent.OpenRequested]: a transition begun by it is already
+     * live when a settling [AudioSessionEvent.RouteChanged] arrives, so the confirmation is not
+     * silently dropped by [RouteTransitionTracker.settle]'s own guard — the exact failure mode a
+     * platform call able to confirm synchronously (or very shortly after returning) produced before
+     * this event existed.
+     */
+    @Test
+    fun `a route change settling between OpenRequested and Opened is not lost`() {
+        var state = AudioSessionState()
+        val requested = AudioSessionLifecycle.reduce(state, AudioSessionEvent.OpenRequested(0, atMonoUs = 1_000))
+        state = requested.state
+        assertTrue(state.transition.transitioning, "the transition must already be live")
+        assertFalse(state.open, "OpenRequested alone must not claim the session")
+
+        // The platform's confirmation arrives before `Opened` ever runs.
+        val settled =
+            AudioSessionLifecycle.reduce(
+                state,
+                AudioSessionEvent.RouteChanged(0, AudioRouteChangeReason.CATEGORY_CHANGE, atMonoUs = 2_000, settles = true),
+            )
+        state = settled.state
+        assertFalse(state.transition.transitioning, "the confirmation must not be silently dropped")
+        assertEquals(1_000L, state.transition.lastDurationUs)
+
+        // `Opened` still runs afterward (the platform call itself succeeded) and must not resurrect
+        // a transition that has already settled.
+        val opened = AudioSessionLifecycle.reduce(state, AudioSessionEvent.Opened(0, atMonoUs = 2_500))
+        assertTrue(opened.state.open)
+        assertFalse(opened.state.transition.transitioning, "Opened must not restart an already-settled transition")
+    }
+
+    @Test
+    fun `OpenRequested and Opened together begin the same transition once, not twice`() {
+        var state = AudioSessionState()
+        state = AudioSessionLifecycle.reduce(state, AudioSessionEvent.OpenRequested(0, atMonoUs = 1_000)).state
+        val opened = AudioSessionLifecycle.reduce(state, AudioSessionEvent.Opened(0, atMonoUs = 9_000))
+        assertEquals(1_000L, opened.state.transition.startedAtMonoUs, "the first instant is the one that counts")
+    }
+
+    /**
+     * The platform call [AudioSessionEvent.OpenRequested] began refused before it could complete.
+     * The transition settles right away — never left latched for the failure-protection timeout to
+     * notice — and the session was never actually handed to the platform.
+     */
+    @Test
+    fun `OpenAborted settles the transition immediately and leaves the session closed`() {
+        var state = AudioSessionState()
+        state = AudioSessionLifecycle.reduce(state, AudioSessionEvent.OpenRequested(0, atMonoUs = 1_000)).state
+        val aborted =
+            AudioSessionLifecycle.reduce(state, AudioSessionEvent.OpenAborted(0, atMonoUs = 1_500, VoiceFailure.ROUTE_SELECTION_FAILED))
+        assertFalse(aborted.state.open, "the platform never actually took the session")
+        assertFalse(aborted.state.transition.transitioning, "settled immediately, not left for the timeout")
+        assertEquals(VoiceFailure.ROUTE_SELECTION_FAILED, aborted.state.lastFailure)
+        assertEquals(0, aborted.state.transition.timedOutCount, "an abort is not a timeout")
+        assertTrue(aborted.actions.contains(AudioSessionAction.ReportFailure(VoiceFailure.ROUTE_SELECTION_FAILED)))
+        assertTrue(aborted.actions.contains(AudioSessionAction.PublishSnapshot(RouteState.STABLE)))
+    }
+
+    /** Mirrors the open-side proof for the closing direction. */
+    @Test
+    fun `CloseRequested begins a transition without yet claiming the session closed`() {
+        val state = AudioSessionState(open = true)
+        val outcome = AudioSessionLifecycle.reduce(state, AudioSessionEvent.CloseRequested(0, atMonoUs = 500))
+        assertTrue(outcome.state.transition.transitioning)
+        assertTrue(outcome.state.open, "open stays true until Closed actually confirms it")
+    }
+
+    @Test
+    fun `a route change settling between CloseRequested and Closed is not lost`() {
+        var state = AudioSessionState(open = true)
+        state = AudioSessionLifecycle.reduce(state, AudioSessionEvent.CloseRequested(0, atMonoUs = 1_000)).state
+        val settled =
+            AudioSessionLifecycle.reduce(
+                state,
+                AudioSessionEvent.RouteChanged(0, AudioRouteChangeReason.CATEGORY_CHANGE, atMonoUs = 1_800, settles = true),
+            )
+        assertFalse(settled.state.transition.transitioning, "the restoring confirmation must not be dropped")
+        val closed = AudioSessionLifecycle.reduce(settled.state, AudioSessionEvent.Closed(0, atMonoUs = 1_900))
+        assertFalse(closed.state.open)
+        assertFalse(closed.state.transition.transitioning, "Closed must not restart an already-settled transition")
+    }
+
     /**
      * **A timeout is failure protection, never the definition of success** (this phase's brief §15).
      * It settles a transition the platform never confirmed, and it is counted so the diagnostics can
@@ -87,7 +175,8 @@ class AudioSessionLifecycleTest {
      */
     @Test
     fun `a timeout settles a transition the platform never confirmed, and says so`() {
-        var state = AudioSessionLifecycle.reduce(AudioSessionState(), AudioSessionEvent.Opened(0, atMonoUs = 0)).state
+        var state = AudioSessionLifecycle.reduce(AudioSessionState(), AudioSessionEvent.OpenRequested(0, atMonoUs = 0)).state
+        state = AudioSessionLifecycle.reduce(state, AudioSessionEvent.Opened(0, atMonoUs = 0)).state
         val early =
             AudioSessionLifecycle.reduce(
                 state,
@@ -204,6 +293,9 @@ class AudioSessionLifecycleTest {
                 AudioSessionEvent.MediaServicesReset(0, atMonoUs = 3_000),
                 AudioSessionEvent.Failed(0, VoiceFailure.CAPTURE_START_FAILED),
                 AudioSessionEvent.TransitionTimeoutCheck(0, atMonoUs = 99_000_000),
+                AudioSessionEvent.OpenRequested(0, atMonoUs = 3_000),
+                AudioSessionEvent.CloseRequested(0, atMonoUs = 3_000),
+                AudioSessionEvent.OpenAborted(0, atMonoUs = 3_000, VoiceFailure.ROUTE_SELECTION_FAILED),
             )
         for (event in staleEvents) {
             val outcome = AudioSessionLifecycle.reduce(afterReset, event)
@@ -261,7 +353,10 @@ class AudioSessionLifecycleTest {
 
     @Test
     fun `closing publishes a transition and clears the interruption state`() {
-        val state = AudioSessionState(open = true, interrupted = true, awaitingResume = true)
+        var state = AudioSessionState(open = true, interrupted = true, awaitingResume = true)
+        // `CloseRequested` begins the transition; `Closed` only confirms it (this phase's final
+        // hardening pass, Issue 1).
+        state = AudioSessionLifecycle.reduce(state, AudioSessionEvent.CloseRequested(0, atMonoUs = 10)).state
         val outcome = AudioSessionLifecycle.reduce(state, AudioSessionEvent.Closed(0, atMonoUs = 10))
         assertFalse(outcome.state.open)
         assertFalse(outcome.state.interrupted)

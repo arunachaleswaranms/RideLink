@@ -99,6 +99,25 @@ private const val INSTANCE_NAME_HANDLE_PREFIX_LENGTH = 8
 fun instanceServiceName(discoveryHandle: String): String = "RideLink-${discoveryHandle.take(INSTANCE_NAME_HANDLE_PREFIX_LENGTH)}"
 
 /**
+ * The two things [SessionCoordinator][com.ridelink.app.session.SessionCoordinator] needs from
+ * discovery, extracted so it can be constructed with a fake in a test that never touches
+ * `NsdManager`/`Context` (this phase's final hardening pass, problem 32 — proving the `ENDING`
+ * effect's ordering needs a [SessionCoordinator][com.ridelink.app.session.SessionCoordinator] a JVM
+ * test can build).
+ *
+ * [NsdDiscoveryController] is the only production implementation; nothing about the seam changes
+ * its behaviour.
+ */
+interface DiscoveryController {
+    fun advertise(
+        port: Int,
+        rotationIntervalMs: Long = DiscoveryHandleRotationPolicy.ROTATION_INTERVAL_MS,
+    ): Flow<AdvertiseState>
+
+    fun browse(): Flow<DiscoveryEvent>
+}
+
+/**
  * Android `NsdManager`-backed implementation of PROTOCOL §4.1 / ARCHITECTURE §4.1 discovery.
  *
  * The TXT record carries **exactly** `{v, dh, plat}` (CLAUDE.md privacy rules) — no `peer_id`, no
@@ -113,7 +132,7 @@ fun instanceServiceName(discoveryHandle: String): String = "RideLink-${discovery
  */
 class NsdDiscoveryController(
     context: Context,
-) {
+) : DiscoveryController {
     private val nsdManager = context.applicationContext.getSystemService(Context.NSD_SERVICE) as NsdManager
     private val mainExecutor: Executor = context.applicationContext.mainExecutor
 
@@ -134,9 +153,9 @@ class NsdDiscoveryController(
      * control-plane socket: discovery and control are wired as two independent systems for
      * exactly this reason.
      */
-    fun advertise(
+    override fun advertise(
         port: Int,
-        rotationIntervalMs: Long = DiscoveryHandleRotationPolicy.ROTATION_INTERVAL_MS,
+        rotationIntervalMs: Long,
     ): Flow<AdvertiseState> =
         callbackFlow {
             var registeredListener: NsdManager.RegistrationListener? = null
@@ -215,7 +234,7 @@ class NsdDiscoveryController(
      * device name/IP/peer_id, is the only correct way to recognise that (this session's brief §4E).
      */
     @Suppress("LongMethod")
-    fun browse(): Flow<DiscoveryEvent> =
+    override fun browse(): Flow<DiscoveryEvent> =
         callbackFlow {
             // mDNS service *names*, not discovery handles, are what onServiceLost gives back
             // unresolved — this map is what lets Lost still carry the right dh.

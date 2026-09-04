@@ -141,10 +141,25 @@ class AndroidVoiceAudioSession(
             runCatching { audioManager.registerAudioDeviceCallback(deviceCallback, null) }
             runCatching { audioManager.addOnCommunicationDeviceChangedListener(context.mainExecutor, deviceChangedListener) }
 
+            // The transition begins here — before either platform call below, not when `Opened`
+            // confirms success — so a confirming callback either call can produce synchronously (or
+            // very shortly after it returns) finds a transition already begun to settle, rather than
+            // one that has not started yet (this phase's final hardening pass, Issue 1):
+            // `RouteTransitionTracker.settle` silently drops a confirmation that arrives before
+            // `begin` has ever run.
+            apply(AudioSessionEvent.OpenRequested(lifecycle.generation, monotonicNowUs()))
+
             val focused = runCatching { requestFocusAndCommunicationMode() }
             if (focused.isFailure) {
                 unregisterPlatformCallbacks()
-                return@withContext fail(VoiceFailure.AUDIO_SESSION_ACTIVATION_FAILED)
+                apply(
+                    AudioSessionEvent.OpenAborted(
+                        lifecycle.generation,
+                        monotonicNowUs(),
+                        VoiceFailure.AUDIO_SESSION_ACTIVATION_FAILED,
+                    ),
+                )
+                return@withContext Result.failure(VoiceAudioSessionFailure(VoiceFailure.AUDIO_SESSION_ACTIVATION_FAILED))
             }
 
             val routed = runCatching { selectCommunicationDevice() }
@@ -153,7 +168,8 @@ class AndroidVoiceAudioSession(
                 // activation failure because the user action is different: reconnect the helmet unit,
                 // not restart the app.
                 releasePlatformSession()
-                return@withContext fail(VoiceFailure.ROUTE_SELECTION_FAILED)
+                apply(AudioSessionEvent.OpenAborted(lifecycle.generation, monotonicNowUs(), VoiceFailure.ROUTE_SELECTION_FAILED))
+                return@withContext Result.failure(VoiceAudioSessionFailure(VoiceFailure.ROUTE_SELECTION_FAILED))
             }
 
             apply(AudioSessionEvent.Opened(lifecycle.generation, monotonicNowUs()))
@@ -163,6 +179,10 @@ class AndroidVoiceAudioSession(
     override suspend fun close() {
         withContext(Dispatchers.Main.immediate) {
             if (!lifecycle.open) return@withContext
+            // Begun before `releasePlatformSession()`'s platform calls, for the same reason as
+            // `open()` above — `clearCommunicationDevice()` can synchronously confirm the very
+            // change this transition exists to track (this phase's final hardening pass, Issue 1).
+            apply(AudioSessionEvent.CloseRequested(lifecycle.generation, monotonicNowUs()))
             // The callbacks that could confirm this restoring change stay registered through the calls
             // that request it — `releasePlatformSession` unregisters them only as its **last** step
             // (this phase's hardening pass, Issue D) — so a `.categoryChange`-equivalent confirmation

@@ -132,6 +132,16 @@ public actor VoiceController: VoiceSignalSink {
     private var consumerTask: Task<Void, Never>?
     private var diagnosticsPollTask: Task<Void, Never>?
 
+    /// Ordered route delivery (this phase's final hardening pass, Issue 4). `audioSession.setRouteSink`'s
+    /// callback is synchronous and non-isolated, so it cannot call directly into this actor — the
+    /// previous shape spawned an unstructured `Task` per snapshot, which (like every other `Task`-per-
+    /// event pattern this codebase has already fixed, e.g. STATUS §2h) only preserves the order the
+    /// tasks were *created* in, not the order they *run* in. One channel, one consumer, exactly the
+    /// pattern `SessionCoordinator.voiceDiagnosticsChannel` already establishes for this actor's own
+    /// diagnostics.
+    private var routeChannel: OrderedEventChannel<AudioRouteSnapshot>?
+    private var routeConsumerTask: Task<Void, Never>?
+
     public init(
         engine: any VoiceEngine,
         audioSession: any VoiceAudioSession,
@@ -158,17 +168,35 @@ public actor VoiceController: VoiceSignalSink {
     public func attach() async {
         let box = mailbox
         let bell = doorbell
-        await engine.setEventSink { [weak self] event in
+        await engine.setEventSink { event in
             // Reduced to a table input at the boundary, so nothing WebRTC-shaped reaches the mailbox
             // -- and, on this platform, so nothing non-`Sendable` has to cross an isolation domain.
+            //
+            // This phase's final hardening pass, Issue 5: the setup marks and named failure this
+            // event can imply used to be recorded via a second `Task` per event
+            // (`noteEngineEvent`), racing independently against the mailbox's own ordered
+            // processing of the very same event. Deriving them from the `VoiceInput` `apply` is
+            // about to reduce anyway -- inside `apply`, before the reducer runs -- makes them
+            // exactly as ordered and exactly as generation-consistent as the table transition
+            // itself, with no second hop and nothing left to race.
             box.offer(Self.inputFor(event), doorbell: bell)
-            // The setup marks and the named failure are actor state, so they are recorded through a hop
-            // rather than in the callback. Ordering does not matter for either: `VoiceSetupTimer` is
-            // first-write-wins per milestone, and a failure name is an absolute value.
-            Task { await self?.noteEngineEvent(event) }
         }
-        await audioSession.setRouteSink { [weak self] snapshot in
-            Task { await self?.publishRoute(snapshot) }
+        // Ordered route delivery (Issue 4): `setRouteSink`'s callback is synchronous and
+        // non-isolated, so it cannot call into this actor directly, and a `Task` per snapshot only
+        // preserves creation order, not run order -- see `routeChannel`'s own doc. One channel, one
+        // consumer, created fresh here so a stale sink from a torn-down controller can only ever
+        // write into a channel `shutdown()` has already finished.
+        let route = OrderedEventChannel<AudioRouteSnapshot>()
+        routeChannel = route
+        routeConsumerTask?.cancel()
+        routeConsumerTask = Task { [weak self] in
+            for await snapshot in route.stream {
+                guard let self else { return }
+                await self.publishRoute(snapshot)
+            }
+        }
+        await audioSession.setRouteSink { snapshot in
+            route.send(snapshot)
         }
         consumerTask = Task { [weak self] in
             for await _ in bell.stream {
@@ -272,6 +300,14 @@ public actor VoiceController: VoiceSignalSink {
         consumerTask?.cancel()
         consumerTask = nil
         doorbell.finish()
+        // Cancel the route consumer, then finish the channel, mirroring `SessionCoordinator`'s own
+        // `voiceDiagnosticsChannel` teardown: cancellation is only the cooperative signal, and
+        // finishing is what actually ends the `for await` loop and turns a stale sink's later
+        // `send` into a no-op rather than a mutation of whatever session replaces this one.
+        routeConsumerTask?.cancel()
+        routeConsumerTask = nil
+        routeChannel?.finish()
+        routeChannel = nil
         mailbox.clear()
         pending.reset()
     }
@@ -354,12 +390,38 @@ public actor VoiceController: VoiceSignalSink {
     // MARK: - the driver
 
     private func apply(_ input: VoiceInput) async {
+        // Recorded here -- before the reducer runs, on the same ordered call the mailbox consumer
+        // already applies this exact input through -- rather than from a second `Task` per engine
+        // event (Issue 5). Ordering could otherwise corrupt a setup mark across a generation
+        // boundary: a stale mark racing a fresh `VoiceSetupTimer.restart()` would land as that
+        // restart's own first-write-wins entry, reporting a V-01 setup time that was actually the
+        // previous negotiation's. Applying in the same call `apply` itself is ordered by makes that
+        // structurally impossible rather than merely unlikely.
+        noteFromInput(input)
         let outcome = VoiceNegotiation.reduce(state: state, input: input)
         state = outcome.state
         for action in outcome.actions {
             await perform(action)
         }
         publishDiagnostics()
+    }
+
+    /// The setup-timing marks and named failure an engine-originated `VoiceInput` implies --
+    /// derived from the already-mapped input (see `inputFor`) rather than from the raw
+    /// `VoiceEngineEvent`, so no second copy of this mapping exists. A no-op for every input that
+    /// is not one of these three shapes.
+    private func noteFromInput(_ input: VoiceInput) {
+        switch input {
+        case .localOfferCreated, .localAnswerCreated:
+            mark(.localDescription)
+        case .remoteTrackChanged(_, let present):
+            if present { mark(.remoteTrack) }
+        case .mediaConnectivityChanged(_, let connected, let failed):
+            if connected { mark(.mediaConnected) }
+            if failed { lastFailure = .webRtcFailed }
+        default:
+            break
+        }
     }
 
     // swiftlint:disable:next cyclomatic_complexity
@@ -513,30 +575,11 @@ public actor VoiceController: VoiceSignalSink {
     /// which is the generation guard applied to callbacks rather than to the wire (PROTOCOL §7.8) — a
     /// delegate call from a peer connection this controller has already closed names the old generation
     /// and the table drops it.
-    /// Records the timing milestones and the named failure an engine event implies.
     ///
-    /// Separate from `inputFor` because that is `static` — it must be, to be callable from a `Sendable`
-    /// closure without capturing the actor — and these are actor state.
-    private func noteEngineEvent(_ event: VoiceEngineEvent) {
-        switch event {
-        case .offerCreated, .answerCreated:
-            mark(.localDescription)
-        case .remoteTrackChanged(_, let present):
-            if present { mark(.remoteTrack) }
-        case .transportStateChanged(_, let transportState):
-            if transportState == .connected { mark(.mediaConnected) }
-            if transportState == .failed { lastFailure = .webRtcFailed }
-        case .failed:
-            lastFailure = .webRtcFailed
-        case .localCandidateGathered:
-            break
-        }
-        // Published here as well as from `apply`, because this runs on its own hop: the mailbox input
-        // the same event produced may already have been applied and published by the time these marks
-        // and this failure name are recorded, and a diagnostic nobody publishes is a diagnostic nobody
-        // sees.
-        publishDiagnostics()
-    }
+    /// `static` so it is callable from the `Sendable` closure `attach()` hands `engine.setEventSink`
+    /// without capturing the actor. What an event implies for `VoiceSetupTimeline`/`lastFailure` is
+    /// derived from the `VoiceInput` this produces, inside `apply` (`noteFromInput`) — not here, and
+    /// not from a second, actor-hopping `Task` (this phase's final hardening pass, Issue 5).
 
     private static func inputFor(_ event: VoiceEngineEvent) -> VoiceInput {
         switch event {

@@ -27,8 +27,9 @@ import com.ridelink.network.control.ControlSessionManager
 import com.ridelink.network.control.LocalHandshakeIdentity
 import com.ridelink.network.control.PairingPrompt
 import com.ridelink.network.control.SessionGate
+import com.ridelink.network.discovery.DiscoveryController
 import com.ridelink.network.discovery.DiscoveryEvent
-import com.ridelink.network.discovery.NsdDiscoveryController
+import com.ridelink.network.voice.StopReleaseResult
 import com.ridelink.network.voice.VoiceController
 import com.ridelink.network.voice.VoiceDiagnostics
 import kotlinx.coroutines.CoroutineScope
@@ -63,6 +64,21 @@ data class SessionEnvironment(
 )
 
 /**
+ * Where [SessionCoordinator] sends the Android microphone foreground service its stop signal, once
+ * — and only once — capture release is proven (ARCHITECTURE §6.4, this phase's final hardening
+ * pass, problem 32).
+ *
+ * A tiny seam rather than a `Context` held here: [SessionCoordinator] stays free of platform
+ * lifecycle types (CLAUDE.md rule 9's discipline, applied one layer up — this class is `app`, not
+ * `core`, but the reasoning is the same: a `Context` in a class whose whole job is deciding *when*
+ * to call it would make that decision untestable without an Android runtime). `AppContainer`
+ * supplies the real implementation; a test supplies a fake that just counts calls.
+ */
+fun interface ForegroundServiceController {
+    fun stop()
+}
+
+/**
  * The single owner of session state (CLAUDE.md rule 8 / ARCHITECTURE §3 rule 4). No view model
  * holds connection state of its own; every screen observes [state], [discoveredPeers] and
  * [controlDiagnostics] here.
@@ -79,7 +95,7 @@ data class SessionEnvironment(
  * raising a security alert, starting a reconnect.
  */
 class SessionCoordinator(
-    private val discovery: NsdDiscoveryController,
+    private val discovery: DiscoveryController,
     private val controlSessionManager: ControlSessionManager,
     private val localIdentity: LocalHandshakeIdentity,
     private val scope: CoroutineScope,
@@ -87,6 +103,11 @@ class SessionCoordinator(
     private val trustedPeers: TrustedPeerStore,
     /** The three environment readings this coordinator needs. See [SessionEnvironment]. */
     private val environment: SessionEnvironment,
+    /**
+     * Stops the Android microphone foreground service, once release is proven (problem 32). Only
+     * ever invoked from the `ENDING` effect below — never from a link blip.
+     */
+    private val foregroundService: ForegroundServiceController,
     /**
      * Phase 2a. Built per authenticated session by [buildVoiceController] and torn down with it, so
      * there is exactly one per two-person session and none at all before the trust gate has passed
@@ -237,10 +258,12 @@ class SessionCoordinator(
      * A no-op, returning immediately, when there is no authenticated session — `voice` is null before
      * the trust gate has passed and after a deliberate `BYE`/session end, both of which are already
      * safe to call this from.
+     *
+     * This phase's final hardening pass (Issue 2): the result is [StopReleaseResult], never
+     * discarded — a caller must not stop the foreground service on [StopReleaseResult.TimedOut], the
+     * one outcome that does **not** prove capture was released.
      */
-    suspend fun endIntercomAndAwaitRelease() {
-        voice?.stopAndAwaitRelease()
-    }
+    suspend fun endIntercomAndAwaitRelease(): StopReleaseResult = voice?.stopAndAwaitRelease() ?: StopReleaseResult.AlreadyReleased
 
     fun setMicrophoneMuted(muted: Boolean) {
         voice?.setMicrophoneMuted(muted)
@@ -376,8 +399,13 @@ class SessionCoordinator(
      * matters for pairing: the trusted-peer record is written before the session is allowed to
      * leave `PAIRING`, so there is no instant in which the app is past the trust gate with nothing
      * persisted behind it.
+     *
+     * `internal` rather than `private`: the seam this module's `ENDING`-effect test drives directly
+     * (problem 32) rather than standing up a real `NsdManager`/TLS control connection just to reach
+     * it — see `SessionCoordinatorEndingEffectTest` for why, and CLAUDE.md rule 8 for why this class,
+     * not a test double, remains the one thing that decides what a control event means.
      */
-    private fun handleControlEvent(event: ControlEvent) {
+    internal fun handleControlEvent(event: ControlEvent) {
         applySideEffects(event)
         SessionGate.sessionEventFor(event, _state.value.status)?.let { applyEvent(it) }
         // Only after the FSM has been moved: `beginReconnect` requires RECONNECTING, which is
@@ -420,8 +448,16 @@ class SessionCoordinator(
             is ControlEvent.LinkLost -> {
                 // PROTOCOL §7.8: media goes, the capture device stays (ARCHITECTURE §6.3/§6.4), and
                 // nothing is retried here — §10's control ladder is the app's only reconnect loop.
+                //
+                // A BYE's own release is **not** started here (this phase's final hardening pass,
+                // problem 32): `handleControlEvent` applies the FSM transition this same event
+                // implies right after this method returns, and BYE always drives CONNECTED/
+                // RIDE_ACTIVE/RECONNECTING to ENDING (SessionFsm), whose own effect
+                // (`ReleaseAudioAndStopForegroundService`, below) is the **one** owner of the release
+                // -> foreground-service-stop -> teardown order. A second, eager, fire-and-forget
+                // release here raced that ordering and could tell the platform capture was safe to
+                // reclaim before it actually was.
                 voice?.onControlLinkLost()
-                if (event.reason == ControlLinkLossReason.BYE) releaseVoice()
             }
             ControlEvent.DuplicateConnectionClosed,
             ControlEvent.ReconnectBudgetExhausted,
@@ -467,8 +503,13 @@ class SessionCoordinator(
     }
 
     /**
-     * ARCHITECTURE §3 rule 3: only a deliberate end releases the audio session. Called on `BYE` and
-     * from the `ENDING` effect, never on a link blip.
+     * ARCHITECTURE §3 rule 3: only a deliberate end releases the audio session. The **only** caller
+     * left is [cancelDiscovery]'s defensive path through [teardownSession] — `voice` is always
+     * already null by the time that runs in every path this app actually exercises (a session ends
+     * either from `IDLE`/`DISCOVERING`, before `attachVoice` ever ran, or from `ENDING`, whose own
+     * effect uses [releaseVoiceAndAwait] below) — so this is fire-and-forget on purpose: it exists
+     * only so `teardownSession` can never be blocked on a `voice` that should not exist in its
+     * caller's paths, not as a second deliberate-release owner.
      */
     private fun releaseVoice() {
         val controller = voice ?: return
@@ -479,6 +520,29 @@ class SessionCoordinator(
         voiceDiagnosticsJob = null
         scope.launch { controller.shutdown() }
         _voiceDiagnostics.value = VoiceDiagnostics()
+    }
+
+    /**
+     * The **one** deliberate-ENDING release path (this phase's final hardening pass, problem 32):
+     * awaits capture release before returning, so [runEffect]'s `ENDING` handling can prove release
+     * happened before it ever asks the foreground service to stop.
+     *
+     * [VoiceController.stopAndAwaitRelease] is itself bounded (Issue 2) — a timeout here is
+     * surfaced to the caller rather than silently treated as success, and [VoiceController.shutdown]
+     * still runs afterward regardless of the result, because this controller is being torn down
+     * either way and its tasks must not be leaked.
+     */
+    private suspend fun releaseVoiceAndAwait(): StopReleaseResult {
+        val controller = voice ?: return StopReleaseResult.AlreadyReleased
+        val result = controller.stopAndAwaitRelease()
+        voice = null
+        controlSessionManager.voice.sink = null
+        controlSessionManager.audioState.sink = null
+        voiceDiagnosticsJob?.cancel()
+        voiceDiagnosticsJob = null
+        controller.shutdown()
+        _voiceDiagnostics.value = VoiceDiagnostics()
+        return result
     }
 
     /**
@@ -512,8 +576,13 @@ class SessionCoordinator(
         controlSessionManager.beginReconnect(localIdentity, host, port)
     }
 
-    /** @return true if the event produced a real transition, false if it was rejected or ignored. */
-    private fun applyEvent(event: SessionEvent): Boolean {
+    /**
+     * `internal` for the same reason as [handleControlEvent] — the test-seam an `ENDING`-effect test
+     * uses to walk this FSM to `CONNECTED` without a real discovery/control session (problem 32).
+     *
+     * @return true if the event produced a real transition, false if it was rejected or ignored.
+     */
+    internal fun applyEvent(event: SessionEvent): Boolean {
         val current = _state.value
         return when (val result = SessionFsm.transition(current, event)) {
             is FsmResult.Transitioned -> {
@@ -537,9 +606,26 @@ class SessionCoordinator(
             is Effect.LogTransition ->
                 logger.info("SessionCoordinator", "${effect.from.status} -> ${effect.to.status} (${effect.trigger})")
             is Effect.ReleaseAudioAndStopForegroundService -> {
+                // This phase's final hardening pass, problem 32: this effect's name promised a
+                // foreground-service stop it never actually performed — `releaseVoice()` alone is
+                // fire-and-forget, and nothing here ever called `RideForegroundService.stop`. Fixed
+                // by making this the **one** owner of the ENDING order (ARCHITECTURE §6.4): release
+                // is awaited to a proven result first; the foreground service is stopped only when
+                // that result is not a timeout; and session teardown (control/discovery) always runs
+                // last, regardless, because the control session and discovery are being torn down
+                // either way.
                 logger.info("SessionCoordinator", "release audio + stop foreground service")
-                releaseVoice()
-                teardownSession()
+                scope.launch {
+                    when (val result = releaseVoiceAndAwait()) {
+                        StopReleaseResult.Released, StopReleaseResult.AlreadyReleased -> foregroundService.stop()
+                        StopReleaseResult.TimedOut ->
+                            logger.warn(
+                                "SessionCoordinator",
+                                "audio release timed out on ENDING; leaving the foreground service running",
+                            )
+                    }
+                    teardownSession()
+                }
             }
         }
     }

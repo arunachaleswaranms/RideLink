@@ -19,6 +19,9 @@ final class AudioSessionLifecycleTests: XCTestCase {
     /// tested separately and is failure protection only.
     func testOpeningPublishesTransitioningAndThePlatformsConfirmationPublishesStable() {
         var state = AudioSessionState()
+        // `.openRequested` begins the transition; `.opened` (the platform call it precedes actually
+        // succeeding) only confirms the session — this phase's final hardening pass, Issue 1.
+        state = AudioSessionLifecycle.reduce(state: state, event: .openRequested(generation: 0, atMonoUs: 1_000_000)).state
         let opened = AudioSessionLifecycle.reduce(state: state, event: .opened(generation: 0, atMonoUs: 1_000_000))
         state = opened.state
         XCTAssertTrue(state.open)
@@ -58,14 +61,90 @@ final class AudioSessionLifecycleTests: XCTestCase {
         XCTAssertEqual(3_000, transition.lastDurationUs, "so the whole transition is measured, not its tail")
     }
 
+    // MARK: - openRequested / closeRequested / openAborted (this phase's final hardening pass, Issue 1)
+
+    /// The whole point of `.openRequested`: a transition begun by it is already live when a settling
+    /// `.routeChanged` arrives, so the confirmation is not silently dropped by
+    /// `RouteTransitionTracker.settle`'s own guard — the exact failure mode a platform call able to
+    /// confirm synchronously (or very shortly after returning) produced before this event existed.
+    func testARouteChangeSettlingBetweenOpenRequestedAndOpenedIsNotLost() {
+        var state = AudioSessionState()
+        let requested = AudioSessionLifecycle.reduce(state: state, event: .openRequested(generation: 0, atMonoUs: 1_000))
+        state = requested.state
+        XCTAssertTrue(state.transition.transitioning, "the transition must already be live")
+        XCTAssertFalse(state.open, "openRequested alone must not claim the session")
+
+        // The platform's confirmation arrives before `.opened` ever runs.
+        let settled = AudioSessionLifecycle.reduce(
+            state: state,
+            event: .routeChanged(generation: 0, reason: .categoryChange, atMonoUs: 2_000, settles: true)
+        )
+        state = settled.state
+        XCTAssertFalse(state.transition.transitioning, "the confirmation must not be silently dropped")
+        XCTAssertEqual(1_000, state.transition.lastDurationUs)
+
+        // `.opened` still runs afterward (the platform call itself succeeded) and must not resurrect a
+        // transition that has already settled.
+        let opened = AudioSessionLifecycle.reduce(state: state, event: .opened(generation: 0, atMonoUs: 2_500))
+        XCTAssertTrue(opened.state.open)
+        XCTAssertFalse(opened.state.transition.transitioning, "opened must not restart an already-settled transition")
+    }
+
+    func testOpenRequestedAndOpenedTogetherBeginTheSameTransitionOnceNotTwice() {
+        var state = AudioSessionState()
+        state = AudioSessionLifecycle.reduce(state: state, event: .openRequested(generation: 0, atMonoUs: 1_000)).state
+        let opened = AudioSessionLifecycle.reduce(state: state, event: .opened(generation: 0, atMonoUs: 9_000))
+        XCTAssertEqual(1_000, opened.state.transition.startedAtMonoUs, "the first instant is the one that counts")
+    }
+
+    /// The platform call `.openRequested` began refused before it could complete. The transition
+    /// settles right away — never left latched for the failure-protection timeout to notice — and the
+    /// session was never actually handed to the platform.
+    func testOpenAbortedSettlesTheTransitionImmediatelyAndLeavesTheSessionClosed() {
+        var state = AudioSessionState()
+        state = AudioSessionLifecycle.reduce(state: state, event: .openRequested(generation: 0, atMonoUs: 1_000)).state
+        let aborted = AudioSessionLifecycle.reduce(
+            state: state,
+            event: .openAborted(generation: 0, atMonoUs: 1_500, failure: .routeSelectionFailed)
+        )
+        XCTAssertFalse(aborted.state.open, "the platform never actually took the session")
+        XCTAssertFalse(aborted.state.transition.transitioning, "settled immediately, not left for the timeout")
+        XCTAssertEqual(.routeSelectionFailed, aborted.state.lastFailure)
+        XCTAssertEqual(0, aborted.state.transition.timedOutCount, "an abort is not a timeout")
+        XCTAssertTrue(aborted.actions.contains(.reportFailure(.routeSelectionFailed)))
+        XCTAssertTrue(aborted.actions.contains(.publishSnapshot(routeState: .stable)))
+    }
+
+    /// Mirrors the open-side proof for the closing direction.
+    func testCloseRequestedBeginsATransitionWithoutYetClaimingTheSessionClosed() {
+        let state = AudioSessionState(open: true)
+        let outcome = AudioSessionLifecycle.reduce(state: state, event: .closeRequested(generation: 0, atMonoUs: 500))
+        XCTAssertTrue(outcome.state.transition.transitioning)
+        XCTAssertTrue(outcome.state.open, "open stays true until closed actually confirms it")
+    }
+
+    func testARouteChangeSettlingBetweenCloseRequestedAndClosedIsNotLost() {
+        var state = AudioSessionState(open: true)
+        state = AudioSessionLifecycle.reduce(state: state, event: .closeRequested(generation: 0, atMonoUs: 1_000)).state
+        let settled = AudioSessionLifecycle.reduce(
+            state: state,
+            event: .routeChanged(generation: 0, reason: .categoryChange, atMonoUs: 1_800, settles: true)
+        )
+        XCTAssertFalse(settled.state.transition.transitioning, "the restoring confirmation must not be dropped")
+        let closed = AudioSessionLifecycle.reduce(state: settled.state, event: .closed(generation: 0, atMonoUs: 1_900))
+        XCTAssertFalse(closed.state.open)
+        XCTAssertFalse(closed.state.transition.transitioning, "closed must not restart an already-settled transition")
+    }
+
     /// **A timeout is failure protection, never the definition of success** (this phase's brief §15). It
     /// settles a transition the platform never confirmed, and it is counted so the diagnostics can say
     /// the number came from a timer rather than from the platform.
     func testATimeoutSettlesATransitionThePlatformNeverConfirmedAndSaysSo() {
         var state = AudioSessionLifecycle.reduce(
             state: AudioSessionState(),
-            event: .opened(generation: 0, atMonoUs: 0)
+            event: .openRequested(generation: 0, atMonoUs: 0)
         ).state
+        state = AudioSessionLifecycle.reduce(state: state, event: .opened(generation: 0, atMonoUs: 0)).state
         let early = AudioSessionLifecycle.reduce(
             state: state,
             event: .transitionTimeoutCheck(
@@ -194,6 +273,9 @@ final class AudioSessionLifecycleTests: XCTestCase {
             .mediaServicesReset(generation: 0, atMonoUs: 3_000),
             .failed(generation: 0, failure: .captureStartFailed),
             .transitionTimeoutCheck(generation: 0, atMonoUs: 99_000_000, timeoutUs: RouteTransitionTracker.defaultTimeoutUs),
+            .openRequested(generation: 0, atMonoUs: 3_000),
+            .closeRequested(generation: 0, atMonoUs: 3_000),
+            .openAborted(generation: 0, atMonoUs: 3_000, failure: .routeSelectionFailed),
         ]
         for event in staleEvents {
             let outcome = AudioSessionLifecycle.reduce(state: afterReset, event: event)
@@ -241,7 +323,10 @@ final class AudioSessionLifecycleTests: XCTestCase {
     }
 
     func testClosingPublishesATransitionAndClearsTheInterruptionState() {
-        let state = AudioSessionState(open: true, interrupted: true, awaitingResume: true)
+        var state = AudioSessionState(open: true, interrupted: true, awaitingResume: true)
+        // `.closeRequested` begins the transition; `.closed` only confirms it (this phase's final
+        // hardening pass, Issue 1).
+        state = AudioSessionLifecycle.reduce(state: state, event: .closeRequested(generation: 0, atMonoUs: 10)).state
         let outcome = AudioSessionLifecycle.reduce(state: state, event: .closed(generation: 0, atMonoUs: 10))
         XCTAssertFalse(outcome.state.open)
         XCTAssertFalse(outcome.state.interrupted)

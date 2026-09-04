@@ -46,7 +46,8 @@ class VoiceControllerStopAwaitTest {
 
             val stopJob =
                 async {
-                    voice.stopAndAwaitRelease()
+                    val result = voice.stopAndAwaitRelease()
+                    assertEquals(StopReleaseResult.Released, result, "release completed, so the result must say so")
                     // Stands in for `RideForegroundService.stop(context)` — the step ARCHITECTURE §6.4
                     // says must never run before capture is actually released.
                     fgsStopped = true
@@ -71,7 +72,8 @@ class VoiceControllerStopAwaitTest {
     @Test
     fun `stopAndAwaitRelease is an immediate no-op when capture was never opened`() =
         withIntercom { voice, fakes ->
-            withTimeout(AWAIT_TIMEOUT_MS) { voice.stopAndAwaitRelease() }
+            val result = withTimeout(AWAIT_TIMEOUT_MS) { voice.stopAndAwaitRelease() }
+            assertEquals(StopReleaseResult.AlreadyReleased, result, "there was nothing to release")
             assertEquals(0, fakes.audio.openCaptureCount)
             assertEquals(0, fakes.audio.closeCaptureCount)
         }
@@ -85,9 +87,64 @@ class VoiceControllerStopAwaitTest {
             fakes.await("capture open") { fakes.audio.isOpen }
 
             val callers = List(CONCURRENT_STOP_CALLERS) { async { voice.stopAndAwaitRelease() } }
-            withTimeout(AWAIT_TIMEOUT_MS) { callers.forEach { it.await() } }
+            val results = withTimeout(AWAIT_TIMEOUT_MS) { callers.map { it.await() } }
 
             assertEquals(1, fakes.audio.closeCaptureCount, "capture is released exactly once, however many callers awaited it")
+            // Each caller's own fast-path check (`audioSession.isOpen`) can legitimately land before or
+            // after the single real close() actually finishes, so a caller may correctly see either
+            // `Released` (it registered before close() settled) or `AlreadyReleased` (close() had
+            // already finished by the time it checked) — both are proof of a genuine release. What must
+            // never happen is a timeout, which would mean release was never proven at all.
+            assertTrue(
+                results.all { it == StopReleaseResult.Released || it == StopReleaseResult.AlreadyReleased },
+                "every concurrent caller must see a real result, never a timeout: $results",
+            )
+        }
+
+    /**
+     * This phase's final hardening pass (Issue 2): a stall in `audioSession.close()` must surface as
+     * [StopReleaseResult.TimedOut], **never** [StopReleaseResult.Released] — a caller that stopped the
+     * Android foreground service on an unproven release would be doing exactly what problem 32's
+     * fix exists to prevent. The waiter must also not leak: [VoiceController.pendingStopCompletionCount]
+     * returns to zero once the call has timed out (Issue 10), and a *later* real completion of the
+     * stalled `close()` must not corrupt a subsequent, independent stop call.
+     */
+    @Test
+    fun `stopAndAwaitRelease times out rather than reporting success, and does not leak the waiter`() =
+        withIntercom(stopAwaitTimeoutMs = SHORT_TIMEOUT_MS) { voice, fakes ->
+            voice.start()
+            fakes.awaitEngineCall("createOffer")
+            fakes.await("capture open") { fakes.audio.isOpen }
+
+            val neverCompletes = CompletableDeferred<Unit>()
+            fakes.audio.closeGate = neverCompletes
+
+            val result = withTimeout(AWAIT_TIMEOUT_MS) { voice.stopAndAwaitRelease() }
+            assertEquals(StopReleaseResult.TimedOut, result, "a stalled close() must never be reported as Released")
+            assertEquals(0, voice.pendingStopCompletionCount, "the timed-out waiter must not leak")
+
+            // A later, independent stop call must still resolve correctly and must not be corrupted by
+            // the still-stalled first attempt.
+            neverCompletes.complete(Unit)
+            val second = withTimeout(AWAIT_TIMEOUT_MS) { voice.stopAndAwaitRelease() }
+            assertEquals(StopReleaseResult.AlreadyReleased, second, "the earlier close() has now actually finished")
+            assertEquals(0, voice.pendingStopCompletionCount)
+        }
+
+    /** 100 timed-out waiters in a row must not leave anything behind (Issue 10's explicit stress case). */
+    @Test
+    fun `repeated timeouts never accumulate waiters`() =
+        withIntercom(stopAwaitTimeoutMs = SHORT_TIMEOUT_MS) { voice, fakes ->
+            voice.start()
+            fakes.awaitEngineCall("createOffer")
+            fakes.await("capture open") { fakes.audio.isOpen }
+            fakes.audio.closeGate = CompletableDeferred() // never completes
+
+            repeat(REPEATED_TIMEOUT_COUNT) {
+                val result = withTimeout(AWAIT_TIMEOUT_MS) { voice.stopAndAwaitRelease() }
+                assertEquals(StopReleaseResult.TimedOut, result)
+            }
+            assertEquals(0, voice.pendingStopCompletionCount, "100 timed-out waiters must return the count to zero")
         }
 
     /** Shutdown during an already-stopped voice session is safe — no hang, no exception. */
@@ -144,35 +201,40 @@ class VoiceControllerStopAwaitTest {
         }
     }
 
-    private fun withIntercom(body: suspend CoroutineScope.(VoiceController, Fakes) -> Unit) =
-        runBlocking {
-            val scope = CoroutineScope(SupervisorJob())
-            try {
-                val engine = FakeVoiceEngine()
-                val audio = FakeVoiceAudioSession()
-                val transport = RecordingVoiceTransport()
-                val controller =
-                    VoiceController(
-                        scope = scope,
-                        engine = engine,
-                        audioSession = audio,
-                        transport = transport,
-                        isLocalLeader = true,
-                        localTrackId = "ridelink-voice",
-                        newVoiceSessionId = SequencedVoiceSessionIds(GEN_1, GEN_2)::next,
-                    )
-                controller.selectPolicy(IntercomPolicy.MODE_A)
-                body(controller, Fakes(engine, audio))
-            } finally {
-                scope.cancel()
-            }
+    private fun withIntercom(
+        stopAwaitTimeoutMs: Long = AWAIT_TIMEOUT_MS,
+        body: suspend CoroutineScope.(VoiceController, Fakes) -> Unit,
+    ) = runBlocking {
+        val scope = CoroutineScope(SupervisorJob())
+        try {
+            val engine = FakeVoiceEngine()
+            val audio = FakeVoiceAudioSession()
+            val transport = RecordingVoiceTransport()
+            val controller =
+                VoiceController(
+                    scope = scope,
+                    engine = engine,
+                    audioSession = audio,
+                    transport = transport,
+                    isLocalLeader = true,
+                    localTrackId = "ridelink-voice",
+                    newVoiceSessionId = SequencedVoiceSessionIds(GEN_1, GEN_2)::next,
+                )
+            controller.stopAwaitTimeoutMs = stopAwaitTimeoutMs
+            controller.selectPolicy(IntercomPolicy.MODE_A)
+            body(controller, Fakes(engine, audio))
+        } finally {
+            scope.cancel()
         }
+    }
 
     private companion object {
         const val AWAIT_TIMEOUT_MS = 5_000L
+        const val SHORT_TIMEOUT_MS = 20L
         const val POLL_MS = 2L
         const val SETTLE_TURNS = 25
         const val CONCURRENT_STOP_CALLERS = 5
+        const val REPEATED_TIMEOUT_COUNT = 100
         const val GEN_1 = "11111111111111111111111111111111"
         const val GEN_2 = "22222222222222222222222222222222"
     }

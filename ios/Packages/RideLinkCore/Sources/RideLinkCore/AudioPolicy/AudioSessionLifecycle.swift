@@ -153,10 +153,32 @@ public struct AudioSessionState: Sendable, Equatable {
 
 /// What the platform audio layer is told about. Every event carries its generation.
 public enum AudioSessionEvent: Sendable, Equatable {
-    /// The duplex configuration was applied and capture is open. Begins a route transition.
+    /// The duplex configuration was applied and capture is open. Confirms the session, but — since
+    /// this phase's final hardening pass — does **not** itself begin the route transition; see
+    /// `.openRequested`.
     case opened(generation: Int, atMonoUs: Int64)
-    /// The session was returned to the music-only configuration. Begins a route transition.
+    /// Mirrors `.opened` for the closing direction; see `.closeRequested`.
     case closed(generation: Int, atMonoUs: Int64)
+    /// The platform is *about to be asked* to open the duplex session. Begins the route transition
+    /// on its own, before `.opened` ever runs.
+    ///
+    /// This phase's final hardening pass, Issue 1: the platform call `.opened` used to precede
+    /// (`AVAudioSession.setActive` / `AudioManager.setCommunicationDevice`) can itself produce the
+    /// confirming callback synchronously, or very shortly after returning. Without a transition
+    /// already begun for that callback to settle, `RouteTransitionTracker.settle` silently drops
+    /// the confirmation — it only ever acts when `RouteTransitionState.transitioning` is already
+    /// true. `.opened` itself no longer begins a transition at all (only this event does), which is
+    /// what lets the two be applied safely in sequence whether the confirming callback lands before
+    /// or after `.opened` runs: a settle that already happened between the two is never resurrected
+    /// into a fresh, spurious `.transitioning` that nothing would ever confirm.
+    case openRequested(generation: Int, atMonoUs: Int64)
+    /// Mirrors `.openRequested` for the closing direction, against the same race in `.closed`.
+    case closeRequested(generation: Int, atMonoUs: Int64)
+    /// The platform call `.openRequested` began failed before it could complete — the session was
+    /// never actually handed to the platform. Settles the transition immediately, rather than
+    /// leaving it to `.transitionTimeoutCheck` to notice five seconds later, and leaves
+    /// `AudioSessionState.open` false.
+    case openAborted(generation: Int, atMonoUs: Int64, failure: VoiceFailure)
     /// The platform reported a route change. `settles` is true when this callback is the platform
     /// confirming the change **we** asked for, so the transition is over; false for a change originating
     /// outside the app — a device being unplugged mid-ride — which starts a transition of its own.
@@ -173,6 +195,9 @@ public enum AudioSessionEvent: Sendable, Equatable {
         switch self {
         case .opened(let generation, _),
              .closed(let generation, _),
+             .openRequested(let generation, _),
+             .closeRequested(let generation, _),
+             .openAborted(let generation, _, _),
              .routeChanged(let generation, _, _, _),
              .interruptionBegan(let generation, _),
              .interruptionEnded(let generation, _, _),
@@ -226,10 +251,14 @@ public enum AudioSessionLifecycle {
             return AudioSessionOutcome(state: state, actions: [])
         }
         switch event {
-        case .opened(_, let atMonoUs):
-            return opened(state, nowMonoUs: atMonoUs)
-        case .closed(_, let atMonoUs):
-            return closed(state, nowMonoUs: atMonoUs)
+        case .opened:
+            return opened(state)
+        case .closed:
+            return closed(state)
+        case .openRequested(_, let atMonoUs), .closeRequested(_, let atMonoUs):
+            return beginTransition(state, nowMonoUs: atMonoUs)
+        case .openAborted(_, let atMonoUs, let failure):
+            return openAborted(state, nowMonoUs: atMonoUs, failure: failure)
         case .routeChanged(_, _, let atMonoUs, let settles):
             return routeChanged(state, nowMonoUs: atMonoUs, settles: settles)
         case .interruptionBegan:
@@ -250,24 +279,54 @@ public enum AudioSessionLifecycle {
         }
     }
 
-    private static func opened(_ state: AudioSessionState, nowMonoUs: Int64) -> AudioSessionOutcome {
-        // ARCHITECTURE §6.2: switching configuration is an audible route change, so it is announced as
-        // `transitioning` and superseded by `stable` when the platform confirms it — never published as a
-        // fait accompli, and never settled by a sleep.
+    /// Confirms the platform actually took the session; **does not** begin the transition itself any
+    /// more. That is `.openRequested`'s job, applied *before* the platform call that produces this
+    /// event (this phase's final hardening pass, Issue 1) — beginning it again here as well would
+    /// resurrect a transition a synchronous confirming callback landing between the two events may
+    /// already have settled, publishing a spurious `.transitioning` that nothing will ever confirm,
+    /// stuck until the failure-protection timeout. `routeState(of:)` reports whatever the transition
+    /// actually is right now, whether still transitioning (the ordinary case) or already settled
+    /// (the race this event exists to survive).
+    private static func opened(_ state: AudioSessionState) -> AudioSessionOutcome {
         var next = state
         next.open = true
-        next.transition = RouteTransitionTracker.begin(state.transition, nowMonoUs: nowMonoUs)
         next.lastFailure = nil
-        return AudioSessionOutcome(state: next, actions: [.publishSnapshot(routeState: .transitioning)])
+        return AudioSessionOutcome(state: next, actions: [.publishSnapshot(routeState: routeState(of: state))])
     }
 
-    private static func closed(_ state: AudioSessionState, nowMonoUs: Int64) -> AudioSessionOutcome {
+    /// Mirrors `opened(_:)` for the closing direction — `.closeRequested` begins it.
+    private static func closed(_ state: AudioSessionState) -> AudioSessionOutcome {
         var next = state
         next.open = false
         next.interrupted = false
         next.awaitingResume = false
+        return AudioSessionOutcome(state: next, actions: [.publishSnapshot(routeState: routeState(of: state))])
+    }
+
+    /// `.openRequested` and `.closeRequested` both do exactly this and nothing else: begin the
+    /// transition, before the platform call either request precedes has a chance to confirm it out
+    /// from under a not-yet-begun state (this phase's hardening pass, Issue 1). Neither touches
+    /// `AudioSessionState.open` — that stays `.opened`'s and `.closed`'s job, applied right after
+    /// the platform call actually runs.
+    private static func beginTransition(_ state: AudioSessionState, nowMonoUs: Int64) -> AudioSessionOutcome {
+        var next = state
         next.transition = RouteTransitionTracker.begin(state.transition, nowMonoUs: nowMonoUs)
         return AudioSessionOutcome(state: next, actions: [.publishSnapshot(routeState: .transitioning)])
+    }
+
+    private static func openAborted(
+        _ state: AudioSessionState,
+        nowMonoUs: Int64,
+        failure: VoiceFailure
+    ) -> AudioSessionOutcome {
+        var next = state
+        next.open = false
+        next.transition = RouteTransitionTracker.settle(state.transition, nowMonoUs: nowMonoUs)
+        next.lastFailure = failure
+        return AudioSessionOutcome(
+            state: next,
+            actions: [.reportFailure(failure), .publishSnapshot(routeState: .stable)]
+        )
     }
 
     private static func routeChanged(

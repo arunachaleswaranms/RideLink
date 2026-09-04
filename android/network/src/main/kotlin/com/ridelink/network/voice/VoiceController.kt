@@ -109,6 +109,28 @@ data class VoiceDiagnostics(
     val unexpectedCandidateTypeSeen: Boolean = false,
 )
 
+/**
+ * What [VoiceController.stopAndAwaitRelease] actually settled as, so a caller can never mistake a
+ * failure-protection timeout for proof that capture was released (this phase's final hardening
+ * pass, Issue 2).
+ */
+sealed interface StopReleaseResult {
+    /** `StopRequested` ran to completion and there was a capture path to release; it is released now. */
+    data object Released : StopReleaseResult
+
+    /** There was nothing to release — voice was never started, or it was already released. */
+    data object AlreadyReleased : StopReleaseResult
+
+    /**
+     * [VoiceController.STOP_AWAIT_TIMEOUT_MS] elapsed before `StopRequested` finished running.
+     * **Not** a release: `engine.release()`/`audioSession.close()` may still be in flight, or stuck.
+     * A caller that stops the Android microphone foreground service on this result would be doing
+     * so on unproven release — exactly the orphan-service failure mode this type exists to make
+     * impossible to reach by accident.
+     */
+    data object TimedOut : StopReleaseResult
+}
+
 /** ADR-020: 16 CSPRNG bytes as 32 lowercase hex, fresh per negotiation (PROTOCOL §7.2). */
 object VoiceSessionIdGenerator {
     private const val BYTES = 16
@@ -157,6 +179,14 @@ class VoiceController(
     private val monotonicNowUs: () -> Long = { 0 },
     private val newVoiceSessionId: () -> VoiceSessionId = { VoiceSessionIdGenerator.generate() },
 ) : VoiceSignalSink {
+    /**
+     * [stopAndAwaitRelease]'s failure-protection window. A `var`, not a constructor parameter —
+     * [LongParameterList] is already at this class's detekt threshold — so a test (in this module or
+     * `app`'s `SessionCoordinator` integration test) can set it directly and prove
+     * [StopReleaseResult.TimedOut] deterministically and fast rather than waiting out the real five
+     * seconds. Production code has no reason to touch this; it exists for tests.
+     */
+    var stopAwaitTimeoutMs: Long = STOP_AWAIT_TIMEOUT_MS
     private var state = VoiceNegotiationState(role = VoiceRole.forLeadership(isLocalLeader))
     private val pending = PendingCandidates()
     private val dropCounts = mutableMapOf<VoiceSignalDropReason, Int>()
@@ -217,6 +247,10 @@ class VoiceController(
      */
     private val pendingStopCompletions = mutableListOf<CompletableDeferred<Unit>>()
 
+    /** Testing seam: proves a timed-out [stopAndAwaitRelease] waiter does not leak (Issue 10). */
+    internal val pendingStopCompletionCount: Int
+        get() = synchronized(mailboxLock) { pendingStopCompletions.size }
+
     init {
         engine.setEventSink { event -> offer(engineEventToInput(event)) }
         audioSession.setRouteSink { snapshot -> publishRoute(snapshot) }
@@ -255,15 +289,36 @@ class VoiceController(
      * until capture is truly released (`SessionCoordinator.endIntercomAndAwaitRelease`) use this
      * instead.
      *
-     * Bounded by [STOP_AWAIT_TIMEOUT_MS] as failure protection only — never as the definition of
+     * Bounded by [stopAwaitTimeoutMs] as failure protection only — never as the definition of
      * success. The real completion signal is [pendingStopCompletions], resolved from [apply] the moment
      * `StopRequested` has finished running through the reducer and every action it produced.
+     *
+     * This phase's final hardening pass (Issue 2): the result used to be discarded, so a caller could
+     * not tell a real release from a timeout that merely gave up waiting — and the timed-out waiter was
+     * never removed from [pendingStopCompletions], leaking one entry per stall. [StopReleaseResult]
+     * makes the distinction explicit; a timeout is never [StopReleaseResult.Released], and the waiter
+     * is always removed before this returns.
      */
-    suspend fun stopAndAwaitRelease() {
+    @Suppress("ReturnCount") // one early-out per StopReleaseResult outcome, in the order they resolve
+    suspend fun stopAndAwaitRelease(): StopReleaseResult {
+        if (!audioSession.isOpen) {
+            // Nothing to await. Still queue the stop for idempotency — an outstanding PTT/mute gate
+            // state, or a negotiation to unwind — but there is no capture release to wait on.
+            offer(VoiceInput.StopRequested)
+            return StopReleaseResult.AlreadyReleased
+        }
         val completion = CompletableDeferred<Unit>()
         synchronized(mailboxLock) { pendingStopCompletions.add(completion) }
         offer(VoiceInput.StopRequested)
-        withTimeoutOrNull(STOP_AWAIT_TIMEOUT_MS) { completion.await() }
+        val settled = withTimeoutOrNull(stopAwaitTimeoutMs) { completion.await() }
+        if (settled == null) {
+            // Failure protection, never success (this phase's brief §15's principle, applied to a
+            // completion signal rather than a route transition): remove the waiter so it cannot leak,
+            // and tell the caller the truth — release is not proven (Issue 2/9/10).
+            synchronized(mailboxLock) { pendingStopCompletions.remove(completion) }
+            return StopReleaseResult.TimedOut
+        }
+        return StopReleaseResult.Released
     }
 
     /**

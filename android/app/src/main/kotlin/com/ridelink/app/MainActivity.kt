@@ -13,6 +13,7 @@ import com.ridelink.app.session.SessionCoordinator
 import com.ridelink.app.ui.MainScreen
 import com.ridelink.app.ui.SecureTransportUnavailableScreen
 import com.ridelink.core.audiopolicy.RideStartDecision
+import com.ridelink.network.voice.StopReleaseResult
 import kotlinx.coroutines.launch
 
 /**
@@ -151,11 +152,21 @@ class MainActivity : ComponentActivity() {
      * service while it still held the microphone. [SessionCoordinator.endIntercomAndAwaitRelease]
      * suspends until release has actually happened (or until there was nothing to release), so the
      * service is stopped only once that is true.
+     *
+     * This phase's **final** hardening pass (Issue 2): the awaited result is now explicit
+     * ([com.ridelink.network.voice.StopReleaseResult]), and a timeout is never treated as release —
+     * leaving the service running on a stalled release is the safer failure than telling the
+     * platform a microphone still open is safe to reclaim. The diagnostics card already shows the
+     * stuck route transition; nothing here retries automatically, since a silent retry from this
+     * path is exactly what ARCHITECTURE §6.4 forbids for a start and this phase's brief §9
+     * (`stopAndAwaitRelease` is failure protection, never a success it invents) forbids for an end.
      */
     private fun stopIntercom(coordinator: SessionCoordinator) {
         lifecycleScope.launch {
-            coordinator.endIntercomAndAwaitRelease()
-            RideForegroundService.stop(this@MainActivity)
+            when (coordinator.endIntercomAndAwaitRelease()) {
+                StopReleaseResult.Released, StopReleaseResult.AlreadyReleased -> RideForegroundService.stop(this@MainActivity)
+                StopReleaseResult.TimedOut -> Unit
+            }
         }
     }
 

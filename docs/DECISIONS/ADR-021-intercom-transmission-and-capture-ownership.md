@@ -502,3 +502,158 @@ unrelated to any of the eight findings above.
 - Full suites: Android `test ktlintCheck detekt lint assembleDebug assembleRelease` and iOS
   `RideLinkCore`/`RideLinkPlatform` `swift test` plus `xcodebuild` Debug and Release simulator builds all
   green — see `docs/STATUS.md` §2n and §3 for exact counts.
+
+## Amendment A2 — 4 September 2026 — the five gaps Amendment A1 named but did not fix, plus problem 32
+
+**Status of the ADR: still Accepted.** A second independent review, run specifically over what Amendment
+A1's own "What did not change" section flagged as out of scope, named five candidate issues plus
+`docs/STATUS.md` §4 problem 32. All five were confirmed against the actual code before anything changed;
+one (Finding 5 below) proved to be a real ordering hazard once traced through, not a false alarm, and is
+fixed rather than merely documented. As with A1: every fix stays in the platform driver layer, a test
+seam, or the FSM-effect wiring — no pure reducer's decision table, no wire shape, no security property
+moved.
+
+### Finding 1 — the closing (and opening) route transition began after the platform call, not before
+
+`AndroidVoiceAudioSession.close()` called `releasePlatformSession()` — which can synchronously provoke
+`AudioManager.OnCommunicationDeviceChangedListener` — and only applied `AudioSessionEvent.Closed`
+afterward; `open()`'s `apply(Opened(...))` ran only after `selectCommunicationDevice()` had already
+returned. `RouteTransitionTracker.settle` is a no-op unless `RouteTransitionState.transitioning` is
+already true, so a confirmation arriving before `Opened`/`Closed` ever ran was silently discarded — the
+transition `Opened`/`Closed` began immediately afterward then waited for a confirmation that had already
+come and gone, settling only via Finding E's five-second timeout. `AudioSessionLifecycle` gained two new
+events, mirrored on both platforms: `OpenRequested`/`CloseRequested` (begin the transition only — they do
+not touch `AudioSessionState.open`) and `OpenAborted` (the platform call `OpenRequested` preceded failed
+before completing; settles the transition immediately and leaves `open` false, rather than leaving it
+latched for the timeout). Both platform classes now apply `OpenRequested`/`CloseRequested` **before** the
+platform call that can confirm it, and `Opened`/`Closed` **after** — and `Opened`/`Closed` no longer call
+`RouteTransitionTracker.begin` themselves, so a confirmation that already settled the transition in
+between cannot be resurrected into a fresh, spurious `TRANSITIONING`. `AudioSessionLifecycleTest[s]` proves
+both directions: a settling `RouteChanged` landing between `OpenRequested`/`Opened` (or
+`CloseRequested`/`Closed`) is observed, not dropped, and the later confirmation event does not re-begin an
+already-settled transition.
+
+### Finding 2 — `stopAndAwaitRelease()`'s timeout was indistinguishable from success
+
+`VoiceController.stopAndAwaitRelease()` (Amendment A1, Finding F) called
+`withTimeoutOrNull(STOP_AWAIT_TIMEOUT_MS) { completion.await() }` and discarded the result — the function
+returned `Unit` whether `StopRequested` actually finished or the call merely gave up waiting for it, and a
+timed-out `CompletableDeferred` was never removed from `pendingStopCompletions`, leaking one entry per
+stall. A caller (`SessionCoordinator`, `MainActivity`, `AppContainer`) could not tell a proven release from
+an unproven one, which is the exact failure mode Finding F's fix existed to prevent, reached one layer
+later. `stopAndAwaitRelease()` now returns `StopReleaseResult` — `Released`, `AlreadyReleased` (nothing was
+open; still queues the stop for idempotency), or `TimedOut` (the waiter is removed before returning; never
+treated as success) — and every caller inspects it: the Android microphone foreground service is stopped
+only on `Released`/`AlreadyReleased`, never on `TimedOut`. `stopAwaitTimeoutMs` moved from the five-second
+companion constant alone to also being a settable property, so a test can prove `TimedOut` in milliseconds
+rather than waiting out the real window. `VoiceControllerStopAwaitTest` gained coverage for: a stalled
+`close()` reported as `TimedOut` rather than `Released`; the waiter count returning to zero after a
+timeout, including 100 in a row; a later real completion of a stalled `close()` not corrupting an
+independent, subsequent stop call; and several concurrent callers each seeing a genuine
+`Released`/`AlreadyReleased` result, never a timeout.
+
+### Finding 3 — problem 32: the `ENDING` effect never actually stopped the foreground service
+
+Confirmed exactly as `docs/STATUS.md` §4 problem 32 and Amendment A1's own "what did not change" section
+described it: `SessionFsm`'s `Effect.ReleaseAudioAndStopForegroundService` promised a foreground-service
+stop; `SessionCoordinator.runEffect` called `releaseVoice()` (fire-and-forget) and `teardownSession()` and
+never called `RideForegroundService.stop`. `MainActivity` remained the only caller in the app. Every
+legitimate ENDING path this app can currently reach other than the user's own End Intercom button — in
+practice, a peer `BYE` — releases capture correctly and then leaves the service orphaned.
+
+Fixed by making `SessionCoordinator` the **one** owner of the ENDING order, via a small seam rather than a
+`Context`: `ForegroundServiceController` (a `fun interface` with one method, `stop()`), a new constructor
+parameter, supplied in production by `AppContainer` as `ForegroundServiceController { RideForegroundService.stop(context) }`.
+`runEffect`'s handling of `ReleaseAudioAndStopForegroundService` now: awaits capture release via a new
+`releaseVoiceAndAwait()` (which calls `VoiceController.stopAndAwaitRelease()`, Finding 2's `StopReleaseResult`,
+before finishing the rest of the teardown); calls `foregroundService.stop()` only on
+`Released`/`AlreadyReleased`, never on `TimedOut`; and always runs `teardownSession()` (control/discovery)
+afterward regardless of the audio result, since the control session is being torn down either way. The
+`applySideEffects` handling of a `BYE`-reasoned `LinkLost` no longer eagerly released voice itself — that
+was a second, uncoordinated release path racing the FSM's own effect; `LinkLost(BYE)` always drives
+`CONNECTED`/`RIDE_ACTIVE`/`RECONNECTING` to `ENDING` in this app (nothing else currently reaches `BYE` from
+a state where voice could be attached), so the `ENDING` effect is now the single place release actually
+happens for that path.
+
+Proving this needed `SessionCoordinator` to be constructible in a JVM test without a real `NsdManager` or
+TLS socket — the reason no `SessionCoordinator`-level test existed before (`docs/STATUS.md` §4 problem
+20's residual limitation). `NsdDiscoveryController`'s two methods were extracted into a `DiscoveryController`
+interface (no behaviour change; `NsdDiscoveryController` remains the only production implementation), and
+`applyEvent`/`handleControlEvent` were widened from `private` to `internal` as an explicit test seam
+(CLAUDE.md rule 8 still holds: `SessionCoordinator` remains the one thing that decides what a control event
+means, including in the test). `SessionCoordinatorEndingEffectTest` (new, `app` module) drives a real
+`SessionCoordinator` — real `SessionFsm`/`SessionGate`, a real `VoiceController` wired to a fake engine/audio
+session/transport, a fake `ForegroundServiceController` — through `StartDiscovery -> PeerSelected ->
+PeerTrusted -> Connected -> LinkLost(BYE)` and proves: capture release completes before the foreground
+service is told to stop; a timed-out release never stops it; a `NETWORK` link loss never releases capture
+or stops the service; a repeated/duplicate `BYE` cannot double-fire the effect; and a `BYE` with voice never
+started still stops the service. This is the first test in the repository to exercise `SessionCoordinator`
+itself rather than only its collaborators.
+
+### Finding 4 — iOS route snapshots reached `VoiceController` through a Task per callback
+
+`VoiceController.attach()`'s `audioSession.setRouteSink` callback (synchronous, non-isolated, so it cannot
+call into the actor directly) wrapped every snapshot in `Task { await self?.publishRoute(snapshot) }` — the
+same `Task`-per-event shape Amendment A1's Finding G fixed for voice diagnostics, and STATUS §2h fixed for
+`ControlEvent`, explicitly left unfixed here at the time. Two tasks created in order are not guaranteed to
+*run* in that order, so a `transitioning` snapshot could be observed after a later `stable` one — read by
+`AUDIO_STATE`'s revision rule and by `IntercomTransmission`'s `Interrupted` input, both of which care about
+order. Replaced with `routeChannel`, an `OrderedEventChannel<AudioRouteSnapshot>` (the same primitive
+`SessionCoordinator.voiceDiagnosticsChannel` already uses) created fresh in `attach()` and torn down in
+`shutdown()` exactly like `SessionCoordinator`'s own channel: cancel the consumer, then finish the channel,
+so a stale sink call from an already-shut-down controller becomes a silent no-op rather than a mutation of
+whatever replaces it. `VoiceControllerRouteOrderingTests` (new) proves 100 snapshots are observed in the
+exact order published (via a monotonic marker, since `publishRoute` also forwards every route through the
+intercom mailbox's `.interrupted` input, whose own consumer republishes diagnostics again once it runs — a
+real, pre-existing, harmless duplication this test accounts for rather than asserting a fragile 1:1 callback
+count) and that a snapshot published after `shutdown()` is never observed. Run 50 consecutive times, 0
+failures.
+
+### Finding 5 — the iOS engine-event Task, reviewed and folded into the ordered path rather than left alone
+
+Amendment A1 named `VoiceController.attach`'s `Task { await self?.noteEngineEvent(event) }` — recording
+`VoiceSetupTimeline` marks and `lastFailure` from each engine callback — as a narrower version of Finding
+G, deliberately not fixed because it appeared to update only "first-write-wins setup marks" and "absolute
+failure metadata." Traced through for this pass: `VoiceSetupTimer.mark` has no generation guard of its own,
+and `VoiceController.start()` resets `setupTimeline` (`VoiceSetupTimer.restart`) directly, synchronously,
+outside the mailbox. A `noteEngineEvent` `Task` from a *superseded* negotiation, still in flight when
+`start()` begins a new one, could therefore record a stale timestamp as the **new** generation's own
+first-write-wins mark — corrupting the V-01 setup-timing measurement (diagnostic only; no negotiation
+decision reads `setupTimeline`, so this was never a correctness or security gap, only a measurement one).
+Fixed rather than left, since the fix is free: `noteEngineEvent` is deleted, and the same marks/failure are
+now derived from the `VoiceInput` `apply()` is about to reduce anyway (`noteFromInput`, called at the top of
+`apply`, before `VoiceNegotiation.reduce` runs) — the same ordered, single-consumer call that already
+applies the corresponding table transition, with no second hop and no `Task` left to race. This mirrors
+`VoiceController.kt`'s `engineEventToInput`, which already computed the equivalent marks synchronously at
+the callback boundary using a lock rather than an actor hop — the two platforms now reach the same
+ordering guarantee by the idiom each language's concurrency model actually allows.
+
+### What did not change
+
+Everything Amendment A1's own "what did not change" list named is still untouched by this pass too:
+`VoiceNegotiation`, `IntercomTransmission`, `RouteTransitionTracker`'s own arithmetic, every shared vector
+file, the pre-authentication `VOICE_*`/`AUDIO_STATE` refusal, the offerer rule, and the transmission gate's
+capture-free action vocabulary. `VoiceController.shutdown()`'s direct (non-mailbox) call to `apply(.stopRequested)`,
+running on whatever coroutine/task called `shutdown()` concurrently with the mailbox consumer's own `apply`
+calls, is a pre-existing latent concern this pass noticed but did not change — it predates this session,
+is not one of the five confirmed findings, and touching it was out of this pass's scope.
+
+### Verification
+
+- `AudioSessionLifecycleTest`/`AudioSessionLifecycleTests` (both platforms) — new cases for
+  `OpenRequested`/`CloseRequested`/`OpenAborted`, including the settling-in-between proof for both
+  directions; the three pre-existing tests that called `Opened`/`Closed` standalone were updated for the
+  now-paired contract. Run 20 (Android) / 50 (iOS) consecutive times, 0 failures.
+- `VoiceControllerStopAwaitTest` (Android) — see Finding 2. Run 20 consecutive times, 0 failures.
+- `SessionCoordinatorEndingEffectTest` (Android, new) — see Finding 3. Run 20 consecutive times, 0
+  failures.
+- `VoiceControllerRouteOrderingTests` (iOS, new) — see Finding 4. Run 50 consecutive times, 0 failures.
+- Full suites: Android `test ktlintCheck detekt lint assembleDebug assembleRelease` and iOS
+  `RideLinkCore`/`RideLinkPlatform` `swift test` plus `xcodebuild` Debug and Release simulator builds all
+  green — see `docs/STATUS.md` §2o and §3 for exact counts.
+- Stress counts below 50 (20, for the three new/changed Android JVM suites) reflect wall-clock time spent
+  on this pass, not a weaker standard of evidence — each is a deterministic, gate-controlled test with no
+  real sleep-based timing, so a single clean run and a flaky one are equally informative; 20 consecutive
+  clean runs is the same kind of proof as 50, just fewer of them. An early stress attempt that ran two
+  Gradle invocations against this project concurrently produced spurious Kotlin-daemon-contention failures
+  unrelated to any of the five findings; re-run in isolation, all four Android suites above are clean.

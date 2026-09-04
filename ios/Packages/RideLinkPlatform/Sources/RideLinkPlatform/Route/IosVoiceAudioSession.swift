@@ -121,6 +121,12 @@ public actor IosVoiceAudioSession: VoiceAudioSession {
         startConsumer(box: box, bell: bell)
         registerObservers(generation: lifecycle.generation, box: box, bell: bell)
 
+        // Begun here — before the platform call below, not when `.opened` confirms success — so a
+        // `.categoryChange` notification the call itself can produce synchronously finds a
+        // transition already begun to settle, rather than one that has not started yet (this
+        // phase's final hardening pass, Issue 1).
+        apply(.openRequested(generation: lifecycle.generation, atMonoUs: monotonicNowUs()))
+
         do {
             try session.setCategory(
                 .playAndRecord,
@@ -133,7 +139,8 @@ public actor IosVoiceAudioSession: VoiceAudioSession {
             stopConsumer()
             signals = nil
             doorbell = nil
-            return fail(.audioSessionActivationFailed)
+            apply(.openAborted(generation: lifecycle.generation, atMonoUs: monotonicNowUs(), failure: .audioSessionActivationFailed))
+            return .failure(VoiceAudioSessionError(.audioSessionActivationFailed))
         }
         apply(.opened(generation: lifecycle.generation, atMonoUs: monotonicNowUs()))
         return .success(())
@@ -141,6 +148,10 @@ public actor IosVoiceAudioSession: VoiceAudioSession {
 
     public func close() async {
         guard lifecycle.open else { return }
+        // Begun before the restoring call below, for the same reason as `open()` above — the
+        // platform's confirming `.categoryChange` notification can arrive synchronously as part of
+        // it (this phase's final hardening pass, Issue 1).
+        apply(.closeRequested(generation: lifecycle.generation, atMonoUs: monotonicNowUs()))
         // Observers stay registered through the restoring call below, so a `.categoryChange`
         // confirming *this* close has a chance to be observed (Issue D) — removing them is one of the
         // very last steps, once nothing further this generation's box needs to receive remains.

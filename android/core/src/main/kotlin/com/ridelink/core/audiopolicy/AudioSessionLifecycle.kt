@@ -152,16 +152,57 @@ data class AudioSessionState(
 sealed class AudioSessionEvent {
     abstract val generation: Int
 
-    /** The duplex configuration was applied and capture is open. Begins a route transition. */
+    /**
+     * The duplex configuration was applied and capture is open. Confirms the session, but — since
+     * this phase's final hardening pass — does **not** itself begin the route transition; see
+     * [OpenRequested].
+     */
     data class Opened(
         override val generation: Int,
         val atMonoUs: Long,
     ) : AudioSessionEvent()
 
-    /** The session was returned to the music-only configuration. Begins a route transition. */
+    /** Mirrors [Opened] for the closing direction; see [CloseRequested]. */
     data class Closed(
         override val generation: Int,
         val atMonoUs: Long,
+    ) : AudioSessionEvent()
+
+    /**
+     * The platform is *about to be asked* to open the duplex session. Begins the route transition
+     * on its own, before [Opened] ever runs — not merely a synonym for it.
+     *
+     * This phase's final hardening pass, Issue 1: the platform call [Opened] used to precede (e.g.
+     * `AudioManager.setCommunicationDevice` / `AVAudioSession.setActive`) can itself produce the
+     * confirming callback synchronously, or very shortly after returning. Without a transition
+     * already begun for that callback to settle, [RouteTransitionTracker.settle] silently drops the
+     * confirmation — it only ever acts when [RouteTransitionState.transitioning] is already true.
+     * [Opened] itself no longer begins a transition at all (only this event does), which is what
+     * lets the two be applied safely in sequence whether the confirming callback lands before or
+     * after [Opened] runs: a settle that already happened between the two is never resurrected into
+     * a fresh, spurious `TRANSITIONING` that nothing would ever confirm.
+     */
+    data class OpenRequested(
+        override val generation: Int,
+        val atMonoUs: Long,
+    ) : AudioSessionEvent()
+
+    /** Mirrors [OpenRequested] for the closing direction, against the same race in [Closed]. */
+    data class CloseRequested(
+        override val generation: Int,
+        val atMonoUs: Long,
+    ) : AudioSessionEvent()
+
+    /**
+     * The platform call [OpenRequested] began failed before it could complete — the session was
+     * never actually handed to the platform. Settles the transition immediately, rather than
+     * leaving it to [TransitionTimeoutCheck] to notice five seconds later, and leaves
+     * [AudioSessionState.open] false.
+     */
+    data class OpenAborted(
+        override val generation: Int,
+        val atMonoUs: Long,
+        val failure: VoiceFailure,
     ) : AudioSessionEvent()
 
     /**
@@ -260,8 +301,11 @@ object AudioSessionLifecycle {
         // current one is inert — including a real one that used to be current.
         if (event.generation != state.generation) return AudioSessionOutcome(state, emptyList())
         return when (event) {
-            is AudioSessionEvent.Opened -> opened(state, event.atMonoUs)
-            is AudioSessionEvent.Closed -> closed(state, event.atMonoUs)
+            is AudioSessionEvent.Opened -> opened(state)
+            is AudioSessionEvent.Closed -> closed(state)
+            is AudioSessionEvent.OpenRequested -> beginTransition(state, event.atMonoUs)
+            is AudioSessionEvent.CloseRequested -> beginTransition(state, event.atMonoUs)
+            is AudioSessionEvent.OpenAborted -> openAborted(state, event.atMonoUs, event.failure)
             is AudioSessionEvent.RouteChanged -> routeChanged(state, event)
             is AudioSessionEvent.InterruptionBegan -> interruptionBegan(state)
             is AudioSessionEvent.InterruptionEnded -> interruptionEnded(state, event.shouldResume)
@@ -275,28 +319,56 @@ object AudioSessionLifecycle {
         }
     }
 
-    private fun opened(
+    /**
+     * Confirms the platform actually took the session; **does not** begin the transition itself any
+     * more. That is [AudioSessionEvent.OpenRequested]'s job, applied *before* the platform call that
+     * produces this event (this phase's final hardening pass, Issue 1) — beginning it again here as
+     * well would resurrect a transition a synchronous confirming callback landing between the two
+     * events may already have settled, publishing a spurious `TRANSITIONING` that nothing will ever
+     * confirm, stuck until the failure-protection timeout. [routeStateOf] reports whatever the
+     * transition actually is right now, whether that is still transitioning (the ordinary case) or
+     * already settled (the race this event exists to survive).
+     */
+    private fun opened(state: AudioSessionState): AudioSessionOutcome =
+        AudioSessionOutcome(
+            state.copy(open = true, lastFailure = null),
+            listOf(AudioSessionAction.PublishSnapshot(routeStateOf(state))),
+        )
+
+    /** Mirrors [opened] for the closing direction — [AudioSessionEvent.CloseRequested] begins it. */
+    private fun closed(state: AudioSessionState): AudioSessionOutcome =
+        AudioSessionOutcome(
+            state.copy(open = false, interrupted = false, awaitingResume = false),
+            listOf(AudioSessionAction.PublishSnapshot(routeStateOf(state))),
+        )
+
+    /**
+     * [AudioSessionEvent.OpenRequested] and [AudioSessionEvent.CloseRequested] both do exactly
+     * this and nothing else: begin the transition, before the platform call either request
+     * precedes has a chance to confirm it out from under a not-yet-begun state (this phase's
+     * hardening pass, Issue 1). Neither touches [AudioSessionState.open] — that stays [Opened]'s
+     * and [Closed]'s job, applied right after the platform call actually runs.
+     */
+    private fun beginTransition(
         state: AudioSessionState,
         nowMonoUs: Long,
     ): AudioSessionOutcome {
-        // ARCHITECTURE §6.2: switching configuration is an audible route change, so it is announced
-        // as `transitioning` and superseded by `stable` when the platform confirms it — never
-        // published as a fait accompli, and never settled by a sleep.
         val transition = RouteTransitionTracker.begin(state.transition, nowMonoUs)
         return AudioSessionOutcome(
-            state.copy(open = true, transition = transition, lastFailure = null),
+            state.copy(transition = transition),
             listOf(AudioSessionAction.PublishSnapshot(RouteState.TRANSITIONING)),
         )
     }
 
-    private fun closed(
+    private fun openAborted(
         state: AudioSessionState,
         nowMonoUs: Long,
+        failure: VoiceFailure,
     ): AudioSessionOutcome {
-        val transition = RouteTransitionTracker.begin(state.transition, nowMonoUs)
+        val transition = RouteTransitionTracker.settle(state.transition, nowMonoUs)
         return AudioSessionOutcome(
-            state.copy(open = false, interrupted = false, awaitingResume = false, transition = transition),
-            listOf(AudioSessionAction.PublishSnapshot(RouteState.TRANSITIONING)),
+            state.copy(open = false, transition = transition, lastFailure = failure),
+            listOf(AudioSessionAction.ReportFailure(failure), AudioSessionAction.PublishSnapshot(RouteState.STABLE)),
         )
     }
 
