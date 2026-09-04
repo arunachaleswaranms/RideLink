@@ -1376,6 +1376,13 @@ for the eight findings this verifies:**
   together) run **50 consecutive times, 0 failures**.
 - **All prior suites remain green**, including every Phase 1b/2a/2b test named above this paragraph —
   this session ran the full local gate, not only the new tests.
+- **CI green on the first run** —
+  [33882555289](https://github.com/arunachaleswaranms/RideLink/actions/runs/33882555289), commit
+  `6be9f63`. Android: `core unit tests`, `all unit tests`, `ktlint`, `detekt`, `lint`, `assembleDebug`,
+  `assembleRelease` — all green. iOS: `RideLinkCore` tests, `RideLinkPlatform` tests, unsigned Debug
+  **and** Release simulator builds — all green. Nothing was re-run. The one annotation is GitHub's own
+  Node 20 deprecation notice on `actions/checkout@v4`, unrelated to this repository and pre-dating this
+  session.
 
 ---
 
