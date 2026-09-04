@@ -1624,6 +1624,12 @@ still governs the intercom's own defaults; nothing here touches that. The Phase 
 intercom gate this phase was explicitly permitted to leave open (§1's amendment) remains exactly as
 open as before this session.
 
+**CI is green on both platforms on the first fresh run, not re-run to green:** run
+[33918897069](https://github.com/arunachaleswaranms/RideLink/actions/runs/33918897069), commit
+`193e043`. Android: core unit tests, all unit tests, ktlint, detekt, lint, `assembleDebug`,
+`assembleRelease`. iOS: `RideLinkCore` tests, `RideLinkPlatform` tests, unsigned Debug **and**
+Release simulator builds. Every step passed the first time.
+
 ---
 
 ## 3. Tests passed / pending
