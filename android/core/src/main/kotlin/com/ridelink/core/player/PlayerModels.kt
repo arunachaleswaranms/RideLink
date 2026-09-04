@@ -1,7 +1,7 @@
 package com.ridelink.core.player
 
 import com.ridelink.core.library.LocalTrackLocation
-import com.ridelink.core.model.ContentHash
+import com.ridelink.core.model.QuickId
 
 /**
  * What a [Player] can be told to do. Deliberately narrow (this phase's brief §15): loading and
@@ -15,16 +15,22 @@ import com.ridelink.core.model.ContentHash
  */
 sealed class PlaybackCommand {
     /**
-     * [location] is what a real player binding actually opens; [contentHash] is carried alongside
-     * purely for identity so [PlayerState.contentHash] can report *which* track is loaded without
-     * the player ever resolving a hash back to a location itself. That resolution
-     * (`ContentHash -> LocalTrackLocation`) is `data.library.LibraryRepository`'s job — `audio`
-     * (where the real player binding lives) must never depend on `data` (ADR-014), so the one
-     * layer allowed to depend on both, the `app` composition root's queue-owner coordinator, does
-     * the lookup and builds this command already carrying everything the player needs.
+     * [location] is what a real player binding actually opens; [quickId] is carried alongside
+     * purely for identity so [PlayerState.quickId] can report *which* track is loaded without the
+     * player ever resolving an id back to a location itself. That resolution
+     * (`QuickId -> LocalTrackLocation`) is `data.library.LibraryRepository`'s job — `audio` (where
+     * the real player binding lives) must never depend on `data` (ADR-014), so the one layer
+     * allowed to depend on both, the `app` composition root's queue-owner coordinator, does the
+     * lookup and builds this command already carrying everything the player needs.
+     *
+     * [QuickId], not [com.ridelink.core.model.ContentHash]: the authoritative hash is computed
+     * lazily in the background (ADR-005) and is absent on a freshly-indexed track, but nothing
+     * about *playing a local file* needs it — only Phase 4/5 transfer/sync eligibility does. Making
+     * local queue/player identity wait on a background hash would make a track the user just
+     * imported briefly unplayable for no reason a local player has.
      */
     data class Load(
-        val contentHash: ContentHash,
+        val quickId: QuickId,
         val location: LocalTrackLocation,
     ) : PlaybackCommand()
 
@@ -64,11 +70,11 @@ enum class MusicFailure {
 
 /**
  * Observable player state. Enough for Phase 5 to build synchronized playback on top of later
- * (`trackHash`, `positionMs`, `durationMs` are exactly what a future session-time scheduler would
+ * (`quickId`, `positionMs`, `durationMs` are exactly what a future session-time scheduler would
  * need to read) **without** this phase adding any of that behaviour itself (brief §15).
  */
 data class PlayerState(
-    val contentHash: ContentHash? = null,
+    val quickId: QuickId? = null,
     val positionMs: Long = 0,
     val durationMs: Long = 0,
     val playing: Boolean = false,
@@ -78,5 +84,5 @@ data class PlayerState(
 ) {
     /** True once [positionMs] has reached [durationMs] on a loaded, non-zero-length track — the
      *  signal a queue owner turns into [com.ridelink.core.player.LocalQueueAction.Next]. */
-    val ended: Boolean get() = contentHash != null && durationMs > 0 && positionMs >= durationMs && !playing
+    val ended: Boolean get() = quickId != null && durationMs > 0 && positionMs >= durationMs && !playing
 }

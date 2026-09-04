@@ -1,7 +1,7 @@
 import Foundation
 
 /// One local-only queue slot. `id` is a fresh identifier per insertion (a ULID, matching
-/// `SessionId`'s convention) — **not** derived from `contentHash` — so the same track can be queued
+/// `SessionId`'s convention) — **not** derived from `quickId` — so the same track can be queued
 /// more than once (brief §14's "duplicate track added" case) as two distinct, independently
 /// removable/movable entries.
 ///
@@ -10,12 +10,12 @@ import Foundation
 /// that exists before there is anyone to share it with.
 public struct LocalQueueItem: Sendable, Equatable {
     public let id: String
-    public let contentHash: ContentHash
+    public let quickId: QuickId
     public let insertedAtMonoUs: Int64
 
-    public init(id: String, contentHash: ContentHash, insertedAtMonoUs: Int64) {
+    public init(id: String, quickId: QuickId, insertedAtMonoUs: Int64) {
         self.id = id
-        self.contentHash = contentHash
+        self.quickId = quickId
         self.insertedAtMonoUs = insertedAtMonoUs
     }
 }
@@ -57,7 +57,7 @@ public enum LocalQueueAction: Sendable, Equatable {
 /// What the queue owner must do in response — a diff, not a restatement (same convention as
 /// `RideLinkCore.AudioPolicy`'s `IntercomAction`).
 public enum LocalQueueEffect: Sendable, Equatable {
-    case loadAndPlay(ContentHash)
+    case loadAndPlay(QuickId)
     case stopPlayback
 }
 
@@ -117,7 +117,7 @@ public enum LocalQueue {
             let successor = newItems[removedIndex]
             return LocalQueueOutcome(
                 state: LocalQueueState(items: newItems, currentId: successor.id),
-                effects: [.loadAndPlay(successor.contentHash)]
+                effects: [.loadAndPlay(successor.quickId)]
             )
         } else {
             return LocalQueueOutcome(state: LocalQueueState(items: newItems, currentId: nil), effects: [.stopPlayback])
@@ -148,12 +148,12 @@ public enum LocalQueue {
             guard delta > 0, let first = state.items.first else {
                 return LocalQueueOutcome(state: state, effects: [])
             }
-            return LocalQueueOutcome(state: LocalQueueState(items: state.items, currentId: first.id), effects: [.loadAndPlay(first.contentHash)])
+            return LocalQueueOutcome(state: LocalQueueState(items: state.items, currentId: first.id), effects: [.loadAndPlay(first.quickId)])
         }
         let targetIndex = currentIndex + delta
         if targetIndex >= 0, targetIndex < state.items.count {
             let target = state.items[targetIndex]
-            return LocalQueueOutcome(state: LocalQueueState(items: state.items, currentId: target.id), effects: [.loadAndPlay(target.contentHash)])
+            return LocalQueueOutcome(state: LocalQueueState(items: state.items, currentId: target.id), effects: [.loadAndPlay(target.quickId)])
         }
         if delta > 0 {
             // Next past the last item: brief §14's "last item ends" case. Deliberately no wraparound.
@@ -167,6 +167,6 @@ public enum LocalQueue {
         guard let target = state.items.first(where: { $0.id == id }) else {
             return LocalQueueOutcome(state: state, effects: [])
         }
-        return LocalQueueOutcome(state: LocalQueueState(items: state.items, currentId: id), effects: [.loadAndPlay(target.contentHash)])
+        return LocalQueueOutcome(state: LocalQueueState(items: state.items, currentId: id), effects: [.loadAndPlay(target.quickId)])
     }
 }

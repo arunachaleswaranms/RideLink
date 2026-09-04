@@ -6,7 +6,7 @@ import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.common.PlaybackException
 import androidx.media3.exoplayer.ExoPlayer
-import com.ridelink.core.model.ContentHash
+import com.ridelink.core.model.QuickId
 import com.ridelink.core.player.MusicFailure
 import com.ridelink.core.player.PlaybackCommand
 import com.ridelink.core.player.Player
@@ -76,7 +76,7 @@ class ExoPlayerMusicPlayer(
     override suspend fun execute(command: PlaybackCommand): Result<Unit> =
         withContext(Dispatchers.Main.immediate) {
             when (command) {
-                is PlaybackCommand.Load -> load(command.contentHash, command.location.uri)
+                is PlaybackCommand.Load -> load(command.quickId, command.location.uri)
                 PlaybackCommand.Play -> exoPlayer.play()
                 PlaybackCommand.Pause -> exoPlayer.pause()
                 is PlaybackCommand.Seek -> {
@@ -97,11 +97,11 @@ class ExoPlayerMusicPlayer(
         }
 
     private fun load(
-        contentHash: ContentHash,
+        quickId: QuickId,
         uri: String,
     ) {
         stopPositionTicking()
-        cachedState = PlayerState(contentHash = contentHash)
+        cachedState = PlayerState(quickId = quickId)
         emit(cachedState)
         runCatching {
             exoPlayer.setMediaItem(MediaItem.fromUri(Uri.parse(uri)))

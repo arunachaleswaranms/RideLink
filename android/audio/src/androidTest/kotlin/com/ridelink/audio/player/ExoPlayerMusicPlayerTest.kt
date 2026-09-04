@@ -5,7 +5,7 @@ import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.ridelink.core.library.LocalTrackLocation
-import com.ridelink.core.model.ContentHash
+import com.ridelink.core.model.QuickId
 import com.ridelink.core.player.MusicFailure
 import com.ridelink.core.player.PlaybackCommand
 import com.ridelink.core.player.PlayerState
@@ -65,17 +65,17 @@ class ExoPlayerMusicPlayerTest {
     @Test
     fun loadingARealTrackReportsARealDuration() =
         runOnMain {
-            val hash = ContentHash("sha256:" + "a1".repeat(32))
+            val hash = QuickId("sha256:" + "a1".repeat(32))
             player.execute(PlaybackCommand.Load(hash, LocalTrackLocation(fixtureUri("normal.m4a").toString())))
             val ready = withTimeout(TIMEOUT_MS) { states.receiveAsFlow().filter { it.durationMs > 0 }.first() }
-            assertEquals(hash, ready.contentHash)
+            assertEquals(hash, ready.quickId)
             assertTrue(ready.durationMs > 0, "a real AAC file must report a real, positive duration")
         }
 
     @Test
     fun playPauseAndPositionAdvancement() =
         runOnMain {
-            val hash = ContentHash("sha256:" + "b2".repeat(32))
+            val hash = QuickId("sha256:" + "b2".repeat(32))
             player.execute(PlaybackCommand.Load(hash, LocalTrackLocation(fixtureUri("normal.m4a").toString())))
             withTimeout(TIMEOUT_MS) { states.receiveAsFlow().filter { it.durationMs > 0 }.first() }
             player.execute(PlaybackCommand.Play)
@@ -93,7 +93,7 @@ class ExoPlayerMusicPlayerTest {
         runOnMain {
             player.execute(
                 PlaybackCommand.Load(
-                    ContentHash("sha256:" + "c3".repeat(32)),
+                    QuickId("sha256:" + "c3".repeat(32)),
                     LocalTrackLocation(fixtureUri("normal.m4a").toString()),
                 ),
             )
@@ -108,7 +108,7 @@ class ExoPlayerMusicPlayerTest {
         runOnMain {
             player.execute(
                 PlaybackCommand.Load(
-                    ContentHash("sha256:" + "d4".repeat(32)),
+                    QuickId("sha256:" + "d4".repeat(32)),
                     LocalTrackLocation(fixtureUri("normal.m4a").toString()),
                 ),
             )
@@ -126,7 +126,7 @@ class ExoPlayerMusicPlayerTest {
         runOnMain {
             val missingUri = Uri.fromFile(File(context.filesDir, "does-not-exist-${System.nanoTime()}.m4a"))
             player.execute(
-                PlaybackCommand.Load(ContentHash("sha256:" + "e5".repeat(32)), LocalTrackLocation(missingUri.toString())),
+                PlaybackCommand.Load(QuickId("sha256:" + "e5".repeat(32)), LocalTrackLocation(missingUri.toString())),
             )
             val failed = withTimeout(TIMEOUT_MS) { states.receiveAsFlow().filter { it.error != null }.first() }
             assertEquals(MusicFailure.FILE_MISSING, failed.error)
@@ -144,7 +144,7 @@ class ExoPlayerMusicPlayerTest {
             // player's own failure path.
             val garbage = File(context.filesDir, "garbage-${System.nanoTime()}.m4a").apply { writeBytes(ByteArray(256) { 0x2A }) }
             player.execute(
-                PlaybackCommand.Load(ContentHash("sha256:" + "f6".repeat(32)), LocalTrackLocation(Uri.fromFile(garbage).toString())),
+                PlaybackCommand.Load(QuickId("sha256:" + "f6".repeat(32)), LocalTrackLocation(Uri.fromFile(garbage).toString())),
             )
             val failed = withTimeout(TIMEOUT_MS) { states.receiveAsFlow().filter { it.error != null }.first() }
             assertTrue(
@@ -161,7 +161,7 @@ class ExoPlayerMusicPlayerTest {
             // callback path end to end.
             player.execute(
                 PlaybackCommand.Load(
-                    ContentHash("sha256:" + "07".repeat(32)),
+                    QuickId("sha256:" + "07".repeat(32)),
                     LocalTrackLocation(fixtureUri("normal.m4a").toString()),
                 ),
             )

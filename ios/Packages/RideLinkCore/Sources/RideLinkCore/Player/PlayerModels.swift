@@ -8,14 +8,20 @@ import Foundation
 /// this phase's brief §15 explicitly excludes it. A local player executes commands as it receives
 /// them, immediately.
 public enum PlaybackCommand: Sendable, Equatable {
-    /// `location` is what a real player binding actually opens; `contentHash` is carried alongside
-    /// purely for identity so `PlayerState.contentHash` can report *which* track is loaded without
-    /// the player ever resolving a hash back to a location itself. That resolution
-    /// (`ContentHash -> LocalTrackLocation`) is the data-layer repository's job — the real player
+    /// `location` is what a real player binding actually opens; `quickId` is carried alongside
+    /// purely for identity so `PlayerState.quickId` can report *which* track is loaded without the
+    /// player ever resolving an id back to a location itself. That resolution
+    /// (`QuickId -> LocalTrackLocation`) is the data-layer repository's job — the real player
     /// binding must not depend on it directly (ADR-014's mirrored boundary); the app composition
     /// root's queue-owner coordinator does the lookup and builds this command already carrying
     /// everything the player needs.
-    case load(contentHash: ContentHash, location: LocalTrackLocation)
+    ///
+    /// `QuickId`, not `ContentHash`: the authoritative hash is computed lazily in the background
+    /// (ADR-005) and is absent on a freshly-indexed track, but nothing about *playing a local file*
+    /// needs it — only Phase 4/5 transfer/sync eligibility does. Making local queue/player identity
+    /// wait on a background hash would make a track the user just imported briefly unplayable for
+    /// no reason a local player has.
+    case load(quickId: QuickId, location: LocalTrackLocation)
     case play
     case pause
     case seek(positionMs: Int64)
@@ -40,10 +46,10 @@ public enum MusicFailure: Sendable, Equatable {
 }
 
 /// Observable player state. Enough for Phase 5 to build synchronized playback on top of later
-/// (`contentHash`, `positionMs`, `durationMs` are exactly what a future session-time scheduler would
+/// (`quickId`, `positionMs`, `durationMs` are exactly what a future session-time scheduler would
 /// need to read) **without** this phase adding any of that behaviour itself (brief §15).
 public struct PlayerState: Sendable, Equatable {
-    public let contentHash: ContentHash?
+    public let quickId: QuickId?
     public let positionMs: Int64
     public let durationMs: Int64
     public let playing: Bool
@@ -52,14 +58,14 @@ public struct PlayerState: Sendable, Equatable {
     public let error: MusicFailure?
 
     public init(
-        contentHash: ContentHash? = nil,
+        quickId: QuickId? = nil,
         positionMs: Int64 = 0,
         durationMs: Int64 = 0,
         playing: Bool = false,
         rate: Double = 1.0,
         error: MusicFailure? = nil
     ) {
-        self.contentHash = contentHash
+        self.quickId = quickId
         self.positionMs = positionMs
         self.durationMs = durationMs
         self.playing = playing
@@ -70,6 +76,6 @@ public struct PlayerState: Sendable, Equatable {
     /// True once `positionMs` has reached `durationMs` on a loaded, non-zero-length track — the
     /// signal a queue owner turns into `LocalQueueAction.next`.
     public var ended: Bool {
-        contentHash != nil && durationMs > 0 && positionMs >= durationMs && !playing
+        quickId != nil && durationMs > 0 && positionMs >= durationMs && !playing
     }
 }

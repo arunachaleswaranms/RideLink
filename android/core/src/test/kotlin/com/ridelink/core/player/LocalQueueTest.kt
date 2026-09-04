@@ -1,17 +1,17 @@
 package com.ridelink.core.player
 
-import com.ridelink.core.model.ContentHash
+import com.ridelink.core.model.QuickId
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
-private fun hash(byte: String): ContentHash = ContentHash("sha256:" + byte.repeat(32))
+private fun hash(byte: String): QuickId = QuickId("sha256:" + byte.repeat(32))
 
 private fun item(
     id: String,
     hashByte: String = id,
-): LocalQueueItem = LocalQueueItem(id = id, contentHash = hash(hashByte), insertedAtMonoUs = 0L)
+): LocalQueueItem = LocalQueueItem(id = id, quickId = hash(hashByte), insertedAtMonoUs = 0L)
 
 class LocalQueueTest {
     @Test
