@@ -1,13 +1,17 @@
 # RideLink — Status
 
-**Updated:** 4 September 2026 (Phase 2b final hardening pass, thirteenth session — see §2p)
-**Current milestone:** M1 (Private voice link) — in progress
-**Current phase:** Phase 2b — intercom integration and audio lifecycle.
-**Phase 2b status: IMPLEMENTATION COMPLETE — REAL-DEVICE INTERCOM GATE PENDING.**
+**Updated:** 4/5 September 2026 (Phase 3 — local music player, fourteenth session — see §2q)
+**Current milestone:** M1 (Private voice link) is software-complete pending its hardware gate; **M2
+(local music) implementation is now also complete**, started under a deliberate override of this
+file's own precondition (§2q, and the amendment right below).
+**Current phase:** Phase 3 — local music player.
+**Phase 3 status: IMPLEMENTATION COMPLETE — REAL-DEVICE LOCAL-MUSIC GATE PENDING.**
+**Phase 2b status: IMPLEMENTATION COMPLETE — REAL-DEVICE INTERCOM GATE PENDING (unchanged).**
 **Phase 2a status: IMPLEMENTATION COMPLETE — REAL-DEVICE AUDIO GATE PENDING (unchanged).**
 **Phase 1b status: IMPLEMENTATION COMPLETE — REAL-DEVICE GATE PENDING (unchanged).**
 **The overall "2 Intercom" milestone is NOT complete** — TEST_PLAN A-01, A-02, A-04, A-09 and
-V-01…V-11 are hardware gates and none of them has run.
+V-01…V-11 are hardware gates and none of them has run. **Phases 4 (file transfer), 5 (sync) and 6
+(intercom/music coexistence) are NOT STARTED.**
 
 > **What is genuinely new this session, and what is not.** Phase 2b is the intercom *as an app*: the
 > five REQUIREMENTS §8 modes as one interpreted policy object, transmission gated at the WebRTC audio
@@ -1460,6 +1464,168 @@ narrows what is untested in `AndroidVoiceAudioSession`, it does not close the re
 
 ---
 
+## 2q. Phase 3 — local music player (4/5 September 2026 session, fourteenth)
+
+Started under a deliberate, explicit override of this file's own §7 precondition — recorded at the
+point it happened, above in §1's amendment. Nine commits, both platforms software-complete: library
+import/index/search, a local queue, and local playback, entirely independent of the control/voice
+planes (no peer, no wire message, no shared state with `SessionCoordinator`/`ControlSessionManager`).
+
+**Domain model** (`core.library`/`core.player`, `RideLinkCore.Library`/`RideLinkCore.Player`,
+mirrored): `ContentHash` gained real validation (previously a bare wrapper); `QuickId` is new, same
+`sha256:`-prefixed 64-lowercase-hex shape. `LibraryEntry`/`LocalTrackLocation`/`DecodeStatus`/
+`LibraryQuery`/`LibrarySort`, `MetadataNormalizer` (NFC-only, Unicode-scalar-count clamped to 512 per
+PROTOCOL §8.1's manifest bound), `IndexReconciliation` (pure new/still-present/missing set diff),
+`LocalQueue` (pure `(state, action) -> (state, effects)` reducer, same shape as `IntercomTransmission`/
+`AudioSessionLifecycle` — add/remove/move/clear/next/previous/select, no repeat/loop mode in V1),
+`PlaybackCommand`/`PlayerState`/`MusicFailure`, and `Player` (an interface on Android, a protocol on
+iOS). No shared JSON vector set was needed for any of this — none of it crosses the wire, so mirrored
+unit tests on each platform are the proof, the same convention `AudioRouteSnapshot` already
+established.
+
+**Test fixtures**: `tools/generate_test_media.py` (stdlib `wave` + macOS `afconvert` + a hand-written
+MP4 atom injector, since `afconvert` cannot write custom `ilst` tags without its own `udta` atom
+being replaced rather than duplicated) produced 11 files under `test-media/synthetic/` — normal,
+no-metadata, Unicode-metadata (Japanese/Traditional Chinese/an emoji/combining marks), artwork/
+no-artwork, byte-identical duplicates, same-metadata-different-bytes, a genuinely corrupt (truncated)
+file, an unsupported-extension file (real M4A bytes, wrong extension — proves the extension gate is a
+policy layer, not something the decoder itself enforces), and a hand-built minimal MP3 (ID3v2 tags
+only; no MP3 encoder exists in this environment, so its audio payload is documented as unverified,
+never claimed as a decode-tested fixture). `MANIFEST.json` records each fixture's real SHA-256,
+independently useful this session as a cross-platform hash-parity check (§2q's iOS paragraph below).
+
+**Android** (`data.database`/`data.library`, `audio.player`, `app.music`/`app.ui`): Room (FTS4 —
+Room ships no `@Fts5`), `TrackEntity`/`TrackDao`/`RideLinkDatabase` (schema v1, exported), a
+SAF-folder-tree + explicit-multi-select + MediaStore indexer (`ContentHashing`, `MetadataExtractor`,
+`ArtworkProcessor`/`ArtworkCache`, `LibraryIndexer`), `ExoPlayerMusicPlayer` (Media3 1.11.0, already
+pinned), `ForegroundServiceTypePolicy` (a pure `(intercomActive, musicPlaying) -> types` function),
+`MusicCoordinator`, and `LibraryScreen`/`NowPlayingCard`/`MusicSection` wired into `MainScreen`
+independent of session state.
+
+**iOS** (`RideLinkPlatform.Library`/`.Player`, app target): **groue/GRDB.swift 7.11.1** — the first
+dependency added besides the pinned WebRTC pod, reviewed per the brief's own dependency-review
+requirement before adding (MIT licence; empty default transitive-dependency list; no `URLSession`/
+`Network`/`CFNetwork` import anywhere in `Sources/`; `SQLITE_ENABLE_FTS5` on unconditionally, which is
+why iOS gets real FTS5 where Android gets FTS4 — a deliberate, documented per-platform difference).
+`TrackRecord`/`LibraryDatabase` (GRDB `DatabaseMigrator`, schema v1, an FTS5 external-content table
+synchronized by GRDB's own generated triggers), `ContentHashing` (`CryptoKit`), `MetadataExtractor`
+(`AVFoundation`'s modern async `.load()` API), `ArtworkProcessor` (`ImageIO`), `ArtworkCache`,
+`LibraryRepository` (GRDB `ValueObservation` bridged to `AsyncStream`), `LibraryIndexer`,
+`AVAudioEnginePlayer` (an actor; `AVAudioEngine` + `AVAudioPlayerNode` per ARCHITECTURE §7.2, chosen
+over `AVAudioPlayer` for Phase 5's later sample-accurate scheduling even though this phase does not
+use it yet), `MusicAudioSession` (the `.playback` half of ARCHITECTURE §6.2's two configurations,
+`#if os(iOS)`-gated — the only iOS-only file in the whole player/library stack), and
+`MusicCoordinator`/`LibraryView`/`NowPlayingCard`/`MusicSection` wired into `MainScreen`/`RideLinkApp`
+the same independent-of-session way.
+
+**A real, deliberate divergence, not an oversight**: Android's SAF import keeps a persisted
+`content://` permission and re-scans the original location on every rescan, so a removed file is
+detected as `DecodeStatus.missing`. iOS never does — ADR-009 forbids relying on an external
+security-scoped URL indefinitely, so every picked file is copied into this app's own Application
+Support directory at import time and the source URL is never touched again. There is therefore no
+live external reference for iOS to notice going missing; `IndexReconciliation.missingQuickIds` has no
+iOS caller for that reason. Documented in `LibraryIndexer`'s own doc comment on both platforms.
+
+**Five real bugs found only by actually running this, not by reading a platform's API docs** —
+recorded here per this file's own "every real problem found gets written down" discipline, all fixed
+in the same session:
+
+1. **A genuine infinite playback-restart loop (Android, found on the real `RideLink_API36`
+   emulator).** ExoPlayer fires *two* listener callbacks for one natural end of track —
+   `onPlaybackStateChanged(STATE_ENDED)` and `onIsPlayingChanged(false)` — each emitting its own
+   `PlayerState`, both satisfying `PlayerState.ended`. `MusicCoordinator` advanced the queue on every
+   such emission rather than only the transition into it: the first `Next` correctly stopped a
+   single-item queue (`currentId -> null`), but the second landed on `LocalQueue`'s "nothing
+   selected" branch, whose documented behaviour is to restart from the first item — turning one
+   finished track into an unbounded play/restart cycle, confirmed via `adb logcat` showing repeating
+   `AudioTrack: stop(N)` roughly one fixture-duration apart, indefinitely. Fixed with a new pure
+   `core.player.TrackEndEdge` (mirrored to `RideLinkCore`, since `AVAudioPlayerNode`'s
+   completion-handler-vs-observed-state race is the identical shape), edge-detecting the transition
+   into "done" rather than level-triggering on every emission that still describes it.
+   `TrackEndEdgeTest`/`TrackEndEdgeTests` (8 tests each platform) exhaust it, including the exact
+   two-emissions-for-one-finish case. `AVAudioEnginePlayer` carries the same generation-guard shape
+   for the identical reason, proactively, since the bug is structural to "a completion callback
+   racing a poll loop," not specific to ExoPlayer.
+2. **A real crash once bug 1 was fixed and a track could finish with the intercom never started
+   (Android).** `RideForegroundService.refreshForegroundState` called `ServiceCompat.startForeground`
+   unconditionally, including when `ForegroundServiceTypePolicy.requiredTypes(false, false)` is
+   empty — Android throws `InvalidForegroundServiceTypeException` ("type none ... has been
+   prohibited") on API 36 rather than allow a foreground service with no declared type. Fixed by
+   stopping foreground and the service itself when the required type set is empty.
+3. **A real architecture gap alongside bug 2's crash (Android).** `LibraryScreen`'s "tap a row to
+   play it now" called `MusicCoordinator.playNow` directly, bypassing
+   `RideForegroundService.startMusicFromVisibleUi` — the same foreground-visible discipline
+   `MainActivity.attemptMusicPlay` already enforces for the Play button (ARCHITECTURE §6.4, this
+   phase's brief §16). `AppContainer`'s reactive `isMusicActive` observer still brought the
+   foreground service up behind that gate's back, so the visible failure was bug 2's crash, not
+   "music didn't play" — the gate itself was silently defeated. Fixed by adding
+   `MainActivity.attemptPlayNow`, threaded through the same path as `attemptMusicPlay`.
+4. **`music/`/`Music/` in `.gitignore` (bare, unanchored) had the exact bug `library/` had before
+   it, found the same way**: it silently excluded `android/app/.../app/music/` —
+   `MusicCoordinator.kt` itself — from every `git status`, so the file never appeared as untracked
+   and was never committed until this was caught. Anchored to the repo root instead of removed
+   (unlike `library/`, this one protects a real plausible accident: a personal `Music/` folder
+   dropped at a clone's top level).
+5. **A real Xcode project-file gap (iOS).** `ios/RideLink.xcodeproj` uses the classic explicit
+   `PBXFileReference`/`PBXBuildFile`/`PBXSourcesBuildPhase` file-list format, not Xcode 16's
+   filesystem-synchronized groups — writing new `.swift` files into `ios/RideLink/` does not add
+   them to the target. The first `xcodebuild` after adding `MusicCoordinator.swift`/`LibraryView.swift`/
+   `NowPlayingCard.swift`/`MusicSection.swift` reported `BUILD SUCCEEDED` while silently compiling
+   none of them, because nothing yet referenced their symbols from a file already in the target; only
+   once `RideLinkApp.swift`/`MainScreen.swift` were wired to actually use `MusicCoordinator` did the
+   real "cannot find 'MusicCoordinator' in scope" error surface. Fixed by adding all four files to
+   `project.pbxproj`'s four required sections; `plutil -lint` confirms the edited project file is
+   still well-formed.
+
+Two smaller real bugs, same session: `AVAudioFile(forReading:)` reports a missing file as the
+generic CoreAudio error `2003334207` (`kAudioFileUnspecifiedError`, `'wht?'`) — indistinguishable
+from a genuinely corrupt file by domain/code alone, unlike `PlaybackException.errorCode` on Android —
+fixed by checking `FileManager.fileExists(atPath:)` explicitly before ever calling `AVAudioFile`.
+Retroactively conforming `RideLinkCore.DecodeStatus` to `RawRepresentable` from `RideLinkPlatform`
+compiled, but the compiler itself flagged the cross-module risk; replaced with plain
+`LibraryMapping.decodeStatus(fromStored:)`/`storedValue(for:)` functions.
+
+**Verification.** Android: `test ktlintCheck detekt lint assembleDebug assembleRelease` all green —
+526 JVM unit tests (`core` 320, `network` 157, `audio` 33, `data` 9, `app` 7) plus 34 real
+instrumented tests on the already-running `RideLink_API36` emulator (`TrackDaoTest` 12,
+`SchemaMigrationTest` 1, `LibraryIndexerTest` 14 against every `test-media/synthetic/` fixture,
+`ExoPlayerMusicPlayerTest` 7 — real AAC decode, real duration/position/seek/stop/end-of-track, a real
+missing-file failure, a real undecodable-content failure). `:core:test` re-run **50 consecutive
+times, 0 failures**. A full manual walkthrough on the emulator (push a fixture, real Android document
+picker, import, browse with real artwork, tap to play) is what surfaced bugs 1–3 above; re-run clean
+after each fix.
+
+iOS: `swift test` for both packages, `xcodebuild` Debug for the simulator, all green — **201**
+`RideLinkCoreTests` (**+8** `TrackEndEdgeTests`) and **212** `RideLinkPlatformTests` (**+25**: 14
+`LibraryIndexerTests` against the same fixtures Android's own test runs against, 4 `ContentHashingTests`
+cross-checking every fixture's whole-file SHA-256 against `MANIFEST.json`'s independently-recorded
+value — proof the two platforms hash identical bytes to identical hex, not just that each is
+internally consistent — and 7 `AVAudioEnginePlayerTests` exercising a real `AVAudioEngine` end to
+end, the exact real-decode/real-playback proof Android needed a running emulator for, achieved here
+under `swift test` on macOS because neither `AVAudioEngine`/`AVAudioPlayerNode` nor `ImageIO`/
+`AVFoundation`'s asset/metadata loading nor `CryptoKit` is iOS-only). `RideLinkCoreTests` re-run **50
+consecutive times**, `RideLinkPlatformTests` **20 consecutive times** (fewer, since each real-engine
+run costs ~25–28 s against the pure suites' sub-second cost) — **0 failures** either way. The real
+built `.app` was installed and launched on the already-booted iPhone 17 Pro Max simulator: the
+process stays alive, no crash, no GRDB/SQLite error in the simulator log, and a screenshot shows the
+"Local Music" section rendering with no thrown layout exception — but this sandboxed macOS
+environment has no interactive GUI/window server for `Simulator.app`, so unlike the Android emulator
+walkthrough there was no way here to drive the document picker or tap a track row through the actual
+running UI. That interactive proof remains open, alongside everything else a real device would show.
+
+**What is *not* done, on either platform**: nothing here ran on a phone. Audio focus/ducking
+coexistence with the intercom (ARCHITECTURE §6.2's two-configuration switch, `AVAudioSession`'s
+category arbitration when both music and voice are active) is explicitly **not** implemented on
+either platform this phase — `ExoPlayerMusicPlayer` never requests `AudioManager` focus and
+`MusicAudioSession` never arbitrates with `IosVoiceAudioSession`, both honestly-scoped gaps rather
+than a claimed-but-untested feature, and Phase 6's job per CLAUDE.md. No latency, throughput or
+storage-pressure measurement exists for either indexer. `docs/PHASE0_RESULTS.md` is still empty and
+still governs the intercom's own defaults; nothing here touches that. The Phase 2b real-device
+intercom gate this phase was explicitly permitted to leave open (§1's amendment) remains exactly as
+open as before this session.
+
+---
+
 ## 3. Tests passed / pending
 
 **Passed and verified in the Phase 2b session (4 September 2026, tenth), by actually running the
@@ -1885,6 +2051,12 @@ session and route), and integration tests I-01…I-25. Full list in `docs/TEST_P
 | 21 | **Diagnostics now show `CONNECTING` while a six-digit code is on screen**, where they previously showed `CONNECTED`. This is deliberate and more honest (ADR-019 §5), but it is a user-visible change that has never been looked at on a real screen | Low | Confirm it reads sensibly during I-02 on the two phones; the FR-023 diagnostics screen is one of the things I-02 exercises anyway |
 | 32 | **FIXED (twelfth session, §2o, ADR-021 Amendment A2 Finding 3).** `Effect.ReleaseAudioAndStopForegroundService`'s name promised an Android foreground-service stop `SessionCoordinator.runEffect` never actually performed — confirmed exactly as originally recorded here. Fixed with a `ForegroundServiceController` seam (no `Context` inside `SessionCoordinator`) and one owner: `runEffect` awaits capture release (`StopReleaseResult`) before calling `foregroundService.stop()` — never on a timeout — and always tears down the control session afterward. `SessionCoordinatorEndingEffectTest` (new) proves the order at the integration boundary, including that a peer BYE, a timed-out release, a `NETWORK` link loss and a repeated `ENDING` all behave correctly. Kept in this table with its resolution noted rather than deleted, per this file's own discipline | ~~Medium~~ Fixed | ~~Give `SessionCoordinator` a way to reach `RideForegroundService.stop()`...~~ Done — see §2o |
 
+| 33 | **FIXED (fourteenth session, §2q).** A genuine infinite playback-restart loop on Android: ExoPlayer's two listener callbacks for one end-of-track each dispatched `LocalQueueAction.Next`, and the second landed on `LocalQueue`'s "nothing selected" branch, which restarts from the first item. Fixed with `core.player.TrackEndEdge` (mirrored to `RideLinkCore`), edge-detecting the transition into "done" rather than level-triggering on every emission | ~~High~~ Fixed | See §2q for the full account and the regression tests |
+| 34 | **FIXED (fourteenth session, §2q).** `RideForegroundService.refreshForegroundState` crashed (`InvalidForegroundServiceTypeException`) calling `startForeground` with an empty type set once problem 33 was fixed and music could finish with the intercom never started. Fixed by stopping foreground/the service itself when the required type set is empty | ~~High~~ Fixed | See §2q |
+| 35 | **FIXED (fourteenth session, §2q).** `LibraryScreen`'s "tap to play" bypassed `RideForegroundService.startMusicFromVisibleUi`'s foreground-visible gate entirely, reaching the service anyway via `updateMusicPlaying`'s own reactive `startService` call — the gate was silently defeated, surfacing only as problem 34's crash. Fixed by adding `MainActivity.attemptPlayNow` on the same path as `attemptMusicPlay` | ~~Medium~~ Fixed | See §2q |
+| 36 | **FIXED (fourteenth session, §2q).** `music`/`Music` in `.gitignore` (bare, unanchored) had the exact bug `library/` had before it (see the note above problem 33's block in §2q's own text) — it silently excluded `MusicCoordinator.kt` from every `git status`. Anchored to the repo root | ~~Medium~~ Fixed | See §2q |
+| 37 | **FIXED (fourteenth session, §2q).** `ios/RideLink.xcodeproj`'s explicit file-list format silently excluded four newly-added `.swift` files from the actual compiled target — `xcodebuild` reported `BUILD SUCCEEDED` while compiling none of them, until code elsewhere started referencing their symbols. Fixed by adding all four files to `project.pbxproj`'s four required sections; `plutil -lint` confirmed the result stays well-formed | ~~Medium~~ Fixed | See §2q. Watch for this again: any future new iOS app-target file needs the same four-section addition, since this project has no filesystem-synchronized-groups migration planned |
+
 Resolved 26 Aug 2026 session: `CLAUDE.md` in `.gitignore` (was problem 1); `.DS_Store` tracking
 (was problem 7 — the claim was incorrect; the files are untracked and now ignored); the ADR-015/
 ADR-010 leadership-independence rationale error (§2b).
@@ -1917,6 +2089,18 @@ Not blocking Phase 1. Answers needed before Phase 6.
 ---
 
 ## 7. Next exact task
+
+**Phase 3 — local music player. IMPLEMENTATION COMPLETE — REAL-DEVICE LOCAL-MUSIC GATE PENDING**
+(§2q). Library import/index/search, a local queue, and local playback are done on both platforms,
+verified by real execution this machine can run (a real Android emulator; real `AVAudioEngine`/
+GRDB/AVFoundation/CryptoKit under `swift test` on macOS, since none of those four is iOS-only). What
+remains: everything an actual phone would show — a real document-picker walkthrough on a device
+(the iOS half of this specifically, since this sandboxed macOS environment has no interactive
+Simulator.app window to drive one), real storage/battery behaviour over a realistic personal
+library, and the two audio-focus/ducking gaps §2q names as honestly out of scope this phase (Phase
+6's job). The Phase 2b real-device intercom gate below is unchanged by any of this — Phase 3 was
+started under a deliberate, explicit override of that gate rather than a claim that it closed (§1's
+amendment).
 
 **Phase 2b — intercom integration and audio lifecycle. IMPLEMENTATION COMPLETE, REAL-DEVICE INTERCOM
 GATE PENDING.** Everything below is done and verified by the automatable tests this machine can run.

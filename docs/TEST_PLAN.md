@@ -62,6 +62,10 @@ can be exhaustive
 | **Manifest paging — concurrency** | a new `MANIFEST_BEGIN` while one is open aborts the first and discards its staging; `MANIFEST_ABORT` discards staging silently and keeps the previous manifest; restart after abort succeeds |
 | Audio state | `AUDIO_STATE` round-trip; `revision` monotonic — a lower revision is dropped; `media_quality` derived correctly from the effective output profile; unrecognised enum value from a peer treated as `unknown`, not rejected; all six representable situations of [PROTOCOL §4.4](PROTOCOL.md#44-audio_state--effective-runtime) encode and decode |
 | Hashing | `quick_id` and `content_hash` against fixed vectors; files smaller than 128 KiB (the quick_id window overlaps — must not double-count); empty file; 0-byte and 1-byte edge cases |
+| **Local queue** (`LocalQueue`, Phase 3) | add/remove/move/clear/next/previous/select over `LocalQueueItem`; current-item-removed hands playback to its successor or stops if none; next past the last item stops (no wraparound); previous at the first item is a no-op; a duplicate track queued twice is two independent, independently-removable entries |
+| **Track-end edge detection** (`TrackEndEdge`, Phase 3) | fires exactly once on the transition into `ended`/`FILE_MISSING`; a repeated emission describing the same finish does not re-fire; the exact two-emissions-for-one-finish shape a real player binding produces (found on Android, generalized to both platforms) does not double-advance a queue |
+| **Metadata normalization** (`MetadataNormalizer`, Phase 3) | missing/blank title falls back to the extension-stripped filename; missing artist/album fall back to fixed literals; NFC-only normalization (no transliteration); clamped to 512 Unicode scalar values, matching PROTOCOL §8.1's manifest bound exactly |
+| **Index reconciliation** (`IndexReconciliation`, Phase 3) | new/still-present/missing set partition from two `QuickId` sets; a rename is invisible (unchanged content ⇒ unchanged `QuickId` ⇒ still-present); byte-identical duplicates collapse to one still-present id regardless of how many locations a scan found |
 | Leader election | smaller `peer_id` wins; stable across reconnect; disagreement ⇒ `leader_mismatch`; **leadership unaffected by which side initiated the surviving connection** |
 | Redaction | paths → basename; `peer_id` → 6 chars; `identity_spki_sha256` → 6 hex; `conn_tiebreak` → 6 hex; **SAS / bulk tokens / TLS secrets have no log path at all** (assert by planting a secret and searching the entire emitted log for it) |
 
@@ -214,10 +218,10 @@ and is closed by I-02/I-03/I-04/I-19/I-20/I-21 on the two real phones, not by an
 
 | Area | Test | Platform |
 |---|---|---|
-| Database | Room migrations; FTS4 search ranking; 5 000-track insert performance | Android |
-| Database | GRDB migrations; FTS5 parity — **same query, same result set as Room** | iOS |
-| Library scan | synthetic MP3/AAC/M4A/FLAC fixtures in `test-media/synthetic/`; tag extraction; artwork; malformed/truncated file does not crash the scan | both |
-| Player | scheduled start at a future deadline; seek accuracy; rate change applied and restored | both |
+| Database | Room migrations (done — `SchemaMigrationTest`); FTS4 search ranking (done); 5 000-track insert performance (**pending**, see §4.3 L-01) | Android |
+| Database | GRDB migrations (done — `LibraryDatabase.makeMigrator()` exercised by every `LibraryIndexerTests` run); FTS5 parity — **same query, same result set as Room** (matching search behaviour proven case-for-case, not literally cross-checked row-for-row against Room's own result set) | iOS |
+| Library scan | synthetic MP3/AAC/M4A/FLAC fixtures in `test-media/synthetic/`; tag extraction; artwork; malformed/truncated file does not crash the scan — **done, both platforms, §4.3** (`LibraryIndexerTest`/`LibraryIndexerTests`, real emulator / real `swift test` execution) | both |
+| Player | load/play/pause/seek/stop/end-of-track — **done, both platforms, §4.3** (`ExoPlayerMusicPlayerTest`/`AVAudioEnginePlayerTests`). Scheduled start at a future deadline and rate change are Phase 5 sample-accurate-scheduling concerns, not built or tested this phase | both |
 | Transfer | loopback to self: 1 KiB / 5 MiB / 50 MiB; corrupt a chunk ⇒ rejected; truncate ⇒ rejected; cancel mid-transfer ⇒ `.part` removed; **no `.part` ever promoted** | both |
 | Manifest sync | loopback sync of a 5 000-entry manifest; kill the sender after page 20 ⇒ receiver keeps the previous manifest and reports not-synchronised; retry succeeds | both |
 | Discovery | advertise + browse on loopback/emulator network; service resolves | both |
@@ -304,6 +308,41 @@ correctly assumes is unchanged and still pending — same gate, narrower unknown
 | IA-07 | Force `mediaServicesWereResetNotification` | Engine graph rebuilt and session re-activated from scratch; playback resumes; asserted, not assumed | 6 |
 | IA-08 | Wired headset attached mid-session | `endpoint_class: "wired"`, `duplex_wide_stereo`, `media_quality: "full"` — the model must express this without a Bluetooth-specific special case | 6 |
 | IA-09 | No audio device attached | `endpoint_class: "builtin_speaker"`, profile `builtin` | 6 |
+
+### 4.3 Phase 3 local music — what is proven, and what is not
+
+Unlike 4.1/4.2, most of Phase 3's L3 row is **already proven**, on both platforms, without a device —
+because none of GRDB, `AVAudioEngine`/`AVAudioPlayerNode`, `ImageIO`/`AVFoundation`'s asset/metadata
+loading, or `CryptoKit` is iOS-only, and Android's Room/Media3 stack ran on the real, already-provisioned
+`RideLink_API36` emulator this session (not merely compiled).
+
+**Proven, both platforms, against the same `test-media/synthetic/` fixtures**: real file hashing
+(`ContentHashing`/`ContentHashing`, cross-checked against `MANIFEST.json`'s independently-recorded
+SHA-256 — the two platforms hash identical bytes to identical hex, not just internally consistently);
+real metadata/artwork extraction (title/artist/album, Unicode round-tripping through the real
+platform decoder, embedded-artwork extraction and bounded re-encode, a genuinely corrupt file
+classified `CORRUPT` rather than crashing, an unsupported extension classified `UNSUPPORTED` without
+being opened); real database upsert/dedup/search (byte-identical duplicates collapse to one row,
+identical-metadata-different-bytes does not, FTS matching is case-insensitive); real player load/
+play/pause/seek/stop/end-of-track against a real audio file, including a real missing-file failure
+and a real undecodable-content failure. `docs/STATUS.md` §2q has the full account, including the
+Android real-emulator walkthrough (push a fixture, real document picker, import, browse, play) and
+the five real bugs it and the iOS build surfaced.
+
+**Not proven by any of the above, and still pending a real device**:
+
+| ID | Procedure | Pass condition | Phase |
+|---|---|---|---|
+| L-01 | Import a realistic personal library (1 000+ real tracks, real formats, real tag variety) on a real phone | Import completes without OOM or ANR/watchdog kill; search stays responsive; artwork cache stays within a sane bound | 3 |
+| L-02 | iOS: pick a folder/files via the real `UIDocumentPickerViewController` on a device | Security-scoped access granted, copy into Application Support succeeds, indexing proceeds — this session could not exercise this interactively (no window server for `Simulator.app` in this sandbox) even though the underlying `LibraryIndexer.importFiles`/`importFolder` logic is real-execution-tested | 3 |
+| L-03 | Android: real document-picker + real MediaStore scan on a device other than the one already used this session | Confirms this session's single-emulator walkthrough generalizes, not an artifact of one AVD's MediaStore state | 3 |
+| L-04 | Play a track through to a real Bluetooth helmet/TWS output | Real output routing works when music is the only active audio, no `AVAudioSession`/`AudioManager` focus contention (none is simulated by any test here — see `docs/STATUS.md` §2q's audio-focus gap) | 3 |
+| L-05 | Background/foreground the app during playback on a real device | Playback survives (or degrades exactly as documented) across a real backgrounding cycle — `MusicCoordinator`'s lifecycle has never run outside its own process's foreground | 3 |
+
+No latency, throughput or storage-pressure number exists for either indexer or player. **A-01**
+(intercom + music coexistence on real hardware) is unchanged — Phase 3 built the player and library
+that A-01 will eventually exercise, but implemented none of the ducking/focus-arbitration behaviour
+A-01 tests, by design (Phase 6's job).
 
 ---
 
@@ -470,7 +509,7 @@ A phase is complete only when **all** of its row passes and `STATUS.md` records 
 | **2a Voice foundation** | + `voice-signal/` (70) + `voice-fsm/` (52); real-WebRTC loopback (host-only ICE, DTLS-SRTP, Opus) on macOS; pre-auth `VOICE_*` refusal over real TLS on both platforms | — *(none possible: see §3.1a)* | **V-01…V-11 pending** | **A-12…A-15 pending** | — | §8 clean. **No latency claim** |
 | **2b Intercom integration** | + `intercom/` (58) + `audio-state/` (74) + `voice-fsm/` `ModeSelected` rows; the mirrored intercom/lifecycle/readiness suites; the 50-press capture invariant; the pre-auth `AUDIO_STATE` refusal over real TLS on both platforms | — *(none possible: see §3.1b)* | **V-01…V-11 pending** | **A-10 pending** | — | §8 clean. **No latency claim.** VOX level source pending |
 | 2 Intercom | + voice state | route sim, IA-01…IA-03 | I-13 | A-01, A-02, A-04, A-09 | — | latency recorded |
-| 3 Local music | + library, hashing | library, player | — | A-01 | — | 1 000+ real tracks indexed |
+| 3 Local music | + library, hashing (`core.library`/`core.player`, `RideLinkCore.Library`/`.Player`) — **done** | library, player — **done, §4.3** (real GRDB/Room/AVAudioEngine/Media3/AVFoundation/CryptoKit execution on both platforms) | L-02, L-03 pending | L-04, A-01 pending | — | **L-01 (1 000+ real tracks) pending** |
 | 4 Shared library | + manifest paging + paging-error vectors | transfer loopback, manifest sync loopback | I-10, I-11, I-23, I-24 | — | — | 50 MB transfer verified; 5 000-entry manifest synced |
 | 5 Sync playback | + drift, queue | player scheduling | I-09, I-12 | — | — | drift p95 recorded |
 | 6 Coexistence | + audio policy, audio-state vectors | AF-02…AF-09, IA-04…IA-09 | I-13, I-25 | A-03, A-05…A-08, A-10, A-11 | R-01, R-02 | mode chosen and recorded; `confidence` = `measured` |
@@ -490,7 +529,7 @@ whether V1 exists.
 | Both Bluetooth devices work | A-01 |
 | 60 min two-way voice, no restart | A-02 extended to 60 min |
 | One acceptable music+intercom mode validated | A-03, A-10, R-02 |
-| Import / index / search local music | L3 library + 1 000-track real run |
+| Import / index / search local music | L3 library/player (done, §4.3) + L-01 (1 000+ real tracks, pending) |
 | Missing track transferred, hash-verified, played | I-11 + manual UJ-05 |
 | Shared catalogue survives a real library size | I-23, I-24 |
 | Either user controls queue and playback | I-09 |
