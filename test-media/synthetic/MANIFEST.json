@@ -1,15 +1,15 @@
 {
   "corrupt.m4a": {
-    "description": "normal.m4a truncated to two-thirds of its length — a real file, deliberately damaged. Must classify as CORRUPT, never crash the indexer.",
-    "sha256": "dc7779e1424007a86907ee4d48416828361771b2c2309a3e629e8c1a3dc66f2e"
+    "description": "normal.m4a truncated to its first 15 bytes — cut off partway through its own ftyp box, before a single complete top-level box exists. A real file, deliberately damaged at the container-structure level (two much later truncation points were tried first and confirmed MediaMetadataRetriever still parses them cleanly). Must classify as CORRUPT, never crash the indexer.",
+    "sha256": "817e94f0e800b4e6c87226ca4f18be70eecfabc3ae482471479813bd4ca9ec3e"
   },
   "duplicate_a.m4a": {
     "description": "Byte-identical to normal.m4a under a different filename — same sha256, the FR-010 dedup case.",
-    "sha256": "0430a62b735c1da73882efeff90bea6f0dba90c3eae7e7f0995a00d396539db1"
+    "sha256": "2cd9dc156a02397584c0853075f7b664fa16afa441a62291f486f6c59edc7055"
   },
   "duplicate_b.m4a": {
     "description": "Byte-identical to normal.m4a under a different filename — same sha256, the FR-010 dedup case.",
-    "sha256": "0430a62b735c1da73882efeff90bea6f0dba90c3eae7e7f0995a00d396539db1"
+    "sha256": "2cd9dc156a02397584c0853075f7b664fa16afa441a62291f486f6c59edc7055"
   },
   "minimal.mp3": {
     "description": "Hand-built ID3v2 header + one zero-filled MPEG-1 Layer III frame — proves MP3 extension/ID3 tag detection only. NOT a verified decodable audio fixture (no MP3 encoder exists in this environment; see the module docstring). Real MP3 files decode via the platform's own native MP3 decoder, exercised only by a real user's own files.",
@@ -24,7 +24,7 @@
     "expected_artist": "Test Artist",
     "expected_title": "No Artwork Track",
     "has_artwork": false,
-    "sha256": "d7600ba11eb7119cd370e936dad1215c4145e07f4cf88b83d70389e0712ee08e"
+    "sha256": "3420b4ce55711df7ad1e7e3aada6cab7588389145390e8cd048e1a22248441b2"
   },
   "no_metadata.m4a": {
     "description": "No tags at all — exercises the filename-fallback title and Unknown Artist/Album normalization.",
@@ -32,7 +32,7 @@
     "expected_artist": null,
     "expected_title": null,
     "has_artwork": false,
-    "sha256": "9ff3155ab3258fd716e1c484f80181c0e8adbb5ff863a57049f24d10cb8b24b3"
+    "sha256": "ae71f6bea57a0aab2eb33a192d66dbd8f613b215fcca6a150642fd5e37d24fab"
   },
   "normal.m4a": {
     "description": "A normal track: title/artist/album tags and embedded artwork.",
@@ -40,7 +40,7 @@
     "expected_artist": "Test Artist",
     "expected_title": "Test Track",
     "has_artwork": true,
-    "sha256": "0430a62b735c1da73882efeff90bea6f0dba90c3eae7e7f0995a00d396539db1"
+    "sha256": "2cd9dc156a02397584c0853075f7b664fa16afa441a62291f486f6c59edc7055"
   },
   "same_metadata_different_bytes_a.m4a": {
     "description": "Same title/artist/album as its pair, genuinely different audio bytes — must NOT be deduplicated; metadata alone is never identity (REQUIREMENTS §9.2).",
@@ -48,7 +48,7 @@
     "expected_artist": "Shared Artist",
     "expected_title": "Shared Title",
     "has_artwork": false,
-    "sha256": "97c3b7030e6cc53494419f6b07bc0b81b34a99bccda9aa467d8e2f2ca8111a5b"
+    "sha256": "25e538565b7a4429cd3cbe2cf0c569d6bf0825c78355d327868a23d6151fed39"
   },
   "same_metadata_different_bytes_b.m4a": {
     "description": "Same title/artist/album as its pair, genuinely different audio bytes — must NOT be deduplicated; metadata alone is never identity (REQUIREMENTS §9.2).",
@@ -56,7 +56,7 @@
     "expected_artist": "Shared Artist",
     "expected_title": "Shared Title",
     "has_artwork": false,
-    "sha256": "a809c1c126800a072d7f68923125b17aefdeb9150a8712001af0d0fba63c0453"
+    "sha256": "d56253c7bb919e2ffe6c47de4b4f8e20b1d7107828f5de85b06f02f8f82e2dbb"
   },
   "unicode_metadata.m4a": {
     "description": "Unicode tags (Japanese, an emoji, and combining marks) — exercises NFC normalization end to end, not just in the pure normalizer's own unit tests.",
@@ -64,10 +64,10 @@
     "expected_artist": "É́lève",
     "expected_title": "テスト楽曲 🎵",
     "has_artwork": false,
-    "sha256": "998878c8610e2c994cf85e47cc6d5e960baf70e0e90526b5c3b33cfb4e154645"
+    "sha256": "49550a78143d22a8e03ece8520403e043ba5ba80c71d234857398b1ae9705685"
   },
   "unsupported.xyz": {
     "description": "normal.m4a's exact bytes under an unrecognized extension. Must classify as UNSUPPORTED (extension gate), never CORRUPT or crash.",
-    "sha256": "0430a62b735c1da73882efeff90bea6f0dba90c3eae7e7f0995a00d396539db1"
+    "sha256": "2cd9dc156a02397584c0853075f7b664fa16afa441a62291f486f6c59edc7055"
   }
 }

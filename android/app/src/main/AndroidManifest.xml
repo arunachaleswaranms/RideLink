@@ -26,10 +26,22 @@
 
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
-    <!-- Declared now because one service carries both types for a ride (ARCHITECTURE §6.4).
-         Phase 2a does not request mediaPlayback at runtime: there is no player until Phase 5, and
-         requesting a type the app does not use is how an app gets killed rather than trusted. -->
+    <!-- One service carries both types for a ride (ARCHITECTURE §6.4). Phase 3 now requests
+         mediaPlayback at runtime for local music, independent of whether the intercom is active —
+         see this phase's brief §16's "music-only playback must work without the microphone/
+         intercom being active." (An earlier comment here said "no player until Phase 5"; that was
+         simply wrong — REQUIREMENTS §13 has always put the local player at Phase 3.) -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
+
+    <!-- Phase 3 library import (ARCHITECTURE §8.4). SAF (ACTION_OPEN_DOCUMENT_TREE /
+         ACTION_OPEN_DOCUMENT) needs no permission at all and is the primary, always-available
+         import path. READ_MEDIA_AUDIO/READ_EXTERNAL_STORAGE are only for the secondary "whole
+         device library" MediaStore convenience scan — the scoped, audio-only permission on API 33+
+         rather than broad storage access, per this phase's brief §10's "minimize permissions." -->
+    <uses-permission android:name="android.permission.READ_MEDIA_AUDIO" />
+    <uses-permission
+        android:name="android.permission.READ_EXTERNAL_STORAGE"
+        android:maxSdkVersion="32" />
 
     <application
         android:name=".RideLinkApplication"

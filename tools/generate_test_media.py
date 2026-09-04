@@ -27,6 +27,7 @@ import shutil
 import struct
 import subprocess
 import sys
+import time
 import wave
 import zlib
 from pathlib import Path
@@ -34,6 +35,9 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 OUT_DIR = REPO_ROOT / "test-media" / "synthetic"
 SAMPLE_RATE = 44_100
+MDLS_MAX_ATTEMPTS = 5
+MDLS_RETRY_DELAY_S = 1.0
+TRUNCATE_INSIDE_FTYP_BYTES = 15
 
 
 # ─── Low-level PCM / AAC generation ─────────────────────────────────────────────────────────────
@@ -373,13 +377,24 @@ def main() -> None:
             "sha256": sha256_hex(path),
         }
 
-    # A real, valid AAC/M4A file truncated mid-stream — a decoder must report CORRUPT, not crash.
+    # A real AAC/M4A file truncated inside its very first box (`ftyp`) — a decoder must report
+    # CORRUPT, not crash. Measured directly against `MediaMetadataRetriever` on a real Android
+    # emulator, Android's own parser turned out to be considerably more forgiving than expected:
+    # truncating to two-thirds of the file (damaging only the trailing `mdat` audio payload) still
+    # parsed cleanly, and truncating a third of the way through `moov` *also* still parsed cleanly
+    # (both tried and confirmed insufficient before this one) — M4A's metadata atoms sit entirely
+    # before `mdat`, and the platform parser reads only as much of `moov` as it needs. Truncating
+    # inside `ftyp` itself removes even a complete top-level box header, which is the point where a
+    # correctly-behaving parser has no choice but to fail.
     corrupt = OUT_DIR / "corrupt.m4a"
     normal_bytes = normal.read_bytes()
-    corrupt.write_bytes(normal_bytes[: len(normal_bytes) * 2 // 3])
+    corrupt.write_bytes(normal_bytes[:TRUNCATE_INSIDE_FTYP_BYTES])
     manifest["corrupt.m4a"] = {
-        "description": "normal.m4a truncated to two-thirds of its length — a real file, "
-        "deliberately damaged. Must classify as CORRUPT, never crash the indexer.",
+        "description": f"normal.m4a truncated to its first {TRUNCATE_INSIDE_FTYP_BYTES} bytes — cut "
+        "off partway through its own ftyp box, before a single complete top-level box exists. A "
+        "real file, deliberately damaged at the container-structure level (two much later "
+        "truncation points were tried first and confirmed MediaMetadataRetriever still parses them "
+        "cleanly). Must classify as CORRUPT, never crash the indexer.",
         "sha256": sha256_hex(corrupt),
     }
 
@@ -414,14 +429,27 @@ def main() -> None:
     # (afinfo's `-i` InfoDictionary was tried first and does not surface iTunes-style atoms for
     # plain AAC/M4A at all — confirmed by inspecting its output against a hand-verified box dump —
     # so it is not a suitable check here; mdls is.)
-    mdls = subprocess.run(
-        ["mdls", "-name", "kMDItemTitle", "-name", "kMDItemAuthors", "-name", "kMDItemAlbum", str(normal)],
-        capture_output=True,
-        text=True,
-    )
-    if "Test Track" not in mdls.stdout or "Test Artist" not in mdls.stdout or "Test Album" not in mdls.stdout:
-        print("ERROR: mdls did not read back the injected metadata for normal.m4a", file=sys.stderr)
-        print(mdls.stdout, mdls.stderr, file=sys.stderr)
+    #
+    # Spotlight indexes asynchronously, so the very first query right after a fresh write can race
+    # its indexer — confirmed by re-running the identical query moments later and getting the
+    # correct answer. Retried rather than treated as a one-shot check for exactly that reason.
+    mdls_ok = False
+    mdls_output = ""
+    for attempt in range(MDLS_MAX_ATTEMPTS):
+        if attempt > 0:
+            time.sleep(MDLS_RETRY_DELAY_S)
+        mdls = subprocess.run(
+            ["mdls", "-name", "kMDItemTitle", "-name", "kMDItemAuthors", "-name", "kMDItemAlbum", str(normal)],
+            capture_output=True,
+            text=True,
+        )
+        mdls_output = mdls.stdout + mdls.stderr
+        if "Test Track" in mdls.stdout and "Test Artist" in mdls.stdout and "Test Album" in mdls.stdout:
+            mdls_ok = True
+            break
+    if not mdls_ok:
+        print(f"ERROR: mdls did not read back the injected metadata for normal.m4a after {MDLS_MAX_ATTEMPTS} attempts", file=sys.stderr)
+        print(mdls_output, file=sys.stderr)
         sys.exit(1)
 
     print(f"Wrote {len(manifest)} fixtures to {OUT_DIR}")

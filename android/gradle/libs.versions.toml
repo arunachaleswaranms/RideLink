@@ -1,6 +1,13 @@
 [versions]
 agp = "9.3.2"
 kotlin = "2.4.10"
+ksp = "2.3.11"
+room = "2.8.4"
+documentfile = "1.1.0"
+androidxTestRunner = "1.7.0"
+androidxTestJunit = "1.3.0"
+junit4 = "4.13.2"
+media3 = "1.11.0"
 composeBom = "2026.04.01"
 coreKtx = "1.18.0"
 activityCompose = "1.13.0"
@@ -34,6 +41,17 @@ kotlin-test-junit5 = { group = "org.jetbrains.kotlin", name = "kotlin-test-junit
 kotlinx-coroutines-test = { group = "org.jetbrains.kotlinx", name = "kotlinx-coroutines-test", version.ref = "kotlinxCoroutines" }
 conscrypt-openjdk-uber = { group = "org.conscrypt", name = "conscrypt-openjdk-uber", version.ref = "conscrypt" }
 webrtc-android = { group = "io.github.webrtc-sdk", name = "android", version.ref = "webrtcAndroid" }
+room-runtime = { group = "androidx.room", name = "room-runtime", version.ref = "room" }
+room-ktx = { group = "androidx.room", name = "room-ktx", version.ref = "room" }
+room-compiler = { group = "androidx.room", name = "room-compiler", version.ref = "room" }
+room-testing = { group = "androidx.room", name = "room-testing", version.ref = "room" }
+documentfile = { group = "androidx.documentfile", name = "documentfile", version.ref = "documentfile" }
+androidx-test-runner = { group = "androidx.test", name = "runner", version.ref = "androidxTestRunner" }
+androidx-test-junit = { group = "androidx.test.ext", name = "junit", version.ref = "androidxTestJunit" }
+junit4 = { group = "junit", name = "junit", version.ref = "junit4" }
+media3-exoplayer = { group = "androidx.media3", name = "media3-exoplayer", version.ref = "media3" }
+media3-session = { group = "androidx.media3", name = "media3-session", version.ref = "media3" }
+media3-common = { group = "androidx.media3", name = "media3-common", version.ref = "media3" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }
@@ -42,5 +60,6 @@ kotlin-android = { id = "org.jetbrains.kotlin.android", version.ref = "kotlin" }
 kotlin-jvm = { id = "org.jetbrains.kotlin.jvm", version.ref = "kotlin" }
 kotlin-compose = { id = "org.jetbrains.kotlin.plugin.compose", version.ref = "kotlin" }
 kotlin-serialization = { id = "org.jetbrains.kotlin.plugin.serialization", version.ref = "kotlin" }
+ksp = { id = "com.google.devtools.ksp", version.ref = "ksp" }
 ktlint = { id = "org.jlleitschuh.gradle.ktlint", version.ref = "ktlint" }
 detekt = { id = "io.gitlab.arturbosch.detekt", version.ref = "detekt" }
