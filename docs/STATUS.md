@@ -1,6 +1,6 @@
 # RideLink — Status
 
-**Updated:** 4 September 2026 (Phase 2b final hardening pass, twelfth session — see §2o)
+**Updated:** 4 September 2026 (Phase 2b final hardening pass, thirteenth session — see §2p)
 **Current milestone:** M1 (Private voice link) — in progress
 **Current phase:** Phase 2b — intercom integration and audio lifecycle.
 **Phase 2b status: IMPLEMENTATION COMPLETE — REAL-DEVICE INTERCOM GATE PENDING.**
@@ -1385,6 +1385,78 @@ gained Amendment A2; this file's problem 32 (§4) is now recorded FIXED.
 Bluetooth, no foreground service, no lock screen, no latency figure. Every finding and fix above is a
 laptop-only correctness proof; the real-device intercom gate (§7) is exactly as open as it was before
 this session.
+
+---
+
+## 2p. Phase 2b final hardening, third pass — the Android route-close listener still tore down
+before its own confirmation (4 September 2026 session, thirteenth)
+
+A third, narrowly-scoped review, requested against exactly the one residual §2o's Finding 1 named for
+Android and judged acceptable at the time: the fallback timeout could never hang, only *lose a race*
+against the real confirmation. Traced through rather than left there, losing that race turns out to
+have a cost §2o did not account for: a normal, successful platform confirmation gets reported as a
+timeout. Confirmed against the actual code before anything changed. Full account:
+[ADR-021 Amendment A3](DECISIONS/ADR-021-intercom-transmission-and-capture-ownership.md#amendment-a3--4-september-2026--the-android-route-close-listener-still-tore-down-before-its-own-confirmation-not-just-before-the-transition-began).
+
+**The finding.** `AndroidVoiceAudioSession.close()`'s `releasePlatformSession()` unregistered
+`OnCommunicationDeviceChangedListener` as its last step — which was §2o's own fix, and correctly
+ordered relative to the platform calls that could provoke a confirmation. What that fix did not
+account for: those platform calls and the listener's teardown all ran in one uninterrupted
+synchronous function. A confirmation `clearCommunicationDevice()` produces **synchronously** is caught
+fine; one it produces **asynchronously**, arriving after the function has already returned and
+unregistered the listener, has nowhere left to land. Not a hang — the independent failure-protection
+timeout `manageTransitionTimeout` arms still settles the transition regardless — but a
+mischaracterization: a route change the platform genuinely confirmed gets counted as
+`timedOutCount + 1`, indistinguishable in the diagnostics from a platform that never confirmed
+anything. The five-second window built specifically as failure protection, never as the definition of
+success, had quietly become the ordinary close path whenever the real confirmation lost the race
+against `unregisterPlatformCallbacks()`.
+
+**The fix.** `releasePlatformSession()` is split into `requestPlatformRestore()` (clears the
+communication device, restores the mode, abandons focus — everything that could still provoke a
+confirmation) and the unchanged, still-last `unregisterPlatformCallbacks()`. Between them, `close()`
+now suspends on a new `TransitionSettlementGate` — a small, Android-free class holding only
+`kotlinx.coroutines` — until the closing transition has actually settled, by the platform's
+confirmation or by the existing timeout, whichever comes first, and only then unregisters. All three
+timings are handled correctly: a synchronous confirmation is already settled by the time the gate is
+reached, so `close()` never suspends at all; an asynchronous one resumes a genuinely suspended
+`close()` once it arrives, listener still registered to receive it; no confirmation at all still falls
+back to the same timeout as before, now correctly counted as a real timeout because in that case it is
+one. `open()`'s two failure-abort paths changed only mechanically (the same two split functions,
+called back-to-back, no await) — `OpenAborted` settles its transition synchronously and
+unconditionally inside the reducer itself, so that path never needed the await in the first place.
+`open()`'s success path and the whole of iOS are untouched; inspection did not find the same defect
+on either.
+
+**New regression coverage.** `TransitionSettlementGate` (Android, new,
+`android/audio/src/main/kotlin/com/ridelink/audio/route/TransitionSettlementGate.kt`) is the suspend/
+resume primitive itself, extracted so it — unlike `AndroidVoiceAudioSession`, which cannot be
+constructed in a JVM test at all — is provable off-device. `TransitionSettlementGateTest` (6 tests)
+proves it directly: already-settled short-circuits without suspending, a genuine suspend/resume across
+a `kotlinx-coroutines-test` `StandardTestDispatcher`, a settlement notification with nothing waiting
+on it is a no-op, and a repeated notification after resume does not double-complete.
+`AndroidVoiceAudioSessionCloseOrderingTest` (7 tests, new) is a structural mirror of `close()`'s exact
+call sequence, built from the same two production pieces (`TransitionSettlementGate` and the shared
+`AudioSessionLifecycle` reducer) with every `AudioManager` call replaced by a recorded fake, and proves
+the listener stays registered through a synchronous confirmation, an asynchronous one, and a route
+timeout; that unregistration never runs before settlement; that a mismatched-generation timeout is
+ignored while the real one still settles; and that repeated/idempotent `close()` calls do not re-run
+the platform sequence. **This proves the ordering policy, not `AudioManager`'s actual callback timing**
+— that remains REAL-DEVICE INTERCOM GATE PENDING like the rest of `AndroidVoiceAudioSession`; §4
+problem 23 is otherwise unchanged, narrowed only in what specifically is untested there.
+
+**Verification.** Android: `test ktlintCheck detekt lint assembleDebug assembleRelease` all green,
+**468 tests** (was 455 — +13 in `audio`, now 33, was 20). The two new suites (13 tests total) run
+**100 consecutive times, 0 failures**. iOS: untouched by this pass (Android-only finding, no shared
+type changed) — `RideLinkCore` unchanged at 147/147, `RideLinkPlatform` unchanged at 187/187,
+`xcodebuild` Debug and Release both succeed for the simulator, re-run clean as a regression check. No
+production wire shape, security property, module boundary or platform baseline changed.
+`docs/DECISIONS/ADR-021.md` gained Amendment A3.
+
+**Still true, unchanged by this pass:** nothing here ran on a phone. No microphone, no speaker, no
+Bluetooth, no foreground service, no lock screen, no latency figure. Real Android `AudioManager`/
+communication-device callback timing remains exactly as unmeasured as before this session — this pass
+narrows what is untested in `AndroidVoiceAudioSession`, it does not close the real-device gate.
 
 ---
 

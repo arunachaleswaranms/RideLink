@@ -92,6 +92,15 @@ class AndroidVoiceAudioSession(
     @Volatile
     private var lifecycle = AudioSessionState()
 
+    /**
+     * Lets [close] suspend until the closing transition it just began has actually settled — by
+     * [deviceChangedListener] or by the failure-protection timeout — before
+     * [unregisterPlatformCallbacks] runs. See [TransitionSettlementGate]'s doc for why: the previous
+     * close order tore the listener down as soon as every platform call that *could* provoke it had
+     * been made, not once one of them actually had.
+     */
+    private val closeSettlementGate = TransitionSettlementGate(isSettled = { !lifecycle.transition.transitioning })
+
     @Volatile
     private var snapshot = AudioRouteSnapshot()
 
@@ -166,8 +175,12 @@ class AndroidVoiceAudioSession(
             if (routed.isFailure) {
                 // The session is up but pointing at the wrong endpoint. Named distinctly from an
                 // activation failure because the user action is different: reconnect the helmet unit,
-                // not restart the app.
-                releasePlatformSession()
+                // not restart the app. `OpenAborted` settles the transition itself, synchronously and
+                // unconditionally (it does not wait on a platform confirmation), so there is nothing
+                // here for a still-registered listener to catch — unlike the ordinary close path,
+                // this one does not need to await settlement before unregistering.
+                requestPlatformRestore()
+                unregisterPlatformCallbacks()
                 apply(AudioSessionEvent.OpenAborted(lifecycle.generation, monotonicNowUs(), VoiceFailure.ROUTE_SELECTION_FAILED))
                 return@withContext Result.failure(VoiceAudioSessionFailure(VoiceFailure.ROUTE_SELECTION_FAILED))
             }
@@ -179,16 +192,23 @@ class AndroidVoiceAudioSession(
     override suspend fun close() {
         withContext(Dispatchers.Main.immediate) {
             if (!lifecycle.open) return@withContext
-            // Begun before `releasePlatformSession()`'s platform calls, for the same reason as
+            // Begun before `requestPlatformRestore()`'s platform calls, for the same reason as
             // `open()` above — `clearCommunicationDevice()` can synchronously confirm the very
             // change this transition exists to track (this phase's final hardening pass, Issue 1).
             apply(AudioSessionEvent.CloseRequested(lifecycle.generation, monotonicNowUs()))
-            // The callbacks that could confirm this restoring change stay registered through the calls
-            // that request it — `releasePlatformSession` unregisters them only as its **last** step
-            // (this phase's hardening pass, Issue D) — so a `.categoryChange`-equivalent confirmation
-            // has a chance to be observed before nothing is listening for it any more.
-            releasePlatformSession()
+            requestPlatformRestore()
             apply(AudioSessionEvent.Closed(lifecycle.generation, monotonicNowUs()))
+            // This phase's route-close hardening pass: staying registered through the calls above is
+            // not enough by itself — `clearCommunicationDevice()`'s confirmation can arrive
+            // *asynchronously*, after this point, and unregistering the moment every provoking call
+            // had been made (rather than once one of them actually settled the transition) meant a
+            // normal successful confirmation could lose its listener before it ever arrived, leaving
+            // only the five-second failure-protection timeout — never meant to be the ordinary path —
+            // to settle it instead. `awaitSettled()` returns immediately if the confirmation already
+            // landed synchronously inside `requestPlatformRestore()`; otherwise it suspends until
+            // either `deviceChangedListener` or the timeout settles the transition `apply` just began.
+            closeSettlementGate.awaitSettled()
+            unregisterPlatformCallbacks()
         }
     }
 
@@ -229,15 +249,18 @@ class AndroidVoiceAudioSession(
         audioManager.mode = AudioManager.MODE_IN_COMMUNICATION
     }
 
-    private fun releasePlatformSession() {
+    /**
+     * Every platform call that requests the restoring change and could still provoke
+     * [deviceChangedListener]'s confirmation of it — and, deliberately, nothing else. Unlike the
+     * superseded `releasePlatformSession()` this replaces, it does **not** unregister the listeners:
+     * that is [close]'s job, only once [closeSettlementGate] says the transition this call started has
+     * actually settled (this phase's route-close hardening pass).
+     */
+    private fun requestPlatformRestore() {
         runCatching { audioManager.clearCommunicationDevice() }
         runCatching { audioManager.mode = previousMode }
         focusRequest?.let { runCatching { audioManager.abandonAudioFocusRequest(it) } }
         focusRequest = null
-        // Unregistered last, once every call that could still provoke a confirming callback has
-        // already been made — removing them earlier would mean the very confirmation this generation's
-        // closing transition is waiting for can never arrive (this phase's hardening pass, Issue D).
-        unregisterPlatformCallbacks()
     }
 
     private fun unregisterPlatformCallbacks() {
@@ -336,6 +359,10 @@ class AndroidVoiceAudioSession(
             }
         }
         manageTransitionTimeout(previousStartedAtUs)
+        // Resumes a suspended `close()` the instant this event settled the transition it is
+        // waiting on — from `deviceChangedListener` or from the timeout below alike. A no-op for
+        // every event that is not a settlement, and for a settlement `close()` is not waiting on.
+        closeSettlementGate.onSettlementObserved()
     }
 
     @Volatile

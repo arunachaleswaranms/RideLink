@@ -120,6 +120,7 @@ cases and **none of them can open or close the capture device**.
 | The iOS notification path is bounded, generation-tagged at the callback boundary, and drains in a real (not merely documented) safety priority, and survives repeated End → Start cycles | `AudioSessionSignalBoxTests`, rewritten for the eleventh session's hardening pass (ADR-021 Amendment A1, findings A–C) — every arrival permutation of the three signal kinds, concurrent producers, and several open→finish cycles in a row |
 | The Android microphone foreground service cannot be told to stop before capture is actually released | `VoiceControllerStopAwaitTest` (ADR-021 Amendment A1, finding F) — a controllable suspend gate proves `stopAndAwaitRelease()` waits for `audioSession.close()` to complete, not merely for it to be called; a link loss does not resolve a pending call |
 | Android `VoiceController` diagnostics writes from three independent execution contexts (the mailbox consumer, the diagnostics-poll coroutine, the platform route-sink callback thread) cannot lose one another's fields | `VoiceControllerDiagnosticsRaceTest` (ADR-021 Amendment A1, finding H) — 300 concurrent iterations per pairing, two independent field pairings |
+| Android `close()`'s communication-device listener stays registered until its own transition actually settles — by a synchronous confirmation, an asynchronous one, or the failure-protection timeout — and is torn down only after, never merely once every platform call that *could* provoke a confirmation has been made | `TransitionSettlementGateTest` (the suspend/resume primitive in isolation, ADR-021 Amendment A3) and `AndroidVoiceAudioSessionCloseOrderingTest` (the same call sequence `close()` uses, built from a recorded fake since `AndroidVoiceAudioSession` cannot be constructed off-device) — proves the ordering policy; run 100 consecutive times, 0 failures |
 
 **Not proven, and none of it may be reported as passing:**
 
@@ -241,11 +242,17 @@ is still pending** — `RideForegroundService` has never started (docs/STATUS.md
 The eleventh session's hardening pass (ADR-021 Amendment A1, finding F) fixed a real ordering bug in
 `AndroidVoiceAudioSession`'s listener registration (registered after the request it must confirm, on
 both the open and the close path) and made sure the service is never told to stop before
-`VoiceController.stopAndAwaitRelease()` confirms capture actually released. Both are code fixes with
-laptop-testable coverage where the logic is pure or fake-driven (`VoiceControllerStopAwaitTest`); the
-*platform* behaviour these rows exist to test — whether `setCommunicationDevice` actually fires
-`OnCommunicationDeviceChangedListener` in the corrected order on real hardware — is unchanged and still
-pending.
+`VoiceController.stopAndAwaitRelease()` confirms capture actually released. The thirteenth session
+(ADR-021 Amendment A3) narrowed the same listener's teardown further: registering it in the right
+order was not enough, because `close()` unregistered it as soon as every platform call that *could*
+provoke a confirmation had been made, not once one of them actually had — losing an asynchronous
+confirmation and reporting it as a timeout instead. `close()` now awaits the transition's actual
+settlement (by the confirmation or by the existing failure-protection timeout) before unregistering.
+All three are code fixes with laptop-testable coverage where the logic is pure or fake-driven
+(`VoiceControllerStopAwaitTest`, `TransitionSettlementGateTest`,
+`AndroidVoiceAudioSessionCloseOrderingTest`); the *platform* behaviour these rows exist to test —
+whether `setCommunicationDevice` actually fires `OnCommunicationDeviceChangedListener` in the
+corrected order, and with the corrected timing, on real hardware — is unchanged and still pending.
 
 | ID | Procedure | Pass condition | Phase |
 |---|---|---|---|
