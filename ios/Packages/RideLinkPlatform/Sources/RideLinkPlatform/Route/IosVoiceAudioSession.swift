@@ -33,22 +33,35 @@ import AVFoundation
 /// `docs/STATUS.md` §4 problem 20 — `AVAudioSession` does not exist on macOS, so anything with a
 /// *decision* in it has to be somewhere `swift test` can reach.
 ///
-/// **Notifications are delivered through one ordered mailbox, not a `Task` per callback.** A `Task` per
-/// notification preserves only the order they were *created* in (STATUS §2h), and here the relative
-/// order matters: an interruption ending and a route change arriving together must not be applied
-/// backwards. `AudioSessionSignalBox` is coalesced by kind and therefore bounded by construction (this
-/// phase's brief §38/§39), which is safe precisely because each kind is re-derived from the platform's
-/// *current* state rather than describing a distinct historical occurrence.
+/// ### Phase 2b final hardening (this pass)
 ///
-/// **The route transition settles on a platform callback, never on a timer.** `routeChangeNotification`
-/// with reason `.categoryChange` is what confirms the change RideLink asked for; `pollTransitionTimeout`
-/// exists only so a platform that never confirms cannot leave `route_state: transitioning` latched for
-/// the rest of a ride, and every use of it is counted (`RouteTransitionState.timedOutCount`).
+/// **Notifications are delivered through one bounded, generation-tagged path, scoped to one open
+/// generation.** `AudioSessionSignalBox` now (a) is created fresh on every `open()` rather than reused
+/// for the actor's whole lifetime — a box `finish()`ed by a prior `close()` stays dead forever, so
+/// reusing one across End → Start Intercom silently stopped delivering notifications for every session
+/// after the first; (b) stamps each signal with the generation captured **at the `NotificationCenter`
+/// callback boundary**, not re-derived when the signal is later processed — reading `lifecycle.generation`
+/// at processing time stamps every event with whatever generation is current *then*, which defeats the
+/// reducer's generation guard by construction; and (c) is drained by explicit priority polling
+/// (`mediaServicesReset` before `interruption` before `routeChanged`) rather than raw `AsyncStream`
+/// arrival order, so a reset can never sit behind a route change it must invalidate.
+///
+/// **Observers are registered before the platform is asked to change, and stay registered through a
+/// close's restoring call.** The confirming `.categoryChange` notification cannot be missed because it
+/// was never listened for.
+///
+/// **The route transition settles on a platform callback, never on a timer — and the timeout that
+/// protects against a missing callback is actually scheduled now.** Every transition start (a changed
+/// `RouteTransitionState.startedAtMonoUs`) arms one generation-tagged timeout task; a settle or a newer
+/// transition cancels/replaces it; `close()`/a reset cancel it outright. `pollTransitionTimeout()` — the
+/// public entry point — remains for direct callers and tests; it is no longer the *only* way the timeout
+/// ever runs.
 ///
 /// **Nothing here has run on a phone.** `AVAudioSession` is unavailable on macOS, so it cannot be
 /// exercised by `swift test`, and no physical iPhone is available in this environment.
-/// `IosAudioRouteMapper` and `AudioSessionLifecycle` are pure and are unit-tested; everything in this
-/// class is **REAL-DEVICE INTERCOM GATE PENDING** (docs/STATUS.md §7, TEST_PLAN IA-01…IA-09, V-01…V-11).
+/// `IosAudioRouteMapper`, `AudioSessionLifecycle` and `AudioSessionSignalBox` are pure/platform-agnostic
+/// and are unit-tested; everything else in this class is **REAL-DEVICE INTERCOM GATE PENDING**
+/// (docs/STATUS.md §7, TEST_PLAN IA-01…IA-09, V-01…V-11).
 public actor IosVoiceAudioSession: VoiceAudioSession {
     private let session = AVAudioSession.sharedInstance()
     private var observers: [NSObjectProtocol] = []
@@ -58,9 +71,18 @@ public actor IosVoiceAudioSession: VoiceAudioSession {
     private var lastReason: AudioRouteChangeReason = .unknown
     private let monotonicNowUs: @Sendable () -> Int64
 
-    /// The one ordered path from `NotificationCenter` into this actor. See the type doc.
-    private let signals = AudioSessionSignalBox()
+    /// This open generation's signal path — `nil` whenever the session is closed. Recreated fresh on
+    /// every `open()`, which is what makes a prior generation's `finish()` harmless rather than
+    /// permanent (see the type doc above and `AudioSessionSignalBox`'s own doc for why).
+    private var signals: AudioSessionSignalBox?
+    private var doorbell: ConflatedSignal?
     private var consumerTask: Task<Void, Never>?
+
+    /// Failure protection for the current transition, if one is outstanding. Scheduled/cancelled by
+    /// `manageTransitionTimeout`, keyed to the generation active when it was scheduled — a reset firing
+    /// mid-window cannot let this stale timer settle the *new* generation's transition, because the event
+    /// it eventually applies still names the old one and the reducer's own guard drops it.
+    private var transitionTimeoutTask: Task<Void, Never>?
 
     public init(
         monotonicNowUs: @escaping @Sendable () -> Int64 = { Int64(DispatchTime.now().uptimeNanoseconds / 1000) }
@@ -88,6 +110,17 @@ public actor IosVoiceAudioSession: VoiceAudioSession {
         guard await hasMicrophonePermission() else {
             return fail(.micPermissionDenied)
         }
+
+        // A fresh signal path for this generation, and the observers that will confirm the request below
+        // — registered **before** the request is made, so the platform's confirming notification cannot
+        // arrive into a session nobody is listening to yet (this phase's hardening pass, Issue D).
+        let box = AudioSessionSignalBox()
+        let bell = ConflatedSignal()
+        signals = box
+        doorbell = bell
+        startConsumer(box: box, bell: bell)
+        registerObservers(generation: lifecycle.generation, box: box, bell: bell)
+
         do {
             try session.setCategory(
                 .playAndRecord,
@@ -96,30 +129,37 @@ public actor IosVoiceAudioSession: VoiceAudioSession {
             )
             try session.setActive(true)
         } catch {
+            unregisterObservers()
+            stopConsumer()
+            signals = nil
+            doorbell = nil
             return fail(.audioSessionActivationFailed)
         }
-        startConsumer()
-        registerObservers()
         apply(.opened(generation: lifecycle.generation, atMonoUs: monotonicNowUs()))
         return .success(())
     }
 
     public func close() async {
         guard lifecycle.open else { return }
-        unregisterObservers()
-        // Back to the music-only configuration (ARCHITECTURE §6.2), not to "inactive": a ride may still
-        // be playing music, and deactivating the session would stop it.
+        // Observers stay registered through the restoring call below, so a `.categoryChange`
+        // confirming *this* close has a chance to be observed (Issue D) — removing them is one of the
+        // very last steps, once nothing further this generation's box needs to receive remains.
         try? session.setCategory(.playback, mode: .default, options: [])
         apply(.closed(generation: lifecycle.generation, atMonoUs: monotonicNowUs()))
-        consumerTask?.cancel()
-        consumerTask = nil
-        signals.finish()
+        unregisterObservers()
+        transitionTimeoutTask?.cancel()
+        transitionTimeoutTask = nil
+        stopConsumer()
+        signals?.finish()
+        signals = nil
+        doorbell = nil
     }
 
-    /// **Failure protection, never the definition of success** (this phase's brief §15). A caller may
-    /// poll this while a transition is outstanding; if the platform never confirmed the change, the
-    /// transition is declared settled and *counted as a timeout* so the diagnostics can say the number
-    /// came from a timer rather than from `AVAudioSession`.
+    /// **Failure protection, never the definition of success** (this phase's brief §15). Now actually
+    /// scheduled by `manageTransitionTimeout` after every transition-starting event, in addition to
+    /// remaining callable directly (tests, or a caller that wants to force a check). If the platform
+    /// never confirmed the change, the transition is declared settled and *counted as a timeout* so the
+    /// diagnostics can say the number came from a timer rather than from `AVAudioSession`.
     public func pollTransitionTimeout() async {
         apply(
             .transitionTimeoutCheck(
@@ -132,35 +172,46 @@ public actor IosVoiceAudioSession: VoiceAudioSession {
 
     // MARK: - the three notifications ARCHITECTURE §6.2 requires
 
-    private func startConsumer() {
-        guard consumerTask == nil else { return }
-        let stream = signals.stream
-        let box = signals
+    private func startConsumer(box: AudioSessionSignalBox, bell: ConflatedSignal) {
+        consumerTask?.cancel()
         consumerTask = Task { [weak self] in
-            for await delivered in stream {
+            for await _ in bell.stream {
                 guard let self else { return }
-                // The element the stream handed over may have been superseded while it waited, so the
-                // newest value for that kind is taken from the box rather than trusting the delivery.
-                // That is what makes the coalescing correct rather than merely cheap.
-                guard let signal = box.take(delivered) else { continue }
-                await self.handle(signal)
+                await self.drainSignals(box: box)
             }
         }
     }
 
-    private func registerObservers() {
+    private func stopConsumer() {
+        consumerTask?.cancel()
+        consumerTask = nil
+        // `cancel()` alone is only the cooperative signal — it does not by itself end a `for await`
+        // still suspended on the doorbell's stream (STATUS's own precedent for `OrderedEventChannel`).
+        // `finish()` is what actually returns control to `startConsumer`'s loop.
+        doorbell?.finish()
+    }
+
+    /// Drains `box` to empty, in `AudioSessionSignal.Kind` priority order (`AudioSessionSignalBox.poll`)
+    /// rather than arrival order — a reset can never be stuck behind a route change it must invalidate.
+    private func drainSignals(box: AudioSessionSignalBox) async {
+        while let delivered = box.poll() {
+            handle(delivered)
+        }
+    }
+
+    private func registerObservers(generation: Int, box: AudioSessionSignalBox, bell: ConflatedSignal) {
         guard observers.isEmpty else { return }
         let center = NotificationCenter.default
-        let box = signals
         // Every closure below reduces the notification to a `Sendable` value **inside** the callback and
-        // hands it to the box, which is safe to call from any context and never allocates a `Task`. A
-        // `Notification` is not `Sendable`, and the reason value is the only part that may leave the
-        // route layer anyway (ADR-016 — a platform route description is a privacy leak).
+        // hands it to the box together with `generation` — captured here, at registration time, and
+        // never re-read later. A `Notification` is not `Sendable`, and the reason value is the only part
+        // that may leave the route layer anyway (ADR-016 — a platform route description is a privacy
+        // leak).
         observers = [
             center.addObserver(forName: AVAudioSession.routeChangeNotification, object: nil, queue: nil) { note in
                 let raw = (note.userInfo?[AVAudioSessionRouteChangeReasonKey] as? UInt)
                     .flatMap(AVAudioSession.RouteChangeReason.init(rawValue:)) ?? .unknown
-                box.offer(.routeChanged(reason: IosAudioRouteMapper.changeReason(raw)))
+                box.offer(.routeChanged(reason: IosAudioRouteMapper.changeReason(raw)), generation: generation, doorbell: bell)
             },
             center.addObserver(forName: AVAudioSession.interruptionNotification, object: nil, queue: nil) { note in
                 let info = note.userInfo
@@ -172,16 +223,15 @@ public actor IosVoiceAudioSession: VoiceAudioSession {
                 let options = AVAudioSession.InterruptionOptions(
                     rawValue: (info?[AVAudioSessionInterruptionOptionKey] as? UInt) ?? 0
                 )
-                box.offer(
-                    began
-                        ? .interruptionBegan
-                        : .interruptionEnded(shouldResume: options.contains(.shouldResume))
-                )
+                let signal: AudioSessionSignal = began
+                    ? .interruptionBegan
+                    : .interruptionEnded(shouldResume: options.contains(.shouldResume))
+                box.offer(signal, generation: generation, doorbell: bell)
             },
             center.addObserver(
                 forName: AVAudioSession.mediaServicesWereResetNotification, object: nil, queue: nil
             ) { _ in
-                box.offer(.mediaServicesReset)
+                box.offer(.mediaServicesReset, generation: generation, doorbell: bell)
             },
         ]
     }
@@ -191,10 +241,10 @@ public actor IosVoiceAudioSession: VoiceAudioSession {
         observers.removeAll()
     }
 
-    private func handle(_ signal: AudioSessionSignal) {
+    private func handle(_ delivered: GeneratedAudioSessionSignal) {
         let now = monotonicNowUs()
-        let generation = lifecycle.generation
-        switch signal {
+        let generation = delivered.generation
+        switch delivered.signal {
         case .routeChanged(let reason):
             lastReason = reason
             // `.categoryChange` is the platform confirming the configuration change **we** asked for, so
@@ -224,8 +274,11 @@ public actor IosVoiceAudioSession: VoiceAudioSession {
     ///
     /// The generation check is inside the reducer, not here, which is the point: a notification still in
     /// flight from before a media-services reset is inert by comparison rather than by hoping the timing
-    /// lines up (ADR-020 Amendment A2's rule, applied to the audio session).
+    /// lines up (ADR-020 Amendment A2's rule, applied to the audio session) — and, since this hardening
+    /// pass, by comparison against the generation the notification was actually stamped with at the
+    /// callback boundary, not whatever generation happens to be current when this runs.
     private func apply(_ event: AudioSessionEvent) {
+        let previousStartedAt = lifecycle.transition.startedAtMonoUs
         let outcome = AudioSessionLifecycle.reduce(state: lifecycle, event: event)
         lifecycle = outcome.state
         for action in outcome.actions {
@@ -236,15 +289,60 @@ public actor IosVoiceAudioSession: VoiceAudioSession {
                 // Only reached when the platform said `.shouldResume`.
                 try? session.setActive(true)
             case .rebuildAfterReset:
-                // Every audio object this process holds is invalid. The old observers belonged to the
-                // superseded generation, so they go; the user restarting the intercom is what rebuilds,
-                // and the diagnostics card makes the reset visible rather than limping through it.
+                // Every audio object this process holds is invalid. The old observers and this
+                // generation's signal path belonged to the superseded generation, so both go; the user
+                // restarting the intercom is what rebuilds — `open()` creates entirely fresh ones — and
+                // the diagnostics card makes the reset visible rather than limping through it.
                 unregisterObservers()
+                stopConsumer()
+                signals?.finish()
+                signals = nil
+                doorbell = nil
                 try? session.setCategory(.playback, mode: .default, options: [])
             case .reportFailure:
                 break // recorded in `lifecycle.lastFailure`
             }
         }
+        manageTransitionTimeout(previousStartedAt: previousStartedAt)
+    }
+
+    /// Arms or disarms the failure-protection timeout for whatever transition `apply` just produced.
+    ///
+    /// Compares `startedAtMonoUs` rather than the bare `transitioning` flag: a burst of route callbacks
+    /// within the *same* transition (`RouteTransitionTracker.begin` deliberately keeps the original start
+    /// instant) must not re-arm a fresh window, but a reset's brand-new transition — which can begin while
+    /// the *old* generation was still mid-transition — must.
+    private func manageTransitionTimeout(previousStartedAt: Int64?) {
+        if lifecycle.transition.transitioning {
+            if lifecycle.transition.startedAtMonoUs != previousStartedAt {
+                scheduleTransitionTimeout(generation: lifecycle.generation)
+            }
+        } else {
+            transitionTimeoutTask?.cancel()
+            transitionTimeoutTask = nil
+        }
+    }
+
+    /// One timeout task per active transition. `generation` is captured here, at schedule time — not
+    /// re-read when the sleep resolves — so a generation that has since moved on renders this task inert
+    /// via the reducer's own guard rather than by hoping the cancellation raced correctly.
+    private func scheduleTransitionTimeout(generation: Int) {
+        transitionTimeoutTask?.cancel()
+        transitionTimeoutTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(RouteTransitionTracker.defaultTimeoutUs) * 1_000)
+            guard !Task.isCancelled else { return }
+            await self?.timeoutTransition(generation: generation)
+        }
+    }
+
+    private func timeoutTransition(generation: Int) {
+        apply(
+            .transitionTimeoutCheck(
+                generation: generation,
+                atMonoUs: monotonicNowUs(),
+                timeoutUs: RouteTransitionTracker.defaultTimeoutUs
+            )
+        )
     }
 
     /// Recomputes the snapshot from the platform's current view and hands it to the sink.

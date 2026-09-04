@@ -15,10 +15,16 @@ import com.ridelink.core.audiopolicy.AudioSessionEvent
 import com.ridelink.core.audiopolicy.AudioSessionLifecycle
 import com.ridelink.core.audiopolicy.AudioSessionState
 import com.ridelink.core.audiopolicy.RouteState
+import com.ridelink.core.audiopolicy.RouteTransitionTracker
 import com.ridelink.core.audiopolicy.VoiceFailure
 import com.ridelink.core.voice.VoiceAudioSession
 import com.ridelink.core.voice.VoiceAudioSessionFailure
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 /**
@@ -67,6 +73,12 @@ class AndroidVoiceAudioSession(
     private val endpointPreference: AudioEndpointPreference = AudioEndpointPreference.PLATFORM_DEFAULT,
     /** Monotonic microseconds, for the IA-03 transition measurement. Never a wall clock (rule 5). */
     private val monotonicNowUs: () -> Long = { android.os.SystemClock.elapsedRealtimeNanos() / NANOS_PER_MICRO },
+    /**
+     * Where [scheduleTransitionTimeout] runs its one-shot delay. A `SupervisorJob` of its own by
+     * default: this session is a process-lifetime singleton (ADR-021 §2), so its timeout work must
+     * outlive any one voice session rather than being cancelled when a caller's own scope is.
+     */
+    private val scope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate),
 ) : VoiceAudioSession {
     private val audioManager: AudioManager =
         context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
@@ -121,8 +133,19 @@ class AndroidVoiceAudioSession(
             if (!hasRecordAudioPermission()) return@withContext fail(VoiceFailure.MIC_PERMISSION_DENIED)
             if (!hasUsableEndpoint) return@withContext fail(VoiceFailure.NO_AUDIO_ENDPOINT)
 
+            // Registered *before* anything that could provoke the callbacks below confirm — never
+            // after. `setCommunicationDevice` can fire `OnCommunicationDeviceChangedListener`
+            // synchronously to very shortly after the call returns, and a listener added afterward
+            // would miss the very confirmation it exists to observe (this phase's hardening pass,
+            // Issue D).
+            runCatching { audioManager.registerAudioDeviceCallback(deviceCallback, null) }
+            runCatching { audioManager.addOnCommunicationDeviceChangedListener(context.mainExecutor, deviceChangedListener) }
+
             val focused = runCatching { requestFocusAndCommunicationMode() }
-            if (focused.isFailure) return@withContext fail(VoiceFailure.AUDIO_SESSION_ACTIVATION_FAILED)
+            if (focused.isFailure) {
+                unregisterPlatformCallbacks()
+                return@withContext fail(VoiceFailure.AUDIO_SESSION_ACTIVATION_FAILED)
+            }
 
             val routed = runCatching { selectCommunicationDevice() }
             if (routed.isFailure) {
@@ -133,8 +156,6 @@ class AndroidVoiceAudioSession(
                 return@withContext fail(VoiceFailure.ROUTE_SELECTION_FAILED)
             }
 
-            runCatching { audioManager.registerAudioDeviceCallback(deviceCallback, null) }
-            runCatching { audioManager.addOnCommunicationDeviceChangedListener(context.mainExecutor, deviceChangedListener) }
             apply(AudioSessionEvent.Opened(lifecycle.generation, monotonicNowUs()))
             Result.success(Unit)
         }
@@ -142,18 +163,21 @@ class AndroidVoiceAudioSession(
     override suspend fun close() {
         withContext(Dispatchers.Main.immediate) {
             if (!lifecycle.open) return@withContext
+            // The callbacks that could confirm this restoring change stay registered through the calls
+            // that request it — `releasePlatformSession` unregisters them only as its **last** step
+            // (this phase's hardening pass, Issue D) — so a `.categoryChange`-equivalent confirmation
+            // has a chance to be observed before nothing is listening for it any more.
             releasePlatformSession()
             apply(AudioSessionEvent.Closed(lifecycle.generation, monotonicNowUs()))
-            // Returning to the music-only configuration is an audible route change too, and the
-            // platform confirms it through the same listener the open path uses.
         }
     }
 
     /**
-     * **Failure protection, never the definition of success** (this phase's brief §15). A caller may
-     * poll this while a transition is outstanding; if the platform never confirmed the change, the
-     * transition is declared settled and *counted as a timeout* so the diagnostics can say the number
-     * came from a timer rather than from `AudioManager`.
+     * **Failure protection, never the definition of success** (this phase's brief §15). Scheduled
+     * automatically by [manageTransitionTimeout] after every transition-starting event, in addition to
+     * remaining callable directly (tests, or a caller that wants to force a check). If the platform
+     * never confirmed the change, the transition is declared settled and *counted as a timeout* so the
+     * diagnostics can say the number came from a timer rather than from `AudioManager`.
      */
     suspend fun pollTransitionTimeout() {
         withContext(Dispatchers.Main.immediate) {
@@ -186,12 +210,19 @@ class AndroidVoiceAudioSession(
     }
 
     private fun releasePlatformSession() {
-        runCatching { audioManager.unregisterAudioDeviceCallback(deviceCallback) }
-        runCatching { audioManager.removeOnCommunicationDeviceChangedListener(deviceChangedListener) }
         runCatching { audioManager.clearCommunicationDevice() }
         runCatching { audioManager.mode = previousMode }
         focusRequest?.let { runCatching { audioManager.abandonAudioFocusRequest(it) } }
         focusRequest = null
+        // Unregistered last, once every call that could still provoke a confirming callback has
+        // already been made — removing them earlier would mean the very confirmation this generation's
+        // closing transition is waiting for can never arrive (this phase's hardening pass, Issue D).
+        unregisterPlatformCallbacks()
+    }
+
+    private fun unregisterPlatformCallbacks() {
+        runCatching { audioManager.unregisterAudioDeviceCallback(deviceCallback) }
+        runCatching { audioManager.removeOnCommunicationDeviceChangedListener(deviceChangedListener) }
     }
 
     /**
@@ -265,7 +296,12 @@ class AndroidVoiceAudioSession(
      * lines up (ADR-020 Amendment A2's rule, applied to the audio session).
      */
     private fun apply(event: AudioSessionEvent) {
-        val outcome = synchronized(lock) { AudioSessionLifecycle.reduce(lifecycle, event).also { lifecycle = it.state } }
+        val previousStartedAtUs: Long?
+        val outcome =
+            synchronized(lock) {
+                previousStartedAtUs = lifecycle.transition.startedAtMonoUs
+                AudioSessionLifecycle.reduce(lifecycle, event).also { lifecycle = it.state }
+            }
         val reason = (event as? AudioSessionEvent.RouteChanged)?.reason ?: lastReason
         lastReason = reason
         for (action in outcome.actions) {
@@ -279,10 +315,64 @@ class AndroidVoiceAudioSession(
                 is AudioSessionAction.ReportFailure -> Unit // recorded in `lifecycle.lastFailure`
             }
         }
+        manageTransitionTimeout(previousStartedAtUs)
     }
 
     @Volatile
     private var lastReason: AudioRouteChangeReason = AudioRouteChangeReason.UNKNOWN
+
+    /**
+     * One timeout job per active transition (this phase's hardening pass, Issue E: [pollTransitionTimeout]
+     * previously had no caller anywhere in the app, so a platform that never confirmed a change left
+     * `route_state: transitioning` latched for the rest of a ride). Guarded by [lock] alongside
+     * [lifecycle], since it is read and replaced from both [apply] (Main-immediate) and its own delayed
+     * coroutine body.
+     */
+    private var transitionTimeoutJob: Job? = null
+
+    /**
+     * Arms or disarms the failure-protection timeout for whatever transition [apply] just produced.
+     *
+     * Compares `startedAtMonoUs` rather than the bare `transitioning` flag: a burst of route callbacks
+     * within the *same* transition (`RouteTransitionTracker.begin` deliberately keeps the original start
+     * instant) must not re-arm a fresh window — but Android has no reset-driven generation bump to worry
+     * about (the `RebuildAfterReset` action above is unreachable here), so in practice this only ever
+     * arms once per open/close transition and cancels once it settles.
+     */
+    private fun manageTransitionTimeout(previousStartedAtUs: Long?) {
+        val transition = lifecycle.transition
+        if (transition.transitioning) {
+            if (transition.startedAtMonoUs != previousStartedAtUs) {
+                scheduleTransitionTimeout(lifecycle.generation)
+            }
+        } else {
+            cancelTransitionTimeout()
+        }
+    }
+
+    private fun cancelTransitionTimeout() {
+        synchronized(lock) {
+            transitionTimeoutJob?.cancel()
+            transitionTimeoutJob = null
+        }
+    }
+
+    /**
+     * `generation` is captured here, at schedule time — never re-read when the delay elapses — so a
+     * generation that has since moved on renders this job inert via the reducer's own guard rather than
+     * by hoping cancellation raced correctly (mirrors the iOS half of this hardening pass exactly).
+     */
+    private fun scheduleTransitionTimeout(generation: Int) {
+        cancelTransitionTimeout()
+        val job =
+            scope.launch {
+                delay(TRANSITION_TIMEOUT_MS)
+                withContext(Dispatchers.Main.immediate) {
+                    apply(AudioSessionEvent.TransitionTimeoutCheck(generation, monotonicNowUs()))
+                }
+            }
+        synchronized(lock) { transitionTimeoutJob = job }
+    }
 
     /**
      * Recomputes the snapshot from the platform's current view and hands it to the sink.
@@ -328,5 +418,8 @@ class AndroidVoiceAudioSession(
 
     private companion object {
         const val NANOS_PER_MICRO = 1_000L
+
+        /** Milliseconds form of `RouteTransitionTracker.DEFAULT_TIMEOUT_US` — one shared window, not two. */
+        const val TRANSITION_TIMEOUT_MS: Long = RouteTransitionTracker.DEFAULT_TIMEOUT_US / 1_000L
     }
 }

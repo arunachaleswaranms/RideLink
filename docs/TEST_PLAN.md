@@ -117,7 +117,9 @@ cases and **none of them can open or close the capture device**.
 | An unauthenticated peer's `AUDIO_STATE` never reaches the app | `VoiceAuthenticationGateTest[s]`, over **real TLS** with two real unpaired peers, refusals *counted* so the test cannot pass vacuously — and the same frames **are** delivered once both users confirm |
 | `stable -> transitioning -> stable`, `shouldResume`, a media-services reset, and a stale-generation callback | `AudioSessionLifecycleTest[s]` — the pure reducer, on both platforms |
 | ARCHITECTURE §6.4's readiness rules, including "never open capture from the background" | `RideStartPolicyTest[s]`, over the whole 2^7 request cross-product |
-| The iOS notification path is ordered and bounded | `AudioSessionSignalBoxTests` |
+| The iOS notification path is bounded, generation-tagged at the callback boundary, and drains in a real (not merely documented) safety priority, and survives repeated End → Start cycles | `AudioSessionSignalBoxTests`, rewritten for the eleventh session's hardening pass (ADR-021 Amendment A1, findings A–C) — every arrival permutation of the three signal kinds, concurrent producers, and several open→finish cycles in a row |
+| The Android microphone foreground service cannot be told to stop before capture is actually released | `VoiceControllerStopAwaitTest` (ADR-021 Amendment A1, finding F) — a controllable suspend gate proves `stopAndAwaitRelease()` waits for `audioSession.close()` to complete, not merely for it to be called; a link loss does not resolve a pending call |
+| Android `VoiceController` diagnostics writes from three independent execution contexts (the mailbox consumer, the diagnostics-poll coroutine, the platform route-sink callback thread) cannot lose one another's fields | `VoiceControllerDiagnosticsRaceTest` (ADR-021 Amendment A1, finding H) — 300 concurrent iterations per pairing, two independent field pairings |
 
 **Not proven, and none of it may be reported as passing:**
 
@@ -236,6 +238,15 @@ whether capture survives a screen lock, whether the notification's actions work 
 and whether `ForegroundServiceStartNotAllowedException` ever fires in practice. **Every one of those
 is still pending** — `RideForegroundService` has never started (docs/STATUS.md §4 problem 25).
 
+The eleventh session's hardening pass (ADR-021 Amendment A1, finding F) fixed a real ordering bug in
+`AndroidVoiceAudioSession`'s listener registration (registered after the request it must confirm, on
+both the open and the close path) and made sure the service is never told to stop before
+`VoiceController.stopAndAwaitRelease()` confirms capture actually released. Both are code fixes with
+laptop-testable coverage where the logic is pure or fake-driven (`VoiceControllerStopAwaitTest`); the
+*platform* behaviour these rows exist to test — whether `setCommunicationDevice` actually fires
+`OnCommunicationDeviceChangedListener` in the corrected order on real hardware — is unchanged and still
+pending.
+
 | ID | Procedure | Pass condition | Phase |
 |---|---|---|---|
 | AF-01 | START RIDE from a resumed Activity with all permissions granted, intercom enabled | Service starts with types `mediaPlayback\|microphone`; capture opens; no exception | 1/6 |
@@ -264,6 +275,16 @@ IA-03's *instrumentation* now exists and is unit-tested (`RouteTransitionTracker
 microseconds, surfaced as `lastTransitionDurationUs` and rendered on the intercom card). The
 **number** it would record has never been measured, and ARCHITECTURE §6.2's "roughly 0.5–2 s" remains
 an expectation from documentation, not a result.
+
+The eleventh session's hardening pass (ADR-021 Amendment A1, findings A–E) fixed real bugs in
+`IosVoiceAudioSession`'s notification path: a box that silently stopped delivering after the first End
+Intercom (fixed by creating one per `open()`), a generation stamped at the wrong time (fixed by
+capturing it at the `NotificationCenter` callback boundary), a documented-but-not-real drain priority
+(fixed with explicit priority polling), observers registered after the request they confirm (fixed by
+reordering), and a transition timeout that was dead code (fixed by self-scheduling it per transition).
+All five are code fixes proven at the `AudioSessionSignalBox`/pure-reducer level, which is everything
+`swift test` can reach on macOS; whether `AVAudioSession` itself actually behaves as the reducer now
+correctly assumes is unchanged and still pending — same gate, narrower unknown.
 
 | ID | Procedure | Pass condition | Phase |
 |---|---|---|---|

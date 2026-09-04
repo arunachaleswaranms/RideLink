@@ -7,11 +7,13 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.material3.MaterialTheme
+import androidx.lifecycle.lifecycleScope
 import com.ridelink.app.service.RideForegroundService
 import com.ridelink.app.session.SessionCoordinator
 import com.ridelink.app.ui.MainScreen
 import com.ridelink.app.ui.SecureTransportUnavailableScreen
 import com.ridelink.core.audiopolicy.RideStartDecision
+import kotlinx.coroutines.launch
 
 /**
  * The one place that can honestly claim "the app is foreground-visible", which is why
@@ -138,12 +140,23 @@ class MainActivity : ComponentActivity() {
         coordinator.startIntercom()
     }
 
+    /**
+     * Order matters and is the reverse of the start: the intercom releases capture first, then the
+     * service that existed to hold it goes. A microphone foreground service with no microphone is the
+     * orphan ARCHITECTURE §6.4's failure table forbids.
+     *
+     * This phase's hardening pass (Issue F): `endIntercom()` alone only *queues* the stop — the actual
+     * `engine.release()`/`audioSession.close()` runs later, on the controller's own consumer. Calling
+     * [RideForegroundService.stop] right after it, as before, could let the platform reclaim the
+     * service while it still held the microphone. [SessionCoordinator.endIntercomAndAwaitRelease]
+     * suspends until release has actually happened (or until there was nothing to release), so the
+     * service is stopped only once that is true.
+     */
     private fun stopIntercom(coordinator: SessionCoordinator) {
-        // Order matters and is the reverse of the start: the intercom releases capture first, then the
-        // service that existed to hold it goes. A microphone foreground service with no microphone is
-        // the orphan ARCHITECTURE §6.4's failure table forbids.
-        coordinator.endIntercom()
-        RideForegroundService.stop(this)
+        lifecycleScope.launch {
+            coordinator.endIntercomAndAwaitRelease()
+            RideForegroundService.stop(this@MainActivity)
+        }
     }
 
     private fun notificationsGranted(): Boolean =

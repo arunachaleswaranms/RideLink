@@ -23,8 +23,10 @@ public enum AudioSessionSignal: Sendable, Equatable {
         }
     }
 
-    /// Drain order, and it is a safety order rather than an arbitrary one: a reset invalidates every
-    /// audio object this process holds, so it is applied before anything that would act on one.
+    /// Drain priority. `allCases` is declared in this exact order, and `AudioSessionSignalBox.poll()`
+    /// walks it in order — a reset invalidates every audio object this process holds, so it is *always*
+    /// applied before anything that would act on one, independent of arrival order (this phase's
+    /// hardening pass: a raw `AsyncStream` only delivers in arrival order, which is not the same thing).
     enum Kind: Int, CaseIterable {
         case mediaServicesReset
         case interruption
@@ -32,85 +34,108 @@ public enum AudioSessionSignal: Sendable, Equatable {
     }
 }
 
-/// The one ordered, bounded path from `NotificationCenter` into `IosVoiceAudioSession`.
+/// One signal plus the generation it was captured under.
 ///
-/// ### Why this exists rather than a `Task` per notification
+/// The generation is stamped **at the platform-callback boundary** — inside the `NotificationCenter`
+/// closure, at the moment the notification actually fired — and never re-derived later. That is the
+/// whole point: `AudioSessionLifecycle.reduce`'s generation guard can only reject a stale callback if
+/// the event it is handed still says which generation produced it. Reading `lifecycle.generation` fresh
+/// when the signal is finally *processed* would stamp every event with whatever generation happens to be
+/// current at that later moment, which defeats the guard by construction — a route-changed notification
+/// queued before a media-services reset, drained after it, would silently be promoted to the new
+/// generation instead of being recognised as stale.
+public struct GeneratedAudioSessionSignal: Sendable, Equatable {
+    public let generation: Int
+    public let signal: AudioSessionSignal
+
+    public init(generation: Int, signal: AudioSessionSignal) {
+        self.generation = generation
+        self.signal = signal
+    }
+}
+
+/// The one bounded path from `NotificationCenter` into `IosVoiceAudioSession`, for one audio-session open
+/// generation.
+///
+/// ### Why this is a doorbell + bounded slots, not a raw `AsyncStream`
 ///
 /// A `Task` per callback preserves the order the notifications were *created* in, not the order they
-/// *run* in — which is exactly the bug STATUS §2h fixed for control events, and it matters here for the
-/// same reason: an interruption ending and a route change arriving together must not be applied
-/// backwards, or the session ends up reactivated against a route that has since moved. One stream with
-/// one consumer inside the actor is what makes the order real (this phase's brief §39).
+/// *run* in — exactly the bug STATUS §2h fixed for control events. The original shape of this type fixed
+/// that by draining a single `AsyncStream`, but an `AsyncStream` only delivers in **arrival** order, and
+/// the doc comment on `AudioSessionSignal.Kind` had claimed a *safety* order (reset before anything that
+/// would act on one) that arrival order does not actually provide: a reset that arrives fractionally
+/// after a route-change notification would still be drained after it. This hardening pass makes the
+/// safety order real: `offer` only rings a doorbell (`ConflatedSignal`, the same primitive
+/// `VoiceController`'s mailbox already uses for this exact reason), and the consumer explicitly polls in
+/// `AudioSessionSignal.Kind` priority order — `mediaServicesReset` before `interruption` before
+/// `routeChanged` — regardless of which one was offered first.
 ///
-/// ### Why coalescing by kind is safe here
+/// ### Why coalescing by kind is still safe
 ///
 /// Every signal answers "what is the platform's audio state **now**", and the handler re-derives the
 /// route from `AVAudioSession.currentRoute` when it applies one. So two route changes arriving before a
 /// drain are not two facts to preserve — the newer one describes the same current reality. That is what
-/// makes the box **bounded by construction** at one slot per `AudioSessionSignal.Kind` (this phase's
-/// brief §38): there is no capacity to exceed and no overflow path to get wrong.
+/// makes the box **bounded by construction** at one slot per `AudioSessionSignal.Kind`: there is no
+/// capacity to exceed and no overflow path to get wrong.
 ///
-/// A media-services reset gets its own slot precisely so it can never be coalesced away by a route
-/// change that follows it — it is the one signal whose loss would leave the app holding invalid audio
-/// objects and believing they were fine.
+/// ### One box per open generation
+///
+/// `IosVoiceAudioSession` creates a fresh box (and a fresh doorbell, and a fresh consumer task) on every
+/// `open()`, rather than holding one for its own lifetime. A box that outlives its `close()` is a box
+/// that is dead for the rest of the process's life once `finish()` is called on it — `finish()` sets a
+/// permanent flag with no way to un-set it — so reusing one across End Intercom → Start Intercom would
+/// silently stop delivering route/interruption/reset notifications for every session after the first.
+/// Recreating it per generation is what makes `finish()` "stale offers for *this* generation are no-ops"
+/// rather than "stale offers forever."
 public final class AudioSessionSignalBox: @unchecked Sendable {
     private struct State {
-        var slots: [AudioSessionSignal.Kind: AudioSessionSignal] = [:]
-        var continuation: AsyncStream<AudioSessionSignal>.Continuation?
+        var slots: [AudioSessionSignal.Kind: GeneratedAudioSessionSignal] = [:]
         var finished = false
     }
 
     // `@unchecked Sendable` confined to state that is only ever touched under `lock` — the same
-    // discipline `VoiceInputMailboxBox` and `SSLInitLatch` follow in this module.
+    // discipline `VoiceInputMailboxBox` follows in this module.
     private let lock = NSLock()
     private var state = State()
 
-    public let stream: AsyncStream<AudioSessionSignal>
+    public init() {}
 
-    public init() {
-        var continuation: AsyncStream<AudioSessionSignal>.Continuation!
-        // Unbounded is safe *because the box in front of it is bounded*: `offer` yields at most one
-        // element per kind between drains, so at most `AudioSessionSignal.Kind.allCases.count` elements
-        // can be in flight at once however fast the platform produces notifications.
-        stream = AsyncStream(bufferingPolicy: .unbounded) { continuation = $0 }
-        state.continuation = continuation
-    }
-
-    /// Offers one signal. Safe to call from any context — including a `NotificationCenter` callback on an
-    /// arbitrary queue — and it never blocks, never suspends and never allocates a `Task`.
-    public func offer(_ signal: AudioSessionSignal) {
+    /// Offers one signal, stamped with the generation captured at the call site — which must be the
+    /// generation read at the moment the platform callback fired, not at some later processing time.
+    /// Safe to call from any context — including a `NotificationCenter` callback on an arbitrary queue —
+    /// and it never blocks, never suspends and never allocates a `Task`.
+    public func offer(_ signal: AudioSessionSignal, generation: Int, doorbell: ConflatedSignal) {
         lock.lock()
         if state.finished {
             lock.unlock()
             return
         }
-        let alreadyPending = state.slots[signal.kind] != nil
-        state.slots[signal.kind] = signal
-        let continuation = state.continuation
-        // Only yield when this kind had no pending value: the consumer drains by kind order, so a second
-        // yield for the same kind would deliver a duplicate of whatever the newest value turns out to be.
-        let shouldYield = !alreadyPending
+        // Coalesced by kind: a second offer for a kind already pending replaces it, since both describe
+        // "the platform's state now" and the newer one is the truer answer.
+        state.slots[signal.kind] = GeneratedAudioSessionSignal(generation: generation, signal: signal)
         lock.unlock()
-        if shouldYield { continuation?.yield(signal) }
+        doorbell.signal()
     }
 
-    /// Takes the newest value for `signal`'s kind, which is what the consumer must act on rather than the
-    /// element it was handed — that element may have been superseded while it waited.
-    public func take(_ delivered: AudioSessionSignal) -> AudioSessionSignal? {
+    /// Pops the highest-priority pending signal — `mediaServicesReset`, then `interruption`, then
+    /// `routeChanged` — independent of the order they were offered in. Returns `nil` once every slot is
+    /// empty, which is what lets the consumer drain-to-empty on every doorbell ring.
+    public func poll() -> GeneratedAudioSessionSignal? {
         lock.lock()
         defer { lock.unlock() }
-        return state.slots.removeValue(forKey: delivered.kind)
+        for kind in AudioSessionSignal.Kind.allCases {
+            if let value = state.slots.removeValue(forKey: kind) { return value }
+        }
+        return nil
     }
 
-    /// Ends the stream, so a `for await` over it returns and any later `offer` is a silent no-op — a
-    /// stale notification from an already-closed session cannot restart a finished consumer.
+    /// Ends this generation's box: every pending slot is discarded (a signal still here describes a
+    /// session that is being torn down) and every later `offer` is a silent no-op. A **new** box for the
+    /// next generation is unaffected — this only poisons the instance it is called on.
     public func finish() {
         lock.lock()
-        let continuation = state.continuation
         state.finished = true
-        state.continuation = nil
         state.slots.removeAll()
         lock.unlock()
-        continuation?.finish()
     }
 }

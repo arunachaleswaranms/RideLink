@@ -39,6 +39,7 @@ import com.ridelink.core.voice.VoiceSignalDropReason
 import com.ridelink.core.voice.VoiceSignalSink
 import com.ridelink.core.voice.VoiceSignalTransport
 import com.ridelink.core.voice.VoiceStatus
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.channels.Channel
@@ -47,7 +48,9 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 import java.security.SecureRandom
 
 /** FR-023 voice diagnostics, as one observable value. Contains nothing PROTOCOL §7.7 forbids. */
@@ -206,6 +209,14 @@ class VoiceController(
     private var consumerJob: Job? = null
     private var diagnosticsPollJob: Job? = null
 
+    /**
+     * Every outstanding [stopAndAwaitRelease] caller, guarded by [mailboxLock] alongside the mailboxes
+     * it is keyed off. Several concurrent End presses are legal (idempotent), so this is a list rather
+     * than a single slot — [apply] completes and clears all of them together the moment `StopRequested`
+     * has finished running, whether or not it produced a [VoiceAction.ReleaseLocalAudio].
+     */
+    private val pendingStopCompletions = mutableListOf<CompletableDeferred<Unit>>()
+
     init {
         engine.setEventSink { event -> offer(engineEventToInput(event)) }
         audioSession.setRouteSink { snapshot -> publishRoute(snapshot) }
@@ -230,6 +241,29 @@ class VoiceController(
     /** The user pressed End Voice, or the session is entering `ENDING`. */
     fun stop() {
         offer(VoiceInput.StopRequested)
+    }
+
+    /**
+     * Like [stop], but suspends until `StopRequested` has been **fully applied** — which, when capture
+     * was open, means [VoiceAction.ReleaseLocalAudio] has already run `engine.release()` and
+     * `audioSession.close()` to completion, not merely been queued.
+     *
+     * This phase's hardening pass (Issue F): a Android microphone foreground service stopped
+     * immediately after a fire-and-forget [stop] could be reclaimed by the platform while it was still
+     * holding the microphone, because `stop()` only *queues* `StopRequested` — the actual release runs
+     * later, on this controller's single consumer. Callers that must not stop the foreground service
+     * until capture is truly released (`SessionCoordinator.endIntercomAndAwaitRelease`) use this
+     * instead.
+     *
+     * Bounded by [STOP_AWAIT_TIMEOUT_MS] as failure protection only — never as the definition of
+     * success. The real completion signal is [pendingStopCompletions], resolved from [apply] the moment
+     * `StopRequested` has finished running through the reducer and every action it produced.
+     */
+    suspend fun stopAndAwaitRelease() {
+        val completion = CompletableDeferred<Unit>()
+        synchronized(mailboxLock) { pendingStopCompletions.add(completion) }
+        offer(VoiceInput.StopRequested)
+        withTimeoutOrNull(STOP_AWAIT_TIMEOUT_MS) { completion.await() }
     }
 
     /**
@@ -426,6 +460,17 @@ class VoiceController(
         state = outcome.state
         for (action in outcome.actions) perform(action)
         publishDiagnostics()
+        // By the time `perform` returns for every action above, a `VoiceAction.ReleaseLocalAudio` this
+        // input produced has already awaited `engine.release()` and `audioSession.close()` to
+        // completion — `perform` is suspend and actions run sequentially, not fired off — so completing
+        // here is exactly "StopRequested has been fully applied," including the case where there was
+        // nothing to release at all (idempotent End, or End before Start).
+        if (input is VoiceInput.StopRequested) completePendingStops()
+    }
+
+    private fun completePendingStops() {
+        val waiters = synchronized(mailboxLock) { pendingStopCompletions.toList().also { pendingStopCompletions.clear() } }
+        waiters.forEach { it.complete(Unit) }
     }
 
     @Suppress("CyclomaticComplexMethod") // a flat 1:1 dispatch over VoiceAction; splitting it hides the mapping
@@ -648,11 +693,21 @@ class VoiceController(
     }
 
     private fun publishEngineDiagnostics() {
-        _diagnostics.value = _diagnostics.value.copy(engine = engine.diagnostics)
+        // `update` (an atomic CAS retry loop), not a plain read-copy-write: this runs on
+        // [diagnosticsPollJob], a *different* coroutine from the mailbox consumer that calls
+        // [publishDiagnostics], and from the platform audio-session callback thread that calls
+        // [publishRoute] below — three independent writers of the same `MutableStateFlow`, none of them
+        // synchronized against each other by anything but this (this phase's hardening pass, Issue H).
+        // `update`'s retry-on-conflict is what stops a slower writer's stale `copy()` base from silently
+        // reverting a field a concurrent writer just changed.
+        _diagnostics.update { it.copy(engine = engine.diagnostics) }
     }
 
     private fun publishRoute(snapshot: AudioRouteSnapshot) {
-        _diagnostics.value = _diagnostics.value.copy(route = snapshot)
+        // See `publishEngineDiagnostics`'s comment: this callback can run on the platform audio-session
+        // thread, concurrently with the mailbox consumer's own diagnostics writes, so this must be an
+        // atomic update too.
+        _diagnostics.update { it.copy(route = snapshot) }
         // An interruption is a *route* fact (ADR-016), and it is one of the two overrides that can
         // only ever stop transmission. Routed through the gate rather than acted on here, so there is
         // one place that decides whether audio leaves.
@@ -674,8 +729,13 @@ class VoiceController(
             } else {
                 dropCounts.toMap()
             }
-        _diagnostics.value =
-            _diagnostics.value.copy(
+        // `update`, not a plain read-copy-write (Issue H): this runs on the mailbox consumer, but
+        // `publishEngineDiagnostics` (the diagnostics-poll coroutine) and `publishRoute` (a platform
+        // audio-session callback thread) can both write `_diagnostics` concurrently with this call, and
+        // a lost update here would silently revert whichever of the three ran last back to a stale
+        // snapshot of the other two fields.
+        _diagnostics.update {
+            it.copy(
                 status = state.status,
                 role = state.role,
                 voiceSessionPrefix = state.voiceSessionId?.toString(),
@@ -707,6 +767,7 @@ class VoiceController(
                 rebuildCount = rebuildCount,
                 unexpectedCandidateTypeSeen = unexpectedCandidateSeen,
             )
+        }
     }
 
     /** The three lock-guarded values [publishDiagnostics] needs, read in one critical section. */
@@ -718,5 +779,13 @@ class VoiceController(
 
     private companion object {
         const val DIAGNOSTICS_POLL_MS = 2_000L
+
+        /**
+         * Failure protection for [stopAndAwaitRelease], never the definition of success (this phase's
+         * brief §15's principle, applied to a completion signal rather than a route transition): the
+         * real signal is [pendingStopCompletions] resolving from [apply]. This only bounds how long a
+         * caller can be made to wait if something elsewhere is wrong.
+         */
+        const val STOP_AWAIT_TIMEOUT_MS = 5_000L
     }
 }

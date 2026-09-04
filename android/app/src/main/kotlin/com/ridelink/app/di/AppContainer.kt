@@ -27,6 +27,7 @@ import com.ridelink.network.voice.WebRtcVoiceEngine
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 import java.io.File
 
 private const val APP_VERSION = "0.1.0"
@@ -157,6 +158,14 @@ class AppContainer(
      * to act on should be dropped rather than buffered. `END_INTERCOM` deliberately ends the
      * *intercom*, never the control session: PROTOCOL §7.8 keeps those separate, and "End Voice" is
      * not "Forget peer".
+     *
+     * **`END_INTERCOM` owns stopping the foreground service, not `RideForegroundService` itself**
+     * (this phase's hardening pass, Issue F). `RideCommandBus.dispatch` is a synchronous call, but
+     * releasing capture is not — `endIntercomAndAwaitRelease` suspends until
+     * `engine.release()`/`audioSession.close()` have actually completed — so this handler launches on
+     * [appScope] and calls [RideForegroundService.stop] only once that awaited call returns. This is
+     * the one place a lock-screen End Intercom tap and the in-app End button both funnel through, so
+     * fixing it here covers both entry points identically.
      */
     private fun installRideNotificationCommands() {
         RideCommandBus.handler = { command ->
@@ -166,7 +175,11 @@ class AppContainer(
                     sessionCoordinator.setMicrophoneMuted(muted)
                     RideForegroundService.updateMuteState(context, muted)
                 }
-                RideCommand.END_INTERCOM -> sessionCoordinator.endIntercom()
+                RideCommand.END_INTERCOM ->
+                    appScope.launch {
+                        sessionCoordinator.endIntercomAndAwaitRelease()
+                        RideForegroundService.stop(context)
+                    }
             }
         }
     }

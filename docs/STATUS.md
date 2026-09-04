@@ -1,6 +1,6 @@
 # RideLink — Status
 
-**Updated:** 4 September 2026 (Phase 2b — intercom integration and audio lifecycle, tenth session)
+**Updated:** 4 September 2026 (Phase 2b final hardening pass, eleventh session)
 **Current milestone:** M1 (Private voice link) — in progress
 **Current phase:** Phase 2b — intercom integration and audio lifecycle.
 **Phase 2b status: IMPLEMENTATION COMPLETE — REAL-DEVICE INTERCOM GATE PENDING.**
@@ -1201,6 +1201,97 @@ spelling always meant. **No wire field, value or bound changed.**
 
 ---
 
+## 2n. Phase 2b final hardening — real ordering, real registration order, a real timeout, a
+completion-aware stop (4 September 2026 session, eleventh)
+
+An independent review of §2m's implementation raised eight candidate issues in the audio/intercom
+lifecycle. Each was verified against the actual code before anything changed — none was patched on
+the review's say-so alone. All eight were **confirmed real bugs**. Full account, finding by finding:
+[ADR-021 Amendment A1](DECISIONS/ADR-021-intercom-transmission-and-capture-ownership.md#amendment-a1--4-september-2026--final-hardening-real-ordering-real-registration-order-a-real-timeout-and-a-completion-aware-stop).
+
+**A — iOS's `AudioSessionSignalBox` was one-shot.** Held for `IosVoiceAudioSession`'s whole process
+lifetime; `close()`'s `finish()` permanently poisoned it, so a second Start Intercom after End Intercom
+silently stopped receiving route/interruption/reset notifications for the rest of the process's life.
+Now created fresh on every `open()`, exactly as `SessionCoordinator` already does for
+`OrderedEventChannel` per `startDiscovery()`.
+
+**B — the generation stamped on an iOS signal was read at processing time, not callback time.**
+`IosVoiceAudioSession.handle` read the actor's *current* generation when a queued signal was finally
+processed, not the generation live when the notification fired — which made
+`AudioSessionLifecycle.reduce`'s generation guard structurally unable to reject anything from iOS. Fixed
+by capturing the generation once, at `registerObservers` time, and threading it through
+`AudioSessionSignalBox.offer`/`poll` explicitly.
+
+**C — the "safety priority" (reset before interruption before route) was documentation, not
+behaviour.** The box was a raw `AsyncStream`, which only ever delivers in arrival order. Replaced with a
+doorbell (`ConflatedSignal`) plus explicit priority polling, mirroring the pattern
+`VoiceInputMailbox`/`IntercomCommandMailbox` already established for exactly this reason.
+
+**D — a listener registered after the request it exists to confirm, on both platforms.** iOS registered
+`NotificationCenter` observers after `setCategory`/`setActive`, and unregistered them before the
+restoring call on `close()`; Android registered `AudioDeviceCallback`/`OnCommunicationDeviceChangedListener`
+after `requestFocusAndCommunicationMode`/`selectCommunicationDevice`, and unregistered before
+`clearCommunicationDevice`/the mode restore. Both now register first and unregister last.
+
+**E — the route-transition timeout was dead code on both platforms.** `pollTransitionTimeout()` is not
+part of the shared `VoiceAudioSession` protocol/interface and had no caller anywhere in either app.
+Both platform classes now self-schedule one generation-tagged timeout task per genuinely new
+transition (detected by a changed `startedAtMonoUs`, so a burst of callbacks within one transition does
+not re-arm it), cancelled on settle.
+
+**F — the Android microphone foreground service could be told to stop before capture actually
+released.** `MainActivity.stopIntercom()` and the lock-screen `END_INTERCOM` notification action both
+called (or dispatched to) a fire-and-forget `stop()` and then stopped the service immediately —
+`VoiceController.stop()` only *queues* `StopRequested`; the real `engine.release()`/`audioSession.close()`
+runs later, on the controller's own consumer. `VoiceController` gained `stopAndAwaitRelease()`, a
+suspend function resolved by `apply` only once `StopRequested` has fully run; `SessionCoordinator`,
+`MainActivity` and `AppContainer`'s `RideCommandBus` handler all now await it before calling
+`RideForegroundService.stop()`, and `RideForegroundService` no longer calls `stopSelf()` from either
+entry point itself.
+
+**G — iOS voice diagnostics reached `SessionCoordinator` through a `Task` per callback.** The exact
+`Task { @MainActor in ... }`-per-event pattern STATUS §2h fixed for `ControlEvent`, explicitly deferred
+here in §2m. `SessionCoordinator` now drains an `OrderedEventChannel<VoiceDiagnostics>` with one
+consumer, mirroring `controlEventChannel`.
+
+**H — Android's `VoiceController._diagnostics` had three unsynchronized writers.** The mailbox
+consumer, the diagnostics-poll coroutine, and the platform audio-session's route-sink callback thread
+each did a plain `_diagnostics.value = _diagnostics.value.copy(...)` — a read-copy-write that can lose
+a concurrent writer's update. All three now use `MutableStateFlow.update {}`, an atomic
+compare-and-retry.
+
+**Two things this pass found but deliberately did not touch**, because they were outside what was
+reviewed: `VoiceController.attach`'s own `Task`-per-engine-event/`Task`-per-route-event forwarding on
+iOS (a narrower version of Finding G, one layer lower, already running on top of an already-bounded,
+already-ordered mailbox); and `Effect.ReleaseAudioAndStopForegroundService`, an FSM effect whose name
+promises an Android foreground-service stop it has never actually performed — `MainActivity` remains
+the only caller of `RideForegroundService.stop` in the app. Neither is a regression from this pass, and
+neither was one of the eight confirmed findings.
+
+**New regression coverage.** iOS: `AudioSessionSignalBoxTests` rewritten for the new
+generation-tagged, priority-polling API (17 tests: every kind reachable, coalescing, generation
+preservation, safety-order draining under every arrival permutation and under concurrent producers,
+and reuse-after-`finish()` across several open→finish cycles) — run **50 consecutive times, 0
+failures**. Android: `VoiceControllerStopAwaitTest` (5 tests, including a controllable suspend gate
+that proves `stopAndAwaitRelease()` really waits for `audioSession.close()` rather than merely calling
+it) and `VoiceControllerDiagnosticsRaceTest` (2 tests, 300 stress iterations each) — run together **50
+consecutive times, 0 failures**. Findings D and E live entirely in code that cannot run off a device
+(`AVAudioSession`/`AudioManager`), so those two are **REAL-DEVICE INTERCOM GATE PENDING** like
+everything else in those two classes; this pass narrows what is untested there without claiming to
+close the device gate. `SessionCoordinator`'s own diagnostics-channel wiring (Finding G) inherits the
+existing §4 problem 20 limitation — no app-target test target on either platform.
+
+**Verification.** Android: `test ktlintCheck detekt lint assembleDebug assembleRelease` all green,
+**443 tests** (was 436 — +7: 5 `VoiceControllerStopAwaitTest`, 2 `VoiceControllerDiagnosticsRaceTest`).
+iOS: `RideLinkCore` unchanged at 142/142 (nothing in the pure core changed); `RideLinkPlatform`
+**185/185** (was 178 — net +7 from the rewritten `AudioSessionSignalBoxTests`); `xcodebuild` Debug and
+Release both succeed for the simulator, zero warnings beyond the pre-existing benign
+"no AppIntents.framework dependency" notice. No production wire shape, security property, module
+boundary or platform baseline changed — this is a code-and-test-only hardening pass, and CLAUDE.md's
+rules table needed no new row.
+
+---
+
 ## 3. Tests passed / pending
 
 **Passed and verified in the Phase 2b session (4 September 2026, tenth), by actually running the
@@ -1264,6 +1355,27 @@ commands.** Every Gradle command was run with
 **What none of this is evidence about:** any phone, any microphone, any speaker, any Bluetooth
 endpoint, any foreground service, any lock screen, or any latency. See §2m's "Explicitly not done"
 and §7.
+
+**Passed and verified in the Phase 2b final hardening session (4 September 2026, eleventh) — see §2n
+for the eight findings this verifies:**
+
+- `./gradlew test ktlintCheck detekt lint assembleDebug assembleRelease` — **all green**, all five
+  Android modules. **443 tests** (was 436): `network` **155** (was 148 — +5
+  `VoiceControllerStopAwaitTest`, +2 `VoiceControllerDiagnosticsRaceTest`); `core`/`audio`/`app`/`data`
+  unchanged (this pass touched no pure `core` type and added no `audio`-module test, since
+  `AndroidVoiceAudioSession` still cannot run off a device).
+- `swift test --package-path ios/Packages/RideLinkCore` — **142/142**, unchanged (nothing in the pure
+  core changed this pass).
+- `swift test --package-path ios/Packages/RideLinkPlatform` — **185/185** (was 178 — net +7 from
+  `AudioSessionSignalBoxTests`' rewrite for the new generation-tagged, priority-polling API), zero
+  Swift 6 strict-concurrency warnings.
+- `xcodebuild` Debug **and** Release for the simulator — both succeed, **zero warnings** beyond the
+  pre-existing benign "no AppIntents.framework dependency" notice.
+- **Stress validation, no rerun-until-green:** `AudioSessionSignalBoxTests` (iOS) run **50 consecutive
+  times, 0 failures**; `VoiceControllerStopAwaitTest` + `VoiceControllerDiagnosticsRaceTest` (Android,
+  together) run **50 consecutive times, 0 failures**.
+- **All prior suites remain green**, including every Phase 1b/2a/2b test named above this paragraph —
+  this session ran the full local gate, not only the new tests.
 
 ---
 
@@ -1558,6 +1670,7 @@ session and route), and integration tests I-01…I-25. Full list in `docs/TEST_P
 | 29 | **A Phase 1b timing test tripped its ceiling in CI because Phase 2a changed what shares its process.** `PingRaceAndReconnectTests.testRepeatedClockBurstsAllCompleteQuickly` asserts an 11-sample clock burst converges within a fixed budget. That budget (4.0s) was measured when the `RideLinkPlatform` test binary held control-plane code only; it now also links a ~96 MB WebRTC framework and, a few tests earlier in the same process, stands up two real `RTCPeerConnectionFactory` instances with their own worker threads. CI run 33607112656 tripped it with the signature the test's own comment predicts — `elapsed 4.129s`, `pendingPings=1`, `rttMs=3.0` (three **milliseconds**: the wire was healthy and a PONG was measured; one waiter was not resumed before its own 3s `pingTimeoutMs` fired). Actor-scheduling starvation on a three-core hosted runner, not a protocol or lifecycle bug — `PingRequestRegistry`'s own tests cover the bookkeeping | Low | Ceiling raised to 8.0s with the arithmetic written down: a single dropped PONG costs the full 3.0s timeout on top of a ~0.6s healthy burst, so ~3.6s is the floor before contention. 8.0s clears it with margin and stays below the 10s resync interval, so a genuinely stuck burst still fails. **The underlying fragility is not removed:** a wall-clock assertion sharing a process with a real media stack will always be environment-sensitive. The durable fix is to assert the invariant (every ping resolves, no stale waiter) and measure the timing separately — a Phase 1b test-design change, not a Phase 2a one |
 | 26 | **APK/IPA size.** The Android AAR adds ~48 MB of native code across four ABIs; the Apple XCFramework is ~96 MB expanded and embedded in the app bundle. No ABI filtering or slice stripping is applied — the default is the safe configuration and a sideloaded personal build has no size gate | Low | Revisit if install time becomes annoying. Recorded rather than forgotten |
 | 21 | **Diagnostics now show `CONNECTING` while a six-digit code is on screen**, where they previously showed `CONNECTED`. This is deliberate and more honest (ADR-019 §5), but it is a user-visible change that has never been looked at on a real screen | Low | Confirm it reads sensibly during I-02 on the two phones; the FR-023 diagnostics screen is one of the things I-02 exercises anyway |
+| 32 | **`Effect.ReleaseAudioAndStopForegroundService`'s name promises an Android foreground-service stop it has never actually performed.** Found during the eleventh session's hardening pass (§2n, ADR-021 Amendment A1 Finding F) while fixing the *other* place capture and the service could get out of order: `SessionCoordinator.runEffect` handles this FSM effect by calling `releaseVoice()` and `teardownSession()` only — neither touches `RideForegroundService`, and grepping the whole app confirms `MainActivity.stopIntercom()` remains the **only** caller of `RideForegroundService.stop()` anywhere. So a BYE from the peer, or any other route to the FSM's `ENDING` state that is not the user's own Stop Intercom tap, releases capture correctly but leaves the foreground service running with nothing left to hold | Medium | Give `SessionCoordinator` a way to reach `RideForegroundService.stop()` — it currently has no `Context` — or move the decision to stop the service into a `state`-observing point in `MainActivity`/`AppContainer` the way `RideCommandBus`'s `END_INTERCOM` handler now does (§2n). Not fixed in the same pass because it is a distinct gap from the one under review, not a regression from that pass's fix |
 
 Resolved 26 Aug 2026 session: `CLAUDE.md` in `.gitignore` (was problem 1); `.DS_Store` tracking
 (was problem 7 — the claim was incorrect; the files are untracked and now ignored); the ADR-015/
@@ -1595,6 +1708,15 @@ Not blocking Phase 1. Answers needed before Phase 6.
 **Phase 2b — intercom integration and audio lifecycle. IMPLEMENTATION COMPLETE, REAL-DEVICE INTERCOM
 GATE PENDING.** Everything below is done and verified by the automatable tests this machine can run.
 What remains is hardware.
+
+**The eleventh session (§2n, ADR-021 Amendment A1) hardened eight real ordering/lifecycle bugs found
+by independent review — real generation-tagging and priority draining in iOS's notification path,
+correct listener-registration order on both platforms, an actually-scheduled route-transition timeout,
+a completion-aware Android stop so the foreground service cannot outrun capture release, ordered
+delivery of iOS voice diagnostics, and atomic Android diagnostics writes.** This is a hardening pass,
+not new scope: it does not move any checklist item below off "hardware pending," because every fix is
+in code that either has laptop coverage already (and now has more) or was already, and remains,
+untestable off a device. Do not read it as new evidence about a phone.
 
 1. ✅ **The intercom policy is one interpreted object**, not five code paths — `IntercomPolicy` +
    `IntercomTransmission`, mirrored and pinned by `protocol/vectors/intercom/` (58 rows on both

@@ -98,11 +98,15 @@ class RideForegroundService : Service() {
         when (intent?.action) {
             ACTION_TOGGLE_MUTE -> RideCommandBus.dispatch(RideCommand.TOGGLE_MUTE)
             ACTION_END_INTERCOM -> {
+                // This phase's hardening pass (Issue F): `stopSelf()` used to run immediately after
+                // dispatch, but `RideCommandBus`'s handler only *queues* the stop request — the actual
+                // `engine.release()`/`audioSession.close()` runs later, asynchronously. Stopping the
+                // service here could let the platform reclaim it while it still held the microphone,
+                // which is exactly the orphan ARCHITECTURE §6.4 forbids, just reached from the other
+                // direction. `AppContainer`'s handler now awaits real release and calls
+                // `RideForegroundService.stop()` itself once that is true — this action's whole job is
+                // to dispatch and get out of the way.
                 RideCommandBus.dispatch(RideCommand.END_INTERCOM)
-                // The command ends the intercom; the service ends with it, because a microphone
-                // foreground service with no microphone open is exactly the orphan ARCHITECTURE §6.4
-                // forbids.
-                stopSelf()
                 return START_NOT_STICKY
             }
         }
@@ -120,10 +124,12 @@ class RideForegroundService : Service() {
     /**
      * ARCHITECTURE §6.4: a task swiped from Recents ends the session cleanly rather than leaving an
      * orphaned service holding a microphone.
+     *
+     * No direct `stopSelf()` here either (Issue F, same reasoning as `ACTION_END_INTERCOM` above):
+     * `RideCommandBus`'s handler awaits real release before it calls [stop] itself.
      */
     override fun onTaskRemoved(rootIntent: Intent?) {
         RideCommandBus.dispatch(RideCommand.END_INTERCOM)
-        stopSelf()
         super.onTaskRemoved(rootIntent)
     }
 

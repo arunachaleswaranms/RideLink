@@ -109,6 +109,17 @@ public final class SessionCoordinator {
     /// `VoiceNegotiation` table, for the reason STATUS §4 problem 20 gives.
     private var voice: VoiceController?
 
+    /// Ordered delivery for `VoiceController`'s diagnostics, mirroring `controlEventChannel` above and
+    /// for the identical reason (STATUS §2h). `VoiceController.setOnDiagnosticsChanged`'s callback used
+    /// to be wrapped in a fresh `Task { @MainActor in ... }` per call — which preserves only the order
+    /// those tasks were *created* in, not the order they run in. Since `AUDIO_STATE.revision` is derived
+    /// from the diagnostics sequence (`publishAudioState` below), an out-of-order delivery could make a
+    /// stale route or transmission snapshot the one the peer sees as authoritative. Recreated per
+    /// `attachVoice` and finished in `releaseVoice`, so a diagnostics callback still in flight from a
+    /// torn-down controller lands as a no-op `send` rather than mutating the session that replaced it.
+    private var voiceDiagnosticsChannel: OrderedEventChannel<VoiceDiagnostics>?
+    private var voiceDiagnosticsTask: Task<Void, Never>?
+
     /// Assembles the security wiring, and nothing else does: the Keychain identity (ADR-017), the
     /// one production `ControlChannel` — TLS 1.3 — and the trusted-peer store the SPKI pin is
     /// checked against (ADR-012).
@@ -417,14 +428,26 @@ public final class SessionCoordinator {
             self.voice = controller
             await controller.attach()
             controller.selectPolicy(self.intercomPolicy)
-            await controller.setOnDiagnosticsChanged { diagnostics in
-                Task { @MainActor in
+
+            // Exactly one consumer, draining in a single `for await` loop — see `OrderedEventChannel`'s
+            // doc comment for why a `Task` per event cannot make the ordering guarantee `AUDIO_STATE`'s
+            // revision rule depends on. `send` itself is a plain synchronous call, so it is safe to
+            // invoke directly from the controller actor's `onDiagnosticsChanged` callback.
+            let diagnosticsChannel = OrderedEventChannel<VoiceDiagnostics>()
+            self.voiceDiagnosticsChannel = diagnosticsChannel
+            self.voiceDiagnosticsTask?.cancel()
+            self.voiceDiagnosticsTask = Task { @MainActor [weak self] in
+                for await diagnostics in diagnosticsChannel.stream {
+                    guard let self else { return }
                     self.voiceDiagnostics = diagnostics
                     // Every observable audio change publishes, and the publisher itself decides whether
                     // there is anything new to say — which is what makes `revision` mean "the state
                     // changed" rather than "a callback fired".
                     self.publishAudioState(force: false)
                 }
+            }
+            await controller.setOnDiagnosticsChanged { diagnostics in
+                diagnosticsChannel.send(diagnostics)
             }
             await relay.setSink(controller)
             let audioRelay = await manager.audioStateRelay()
@@ -441,6 +464,14 @@ public final class SessionCoordinator {
         guard let controller = voice else { return }
         voice = nil
         voiceDiagnostics = VoiceDiagnostics()
+        // Cancel the consumer, then finish the channel — cancellation is the cooperative signal,
+        // finishing is what actually ends the `for await` loop and turns any later `send` from a
+        // not-yet-torn-down controller callback into a no-op rather than a stale mutation of whatever
+        // session replaces this one.
+        voiceDiagnosticsTask?.cancel()
+        voiceDiagnosticsTask = nil
+        voiceDiagnosticsChannel?.finish()
+        voiceDiagnosticsChannel = nil
         let manager = controlSessionManager
         Task {
             await manager.voiceRelay().setSink(nil)

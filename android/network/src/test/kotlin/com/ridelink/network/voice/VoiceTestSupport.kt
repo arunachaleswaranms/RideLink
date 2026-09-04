@@ -17,6 +17,7 @@ import com.ridelink.core.voice.VoiceEngineDiagnostics
 import com.ridelink.core.voice.VoiceEngineEvent
 import com.ridelink.core.voice.VoiceSignalSink
 import com.ridelink.core.voice.VoiceSignalTransport
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonObjectBuilder
 import kotlinx.serialization.json.buildJsonObject
@@ -175,6 +176,14 @@ class FakeVoiceAudioSession : VoiceAudioSession {
 
     private var sink: ((AudioRouteSnapshot) -> Unit)? = null
 
+    /**
+     * Set by a test that needs to observe an in-flight `close()` before it completes —
+     * `VoiceControllerStopAwaitTest`'s proof that `stopAndAwaitRelease()` really suspends until
+     * `audioSession.close()` has run, not merely been called. `null` (the default) means `close()`
+     * completes immediately, exactly as before.
+     */
+    var closeGate: CompletableDeferred<Unit>? = null
+
     override fun setRouteSink(sink: (AudioRouteSnapshot) -> Unit) {
         this.sink = sink
     }
@@ -199,6 +208,7 @@ class FakeVoiceAudioSession : VoiceAudioSession {
     }
 
     override suspend fun close() {
+        closeGate?.await()
         calls.add("close")
         if (isOpen) closeCaptureCount += 1
         isOpen = false

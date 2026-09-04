@@ -227,6 +227,21 @@ class SessionCoordinator(
         voice?.stop()
     }
 
+    /**
+     * Like [endIntercom], but suspends until capture has actually been released — or until there was
+     * never anything to release. **The caller must not stop the microphone foreground service before
+     * this returns** (ARCHITECTURE §6.4, this phase's hardening pass, Issue F): stopping it first can
+     * let the platform reclaim a foreground service that is still holding the microphone, because
+     * `endIntercom()`/`VoiceController.stop()` only *queue* the stop request.
+     *
+     * A no-op, returning immediately, when there is no authenticated session — `voice` is null before
+     * the trust gate has passed and after a deliberate `BYE`/session end, both of which are already
+     * safe to call this from.
+     */
+    suspend fun endIntercomAndAwaitRelease() {
+        voice?.stopAndAwaitRelease()
+    }
+
     fun setMicrophoneMuted(muted: Boolean) {
         voice?.setMicrophoneMuted(muted)
     }
