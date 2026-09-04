@@ -1,0 +1,73 @@
+{
+  "corrupt.m4a": {
+    "description": "normal.m4a truncated to two-thirds of its length — a real file, deliberately damaged. Must classify as CORRUPT, never crash the indexer.",
+    "sha256": "dc7779e1424007a86907ee4d48416828361771b2c2309a3e629e8c1a3dc66f2e"
+  },
+  "duplicate_a.m4a": {
+    "description": "Byte-identical to normal.m4a under a different filename — same sha256, the FR-010 dedup case.",
+    "sha256": "0430a62b735c1da73882efeff90bea6f0dba90c3eae7e7f0995a00d396539db1"
+  },
+  "duplicate_b.m4a": {
+    "description": "Byte-identical to normal.m4a under a different filename — same sha256, the FR-010 dedup case.",
+    "sha256": "0430a62b735c1da73882efeff90bea6f0dba90c3eae7e7f0995a00d396539db1"
+  },
+  "minimal.mp3": {
+    "description": "Hand-built ID3v2 header + one zero-filled MPEG-1 Layer III frame — proves MP3 extension/ID3 tag detection only. NOT a verified decodable audio fixture (no MP3 encoder exists in this environment; see the module docstring). Real MP3 files decode via the platform's own native MP3 decoder, exercised only by a real user's own files.",
+    "expected_album": "Minimal Album",
+    "expected_artist": "Minimal Artist",
+    "expected_title": "Minimal MP3",
+    "sha256": "6ccec89041185c24aa764a6f15841ebfbf2dad23bdde3cfda5196dacb0066f13"
+  },
+  "no_artwork.m4a": {
+    "description": "Full text metadata, deliberately no artwork — exercises the placeholder-artwork UI path.",
+    "expected_album": "Test Album",
+    "expected_artist": "Test Artist",
+    "expected_title": "No Artwork Track",
+    "has_artwork": false,
+    "sha256": "d7600ba11eb7119cd370e936dad1215c4145e07f4cf88b83d70389e0712ee08e"
+  },
+  "no_metadata.m4a": {
+    "description": "No tags at all — exercises the filename-fallback title and Unknown Artist/Album normalization.",
+    "expected_album": null,
+    "expected_artist": null,
+    "expected_title": null,
+    "has_artwork": false,
+    "sha256": "9ff3155ab3258fd716e1c484f80181c0e8adbb5ff863a57049f24d10cb8b24b3"
+  },
+  "normal.m4a": {
+    "description": "A normal track: title/artist/album tags and embedded artwork.",
+    "expected_album": "Test Album",
+    "expected_artist": "Test Artist",
+    "expected_title": "Test Track",
+    "has_artwork": true,
+    "sha256": "0430a62b735c1da73882efeff90bea6f0dba90c3eae7e7f0995a00d396539db1"
+  },
+  "same_metadata_different_bytes_a.m4a": {
+    "description": "Same title/artist/album as its pair, genuinely different audio bytes — must NOT be deduplicated; metadata alone is never identity (REQUIREMENTS §9.2).",
+    "expected_album": "Shared Album",
+    "expected_artist": "Shared Artist",
+    "expected_title": "Shared Title",
+    "has_artwork": false,
+    "sha256": "97c3b7030e6cc53494419f6b07bc0b81b34a99bccda9aa467d8e2f2ca8111a5b"
+  },
+  "same_metadata_different_bytes_b.m4a": {
+    "description": "Same title/artist/album as its pair, genuinely different audio bytes — must NOT be deduplicated; metadata alone is never identity (REQUIREMENTS §9.2).",
+    "expected_album": "Shared Album",
+    "expected_artist": "Shared Artist",
+    "expected_title": "Shared Title",
+    "has_artwork": false,
+    "sha256": "a809c1c126800a072d7f68923125b17aefdeb9150a8712001af0d0fba63c0453"
+  },
+  "unicode_metadata.m4a": {
+    "description": "Unicode tags (Japanese, an emoji, and combining marks) — exercises NFC normalization end to end, not just in the pure normalizer's own unit tests.",
+    "expected_album": "中文專輯",
+    "expected_artist": "É́lève",
+    "expected_title": "テスト楽曲 🎵",
+    "has_artwork": false,
+    "sha256": "998878c8610e2c994cf85e47cc6d5e960baf70e0e90526b5c3b33cfb4e154645"
+  },
+  "unsupported.xyz": {
+    "description": "normal.m4a's exact bytes under an unrecognized extension. Must classify as UNSUPPORTED (extension gate), never CORRUPT or crash.",
+    "sha256": "0430a62b735c1da73882efeff90bea6f0dba90c3eae7e7f0995a00d396539db1"
+  }
+}
