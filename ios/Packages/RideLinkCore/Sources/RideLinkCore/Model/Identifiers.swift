@@ -88,7 +88,55 @@ public struct ConnTiebreak: Hashable, Sendable, CustomStringConvertible {
 }
 
 /// SHA-256 of the whole file — the authoritative track identity (ADR-005).
+/// Format: `"sha256:"` + 64 lowercase hex characters (PROTOCOL §8.1's manifest entry shape).
+///
+/// Not redacted: unlike `SpkiHash`/`ConnTiebreak`, a content hash names no peer and identifies no
+/// security material — CLAUDE.md's logging redaction table does not list it, and a music file's
+/// hash reveals nothing about the person carrying it.
 public struct ContentHash: Hashable, Sendable {
     public let value: String
-    public init(_ value: String) { self.value = value }
+
+    public init(_ value: String) {
+        precondition(ContentHash.isValid(value), "ContentHash must be sha256: followed by 64 lowercase hex characters")
+        self.value = value
+    }
+
+    public var hex: String { String(value.dropFirst("sha256:".count)) }
+
+    /// Non-trapping constructor for a value read back from storage or computed from possibly
+    /// unexpected input. Phase 3's indexer runs over arbitrary local files ("even local files are
+    /// untrusted input"), so a malformed persisted row must not crash a read the way `init(_:)`'s
+    /// `precondition` would.
+    public static func parse(_ value: String) -> ContentHash? {
+        isValid(value) ? ContentHash(value) : nil
+    }
+
+    private static func isValid(_ s: String) -> Bool {
+        guard s.hasPrefix("sha256:") else { return false }
+        let hex = s.dropFirst("sha256:".count)
+        return hex.count == 64 && hex.allSatisfy { $0.isHexDigit && !$0.isUppercase }
+    }
+}
+
+/// `SHA-256(size_bytes ‖ first 64 KiB ‖ last 64 KiB)` (ADR-005) — the cheap tier computed at scan
+/// time, before the authoritative `ContentHash` is known. Same wire format as `ContentHash`
+/// (PROTOCOL §8.1: `"quick_id": "sha256:77bd…"`) and used as the stable local index key: it
+/// survives a rename, unlike a path, and is available immediately, unlike the full hash.
+public struct QuickId: Hashable, Sendable {
+    public let value: String
+
+    public init(_ value: String) {
+        precondition(QuickId.isValid(value), "QuickId must be sha256: followed by 64 lowercase hex characters")
+        self.value = value
+    }
+
+    public static func parse(_ value: String) -> QuickId? {
+        isValid(value) ? QuickId(value) : nil
+    }
+
+    private static func isValid(_ s: String) -> Bool {
+        guard s.hasPrefix("sha256:") else { return false }
+        let hex = s.dropFirst("sha256:".count)
+        return hex.count == 64 && hex.allSatisfy { $0.isHexDigit && !$0.isUppercase }
+    }
 }

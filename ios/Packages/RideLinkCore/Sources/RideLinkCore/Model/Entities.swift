@@ -42,7 +42,7 @@ public struct DiscoveredPeer: Sendable, Equatable {
 /// REQUIREMENTS §16. A distinct file on one phone; content_hash is the authoritative identity (ADR-005).
 public struct Track: Sendable, Equatable {
     public let contentHash: ContentHash?
-    public let quickId: String
+    public let quickId: QuickId
     public let title: String
     public let artist: String
     public let album: String
@@ -52,6 +52,32 @@ public struct Track: Sendable, Equatable {
     public let bitrateKbps: Int
     public let artworkRef: String?
     public let sizeBytes: Int64
+
+    public init(
+        contentHash: ContentHash?,
+        quickId: QuickId,
+        title: String,
+        artist: String,
+        album: String,
+        durationMs: Int64,
+        filename: String,
+        codec: String,
+        bitrateKbps: Int,
+        artworkRef: String?,
+        sizeBytes: Int64
+    ) {
+        self.contentHash = contentHash
+        self.quickId = quickId
+        self.title = title
+        self.artist = artist
+        self.album = album
+        self.durationMs = durationMs
+        self.filename = filename
+        self.codec = codec
+        self.bitrateKbps = bitrateKbps
+        self.artworkRef = artworkRef
+        self.sizeBytes = sizeBytes
+    }
 }
 
 public enum TransferState: Sendable, Equatable {

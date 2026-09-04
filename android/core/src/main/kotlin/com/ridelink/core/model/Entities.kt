@@ -23,7 +23,7 @@ data class DiscoveredPeer(
 /** REQUIREMENTS §16. A distinct file on one phone; content_hash is the authoritative identity (ADR-005). */
 data class Track(
     val contentHash: ContentHash?,
-    val quickId: String,
+    val quickId: QuickId,
     val title: String,
     val artist: String,
     val album: String,
