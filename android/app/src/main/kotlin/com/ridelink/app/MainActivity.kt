@@ -8,11 +8,13 @@ import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.material3.MaterialTheme
 import androidx.lifecycle.lifecycleScope
+import com.ridelink.app.music.MusicCoordinator
 import com.ridelink.app.service.RideForegroundService
 import com.ridelink.app.session.SessionCoordinator
 import com.ridelink.app.ui.MainScreen
 import com.ridelink.app.ui.SecureTransportUnavailableScreen
 import com.ridelink.core.audiopolicy.RideStartDecision
+import com.ridelink.core.library.LibraryEntry
 import com.ridelink.network.voice.StopReleaseResult
 import kotlinx.coroutines.launch
 
@@ -48,6 +50,23 @@ class MainActivity : ComponentActivity() {
     private var coordinator: SessionCoordinator? = null
 
     /**
+     * `ACTION_OPEN_DOCUMENT_TREE` — ARCHITECTURE §8.4's primary Android import path. No runtime
+     * permission involved; the grant is the picker result itself (this phase's brief §10).
+     */
+    private val pickFolder =
+        registerForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
+            uri?.let { musicCoordinator?.importTree(it) }
+        }
+
+    /** `ACTION_OPEN_DOCUMENT` multi-select — brief §10's explicit "multiple files" import path. */
+    private val pickFiles =
+        registerForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
+            if (uris.isNotEmpty()) musicCoordinator?.importFiles(uris)
+        }
+
+    private var musicCoordinator: MusicCoordinator? = null
+
+    /**
      * Whether this Activity is resumed. The only honest source for
      * [com.ridelink.core.audiopolicy.RideStartRequest.appForegroundVisible].
      */
@@ -63,13 +82,19 @@ class MainActivity : ComponentActivity() {
                 container.fold(
                     onSuccess = { appContainer ->
                         coordinator = appContainer.sessionCoordinator
+                        musicCoordinator = appContainer.musicCoordinator
                         MainScreen(
                             coordinator = appContainer.sessionCoordinator,
+                            musicCoordinator = appContainer.musicCoordinator,
                             deviceDescription = deviceDescription,
                             onStartIntercom = {
                                 attemptIntercomStart(appContainer.sessionCoordinator, requestPermissionsIfMissing = true)
                             },
                             onStopIntercom = { stopIntercom(appContainer.sessionCoordinator) },
+                            onPlayMusic = { attemptMusicPlay(appContainer.musicCoordinator) },
+                            onPlayNow = { entry -> attemptPlayNow(appContainer.musicCoordinator, entry) },
+                            onImportFolder = { pickFolder.launch(null) },
+                            onImportFiles = { pickFiles.launch(arrayOf("audio/*")) },
                         )
                     },
                     // The only way to land here is a device-identity failure. There is deliberately
@@ -148,10 +173,11 @@ class MainActivity : ComponentActivity() {
      *
      * This phase's hardening pass (Issue F): `endIntercom()` alone only *queues* the stop — the actual
      * `engine.release()`/`audioSession.close()` runs later, on the controller's own consumer. Calling
-     * [RideForegroundService.stop] right after it, as before, could let the platform reclaim the
-     * service while it still held the microphone. [SessionCoordinator.endIntercomAndAwaitRelease]
+     * [RideForegroundService.stopIntercom] right after it, as before, could let the platform reclaim
+     * the service while it still held the microphone. [SessionCoordinator.endIntercomAndAwaitRelease]
      * suspends until release has actually happened (or until there was nothing to release), so the
-     * service is stopped only once that is true.
+     * service is told the intercom ended only once that is true. Phase 3: this drops only the
+     * `microphone` type — a music track still playing keeps the service (and `mediaPlayback`) alive.
      *
      * This phase's **final** hardening pass (Issue 2): the awaited result is now explicit
      * ([com.ridelink.network.voice.StopReleaseResult]), and a timeout is never treated as release —
@@ -164,10 +190,47 @@ class MainActivity : ComponentActivity() {
     private fun stopIntercom(coordinator: SessionCoordinator) {
         lifecycleScope.launch {
             when (coordinator.endIntercomAndAwaitRelease()) {
-                StopReleaseResult.Released, StopReleaseResult.AlreadyReleased -> RideForegroundService.stop(this@MainActivity)
+                StopReleaseResult.Released, StopReleaseResult.AlreadyReleased -> RideForegroundService.stopIntercom(this@MainActivity)
                 StopReleaseResult.TimedOut -> Unit
             }
         }
+    }
+
+    /**
+     * The music mirror of [attemptIntercomStart]'s foreground-visible discipline (this phase's
+     * brief §16): held to the same rule as the intercom's first start, even though music itself
+     * needs no runtime permission and no readiness gate — CLAUDE.md's "Ride Mode starts only from a
+     * visible app" is about foreground-service starts in general, and a single consistent rule is
+     * simpler to reason about than a second, looser one that exists only for music.
+     *
+     * [RideForegroundService.updateMusicPlaying] alone (fired reactively by `AppContainer` as
+     * playback state changes) is a safe no-op while the service is not yet running, by
+     * construction, so the **first** start for music alone has to happen here, exactly once,
+     * before actually calling play.
+     */
+    private fun attemptMusicPlay(musicCoordinator: MusicCoordinator) {
+        if (!foregroundVisible) return
+        RideForegroundService.startMusicFromVisibleUi(this)
+        musicCoordinator.play()
+    }
+
+    /**
+     * [attemptMusicPlay]'s twin for the library screen's "tap a row to play it now" affordance — a
+     * real gap found on the emulator, not a hypothetical: [com.ridelink.app.ui.LibraryScreen]'s row
+     * tap used to call [MusicCoordinator.playNow] directly, which starts real playback without ever
+     * calling [RideForegroundService.startMusicFromVisibleUi] first. `AppContainer`'s reactive
+     * `isMusicActive` observer still brought the foreground service up behind that gate's back (via
+     * [RideForegroundService.updateMusicPlaying]'s own `startService` call), so the failure was not
+     * "music didn't play" but a service started from a path this rule was specifically written to
+     * prevent — see [attemptMusicPlay]'s KDoc and ARCHITECTURE §6.4.
+     */
+    private fun attemptPlayNow(
+        musicCoordinator: MusicCoordinator,
+        entry: LibraryEntry,
+    ) {
+        if (!foregroundVisible) return
+        RideForegroundService.startMusicFromVisibleUi(this)
+        musicCoordinator.playNow(entry)
     }
 
     private fun notificationsGranted(): Boolean =

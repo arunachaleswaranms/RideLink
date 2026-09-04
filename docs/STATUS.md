@@ -2025,6 +2025,22 @@ numbers in it**, for the same reason Phase 2b should not have started before Pha
 policy `IntercomPolicy.onSpeech` already carries is a decision A-03/A-08 measure, and building a
 player against an unmeasured coexistence story is how the product's largest risk gets discovered last.
 
+> **Amendment — 4 September 2026, fourteenth session: this gate was deliberately overridden to start
+> Phase 3 anyway.** The user made this call explicitly, after the conflict between this paragraph and
+> that session's kickoff brief was surfaced and put to them rather than resolved silently. Recorded
+> here per this file's own discipline (§8: contradictions get resolved and written down, not picked
+> silently). The reasoning for overriding: the risk this paragraph actually warns about is building
+> *coexistence* (ducking, VOX/PTT-vs-music, Bluetooth profile trade-offs) against an unmeasured A-03/
+> A-08 story — that is Phase 6 scope, explicitly out of bounds for Phase 3, and Phase 3 is required to
+> expose only clean interfaces for Phase 6 to drive later, never to implement `IntercomPolicy.onSpeech`
+> behaviour itself. Local playback/library/queue/indexing carries none of that risk: it works or fails
+> identically whether or not the intercom hardware gate has run, per FR-025 and the graceful-
+> degradation rule (player failure must not affect `SessionCoordinator`; intercom absence must not
+> affect the player). **This does not retire the gate for anything else.** The Phase 2b real-device
+> intercom gate (A-10, IA-01…03, AF-01/03/05, V-05/06/09) and the overall "2 Intercom" milestone gate
+> (A-01, A-02, A-04, A-09, V-01…V-11) remain exactly as open as recorded above, and Phase 6
+> (intercom+music coexistence) still may not start until they close.
+
 ---
 
 ## 8. How to update this file

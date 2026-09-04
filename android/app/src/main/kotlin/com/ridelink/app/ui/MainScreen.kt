@@ -24,7 +24,9 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import com.ridelink.app.music.MusicCoordinator
 import com.ridelink.app.session.SessionCoordinator
+import com.ridelink.core.library.LibraryEntry
 import com.ridelink.core.sessionfsm.SessionStatus
 import com.ridelink.network.control.ControlDiagnostics
 import com.ridelink.network.control.ControlState
@@ -47,6 +49,7 @@ import com.ridelink.network.control.PairingPrompt
 @Composable
 fun MainScreen(
     coordinator: SessionCoordinator,
+    musicCoordinator: MusicCoordinator,
     deviceDescription: String,
     /**
      * Routed through the Activity on purpose. ARCHITECTURE §6.4 steps 4–6: the microphone foreground
@@ -55,6 +58,14 @@ fun MainScreen(
      */
     onStartIntercom: () -> Unit,
     onStopIntercom: () -> Unit,
+    /** Same foreground-visible discipline, applied to music (this phase's brief §16) — see
+     *  [MainActivity.attemptMusicPlay]. */
+    onPlayMusic: () -> Unit,
+    /** The library screen's "tap a row to play it now" affordance, held to the exact same
+     *  foreground-visible discipline as [onPlayMusic] — see [MainActivity.attemptPlayNow]. */
+    onPlayNow: (LibraryEntry) -> Unit,
+    onImportFolder: () -> Unit,
+    onImportFiles: () -> Unit,
 ) {
     val state by coordinator.state.collectAsState()
     val peers by coordinator.discoveredPeers.collectAsState()
@@ -123,6 +134,16 @@ fun MainScreen(
                 discoveredPeerCount = peers.size,
                 discoveryCount = discoveryCount,
                 localIdentityPrefix = coordinator.localIdentityPrefix,
+            )
+
+            // Deliberately independent of `state.status` — this phase's brief §28/§30: local music
+            // must be fully usable in airplane mode, with no peer, regardless of session state.
+            MusicSection(
+                musicCoordinator = musicCoordinator,
+                onPlayMusic = onPlayMusic,
+                onPlayNow = onPlayNow,
+                onImportFolder = onImportFolder,
+                onImportFiles = onImportFiles,
             )
         }
     }

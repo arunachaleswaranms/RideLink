@@ -50,6 +50,9 @@ dependencies {
     implementation(libs.compose.ui.tooling.preview)
     implementation(libs.compose.material3)
     implementation(libs.kotlinx.coroutines.android)
+    // AppContainer builds the one Room instance directly (RideLinkDatabase's class lives in
+    // :data, but Room.databaseBuilder itself is not re-exported by an `implementation` dependency).
+    implementation(libs.room.runtime)
 
     debugImplementation(libs.compose.ui.tooling)
 

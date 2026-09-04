@@ -153,8 +153,15 @@ secrets.properties
 # runtime "library/" data directory anywhere in the app to protect (this app's on-device storage
 # uses `data.database`/a SQLite file, not a directory by that name), so the pattern is removed
 # rather than anchored — the more specific rules below already cover the real risk.
-music/
-Music/
+#
+# `music/`/`Music/` (bare, unanchored) had the exact same bug, found the same way: it silently
+# excluded `android/app/src/main/kotlin/com/ridelink/app/music/` — Phase 3's real
+# `MusicCoordinator.kt` source package — from every `git status`, so the file simply never appeared
+# as untracked and was never committed. Anchored to the repo root instead of removed, because unlike
+# `library/` this one protects a real, plausible accident: someone dropping a personal `Music/`
+# folder at the top level of a clone.
+/music/
+/Music/
 personal-media/
 test-media/real/
 test-media/personal/

@@ -3,17 +3,24 @@ package com.ridelink.app.di
 import android.content.Context
 import android.os.Build
 import android.os.SystemClock
+import androidx.room.Room
+import com.ridelink.app.music.MusicCoordinator
 import com.ridelink.app.service.RideCommand
 import com.ridelink.app.service.RideCommandBus
 import com.ridelink.app.service.RideForegroundService
 import com.ridelink.app.session.ForegroundServiceController
 import com.ridelink.app.session.SessionCoordinator
 import com.ridelink.app.session.SessionEnvironment
+import com.ridelink.audio.player.ExoPlayerMusicPlayer
 import com.ridelink.audio.route.AndroidVoiceAudioSession
 import com.ridelink.audio.route.AudioEndpointPreference
 import com.ridelink.core.logging.InMemoryLogSink
 import com.ridelink.core.security.TrustedPeerStore
 import com.ridelink.core.security.UtcTime
+import com.ridelink.data.database.RideLinkDatabase
+import com.ridelink.data.library.ArtworkCache
+import com.ridelink.data.library.LibraryIndexer
+import com.ridelink.data.library.LibraryRepository
 import com.ridelink.data.trustedpeers.FileTrustedPeerStore
 import com.ridelink.data.trustedpeers.LocalPeerIdStore
 import com.ridelink.network.control.ConnTiebreakGenerator
@@ -31,6 +38,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 import java.io.File
+import java.util.UUID
 
 private const val APP_VERSION = "0.1.0"
 private const val VOICE_TRACK_ID = "ridelink-voice"
@@ -129,6 +137,39 @@ class AppContainer(
             monotonicNowUs = monotonicNowUs,
         )
 
+    /**
+     * Phase 3's local music stack — entirely independent of everything above: no reference to
+     * [controlSessionManager], [voiceAudioSession] or [sessionCoordinator], and nothing above holds
+     * a reference to this. That is this phase's brief §30 made structural: a player failure cannot
+     * reach the control session because there is no path for it to.
+     */
+    private val musicDatabase =
+        Room
+            .databaseBuilder(context, RideLinkDatabase::class.java, RideLinkDatabase.DATABASE_NAME)
+            .build()
+
+    private val libraryRepository = LibraryRepository(musicDatabase.trackDao())
+
+    private val libraryIndexer =
+        LibraryIndexer(
+            context = context,
+            repository = libraryRepository,
+            artworkCache = ArtworkCache(context),
+            monotonicNowUs = monotonicNowUs,
+        )
+
+    private val musicPlayer = ExoPlayerMusicPlayer(context, appScope)
+
+    val musicCoordinator: MusicCoordinator =
+        MusicCoordinator(
+            repository = libraryRepository,
+            indexer = libraryIndexer,
+            player = musicPlayer,
+            scope = appScope,
+            monotonicNowUs = monotonicNowUs,
+            nextQueueItemId = { UUID.randomUUID().toString() },
+        )
+
     val sessionCoordinator: SessionCoordinator
 
     init {
@@ -147,14 +188,31 @@ class AppContainer(
                         nowEpochSeconds = { System.currentTimeMillis() / MILLIS_PER_SECOND },
                         audioEndpointPresent = { voiceAudioSession.hasUsableEndpoint },
                     ),
-                // problem 32: the one place `RideForegroundService.stop` is reachable from the FSM's
-                // own `ENDING` effect, so a peer BYE (or any other legitimate ENDING path) cannot
-                // leave the service orphaned the way `MainActivity`'s in-app button alone could not
-                // reach.
-                foregroundService = ForegroundServiceController { RideForegroundService.stop(context) },
+                // problem 32: the one place the FSM's own `ENDING` effect can reach the foreground
+                // service, so a peer BYE (or any other legitimate ENDING path) cannot leave it
+                // orphaned the way `MainActivity`'s in-app button alone could not reach.
+                // `stopIntercom`, not a hard `stop`: the session ending (a peer disconnect, say) must
+                // not itself stop local music — brief §30's "peer unavailable -> local music still
+                // usable" graceful-degradation rule, applied to the one shared foreground service.
+                foregroundService = ForegroundServiceController { RideForegroundService.stopIntercom(context) },
                 buildVoiceController = ::voiceController,
             )
         installRideNotificationCommands()
+        observeMusicActivity()
+    }
+
+    /**
+     * Keeps the shared foreground service's `mediaPlayback` type in step with real playback state.
+     * Only ever *updates* an already-running service ([RideForegroundService.updateMusicPlaying]'s
+     * own no-op guard) — the first start for music alone is [MainActivity]'s job, gated the same
+     * foreground-visible way the intercom's first start is (this phase's brief §16).
+     */
+    private fun observeMusicActivity() {
+        appScope.launch {
+            musicCoordinator.isMusicActive.collect { active ->
+                RideForegroundService.updateMusicPlaying(context, active)
+            }
+        }
     }
 
     /**
@@ -188,7 +246,7 @@ class AppContainer(
                         // treated as proof the microphone is safe to reclaim — the stop is skipped, and
                         // the diagnostics card already shows the stalled route transition to explain why.
                         when (sessionCoordinator.endIntercomAndAwaitRelease()) {
-                            StopReleaseResult.Released, StopReleaseResult.AlreadyReleased -> RideForegroundService.stop(context)
+                            StopReleaseResult.Released, StopReleaseResult.AlreadyReleased -> RideForegroundService.stopIntercom(context)
                             StopReleaseResult.TimedOut -> Unit
                         }
                     }
