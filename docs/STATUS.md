@@ -1474,12 +1474,18 @@ twelfth) — see §2o for the five findings this verifies:**
   re-run in isolation.
 - **All prior suites remain green**, including every Phase 1b/2a/2b test named above this paragraph —
   this session ran the full local gate, not only the new tests.
-- **CI green on the first run** —
-  [33892453958](https://github.com/arunachaleswaranms/RideLink/actions/runs/33892453958), commit
-  `797269b`. Android: `core unit tests`, `all unit tests`, `ktlint`, `detekt`, `lint`, `assembleDebug`,
-  `assembleRelease` — all seven green. iOS: `RideLinkCore` tests, `RideLinkPlatform` tests, unsigned
-  Debug **and** Release simulator builds — all four green. Nothing was re-run. The only annotations are
-  GitHub's own pre-existing Node.js 20/`setup-java@v4` deprecation notices, unrelated to this
+- This pass landed as two commits: `797269b` (the five findings and problem 32) and `8b1797f` (a sixth
+  defect, found while fixing Finding 1 on iOS — `close()` tore down its own settle/timeout fallback
+  before the transition it began could use either; see ADR-021 Amendment A2, Finding 1). Both are CI
+  green.
+- **CI green on both commits, first run each time** —
+  [33892453958](https://github.com/arunachaleswaranms/RideLink/actions/runs/33892453958) (`797269b`) and
+  [33893509254](https://github.com/arunachaleswaranms/RideLink/actions/runs/33893509254) (`8b1797f`).
+  Android: `core unit tests`, `all unit tests`, `ktlint`, `detekt`, `lint`, `assembleDebug`,
+  `assembleRelease` — all seven green on both runs. iOS: `RideLinkCore` tests, `RideLinkPlatform`
+  tests, unsigned Debug **and** Release simulator builds — all four green on both runs. Nothing was
+  re-run. The only annotations are GitHub's own pre-existing Node.js 20/`setup-java@v4` deprecation
+  notices, unrelated to this
   repository's code and pre-dating this session.
 
 ---
