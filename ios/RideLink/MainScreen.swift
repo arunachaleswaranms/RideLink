@@ -11,6 +11,10 @@ import SwiftUI
 /// releases the PTT gate (this phase's brief §25).
 struct MainScreen: View {
     let coordinator: SessionCoordinator
+    /// Phase 3's local music stack, deliberately independent of `coordinator` — see
+    /// `MusicCoordinator`'s own doc comment. A `.failure` is shown inline rather than hidden, the
+    /// same honesty `SecureTransportUnavailableView` gives a failed `SessionCoordinator`.
+    let music: Result<MusicCoordinator, Error>
     let deviceDescription: String
 
     var body: some View {
@@ -72,6 +76,18 @@ struct MainScreen: View {
                     discoveryCount: coordinator.discoveryCount,
                     localIdentityPrefix: coordinator.localIdentityPrefix
                 )
+
+                // Deliberately independent of `coordinator.state.status` — this phase's brief §28/
+                // §30: local music must be fully usable in airplane mode, with no peer, regardless
+                // of session state.
+                switch music {
+                case .success(let musicCoordinator):
+                    MusicSection(musicCoordinator: musicCoordinator)
+                case .failure(let error):
+                    Text("Local music unavailable: \(String(describing: error))")
+                        .font(.footnote)
+                        .foregroundStyle(.red)
+                }
             }
             .padding(24)
             .frame(maxWidth: .infinity, alignment: .leading)

@@ -12,6 +12,10 @@
 		463C73AE6E0372402BEDCCA8 /* MainScreen.swift in Sources */ = {isa = PBXBuildFile; fileRef = F57B63A6163CD2391653DC32 /* MainScreen.swift */; };
 		A1B2C3D4E5F60718293A4B5C /* VoiceCard.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0F1E2D3C4B5A69788796A5B4 /* VoiceCard.swift */; };
 		DAB0391CE2C018470044B457 /* SecureTransportPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = EB36F50DDB861E6A58E2B0F2 /* SecureTransportPolicy.swift */; };
+		DE556949F909054A7C9CC1F7 /* MusicCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2672BA908F7B97C11A35C582 /* MusicCoordinator.swift */; };
+		4D03A698B88180C2FC1025BB /* LibraryView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0023ABA3739D0956B97F5D06 /* LibraryView.swift */; };
+		8CC1F9EF0519CE5C87A6742D /* NowPlayingCard.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8BD8DEA8F739B64B1756D784 /* NowPlayingCard.swift */; };
+		3D466877B4FE8FDA47C4C531 /* MusicSection.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8E0F2A55F37B2C20357CF56F /* MusicSection.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -22,6 +26,10 @@
 		0F1E2D3C4B5A69788796A5B4 /* VoiceCard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoiceCard.swift; sourceTree = "<group>"; };
 		EB36F50DDB861E6A58E2B0F2 /* SecureTransportPolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SecureTransportPolicy.swift; sourceTree = "<group>"; };
 		D98B8F9B15BF0E88C459151B /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		2672BA908F7B97C11A35C582 /* MusicCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MusicCoordinator.swift; sourceTree = "<group>"; };
+		0023ABA3739D0956B97F5D06 /* LibraryView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LibraryView.swift; sourceTree = "<group>"; };
+		8BD8DEA8F739B64B1756D784 /* NowPlayingCard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NowPlayingCard.swift; sourceTree = "<group>"; };
+		8E0F2A55F37B2C20357CF56F /* MusicSection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MusicSection.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -51,6 +59,10 @@
 				F57B63A6163CD2391653DC32 /* MainScreen.swift */,
 				0F1E2D3C4B5A69788796A5B4 /* VoiceCard.swift */,
 				EB36F50DDB861E6A58E2B0F2 /* SecureTransportPolicy.swift */,
+				2672BA908F7B97C11A35C582 /* MusicCoordinator.swift */,
+				0023ABA3739D0956B97F5D06 /* LibraryView.swift */,
+				8BD8DEA8F739B64B1756D784 /* NowPlayingCard.swift */,
+				8E0F2A55F37B2C20357CF56F /* MusicSection.swift */,
 				D98B8F9B15BF0E88C459151B /* Info.plist */,
 			);
 			path = RideLink;
@@ -145,6 +157,10 @@
 				463C73AE6E0372402BEDCCA8 /* MainScreen.swift in Sources */,
 				A1B2C3D4E5F60718293A4B5C /* VoiceCard.swift in Sources */,
 				DAB0391CE2C018470044B457 /* SecureTransportPolicy.swift in Sources */,
+				DE556949F909054A7C9CC1F7 /* MusicCoordinator.swift in Sources */,
+				4D03A698B88180C2FC1025BB /* LibraryView.swift in Sources */,
+				8CC1F9EF0519CE5C87A6742D /* NowPlayingCard.swift in Sources */,
+				3D466877B4FE8FDA47C4C531 /* MusicSection.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
