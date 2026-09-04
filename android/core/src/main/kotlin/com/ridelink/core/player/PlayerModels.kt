@@ -1,5 +1,6 @@
 package com.ridelink.core.player
 
+import com.ridelink.core.library.LocalTrackLocation
 import com.ridelink.core.model.ContentHash
 
 /**
@@ -13,8 +14,18 @@ import com.ridelink.core.model.ContentHash
  * them, immediately.
  */
 sealed class PlaybackCommand {
+    /**
+     * [location] is what a real player binding actually opens; [contentHash] is carried alongside
+     * purely for identity so [PlayerState.contentHash] can report *which* track is loaded without
+     * the player ever resolving a hash back to a location itself. That resolution
+     * (`ContentHash -> LocalTrackLocation`) is `data.library.LibraryRepository`'s job — `audio`
+     * (where the real player binding lives) must never depend on `data` (ADR-014), so the one
+     * layer allowed to depend on both, the `app` composition root's queue-owner coordinator, does
+     * the lookup and builds this command already carrying everything the player needs.
+     */
     data class Load(
         val contentHash: ContentHash,
+        val location: LocalTrackLocation,
     ) : PlaybackCommand()
 
     object Play : PlaybackCommand()

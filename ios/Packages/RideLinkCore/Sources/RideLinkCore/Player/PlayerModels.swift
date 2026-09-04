@@ -8,7 +8,14 @@ import Foundation
 /// this phase's brief §15 explicitly excludes it. A local player executes commands as it receives
 /// them, immediately.
 public enum PlaybackCommand: Sendable, Equatable {
-    case load(ContentHash)
+    /// `location` is what a real player binding actually opens; `contentHash` is carried alongside
+    /// purely for identity so `PlayerState.contentHash` can report *which* track is loaded without
+    /// the player ever resolving a hash back to a location itself. That resolution
+    /// (`ContentHash -> LocalTrackLocation`) is the data-layer repository's job — the real player
+    /// binding must not depend on it directly (ADR-014's mirrored boundary); the app composition
+    /// root's queue-owner coordinator does the lookup and builds this command already carrying
+    /// everything the player needs.
+    case load(contentHash: ContentHash, location: LocalTrackLocation)
     case play
     case pause
     case seek(positionMs: Int64)

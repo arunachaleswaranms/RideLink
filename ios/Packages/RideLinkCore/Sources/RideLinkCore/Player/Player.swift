@@ -20,4 +20,10 @@ public protocol Player: Sendable {
 
     /// Pushed on every state change, including position ticks while playing.
     func setStateSink(_ sink: @escaping @Sendable (PlayerState) -> Void) async
+
+    /// Releases the underlying decoder/engine resources. Unlike `VoiceEngine`'s `stop`/`release`
+    /// split, there is no hardware reason to keep two lifecycles here — a local player has no
+    /// Bluetooth profile to avoid disturbing — so one method covers what a control-link blip and a
+    /// deliberate app teardown both need. Idempotent.
+    func release() async
 }

@@ -8,6 +8,18 @@ android {
 
     defaultConfig {
         minSdk = 31
+        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+    }
+
+    // Same cross-module fixture wiring data/build.gradle.kts uses for LibraryIndexerTest.
+    sourceSets {
+        named("androidTest") {
+            assets.directories.add(
+                rootProject.rootDir.parentFile
+                    .resolve("test-media/synthetic")
+                    .path,
+            )
+        }
     }
 
     compileOptions {
@@ -24,11 +36,20 @@ dependencies {
     implementation(project(":core"))
     implementation(libs.kotlinx.coroutines.core)
     implementation(libs.kotlinx.coroutines.android)
+    implementation(libs.media3.exoplayer)
+    implementation(libs.media3.session)
+    implementation(libs.media3.common)
 
     testImplementation(libs.junit.jupiter)
     testImplementation(libs.kotlin.test)
     testImplementation(libs.kotlin.test.junit5)
     testImplementation(libs.kotlinx.coroutines.test)
+
+    androidTestImplementation(libs.androidx.test.runner)
+    androidTestImplementation(libs.androidx.test.junit)
+    androidTestImplementation(libs.junit4)
+    androidTestImplementation(libs.kotlin.test)
+    androidTestImplementation(libs.kotlinx.coroutines.test)
 }
 
 tasks.withType<Test> {

@@ -22,4 +22,13 @@ interface Player {
 
     /** Pushed on every state change, including position ticks while playing. */
     fun setStateSink(sink: (PlayerState) -> Unit)
+
+    /**
+     * Releases the underlying decoder/renderer resources. Unlike
+     * [com.ridelink.core.voice.VoiceEngine]'s `stop`/`release` split, there is no hardware reason
+     * to keep two lifecycles here — a local player has no Bluetooth profile to avoid disturbing —
+     * so one method covers what a control-link blip and a deliberate app teardown both need.
+     * Idempotent.
+     */
+    suspend fun release()
 }
