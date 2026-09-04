@@ -1311,7 +1311,16 @@ transition settled only via §2n's five-second timeout instead. `AudioSessionLif
 `OpenAborted` (the platform call refused; settles immediately rather than waiting for the timeout);
 `Opened`/`Closed` no longer begin a transition themselves, so a settle that already happened in
 between cannot be resurrected into a fresh, spurious `TRANSITIONING`. Both platform classes now apply
-the `*Requested` event before the platform call and the confirming event after.
+the `*Requested` event before the platform call and the confirming event after. **A related defect
+surfaced fixing this on iOS:** `close()` tore down its own notification consumer and failure-protection
+timeout immediately, before the transition it had just begun could possibly settle by either the real
+confirmation or the timeout — silently latching `transitioning` forever. `close()` now awaits the
+transition actually settling (a new `awaitTransitionSettled()`, bounded by the same five-second
+timeout) before tearing anything down. Android's `close()` never shared this defect — its timeout is
+an independent coroutine, untouched by callback unregistration. This half of the fix is **REAL-DEVICE
+INTERCOM GATE PENDING**: it is in `IosVoiceAudioSession`'s `#if os(iOS)` branch, which `swift test`
+cannot exercise on macOS; verified instead by a clean `xcodebuild` Debug/Release simulator rebuild,
+which does compile it.
 
 **2 — `stopAndAwaitRelease()`'s timeout was indistinguishable from success.** The result of
 `withTimeoutOrNull` was discarded, so a caller could not tell a proven release from one that merely
@@ -1465,7 +1474,13 @@ twelfth) — see §2o for the five findings this verifies:**
   re-run in isolation.
 - **All prior suites remain green**, including every Phase 1b/2a/2b test named above this paragraph —
   this session ran the full local gate, not only the new tests.
-- CI: see the commit this pass lands as, recorded once pushed and green.
+- **CI green on the first run** —
+  [33892453958](https://github.com/arunachaleswaranms/RideLink/actions/runs/33892453958), commit
+  `797269b`. Android: `core unit tests`, `all unit tests`, `ktlint`, `detekt`, `lint`, `assembleDebug`,
+  `assembleRelease` — all seven green. iOS: `RideLinkCore` tests, `RideLinkPlatform` tests, unsigned
+  Debug **and** Release simulator builds — all four green. Nothing was re-run. The only annotations are
+  GitHub's own pre-existing Node.js 20/`setup-java@v4` deprecation notices, unrelated to this
+  repository's code and pre-dating this session.
 
 ---
 

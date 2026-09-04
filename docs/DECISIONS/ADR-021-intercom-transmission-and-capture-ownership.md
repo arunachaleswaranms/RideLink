@@ -533,6 +533,31 @@ both directions: a settling `RouteChanged` landing between `OpenRequested`/`Open
 `CloseRequested`/`Closed`) is observed, not dropped, and the later confirmation event does not re-begin an
 already-settled transition.
 
+**A second, related defect surfaced while fixing this on iOS: `close()` tore down its own fallback.**
+Immediately after applying `.closed`, `IosVoiceAudioSession.close()` unregistered its `NotificationCenter`
+observers, cancelled `transitionTimeoutTask`, and stopped the notification consumer (`stopConsumer()`,
+which finishes the doorbell that drives it) — all synchronously, all before the transition it had just
+begun could possibly have settled by either of the two things that were supposed to settle it: a real
+`.categoryChange` confirmation (which the actor cannot even process until `close()`'s own non-suspending
+body finishes running, since actors do not preempt between suspension points) would arrive into a box with
+no consumer left to drain it, and the timeout task that would otherwise catch a missing confirmation was
+cancelled before it could ever fire. The transition was left latched at `transitioning` with nothing left
+to ever publish its settlement — silently, since nothing crashes and nothing times out anymore either.
+Fixed by making `close()` wait: a new `awaitTransitionSettled()` suspends (via a `CheckedContinuation`)
+until `apply` — from *either* a real confirmation or the timeout — reports the transition no longer
+transitioning, and only then does `close()` unregister observers, cancel the (already-fired-or-irrelevant)
+timeout, and tear down the consumer. This cannot hang past the same five-second window Finding E's timeout
+already bounds. Android's `close()` does not share this defect: its failure-protection timeout is an
+independent `scope.launch` coroutine, armed by `manageTransitionTimeout` and never touched by
+`releasePlatformSession()`'s callback unregistration, so it keeps running and will still settle the
+transition even if the real callback loses the unregistration race — Android's fallback was never at risk
+of being killed by its own `close()`, only (as already true before this pass, via Finding D) at risk of
+missing the *faster* real-confirmation path in that same race. This half of the fix is **REAL-DEVICE
+INTERCOM GATE PENDING** like the rest of `IosVoiceAudioSession`: `AVAudioSession` does not exist on macOS,
+so `swift test` builds and exercises only the macOS stand-in, never the `#if os(iOS)` branch this change
+is in — verified instead by `xcodebuild` Debug and Release simulator builds, which compile the real branch
+and were rerun clean after this change specifically.
+
 ### Finding 2 — `stopAndAwaitRelease()`'s timeout was indistinguishable from success
 
 `VoiceController.stopAndAwaitRelease()` (Amendment A1, Finding F) called

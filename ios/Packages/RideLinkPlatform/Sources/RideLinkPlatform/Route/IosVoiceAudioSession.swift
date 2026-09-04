@@ -157,6 +157,17 @@ public actor IosVoiceAudioSession: VoiceAudioSession {
         // very last steps, once nothing further this generation's box needs to receive remains.
         try? session.setCategory(.playback, mode: .default, options: [])
         apply(.closed(generation: lifecycle.generation, atMonoUs: monotonicNowUs()))
+        // The closing transition owns its notification consumer and its failure-protection timeout
+        // until the transition has actually settled — by a real `.categoryChange` confirmation, or by
+        // the timeout itself — and not a moment before (this phase's final hardening pass, Issue 1's
+        // "close kills its own fallback" corollary). Tearing these down immediately, as this method
+        // used to, could win the race against both of the very things that were supposed to settle
+        // this transition: the confirming notification sits in `signals` with no consumer left to
+        // drain it, and the timeout task is cancelled before it can ever fire — the transition then
+        // stays latched at `transitioning` forever, silently, since nothing is left to publish its
+        // settlement. `awaitTransitionSettled` suspends only until one of the two actually happens; it
+        // cannot wait longer than the timeout itself, so this never hangs.
+        await awaitTransitionSettled()
         unregisterObservers()
         transitionTimeoutTask?.cancel()
         transitionTimeoutTask = nil
@@ -164,6 +175,26 @@ public actor IosVoiceAudioSession: VoiceAudioSession {
         signals?.finish()
         signals = nil
         doorbell = nil
+    }
+
+    /// Every caller waiting for the current transition to settle, resolved from `apply` the moment it
+    /// does — by a real confirmation or by the timeout, whichever comes first. A plain array rather
+    /// than a single slot: `close()` is idempotent-safe to call concurrently in principle, and nothing
+    /// here assumes only one waiter exists.
+    private var transitionSettleWaiters: [CheckedContinuation<Void, Never>] = []
+
+    private func awaitTransitionSettled() async {
+        guard lifecycle.transition.transitioning else { return }
+        await withCheckedContinuation { continuation in
+            transitionSettleWaiters.append(continuation)
+        }
+    }
+
+    private func resumeTransitionSettleWaitersIfSettled() {
+        guard !transitionSettleWaiters.isEmpty, !lifecycle.transition.transitioning else { return }
+        let waiters = transitionSettleWaiters
+        transitionSettleWaiters.removeAll()
+        for waiter in waiters { waiter.resume() }
     }
 
     /// **Failure protection, never the definition of success** (this phase's brief §15). Now actually
@@ -315,6 +346,10 @@ public actor IosVoiceAudioSession: VoiceAudioSession {
             }
         }
         manageTransitionTimeout(previousStartedAt: previousStartedAt)
+        // Wakes a `close()` suspended in `awaitTransitionSettled()` the moment the transition it is
+        // waiting on actually settles — by a real confirmation (`.routeChanged(settles: true)`) or by
+        // `.transitionTimeoutCheck`, whichever event this call turns out to be.
+        resumeTransitionSettleWaitersIfSettled()
     }
 
     /// Arms or disarms the failure-protection timeout for whatever transition `apply` just produced.
