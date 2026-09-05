@@ -59,6 +59,12 @@ import kotlin.test.assertTrue
  * this test never calls [SessionCoordinator.startDiscovery] (so neither is ever actually exercised
  * over a socket), driving the FSM instead through [SessionCoordinator.applyEvent] and
  * [SessionCoordinator.handleControlEvent] directly — both `internal` for exactly this seam.
+ *
+ * This phase's closure-audit follow-up (problem 39, ADR-021 Amendment A5) added one more property to
+ * the same seam: once `VoiceController.shutdown()` has waited out an initially-timed-out release and
+ * proven it complete, [SessionCoordinator.releaseVoiceAndAwait] must not still report the stale
+ * `TimedOut` it captured before `shutdown()` ran — see `shutdown after a release timeout still lets
+ * the same stalled release finish` below, which is the exact test that was missing the assertion.
  */
 class SessionCoordinatorEndingEffectTest {
     @Test
@@ -92,6 +98,16 @@ class SessionCoordinatorEndingEffectTest {
             awaitTrue("foreground service stopped") { fgs.stopCalls == 1 }
         }
 
+    /**
+     * The release here never completes at all — `closeGate` is never completed anywhere in this
+     * test — which is the genuinely-unresolved case and must be kept distinct from
+     * `shutdown after a release timeout still lets the same stalled release finish` below, where the
+     * same stall is later resolved. A caller-facing timeout must never be read as proof of release
+     * while the underlying `close()` is still (and forever, in this test) in flight — including
+     * through `VoiceController.shutdown()`'s own unconditional wait, which is why this coroutine never
+     * completes either and no assertion after the delay below can ever observe a foreground-service
+     * stop that has not happened.
+     */
     @Test
     fun `an audio release timeout does not stop the foreground service`() =
         withConnectedSession(stopAwaitTimeoutMs = SHORT_TIMEOUT_MS) { coordinator, fgs, audio ->
@@ -103,7 +119,11 @@ class SessionCoordinatorEndingEffectTest {
 
             // Long enough to be well past the short stop-await timeout, short enough the test stays fast.
             delay(SHORT_TIMEOUT_MS * SETTLE_TIMEOUT_MULTIPLIER)
-            assertEquals(0, fgs.stopCalls, "a timed-out release must never be treated as proof capture was released")
+            assertEquals(
+                0,
+                fgs.stopCalls,
+                "a release that is genuinely still unresolved must never let the foreground service stop",
+            )
         }
 
     /**
@@ -115,6 +135,15 @@ class SessionCoordinatorEndingEffectTest {
      * finish. Proven here by completing the gate the previous test left permanently stalled and
      * confirming `close()` still runs to completion afterward — impossible if `shutdown()` had cancelled
      * the coroutine running it.
+     *
+     * This phase's closure-audit follow-up (problem 39): proving `close()` finished is not the whole
+     * story — `releaseVoiceAndAwait()` used to still return the stale `TimedOut` it captured *before*
+     * `shutdown()` ran, even though `shutdown()` had, by the time it returned, just proven that same
+     * release complete. `SessionCoordinator.runEffect` reads exactly that result to decide whether
+     * `RideForegroundService.stop()` ever runs, so the missing assertion below — that the foreground
+     * service **does** eventually stop, exactly once, once the same stalled release is proven complete
+     * — is the actual regression this pass closes, distinct from (and in addition to) the "release
+     * itself isn't aborted" property the rest of this test already proved.
      */
     @Test
     fun `shutdown after a release timeout still lets the same stalled release finish`() =
@@ -130,7 +159,11 @@ class SessionCoordinatorEndingEffectTest {
             // releaseVoiceAndAwait has moved on to VoiceController.shutdown() — the exact moment the
             // pre-fix code cancelled the coroutine still running audioSession.close().
             delay(SHORT_TIMEOUT_MS * SETTLE_TIMEOUT_MULTIPLIER)
-            assertEquals(0, fgs.stopCalls, "a timed-out release must never be treated as proof capture was released")
+            assertEquals(
+                0,
+                fgs.stopCalls,
+                "the foreground service must not stop while the release it depends on is still in flight",
+            )
             assertEquals(0, audio.closeCaptureCount, "close() is still legitimately in flight")
 
             // The platform (or the test) finally confirms the route change. If `shutdown()` had
@@ -138,6 +171,16 @@ class SessionCoordinatorEndingEffectTest {
             // increment — the confirmation would have nowhere left to land.
             closeGate.complete(Unit)
             awaitTrue("close() actually finished, not aborted mid-flight") { audio.closeCaptureCount == 1 }
+
+            // The key assertion this pass adds: an initial caller-facing TimedOut must not survive as
+            // the final word once `shutdown()` has gone on to prove the same release complete — the
+            // foreground service must still be told to stop, or it orphans the microphone forever.
+            awaitTrue("foreground service eventually stops once the stalled release is proven complete") {
+                fgs.stopCalls == 1
+            }
+            delay(SETTLE_MS)
+            assertEquals(1, fgs.stopCalls, "the foreground service must stop exactly once — no double stop")
+            assertEquals(1, audio.closeCalls, "no duplicate release: close() must not be invoked a second time")
         }
 
     /** Link loss (not BYE) must never release capture or stop the foreground service. */

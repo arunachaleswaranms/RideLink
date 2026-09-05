@@ -531,10 +531,28 @@ class SessionCoordinator(
      * surfaced to the caller rather than silently treated as success, and [VoiceController.shutdown]
      * still runs afterward regardless of the result, because this controller is being torn down
      * either way and its tasks must not be leaked.
+     *
+     * This phase's closure-audit follow-up (problem 39): `stopAndAwaitRelease()`'s result is captured
+     * *before* [VoiceController.shutdown] runs, but [shutdown] is not a second, independent wait — it
+     * is a second caller of the exact same [pendingStopCompletions][VoiceController.pendingStopCompletionCount]
+     * signal `stopAndAwaitRelease()` uses, with no caller-side timeout of its own (ADR-021 Amendment
+     * A4). So when `stopAndAwaitRelease()` returns [StopReleaseResult.TimedOut], the waiter it gave up
+     * on has already been removed from that shared list (`stopAndAwaitRelease`'s own timeout path) —
+     * and `shutdown()`, called immediately after, registers its **own** waiter on the same list and
+     * suspends until the *same* in-flight `StopRequested` application (the one `stopAndAwaitRelease()`
+     * was still waiting on) finishes running, including its `ReleaseLocalAudio` action if there was
+     * one. By the time `shutdown()` returns below, that release is therefore proven complete — not
+     * merely "no longer timed out", but actually done — so a stale `TimedOut` must not survive past
+     * this point: reporting it to [runEffect] would leave `RideForegroundService` running forever
+     * over a release that has already finished (the exact orphan-service failure mode
+     * [StopReleaseResult] exists to make impossible to reach on purpose, now closed for the one path
+     * that was still reaching it by accident). [StopReleaseResult.AlreadyReleased] needs no such
+     * promotion: it means `stopAndAwaitRelease()` found nothing to release in the first place, so
+     * `shutdown()` never registered a waiter for it either.
      */
     private suspend fun releaseVoiceAndAwait(): StopReleaseResult {
         val controller = voice ?: return StopReleaseResult.AlreadyReleased
-        val result = controller.stopAndAwaitRelease()
+        val initialResult = controller.stopAndAwaitRelease()
         voice = null
         controlSessionManager.voice.sink = null
         controlSessionManager.audioState.sink = null
@@ -542,7 +560,7 @@ class SessionCoordinator(
         voiceDiagnosticsJob = null
         controller.shutdown()
         _voiceDiagnostics.value = VoiceDiagnostics()
-        return result
+        return if (initialResult == StopReleaseResult.TimedOut) StopReleaseResult.Released else initialResult
     }
 
     /**
@@ -614,6 +632,15 @@ class SessionCoordinator(
                 // that result is not a timeout; and session teardown (control/discovery) always runs
                 // last, regardless, because the control session and discovery are being torn down
                 // either way.
+                //
+                // The closure-audit follow-up (problem 39): `releaseVoiceAndAwait()` never actually
+                // hands this `when` a stale `TimedOut` any more — see its own doc — so in today's code
+                // this branch is reached only while the release is genuinely still unresolved (a real
+                // stall, not merely a caller that stopped waiting on one that had already finished).
+                // Kept as the exhaustive `else` of a sealed result rather than removed: it is this
+                // `when`, not `releaseVoiceAndAwait()`, that is the last line of defence against ever
+                // stopping the foreground service on an unproven release, and it must stay correct on
+                // its own even if a future caller reaches it with a genuine timeout again.
                 logger.info("SessionCoordinator", "release audio + stop foreground service")
                 scope.launch {
                     when (val result = releaseVoiceAndAwait()) {

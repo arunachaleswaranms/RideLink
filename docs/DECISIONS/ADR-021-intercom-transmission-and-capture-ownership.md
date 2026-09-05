@@ -878,3 +878,106 @@ simulator builds were re-run as a regression check only.
   closure-audit's own `:data`/`:app` instrumented suites re-run clean, confirming this change does not
   regress Android foreground-service-type ownership (`MICROPHONE` / `MEDIA_PLAYBACK` / both, and the
   stop-one-keep-the-other orderings) — see `docs/STATUS.md` §2s for the exact counts.
+
+---
+
+## Amendment A5 — 5 September 2026 — a proven-complete release still reported its own stale timeout
+
+**Status of the ADR: still Accepted.** A second, narrower follow-up to Amendment A4, found while
+independently verifying that amendment's own fix rather than by a separate audit pass. Fixed in the
+same platform-driver layer as A1–A4: no pure reducer, no wire shape, no security property moved, and
+`VoiceController.shutdown()` itself needed no further change — the gap was one layer up, in how its
+caller read the two calls' results together.
+
+### The finding
+
+Amendment A4 made `VoiceController.shutdown()` wait for the exact release
+`stopAndAwaitRelease()` was waiting on, rather than cancelling it — and proved, by construction, that
+by the time `shutdown()` returns, that release has actually finished (§ "The fix" above). But
+`SessionCoordinator.releaseVoiceAndAwait()` captures `stopAndAwaitRelease()`'s result **before**
+calling `shutdown()`, and simply returned that captured value afterward:
+
+```kotlin
+val result = controller.stopAndAwaitRelease()
+...
+controller.shutdown()
+...
+return result   // stale: still whatever stopAndAwaitRelease() said before shutdown() ran
+```
+
+Whenever `stopAndAwaitRelease()` had returned `StopReleaseResult.TimedOut` — its own short
+caller-facing window having elapsed while `close()` was still legitimately in flight, exactly the
+case Amendment A4 exists for — `shutdown()`'s subsequent wait would then finish proving that same
+release complete, and `releaseVoiceAndAwait()` would still hand its caller the *old* `TimedOut`.
+`SessionCoordinator.runEffect`'s `ENDING` handling reads exactly that value to decide whether
+`RideForegroundService.stop()` ever runs, and treats `TimedOut` as "leave the foreground service
+running." The consequence: a release that had, by the time the coroutine reached `return result`,
+already been proven complete could still leave the Android microphone foreground service running
+indefinitely — an orphaned service holding a microphone nothing was using any more, for exactly the
+one path (a stalled-then-recovered release) Amendment A4's own fix was supposed to make safe to stop
+after.
+
+### The fix
+
+`releaseVoiceAndAwait()` now distinguishes the value it captures from the one it returns.
+`stopAndAwaitRelease()`'s result is still the truth at the moment it returns — `Released` and
+`AlreadyReleased` are unconditionally correct as of *that* instant and are returned unchanged. Only
+`TimedOut` is re-examined: because `shutdown()` runs unconditionally next and is, in every path this
+coordinator ever exercises, the *first* call to `shutdown()` on this controller (`voice` is set to
+`null` immediately after `stopAndAwaitRelease()` returns, before `shutdown()` is even called, which is
+what stops `releaseVoice()`'s own fire-and-forget `shutdown()` call from ever reaching the same
+controller instance — see that method's own doc), `shutdown()`'s idempotency guard cannot have already
+made this call a no-op. So its wait is genuine: it registers its own waiter on the same
+`pendingStopCompletions` list `stopAndAwaitRelease()` used, and only returns once the mailbox
+consumer has fully applied the very `StopRequested` that timed-out waiter was still waiting on —
+including its `ReleaseLocalAudio` action, if there was one to run. By the time `shutdown()` returns
+below that call, an initial `TimedOut` therefore no longer describes reality, and is promoted to
+`Released`:
+
+```kotlin
+private suspend fun releaseVoiceAndAwait(): StopReleaseResult {
+    val controller = voice ?: return StopReleaseResult.AlreadyReleased
+    val initialResult = controller.stopAndAwaitRelease()
+    voice = null
+    ...
+    controller.shutdown()
+    ...
+    return if (initialResult == StopReleaseResult.TimedOut) StopReleaseResult.Released else initialResult
+}
+```
+
+This is deliberately not a blanket "timeout never happened" rewrite: it is scoped to the one call site
+that has just observed the proof, stated as such in the method's own doc comment, and it changes
+nothing about `StopReleaseResult`, `VoiceController.shutdown()`, or `stopAndAwaitRelease()` itself —
+a caller of `stopAndAwaitRelease()` on its own (`SessionCoordinator.endIntercomAndAwaitRelease`, used
+by the UI's own End Voice path, which never calls `shutdown()` afterward) still sees a genuine
+`TimedOut` exactly as before, because nothing there subsequently proves the release complete. The
+`SessionFsm.Effect.ReleaseAudioAndStopForegroundService` handler's own `TimedOut` branch is
+unchanged and kept: it is the last line of defence against ever stopping the foreground service on an
+unproven release, and stays correct on its own even though, in today's code, `releaseVoiceAndAwait()`
+no longer reaches it with a release that has actually finished.
+
+### iOS
+
+Not applicable. iOS's `VoiceController` has no `stopAndAwaitRelease`/`StopReleaseResult` construct at
+all (Amendment A4's own note) and `SessionCoordinator`'s Swift counterpart has no equivalent captured-
+then-stale-result path to have the same defect in the first place — inspected, no code changed.
+
+### Verification
+
+- `SessionCoordinatorEndingEffectTest` (Android, `app`) — `shutdown after a release timeout still
+  lets the same stalled release finish` gained the assertion this amendment is about: after the
+  stalled `close()` is completed and observed to finish, the foreground service is now asserted to
+  **eventually stop, exactly once** — the exact assertion the pre-fix version of this test was
+  missing (it proved `closeCaptureCount` reached 1 but never checked `fgs.stopCalls` afterward).
+  Confirmed against the pre-fix code first: with the promotion removed, this exact assertion times
+  out — the foreground service never stops, because `releaseVoiceAndAwait()` still returned the
+  stale `TimedOut` it had captured before `shutdown()` proved the release complete. A second test,
+  `an audio release timeout does not stop the foreground service`, is kept and documented as the
+  deliberately distinct case — the release there never completes at all, so the foreground service
+  correctly never stops, and this amendment must not (and does not) change that.
+- Full suites: Android `test ktlintCheck detekt lint assembleDebug assembleRelease` — see
+  `docs/STATUS.md` §2t for the exact counts. iOS `RideLinkCore`/`RideLinkPlatform` and Debug/Release
+  simulator builds re-run as a clean regression check only, no iOS code changed.
+- The affected suite was run 100 consecutive times with `--rerun-tasks`, isolated from any other
+  concurrent Gradle process — see `docs/STATUS.md` §2t for the exact count and the isolation note.

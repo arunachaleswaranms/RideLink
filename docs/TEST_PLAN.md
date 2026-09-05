@@ -123,6 +123,7 @@ cases and **none of them can open or close the capture device**.
 | ARCHITECTURE §6.4's readiness rules, including "never open capture from the background" | `RideStartPolicyTest[s]`, over the whole 2^7 request cross-product |
 | The iOS notification path is bounded, generation-tagged at the callback boundary, and drains in a real (not merely documented) safety priority, and survives repeated End → Start cycles | `AudioSessionSignalBoxTests`, rewritten for the eleventh session's hardening pass (ADR-021 Amendment A1, findings A–C) — every arrival permutation of the three signal kinds, concurrent producers, and several open→finish cycles in a row |
 | The Android microphone foreground service cannot be told to stop before capture is actually released | `VoiceControllerStopAwaitTest` (ADR-021 Amendment A1, finding F) — a controllable suspend gate proves `stopAndAwaitRelease()` waits for `audioSession.close()` to complete, not merely for it to be called; a link loss does not resolve a pending call |
+| ...but also is not left stuck running once an initially-timed-out release is later proven complete by `shutdown()`'s own wait | `SessionCoordinatorEndingEffectTest#shutdown after a release timeout still lets the same stalled release finish` (ADR-021 Amendment A5) — the foreground service is proven to eventually stop, exactly once, once the same stalled release is later proven complete; kept distinct from the release-never-completes case (`an audio release timeout does not stop the foreground service`), where the service correctly never stops |
 | Android `VoiceController` diagnostics writes from three independent execution contexts (the mailbox consumer, the diagnostics-poll coroutine, the platform route-sink callback thread) cannot lose one another's fields | `VoiceControllerDiagnosticsRaceTest` (ADR-021 Amendment A1, finding H) — 300 concurrent iterations per pairing, two independent field pairings |
 | Android `close()`'s communication-device listener stays registered until its own transition actually settles — by a synchronous confirmation, an asynchronous one, or the failure-protection timeout — and is torn down only after, never merely once every platform call that *could* provoke a confirmation has been made | `TransitionSettlementGateTest` (the suspend/resume primitive in isolation, ADR-021 Amendment A3) and `AndroidVoiceAudioSessionCloseOrderingTest` (the same call sequence `close()` uses, built from a recorded fake since `AndroidVoiceAudioSession` cannot be constructed off-device) — proves the ordering policy; run 100 consecutive times, 0 failures |
 
@@ -283,6 +284,26 @@ through the real `ENDING` effect. Both are pure/fake-driven and REAL-DEVICE INTE
 like the rest of this section; iOS's `VoiceController` has no equivalent caller-facing timeout on
 its own `shutdown()` (it directly awaits its single release path to completion), so this defect was
 Android-only and iOS needed no change, only a clean regression re-run.
+
+A narrower follow-up (ADR-021 Amendment A5) found that fixing `shutdown()` was not, on its own,
+enough: `SessionCoordinator.releaseVoiceAndAwait()` captured `stopAndAwaitRelease()`'s result
+*before* calling `shutdown()`, so an initial `TimedOut` survived unchanged even after `shutdown()`'s
+own subsequent wait had gone on to prove that exact same release complete —
+`SessionCoordinator.runEffect`'s `ENDING` handling reads that stale value and leaves
+`RideForegroundService` running forever over a release that had, by then, already finished. Fixed
+by having `releaseVoiceAndAwait()` promote an initial `TimedOut` to `Released` once `shutdown()`
+returns, reasoned from the fact that `shutdown()` is always this controller's *first* call (`voice`
+is nulled before it runs, so `releaseVoice()`'s own fire-and-forget `shutdown()` call can never reach
+the same instance) and therefore never the idempotent no-op path — its wait is genuine, and its
+return proves the release complete. `Released`/`AlreadyReleased` are returned unchanged; only a
+captured `TimedOut` is re-examined. New coverage: `SessionCoordinatorEndingEffectTest`'s
+`shutdown after a release timeout still lets the same stalled release finish` gained the missing
+assertion — the foreground service is now proven to eventually stop, exactly once, once the same
+stalled release is proven complete — while `an audio release timeout does not stop the foreground
+service` (a release that never completes at all) is kept and documented as the deliberately distinct
+case that must never stop the service. Confirmed against the pre-fix code first: with the promotion
+removed, the new assertion times out. iOS has no equivalent captured-then-stale-result path (no
+`stopAndAwaitRelease`/`StopReleaseResult` construct at all) — inspected, no code changed.
 
 | ID | Procedure | Pass condition | Phase |
 |---|---|---|---|

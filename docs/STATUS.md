@@ -1,15 +1,18 @@
 # RideLink — Status
 
-**Updated:** 5 September 2026 (Phase 2b timeout-ownership hardening pass, sixteenth session — see §2s)
+**Updated:** 5 September 2026 (Phase 2b timeout-ownership closure-audit follow-up, seventeenth
+session — see §2t)
 **Current milestone:** M1 (Private voice link) is now **software-complete with no known defect** —
 its hardware gate is the only thing left open. M2 (local music) implementation is complete and
 closure-audited (§2q/§2r).
-**Current phase:** Phase 2b closure (this session) — the one confirmed-not-fixed defect the Phase 3
-closure audit found is now fixed. Phase 3 (local music player) remains the most recent *feature*
-phase.
+**Current phase:** Phase 2b closure (this session) — a second, narrower gap in the sixteenth
+session's own timeout-ownership fix is now fixed. Phase 3 (local music player) remains the most
+recent *feature* phase.
 **Phase 2b status: FINAL SOFTWARE CLOSURE COMPLETE — REAL-DEVICE INTERCOM GATE PENDING.** The
-timeout-ownership defect §2r confirmed and deliberately left unfixed is fixed and verified this
-session — see §2s. No other known software defect remains in this phase.
+timeout-ownership defect §2r confirmed and deliberately left unfixed was fixed in §2s (ADR-021
+Amendment A4); this session found and fixed one more gap in that same fix — a proven-complete
+release could still report its own stale timeout — see §2t (ADR-021 Amendment A5). No other known
+software defect remains in this phase.
 **Phase 3 status: IMPLEMENTATION COMPLETE — REAL-DEVICE LOCAL-MUSIC GATE PENDING (unchanged).** All
 seven closure-audit findings (A–G, §2r) were already fixed and verified; this session's fix was
 scoped to the separate Phase 2b concern the same audit found and did not touch Phase 3.
@@ -113,7 +116,7 @@ either pass.
 | **Phase 1a — control-plane skeleton** | ✅ **IMPLEMENTATION COMPLETE — REAL-DEVICE GATE PENDING** | Protocol vectors, Android + iOS discovery, plaintext control transport, clock sync, diagnostics UI, hardening pass (§2e). Real-device gate still open — see §7. Its plaintext transport has since been **deleted** (§2f) |
 | **Phase 1b — secure control channel** | ✅ **IMPLEMENTATION COMPLETE — REAL-DEVICE GATE PENDING** | Both ADR-007 A1 spikes closed with measurements; identity, TLS 1.3, pinning, SAS pairing, trust persistence and UI on both platforms (§2f). The trust-gate security bug found afterwards is fixed and vector-pinned (§2g, ADR-019) |
 | **Phase 2a — voice transport foundation** | ✅ **IMPLEMENTATION COMPLETE — REAL-DEVICE AUDIO GATE PENDING** | WebRTC pinned and reviewed on both platforms, PROTOCOL §7 specified in full, the negotiation table shared and vector-pinned, the pre-authentication `VOICE_*` refusal proven over real TLS on both platforms, and **real DTLS-SRTP/Opus media measured on this machine** (§2i, [ADR-020](DECISIONS/ADR-020-webrtc-voice-foundation.md)). No audio captured or played anywhere; the Android media path is untested even locally |
-| **Phase 2b — intercom integration / audio lifecycle** | ✅ **FINAL SOFTWARE CLOSURE COMPLETE — REAL-DEVICE INTERCOM GATE PENDING** | The five modes as one interpreted policy object; transmission gated at the audio track and never at the capture device; `AUDIO_STATE` implemented with no wire change; the platform audio lifecycle as a shared pure reducer; readiness as a shared pure decision; setup-timing instrumentation (§2m, [ADR-021](DECISIONS/ADR-021-intercom-transmission-and-capture-ownership.md)). The Phase 3 closure audit's one confirmed-not-fixed defect (`stopAndAwaitRelease`/`shutdown` timeout ownership) is fixed (§2s, ADR-021 Amendment A4) — no other known software defect remains. Nothing ran on a phone; VOX has no level source; no latency figure exists |
+| **Phase 2b — intercom integration / audio lifecycle** | ✅ **FINAL SOFTWARE CLOSURE COMPLETE — REAL-DEVICE INTERCOM GATE PENDING** | The five modes as one interpreted policy object; transmission gated at the audio track and never at the capture device; `AUDIO_STATE` implemented with no wire change; the platform audio lifecycle as a shared pure reducer; readiness as a shared pure decision; setup-timing instrumentation (§2m, [ADR-021](DECISIONS/ADR-021-intercom-transmission-and-capture-ownership.md)). The Phase 3 closure audit's one confirmed-not-fixed defect (`stopAndAwaitRelease`/`shutdown` timeout ownership) is fixed (§2s, ADR-021 Amendment A4); a second, narrower gap in that same fix (a proven-complete release still reporting its own stale timeout, orphaning the foreground service) is fixed (§2t, ADR-021 Amendment A5) — no other known software defect remains. Nothing ran on a phone; VOX has no level source; no latency figure exists |
 | **Phase 3 — local music player** | ✅ **IMPLEMENTATION COMPLETE — REAL-DEVICE LOCAL-MUSIC GATE PENDING** | Library indexing, two-tier hashing, database/search, ExoPlayer/AVAudioEngine player, local queue, Android `MediaSession` (ADR-022), iOS `MPNowPlayingInfoCenter`/`MPRemoteCommandCenter`, all on both platforms (§2q, and this session's closure-audit hardening pass). Real-emulator instrumented evidence exists for the indexer/database/player (§2q, TEST_PLAN §4.3); nothing has run on a physical phone |
 | Phases 4–8 | ⬜ Not started | The earlier commits named "init phase 2a" and "phase 2a" (`d709c45`, `90cbe12`) were Phase 1b work under a misleading name. Phase 2a proper is the sixth session, §2i |
 
@@ -1889,6 +1892,99 @@ file, and no iOS code change (inspected, not required).
 
 ---
 
+## 2t. Phase 2b timeout-ownership closure-audit follow-up (5 September 2026 session, seventeenth)
+
+One narrow fix, nothing else: **do not read this session as touching Phase 3, or as starting Phase
+4, 5 or 6.** It did not. This is a follow-up to §2s's own fix (ADR-021 Amendment A4), found while
+independently verifying that fix rather than by a separate audit pass.
+
+**Classification: CONFIRMED**, verified against the current code before anything changed.
+§2s made `VoiceController.shutdown()` wait for the exact same release
+`stopAndAwaitRelease()` was waiting on, and proved that by the time `shutdown()` returns, that
+release has actually finished. What §2s's fix did not account for: `SessionCoordinator.releaseVoiceAndAwait()`
+captures `stopAndAwaitRelease()`'s result **before** calling `shutdown()`, and simply returned that
+captured value afterward, unchanged. Whenever `stopAndAwaitRelease()` had returned
+`StopReleaseResult.TimedOut` — its own short caller-facing window having elapsed while `close()` was
+still legitimately in flight, exactly the case §2s's fix exists for — `shutdown()`'s subsequent wait
+would then finish proving that same release complete, and `releaseVoiceAndAwait()` would still hand
+its caller the stale `TimedOut`. `SessionCoordinator.runEffect`'s `ENDING` handling reads exactly
+that value to decide whether `RideForegroundService.stop()` ever runs, and treats `TimedOut` as
+"leave the foreground service running." Concrete consequence: a release already proven complete
+could still leave the Android microphone foreground service running indefinitely — an orphaned
+service holding a microphone nothing was using any more, for exactly the one path (a stalled-then-
+recovered release) §2s's own fix was supposed to make safe to stop after.
+
+**Fix:** `releaseVoiceAndAwait()` now distinguishes the value it captures from the one it returns.
+`Released` and `AlreadyReleased` are unconditionally correct at the moment `stopAndAwaitRelease()`
+returns them and are returned unchanged. Only `TimedOut` is re-examined: `shutdown()` runs
+unconditionally next and is, in every path this coordinator ever exercises, provably the **first**
+call to `shutdown()` on this controller — `voice` is set to `null` immediately after
+`stopAndAwaitRelease()` returns, before `shutdown()` is even called, which is exactly what stops
+`releaseVoice()`'s own fire-and-forget `shutdown()` call from ever reaching the same controller
+instance. So `shutdown()`'s idempotency guard cannot have already made this particular call a
+no-op — its wait is genuine, and its return is proof the release completed, not merely "stopped
+waiting." A captured `TimedOut` is therefore promoted to `Released` once `shutdown()` returns, with
+the reasoning recorded in `SessionCoordinator.releaseVoiceAndAwait()`'s own doc comment rather than
+left as a bare, unexplained special case. `SessionFsm.Effect.ReleaseAudioAndStopForegroundService`'s
+own `TimedOut` branch in `runEffect` is unchanged and kept, documented as the exhaustive last line of
+defence over a sealed result rather than removed, even though in today's code `releaseVoiceAndAwait()`
+no longer reaches it with a release that has actually finished. Full account, including the exact
+old/new code and why a standalone `stopAndAwaitRelease()` caller (`endIntercomAndAwaitRelease`, the
+UI's own End Voice path) is unaffected: [ADR-021 Amendment
+A5](DECISIONS/ADR-021-intercom-transmission-and-capture-ownership.md#amendment-a5--5-september-2026--a-proven-complete-release-still-reported-its-own-stale-timeout).
+
+`VoiceController.shutdown()`/`stopAndAwaitRelease()` themselves needed no further change — both were
+already correct from Amendment A4; the whole gap was in how `SessionCoordinator` read the two calls'
+results together.
+
+**New test, proven to fail against the pre-fix code first, then to pass against the fix:**
+`SessionCoordinatorEndingEffectTest`'s `shutdown after a release timeout still lets the same stalled
+release finish` gained the assertion this session is about — after the stalled `close()` is
+completed and observed to finish, the foreground service is now asserted to **eventually stop,
+exactly once**. The pre-fix version of this test proved `closeCaptureCount` reached 1 but never
+checked `fgs.stopCalls` afterward, which is exactly how this gap survived §2s's own review. With the
+promotion removed, the new assertion times out — confirmed directly, not merely reasoned about.
+`an audio release timeout does not stop the foreground service` (a release that never completes at
+all) is kept and now documented as the deliberately distinct case: the foreground service must
+correctly never stop there, and this fix does not change that.
+
+**iOS: inspected, no equivalent path found, no code changed.** iOS's `VoiceController` has no
+`stopAndAwaitRelease`/`StopReleaseResult` construct at all (§2s's own note), and its
+`SessionCoordinator` counterpart has no captured-then-stale-result path to have the same defect in.
+`swift test` for both packages and `xcodebuild` Debug/Release simulator builds were re-run as a clean
+regression check only.
+
+**Verification, all run directly:**
+
+- Android: `./gradlew test ktlintCheck detekt lint assembleDebug assembleRelease` — all green.
+  **531 unit tests, 0 failures** (unchanged from §2s — this fix updates an existing test's
+  assertions rather than adding a new test method). Per-module: `core` 321 (unchanged), `network`
+  160 (unchanged — no `network`-module file touched), `audio` 33 (unchanged), `app` 8 (unchanged),
+  `data` 9 (unchanged).
+- iOS: `swift test --package-path Packages/RideLinkCore` **207/207** (unchanged). `swift test
+  --package-path Packages/RideLinkPlatform` **219/219** (unchanged). `xcodebuild` Debug **and**
+  Release, unsigned, simulator — both **BUILD SUCCEEDED**, zero new warnings.
+- **Stress: `SessionCoordinatorEndingEffectTest`, run 100 consecutive times with `--rerun-tasks` so
+  nothing was served from cache, isolated from any other concurrent Gradle process: 100 runs, 100
+  passed, 0 failed.** An earlier attempt run concurrently with this session's own separate,
+  unrelated `:app:testDebugUnitTest` invocation produced one spurious daemon/incremental-compiler-
+  cache-contention failure (an unrelated file's stale compile error, not a test failure) — the same
+  class of issue ADR-021 Amendment A2 already recorded. That attempt was discarded; the 100-run count
+  above is from a clean, isolated re-run with no other Gradle process active throughout.
+- **Real-emulator regression check, `RideLink_API36`.** This fix touches no Android framework type —
+  only `app`'s pure-JVM-testable `SessionCoordinator` driver — so no new instrumented test was added.
+  The Phase 3 closure audit's own `:data`/`:app` instrumented suites were re-run to prove Android
+  foreground-service-type ownership is unaffected: `:data` **34/34** passed, `:app` **4/4** passed.
+- **CI is green on both platforms on the first fresh run, not re-run to green:** run
+  [PENDING — filled in after push], head commit `[PENDING]`. Android job **[PENDING]**, iOS job
+  **[PENDING]**, both succeeded.
+
+**What this pass did not do, deliberately:** Phase 3, Phase 4, Phase 5, Phase 6, any weakening of
+TLS/SPKI/SAS/trust-gate/host-only-ICE/WebRTC pins, any change to a pure reducer or shared vector
+file, any change to `VoiceController` itself, and no iOS code change (inspected, not required).
+
+---
+
 ## 3. Tests passed / pending
 
 **Passed and verified in the Phase 2b session (4 September 2026, tenth), by actually running the
@@ -2320,6 +2416,7 @@ session and route), and integration tests I-01…I-25. Full list in `docs/TEST_P
 | 36 | **FIXED (fourteenth session, §2q).** `music`/`Music` in `.gitignore` (bare, unanchored) had the exact bug `library/` had before it (see the note above problem 33's block in §2q's own text) — it silently excluded `MusicCoordinator.kt` from every `git status`. Anchored to the repo root | ~~Medium~~ Fixed | See §2q |
 | 37 | **FIXED (fourteenth session, §2q).** `ios/RideLink.xcodeproj`'s explicit file-list format silently excluded four newly-added `.swift` files from the actual compiled target — `xcodebuild` reported `BUILD SUCCEEDED` while compiling none of them, until code elsewhere started referencing their symbols. Fixed by adding all four files to `project.pbxproj`'s four required sections; `plutil -lint` confirmed the result stays well-formed | ~~Medium~~ Fixed | See §2q. Watch for this again: any future new iOS app-target file needs the same four-section addition, since this project has no filesystem-synchronized-groups migration planned |
 | 38 | **FIXED (sixteenth session, §2s, ADR-021 Amendment A4).** Confirmed by the Phase 3 closure audit (fifteenth session, §2r) and left unfixed there on purpose. `VoiceController.stopAndAwaitRelease()`'s outer 5 s caller-facing timeout is structurally guaranteed to elapse at or before `AndroidVoiceAudioSession.close()`'s inner 5 s route-settlement timeout, and `SessionCoordinator.releaseVoiceAndAwait()`'s unconditional next step, `VoiceController.shutdown()`, read that as license to call `apply(StopRequested)` directly (racing the consumer's own `state` mutation) and then cancel `consumerJob` unconditionally — aborting a still-in-flight `close()` before `unregisterPlatformCallbacks()`/the post-close intercom-gate update could run: a leaked `AudioManager` listener registration and a gate stuck open. Fixed by making `shutdown()` a caller of the same `pendingStopCompletions` signal `stopAndAwaitRelease()` uses, through the ordinary mailbox, with no caller-side timeout of its own — it waits for the deliberate release to finish rather than cancelling it, safely bounded by the inner mechanism's own existing timeout. Also made idempotent. See §2s | ~~Medium/High~~ Fixed | See §2s |
+| 39 | **FIXED (seventeenth session, §2t, ADR-021 Amendment A5).** Found independently verifying problem 38's own fix. `SessionCoordinator.releaseVoiceAndAwait()` captured `stopAndAwaitRelease()`'s result *before* calling `VoiceController.shutdown()`, and returned that captured value unchanged afterward — so an initial `StopReleaseResult.TimedOut` survived even once `shutdown()`'s own subsequent (and, by problem 38's fix, unconditional) wait had gone on to prove that *exact same* release complete. `SessionCoordinator.runEffect`'s `ENDING` handling reads that stale `TimedOut` and leaves `RideForegroundService` running — an orphaned microphone foreground service over a release that had, by the time the coroutine returned, already finished. Fixed by having `releaseVoiceAndAwait()` promote a captured `TimedOut` to `Released` once `shutdown()` returns — reasoned from `shutdown()` being provably this controller's *first* call (`voice` is nulled before it runs, so `releaseVoice()`'s own fire-and-forget `shutdown()` call can never reach the same instance), so its wait is never the idempotent no-op and its return is proof, not merely "stopped waiting." `Released`/`AlreadyReleased` are returned unchanged. See §2t | ~~Medium~~ Fixed | See §2t |
 
 Resolved 26 Aug 2026 session: `CLAUDE.md` in `.gitignore` (was problem 1); `.DS_Store` tracking
 (was problem 7 — the claim was incorrect; the files are untracked and now ignored); the ADR-015/
@@ -2373,8 +2470,12 @@ deliberate, explicit override of that gate rather than a claim that it closed (�
 INTERCOM GATE PENDING.** §2r's one confirmed-but-deliberately-unfixed defect — the timing
 relationship between `VoiceController.stopAndAwaitRelease()`'s outer failure-protection timeout and
 `AndroidVoiceAudioSession.close()`'s inner route-transition timeout, and `shutdown()`'s consequent
-premature cancellation of a still-in-flight release — is fixed and verified this session (§2s, ADR-021
-Amendment A4). Everything in this phase is now done and verified by the automatable tests this
+premature cancellation of a still-in-flight release — is fixed and verified (§2s, ADR-021
+Amendment A4). A second, narrower gap in the same follow-up — `SessionCoordinator.releaseVoiceAndAwait()`
+still reporting a stale `TimedOut` it had captured before `shutdown()` ran, even once `shutdown()`'s
+own wait had gone on to prove that exact release complete, which could leave `RideForegroundService`
+running over a release that had already finished — is fixed and verified this session (§2t, ADR-021
+Amendment A5). Everything in this phase is now done and verified by the automatable tests this
 machine can run; **no known software defect remains.** What is left is hardware, exactly as for every
 other phase below.
 
