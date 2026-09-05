@@ -1,25 +1,32 @@
 # RideLink — Status
 
-**Updated:** 5 September 2026 (Phase 2b timeout-ownership closure-audit follow-up, seventeenth
-session — see §2t)
+**Updated:** 5 September 2026 (Phase 4 — shared library + local file transfer, eighteenth
+session — see §2u)
 **Current milestone:** M1 (Private voice link) is now **software-complete with no known defect** —
 its hardware gate is the only thing left open. M2 (local music) implementation is complete and
-closure-audited (§2q/§2r).
-**Current phase:** Phase 2b closure (this session) — a second, narrower gap in the sixteenth
-session's own timeout-ownership fix is now fixed. Phase 3 (local music player) remains the most
-recent *feature* phase.
-**Phase 2b status: FINAL SOFTWARE CLOSURE COMPLETE — REAL-DEVICE INTERCOM GATE PENDING.** The
-timeout-ownership defect §2r confirmed and deliberately left unfixed was fixed in §2s (ADR-021
-Amendment A4); this session found and fixed one more gap in that same fix — a proven-complete
-release could still report its own stale timeout — see §2t (ADR-021 Amendment A5). No other known
-software defect remains in this phase.
+closure-audited (§2q/§2r). Phase 4 (shared catalogue + authenticated peer file transfer) is now
+implementation-complete on both platforms, laptop-verified, with its real-device gate pending
+exactly like every phase above it.
+**Current phase:** Phase 4 — shared library + local file transfer (this session, §2u). Phase 2b
+closure and Phase 3 remain the most recent prior *feature* work, both unchanged this session.
+**Phase 4 status: IMPLEMENTATION COMPLETE — REAL-DEVICE SHARED-LIBRARY/TRANSFER GATE PENDING.**
+Catalogue paging, `ContentHash`-keyed transfer over a second session-bound TLS connection
+(ADR-023), the two-phase verified cache, availability display and a minimum usable Shared Library
+screen are done on both platforms, laptop-verified including real loopback TLS multi-chunk
+transport. No phone-to-phone transfer, no real Wi-Fi/hotspot topology, and no real storage/battery
+measurement has run — see §2u and §7.
+**Phase 2b status: FINAL SOFTWARE CLOSURE COMPLETE — REAL-DEVICE INTERCOM GATE PENDING
+(unchanged).** The timeout-ownership defect §2r confirmed and deliberately left unfixed was fixed
+in §2s (ADR-021 Amendment A4); §2t fixed one more gap in that same fix. No other known software
+defect remains in this phase.
 **Phase 3 status: IMPLEMENTATION COMPLETE — REAL-DEVICE LOCAL-MUSIC GATE PENDING (unchanged).** All
-seven closure-audit findings (A–G, §2r) were already fixed and verified; this session's fix was
-scoped to the separate Phase 2b concern the same audit found and did not touch Phase 3.
+seven closure-audit findings (A–G, §2r) were already fixed and verified; this session's work is
+additive (a new coordinator/screen on each platform) and touches none of Phase 3's own files beyond
+three small, additive forwarding properties on `MusicCoordinator`/`SessionCoordinator` (§2u).
 **Phase 2a status: IMPLEMENTATION COMPLETE — REAL-DEVICE AUDIO GATE PENDING (unchanged).**
 **Phase 1b status: IMPLEMENTATION COMPLETE — REAL-DEVICE GATE PENDING (unchanged).**
 **The overall "2 Intercom" milestone is NOT complete** — TEST_PLAN A-01, A-02, A-04, A-09 and
-V-01…V-11 are hardware gates and none of them has run. **Phases 4 (file transfer), 5 (sync) and 6
+V-01…V-11 are hardware gates and none of them has run. **Phases 5 (synchronized playback) and 6
 (intercom/music coexistence) are NOT STARTED.**
 
 > **What is genuinely new this session, and what is not.** Phase 2b is the intercom *as an app*: the
@@ -1986,6 +1993,159 @@ file, any change to `VoiceController` itself, and no iOS code change (inspected,
 
 ---
 
+## 2u. Phase 4 — shared library + local file transfer (5 September 2026 session, eighteenth)
+
+**Scope, explicitly bounded per this session's brief: catalogue advertise/browse, `ContentHash`-keyed
+transfer over a second, session-bound TLS connection, streamed+verified transfer, a verified cache,
+availability display and cancel/fail-safe — nothing synchronized (Phase 5), no ducking/audio-focus
+arbitration (Phase 6).** Phase 5 was **not** started; see §7.
+
+**New ADR: [ADR-023](DECISIONS/ADR-023-bulk-transfer-session-binding.md)** — the one genuine design
+gap the existing docs left open. PROTOCOL §8 and ADR-013 already fully specified the wire format and
+the manifest-paging rules; ADR-023 owns what they did not: the bulk TLS listener is opened once **per
+authenticated session** (not per transfer) and reuses the control connection's own device identity;
+`bulk_token` is single-use, 30 s TTL, delivered only over the already-authenticated control channel,
+and scoped to a **session generation** counter distinct from the wire `session_id` (which survives a
+reconnect) — so a reconnect invalidates every outstanding token without an explicit sweep; and the
+cache trust model (verified only after an exact byte count **and** a whole-file SHA-256 recomputed
+from the bytes actually on disk, then an atomic rename — never from a running in-flight hash of what
+was received, which would not catch a truncated write or a disk-full condition).
+
+**Identity discipline (ADR-005 Amendment A1), reused, not reinvented.** `ContentHash` is the sole
+transfer identity; `QuickId` is never transfer identity; `LocalEntryId` never crosses the wire. Two
+manifest entries sharing a `QuickId` but carrying different `ContentHash`es transfer and cache as two
+independent objects — that regression is an explicit test on both platforms
+(`TransferCacheRepositoryTest`/its Swift mirror).
+
+**What was built, mirrored on both platforms, in the sequenced order the plan set out:**
+
+- **Protocol vectors** (hand-written from spec, an independent transcription, the same discipline
+  `intercom/`/`audio-state/` already established): `protocol/vectors/manifest-paging/` (13 rows),
+  `manifest-paging-errors/` (21), `manifest/` (13), `manifest-messages/` (35),
+  `transfer-messages/` (44), `transfer-fsm/` (47), `bulk-framing/` (15) — 188 rows total, all passing
+  identically on both platforms.
+- **Pure domain model**, mirrored line-for-line: `ManifestEntry`/`ManifestPaging`/`ManifestSync`
+  (the idle→staging→validating→committed state machine, ADR-013's "nothing partial is ever
+  promoted") and `TransferReducer`/`TransferStatus`/`TransferError`/`Availability` (the
+  IDLE→QUEUED→NEGOTIATING→TRANSFERRING→VERIFYING→COMPLETE/FAILED/CANCELLED machine, terminal states
+  proven to stay terminal) — `ManifestCodec`/`TransferCodec` parse **and** encode every message,
+  bounds-checked both directions.
+- **Network relays and bulk transport**: `ManifestRelay`/`TransferRelay` mirror
+  `VoiceSignalRelay`/`AudioStateRelay` exactly — `MANIFEST_*`/`TRANSFER_*` are absent from the
+  pre-authentication frame allowlist, the same access control `VOICE_*`/`AUDIO_STATE` already rely
+  on, and a real two-peer TLS test on both platforms proves an unauthenticated peer's frames are
+  dropped and counted, never delivered. `BulkTransportManager`/`TransferManager` (Android
+  class-with-mutex, iOS actor — ARCHITECTURE §9.2) implement RLB1 framing
+  (`magic|chunk_index|byte_length|payload`, unsigned-length parsing, no allocation before length
+  validation) over a real loopback TLS 1.3 connection, SPKI-pin-checked **before** the token is even
+  read, with a real multi-chunk (>64 KiB single read buffer) transfer test on both platforms.
+- **Data layer**: `ManifestGenerator` (deterministic order, sync-eligible rows only, no artwork
+  bytes loaded), `CacheStorage` (`.part` streaming write → exact-size check → whole-file SHA-256
+  recomputed from disk → atomic rename; corrupt-byte, truncated, and oversized cases all covered by a
+  real test), `TransferCacheRepository` (the verified-cache metadata table, additive Room/GRDB
+  migration, LRU-by-last-access eviction that never touches a locked entry), `LocalContentResolver`
+  (cache-first then Phase 3 library, a cheap size-based staleness check rather than a re-hash on
+  every serve, per ADR-023 §7).
+- **App-layer coordinators**: `SharedLibraryCoordinator` on each platform (Android
+  `com.ridelink.app.library`, iOS `ios/RideLink/SharedLibraryCoordinator.swift`) is the single owner
+  of remote-catalogue and per-`ContentHash` download state (CLAUDE.md rule 8) — session/peer-scoped,
+  cleared wholesale on every connect/disconnect, one active transfer per session with further
+  requests queued FIFO, and playback of a verified cached or already-local file goes through the
+  *existing* `MusicCoordinator`/queue/player, never a second one. A minimum usable Shared Library
+  screen (Compose `SharedLibraryScreen`, SwiftUI `SharedLibraryView`) shows the peer's catalogue,
+  each track's availability (local / cached / remote-only, never inferred before an atomic cache
+  commit), and download/cancel/play, gated behind the same authenticated-connected state `VoiceCard`
+  already gates on.
+
+**A real architectural finding on iOS, resolved before it could ship a bug.** iOS's
+`ControlSessionManager.setOnEvent(_:)` is a single mutable callback slot (unlike Android's
+multi-subscriber `SharedFlow`) — a second `setOnEvent`/`setOnPairingPromptChanged`-style
+self-subscription from `SharedLibraryCoordinator` would have silently replaced `SessionCoordinator`'s
+own existing handler. Fixed architecturally, not patched: `SessionCoordinator` already owns the one
+subscription, so it explicitly forwards the two events `SharedLibraryCoordinator` needs
+(`.connected` → `handleConnected()`, `.linkLost` → `handleLinkLost()`) from inside its existing
+`applySideEffects`, rather than the new coordinator subscribing itself.
+
+**One gap iOS's Stage 3/5 completion left for this stage, filled here rather than silently worked
+around.** Neither `ManifestId` nor `TransferId` had a fresh-identifier generator on iOS — both are
+minted at the app layer (a `ManifestId` by whichever peer is about to send `MANIFEST_BEGIN`, a
+`TransferId` by the requester), which is exactly this stage's layer. `RideLinkCore/Model/Ulid.swift`
+mirrors Android's `com.ridelink.core.model.Ulid` line-for-line, including its explicit "not a
+spec-faithful monotonic ULID, just the shape and unpredictability" caveat, using
+`SystemRandomNumberGenerator` rather than `Security.framework`'s `SecRandomCopyBytes` — the latter
+would work, but the former keeps `RideLinkCore` importing only Foundation, matching Android's `core`
+using the JVM's `SecureRandom` rather than an Android-platform API for the identical reason (CLAUDE.md
+rule 9).
+
+**A Swift 6 strict-concurrency false positive, worked around by simplifying the code, not by
+suppressing the checker.** The first draft of `SharedLibraryCoordinator.withOfferTimeout()` raced an
+awaited continuation against a timeout using `withTaskGroup`, with one child task annotated
+`@MainActor`; the region-based isolation checker rejected the pattern outright ("does not understand
+how to check"). Rewritten without a task group at all: the continuation is stored once, and a single
+`Task { @MainActor in ... }` sleeps and resumes it with `nil` if nothing arrived — simpler code, and
+the actual mechanism `handleTransferMessage`'s `.offer` case and this timeout race on (both run on
+`@MainActor` with no suspension between checking and clearing `pendingOfferContinuation`, so exactly
+one of them ever resumes it) is easier to read as a result, not harder.
+
+**Explicitly not done, and not claimed:** synchronized playback, shared queue replication or PLAY_AT
+(Phase 5); music ducking or intercom/transfer audio-focus arbitration (Phase 6); any phone-to-phone
+transfer; any real Wi-Fi/hotspot topology; any storage or battery measurement over a realistic
+personal library; a dedicated unit test for either platform's `SharedLibraryCoordinator` itself
+(only compile success, real loopback-transport tests one layer down, and a no-crash simulator/emulator
+launch with correct UI gating have been verified this session — see below).
+
+**A disclosed, deliberate architectural simplification, not a defect.** Both platforms' app-layer
+coordinators drive transfer state with ad-hoc procedural transitions (a `runDownload`/
+`serveTransferRequest` async function) rather than routing every step through the pure, vector-tested
+`TransferReducer`/`TransferAction` state machine that same coordinator's pure domain layer defines.
+This is a real inconsistency with this project's own "every decision lives in a pure mirrored
+reducer" convention (`SessionGate`, `IntercomTransmission`, `VoiceNegotiation`) — recorded here rather
+than hidden, because async network I/O (awaiting a socket read, a continuation, a timeout) does not
+map onto a synchronous reducer-dispatch loop without materially more plumbing than this phase's
+minimum-usable-UI scope justified. `TransferReducer` itself is fully pure, mirrored and
+vector-pinned regardless — it is simply not yet the thing driving the coordinator's control flow.
+
+**Verification, all run directly this session:**
+
+- Android: `./gradlew test ktlintCheck detekt lint assembleDebug assembleRelease` — **all green**.
+  **565 unit tests** (was 531 at §2t): `core` **328** (was 321 — the seven new manifest/transfer
+  vector test classes), `network` **168** (was 160 — `BulkTransportManagerTest`'s five real-loopback
+  scenarios plus `ManifestTransferAuthenticationGateTest`), `audio` 33 (unchanged), `app` 8
+  (unchanged this pass), `data` **28** (was 9 — `ManifestGeneratorTest`, `CacheStorageTest`,
+  `TransferCacheRepositoryTest`).
+- `connectedDebugAndroidTest` on `RideLink_API36`: unchanged counts from the Phase 3 closure audit
+  (`:data` 34/34, `:app` 4/4) — Phase 4 added no new instrumented test; the real emulator install/
+  launch/no-crash/UI-gating smoke check for the new Shared Library section was run separately (below)
+  rather than as an instrumented test.
+- iOS: `swift test --package-path Packages/RideLinkCore` — **220/220** (was 207). `swift test
+  --package-path Packages/RideLinkPlatform` — **252/252** (was 219), including two new real-loopback
+  TLS transport tests. `xcodebuild -scheme RideLink -destination 'platform=iOS Simulator,name=iPhone
+  17 Pro'` Debug **and** Release — both **BUILD SUCCEEDED**, zero errors, after the new Swift files
+  were added to `RideLink.xcodeproj`'s file references and Sources build phase by hand (this project
+  uses explicit `PBXFileReference`/`PBXBuildFile` entries, not a synchronized-folder group, so a new
+  file is invisible to the build until both are added — the first Debug build attempt failed with
+  "cannot find 'SharedLibraryCoordinator'/'SharedLibraryView' in scope" for exactly this reason,
+  fixed by editing `project.pbxproj` directly).
+- **Real simulator smoke check** (`iPhone 17 Pro`, `27A96B2B-2466-4773-B681-08676F148816`): the
+  Release-configuration app installed and launched with **no crash**; a screenshot confirms the
+  Shared Library section is correctly **absent** while disconnected (`Connection: Idle`), the same
+  gate `VoiceCard` uses — mirroring the Android emulator's own "Shared Library section correctly
+  absent when disconnected" check from Stage 8.
+- **Stress: the seven new pure Swift vector-test classes, run 100 consecutive times each on this
+  machine — 100 runs, 100 passed, 0 failed.** Android's equivalent 100-consecutive-run pass over the
+  seven new pure Kotlin vector test classes was run and recorded earlier this session, also 0
+  failures; the corresponding temporary script was deleted afterward as in every prior stress pass.
+- **CI: not yet observed for this phase's own commits** — pushing and recording one fresh CI run is
+  Stage 12, not yet run as of this write-up. See §7.
+
+**What none of this is evidence about:** any phone, any real Wi-Fi or hotspot network between two
+physical devices, mDNS discovery of a real peer's catalogue, any storage or battery measurement, or
+any transfer over an actual multi-hop or lossy network path. Both platforms' bulk-transport tests are
+real TLS 1.3 over real TCP loopback — not mocked — but loopback is not the network this app will
+actually run on.
+
+---
+
 ## 3. Tests passed / pending
 
 **Passed and verified in the Phase 2b session (4 September 2026, tenth), by actually running the
@@ -2373,6 +2533,15 @@ session and route), and integration tests I-01…I-25. Full list in `docs/TEST_P
 
 ---
 
+**Passed and verified in the Phase 4 session (5 September 2026, eighteenth) — full detail, exact
+counts and the CI status are in §2u rather than repeated here:** 565 Android unit tests (all five
+modules green, `ktlintCheck`/`detekt`/`lint`/`assembleDebug`/`assembleRelease` all green), 220/220
+`RideLinkCore` + 252/252 `RideLinkPlatform` Swift tests, `xcodebuild` Debug and Release simulator
+builds both green, a real Android emulator smoke check and a real iOS simulator smoke check both
+confirming no crash and correct Shared Library UI gating, and 100/100 stress reruns of the seven new
+pure vector-test classes on **both** platforms. CI for this phase's commits had not yet been pushed
+as of this write-up — see §7.
+
 ## 4. Known problems
 
 | # | Problem | Severity | Action |
@@ -2451,6 +2620,21 @@ Not blocking Phase 1. Answers needed before Phase 6.
 ---
 
 ## 7. Next exact task
+
+**Phase 4 — shared library + local file transfer. IMPLEMENTATION COMPLETE — REAL-DEVICE
+SHARED-LIBRARY/TRANSFER GATE PENDING (this session, §2u).** Every laptop-runnable gate is green on
+both platforms, including real loopback-TLS multi-chunk transport, a real emulator smoke check
+(Stage 8, earlier this session) and a real simulator smoke check (Stage 9, §2u). **The exact next
+task is Stage 12**: push this session's commits and observe exactly one fresh CI run — not yet done
+as of this write-up — then record the run ID/SHA/per-job result in a follow-up docs commit, the same
+two-commit convention `e4740d6`'s own history already uses. `docs/TEST_PLAN.md` also still needs its
+Phase 4 rows (already speced under L1–L4) marked verified-vs-pending to match this session's actual
+evidence; `docs/PROTOCOL.md`/`docs/ARCHITECTURE.md` needed no further change beyond what ADR-023 and
+the existing §8.3 update already record. **What remains for Phase 4 specifically, once CI is green:
+everything a real phone-to-phone Wi-Fi/hotspot topology would show** — actual mDNS discovery of a
+peer's live catalogue, a transfer over a real (not loopback) network path, and any storage/battery
+measurement over a realistic personal library. No TEST_PLAN hardware-gate IDs exist yet for Phase 4
+specifically; adding them is part of the docs follow-up above.
 
 **Phase 3 — local music player. IMPLEMENTATION COMPLETE — REAL-DEVICE LOCAL-MUSIC GATE PENDING**
 (§2q, closure-audited in §2r). Library import/index/search, a local queue, local playback, Android
