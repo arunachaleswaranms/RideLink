@@ -334,8 +334,8 @@ product (REQUIREMENTS §8) and the reason Phase 0 existed.
 
 | Concern | Mechanism |
 |---|---|
-| Music playback | `androidx.media3` `ExoPlayer` inside a `MediaSessionService` |
-| Background / lock screen | One foreground service, declared `mediaPlayback` and (when the intercom is part of the ride) `microphone` — see §6.4 |
+| Music playback | `androidx.media3` `ExoPlayer`, with a real `androidx.media3.session.MediaSession` owned directly by the one ride foreground service (ADR-022 — **not** a `MediaSessionService` subclass; see ADR-022 §1 for the binding reason) |
+| Background / lock screen | One foreground service, declared `mediaPlayback` and (when the intercom is part of the ride) `microphone` — see §6.4. Lock-screen transport controls reach the system via a `MediaStyle` notification carrying the `MediaSession`'s token, alongside the service's own mute/end-intercom actions in the same notification (ADR-022) |
 | Voice | WebRTC `PeerConnection` with the built-in `AudioDeviceModule` (owns its own `AudioRecord`/`AudioTrack`, HW AEC/NS/AGC where present). Implemented in `network/voice/WebRtcVoiceEngine`; the session and route half is `audio/route/AndroidVoiceAudioSession`, and the two are deliberately separate calls to tear down (ADR-020 §6) |
 | Route + focus | `AudioManager` — `setCommunicationDevice()` (API 31+, our `minSdk`) for the helmet unit, `AudioFocusRequest` with `WILL_PAUSE_WHEN_DUCKED = false` so *we* control ducking, `AudioDeviceCallback` for connect/disconnect |
 | Ducking | `ExoPlayer.volume` ramped over ~150–250 ms, never stepped (FR-016) |
@@ -898,7 +898,7 @@ small specialised one. Everything pinned.
 | Async | kotlinx-coroutines, Flow | required by brief |
 | JSON | kotlinx-serialization-json | compile-time codegen, no reflection, exact-shape control for the envelope |
 | DB + search | Room (+ FTS4) | official; FTS gives FR-008 search without hand-rolled indexing |
-| Playback | androidx.media3 (ExoPlayer + MediaSession) | format coverage, precise seek, playback-rate control, `MediaSessionService` solves FR-019 |
+| Playback | androidx.media3 (ExoPlayer + MediaSession) | format coverage, precise seek, playback-rate control; a real `MediaSession` owned by the existing ride foreground service (not a `MediaSessionService` subclass) solves FR-019 — [ADR-022](DECISIONS/ADR-022-media-session-without-mediasessionservice.md) |
 | Voice | `io.github.webrtc-sdk:android` **`144.7559.14`** (Chromium M144), BSD-3-Clause | Google publishes no current Maven artifact; this is the maintained community build of *unmodified* upstream WebRTC. **Pinned exactly** (never a range) and supply-chain reviewed: four ABIs, only `org/webrtc` + `org/jni_zero` classes, no permission or service in its manifest, and no telemetry endpoint in the binary. [ADR-020](DECISIONS/ADR-020-webrtc-voice-foundation.md), [evidence](test-results/phase2a-webrtc-spike-20260828.md) |
 | DI | **manual constructor injection** | No framework in V1. [ADR-014 §2](DECISIONS/ADR-014-initial-module-structure-and-di.md#2-dependency-injection) |
 | Preferences | DataStore + Keystore | Keystore for the device identity keypair; no secret in plaintext prefs |

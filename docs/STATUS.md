@@ -1,12 +1,16 @@
 # RideLink — Status
 
-**Updated:** 4/5 September 2026 (Phase 3 — local music player, fourteenth session — see §2q)
+**Updated:** 5 September 2026 (Phase 3 closure-audit hardening pass, fifteenth session — see §2r)
 **Current milestone:** M1 (Private voice link) is software-complete pending its hardware gate; **M2
-(local music) implementation is now also complete**, started under a deliberate override of this
-file's own precondition (§2q, and the amendment right below).
+(local music) implementation is now also complete and closure-audited**, started under a deliberate
+override of this file's own precondition (§2q, and the amendment right below).
 **Current phase:** Phase 3 — local music player.
-**Phase 3 status: IMPLEMENTATION COMPLETE — REAL-DEVICE LOCAL-MUSIC GATE PENDING.**
-**Phase 2b status: IMPLEMENTATION COMPLETE — REAL-DEVICE INTERCOM GATE PENDING (unchanged).**
+**Phase 3 status: IMPLEMENTATION COMPLETE — REAL-DEVICE LOCAL-MUSIC GATE PENDING.** All seven
+closure-audit findings (A–G, §2r) are fixed and verified; a separate Phase 2b concern the same audit
+found (voice-stop timeout ownership) is confirmed but **not fixed** — see §2r. **Do not read this
+line as "Phase 2b closed."**
+**Phase 2b status: IMPLEMENTATION COMPLETE — REAL-DEVICE INTERCOM GATE PENDING, AND ONE
+TIMEOUT-OWNERSHIP DEFECT CONFIRMED-NOT-FIXED (§2r).**
 **Phase 2a status: IMPLEMENTATION COMPLETE — REAL-DEVICE AUDIO GATE PENDING (unchanged).**
 **Phase 1b status: IMPLEMENTATION COMPLETE — REAL-DEVICE GATE PENDING (unchanged).**
 **The overall "2 Intercom" milestone is NOT complete** — TEST_PLAN A-01, A-02, A-04, A-09 and
@@ -71,13 +75,21 @@ transport is gone from every production source set** — not gated, deleted — 
 fails if a raw socket reappears there.
 
 **What is still not done is running any of it on the two real phones.** That gate was already
-open for Phase 1a and this phase does not close it: this machine has no Android device or
-emulator, and only the iOS *simulator*. Everything below is a laptop measurement. See §4 and §7.
+open for Phase 1a and this phase does not close it: this machine has no **physical** Android or iOS
+device, only the iOS *simulator* — and, as of the Phase 3 session (§2q), an Android **emulator**
+(`RideLink_API36`), which has run Phase 3's real instrumented library-indexer/player/database tests
+and a manual walkthrough (§2q), but has run no Phase 1a/1b/2a/2b control-plane, security, WebRTC or
+intercom evidence of any kind — that emulator existing does not narrow §4 problems 15/22 (below) any
+further than §2q's own local-music claims. Everything below §2q is a laptop measurement; §2q itself
+is the one section with real-emulator evidence, scoped exactly as it states. See §4 and §7.
 
-**Repository state:** Android — **436** unit tests across five modules (was 336), `test ktlintCheck
-detekt lint assembleDebug assembleRelease` all green. iOS — `RideLinkCore` **142** tests (was 69),
-`RideLinkPlatform` **178** tests (was 150), `RideLink.xcodeproj` builds in **both** Debug and Release
-for the simulator with zero warnings. Shared vectors: `protocol/vectors/identity/`,
+**Repository state (updated §2r, fifteenth session — the figures below were last true at Phase 2b
+and had drifted; corrected here rather than left as a stale current-state claim):** Android —
+**527** unit tests across five modules (`core` 320, `network` 157, `audio` 33, `data` 9, `app` 8),
+`test ktlintCheck detekt lint assembleDebug assembleRelease` all green, plus real instrumented tests
+on `RideLink_API36` (`:data` 34, `:app` 4). iOS — `RideLinkCore` **207** tests, `RideLinkPlatform`
+**219** tests, `RideLink.xcodeproj` builds in **both** Debug and Release for the simulator with zero
+new warnings. Shared vectors: `protocol/vectors/identity/`,
 `protocol/vectors/session-gate/` (120 rows), `protocol/vectors/voice-signal/` (70 rows),
 `protocol/vectors/voice-fsm/` (**59** rows, was 52 — Phase 2b's `ModeSelected`),
 `protocol/vectors/intercom/` (58 rows, new) and `protocol/vectors/audio-state/` (74 rows across five
@@ -101,7 +113,8 @@ either pass.
 | **Phase 1b — secure control channel** | ✅ **IMPLEMENTATION COMPLETE — REAL-DEVICE GATE PENDING** | Both ADR-007 A1 spikes closed with measurements; identity, TLS 1.3, pinning, SAS pairing, trust persistence and UI on both platforms (§2f). The trust-gate security bug found afterwards is fixed and vector-pinned (§2g, ADR-019) |
 | **Phase 2a — voice transport foundation** | ✅ **IMPLEMENTATION COMPLETE — REAL-DEVICE AUDIO GATE PENDING** | WebRTC pinned and reviewed on both platforms, PROTOCOL §7 specified in full, the negotiation table shared and vector-pinned, the pre-authentication `VOICE_*` refusal proven over real TLS on both platforms, and **real DTLS-SRTP/Opus media measured on this machine** (§2i, [ADR-020](DECISIONS/ADR-020-webrtc-voice-foundation.md)). No audio captured or played anywhere; the Android media path is untested even locally |
 | **Phase 2b — intercom integration / audio lifecycle** | ✅ **IMPLEMENTATION COMPLETE — REAL-DEVICE INTERCOM GATE PENDING** | The five modes as one interpreted policy object; transmission gated at the audio track and never at the capture device; `AUDIO_STATE` implemented with no wire change; the platform audio lifecycle as a shared pure reducer; readiness as a shared pure decision; setup-timing instrumentation (§2m, [ADR-021](DECISIONS/ADR-021-intercom-transmission-and-capture-ownership.md)). Nothing ran on a phone; VOX has no level source; no latency figure exists |
-| Phases 3–8 | ⬜ Not started | The earlier commits named "init phase 2a" and "phase 2a" (`d709c45`, `90cbe12`) were Phase 1b work under a misleading name. Phase 2a proper is the sixth session, §2i |
+| **Phase 3 — local music player** | ✅ **IMPLEMENTATION COMPLETE — REAL-DEVICE LOCAL-MUSIC GATE PENDING** | Library indexing, two-tier hashing, database/search, ExoPlayer/AVAudioEngine player, local queue, Android `MediaSession` (ADR-022), iOS `MPNowPlayingInfoCenter`/`MPRemoteCommandCenter`, all on both platforms (§2q, and this session's closure-audit hardening pass). Real-emulator instrumented evidence exists for the indexer/database/player (§2q, TEST_PLAN §4.3); nothing has run on a physical phone |
+| Phases 4–8 | ⬜ Not started | The earlier commits named "init phase 2a" and "phase 2a" (`d709c45`, `90cbe12`) were Phase 1b work under a misleading name. Phase 2a proper is the sixth session, §2i |
 
 `protocol/schema/` and `protocol/vectors/` now exist (§2c). `android/` is a real five-module
 Gradle project that builds. `ios/` now has all three pieces ARCHITECTURE §9.2 describes:
@@ -1632,6 +1645,146 @@ Release simulator builds. Every step passed the first time.
 
 ---
 
+## 2r. Phase 3 closure-audit hardening pass (5 September 2026 session, fifteenth)
+
+An independent closure audit of the completed Phase 3 implementation, run specifically to check
+whether "software-complete" claims held up rather than to add feature work. Seven findings (A–G)
+were investigated against the actual code before anything was changed; all seven confirmed. A
+separate, eighth concern about Phase 2b's voice-stop timeout ownership was also investigated and
+confirmed, and is reported below **without a fix** — the brief for this pass explicitly forbade
+mixing a Phase 2b redesign into a Phase 3 pass.
+
+**Finding A — CRITICAL, CONFIRMED, fixed.** `quick_id` (a 128 KiB sample, ADR-005) was implemented
+as cross-row identity on both platforms: Android's schema had a `UNIQUE` index on it with
+`REPLACE`-on-conflict upsert; iOS derived the app-container copy's filename from it and skipped
+re-copying if that filename already existed. Two files over 128 KiB with identical size and
+first/last 64 KiB windows but a different middle — not a SHA-256 collision, a consequence of
+sampling — would silently collapse into one row (Android) or lose the second file's bytes entirely
+(iOS, since the original picker URL is never touched again after import). Fixed by introducing
+`LocalEntryId` (a random per-row identity with no relationship to content) as the real identity on
+both platforms; `quick_id` is demoted to exactly ADR-005's stated roles (indexing/change-detection/
+display), `location_uri` becomes the schema-level unique key, and a rename is no longer silently
+followed (a documented, accepted trade: a false "new track" costs one re-index; a false merge
+silently destroyed data). Full account: [ADR-005 Amendment
+A1](DECISIONS/ADR-005-content-hash-track-identity.md#amendment-a1--5-september-2026--quick_id-was-implemented-as-authoritative-identity-corrected).
+A second, latent instance of the same bug class was found and fixed while mirroring this to iOS: a
+SwiftUI `ForEach` keyed on `\.track.quickId` (undefined behaviour for a non-unique id), and an
+Android `MusicSection` "current entry" lookup matching by `quickId`. Deterministic regression
+fixtures (two real byte arrays, `size ‖ shared-first-64KiB ‖ different-middle ‖ shared-last-64KiB`,
+constructed directly rather than hoped for) prove `quick_id(A) == quick_id(B)` while
+`content_hash(A) != content_hash(B)` and prove the full indexing pipeline never collapses them, on
+both platforms, before and after the background hashing pass.
+
+**Finding B — HIGH, CONFIRMED, fixed.** `completeContentHashingInBackground()` existed on both
+platforms, documented as "kicked off once at composition time," but had no production caller
+anywhere — only test code ever invoked the lower-level hashing function directly. `content_hash`
+stayed `null` forever after import. Fixed: the method is now actually called from `MusicCoordinator`'s
+`init` and after every import completes, on both platforms, and — per this pass's own requirement —
+it queries the repository directly for rows missing a hash rather than depending on a
+possibly-stale UI snapshot, so cancellation/restart always resumes exactly the right rows and a
+second concurrent call is guarded (not required for correctness, since each pass is independently
+safe, only to avoid redundant work).
+
+**Finding C — HIGH, CONFIRMED, fixed, with a documented architecture correction.** Android's
+`ExoPlayerMusicPlayer` was a bare `ExoPlayer` with no `MediaSession` at all — the ARCHITECTURE §6.1
+description ("ExoPlayer inside a `MediaSessionService`") was never implemented. Investigation found
+a genuinely binding reason not to implement it exactly as documented: `MediaSessionService`'s
+automatic foreground-service/notification lifecycle has no concept of the `microphone` type or of a
+second subsystem (the intercom) keeping the same service alive, and subclassing it would reopen
+every ADR-021-hardened defect under new code paths. Corrected and implemented per [ADR-022](DECISIONS/ADR-022-media-session-without-mediasessionservice.md):
+`RideForegroundService` stays a plain `Service` — the one ride foreground service, unchanged — and
+owns a real `androidx.media3.session.MediaSession` directly, wired to the same `ExoPlayer`, with the
+lock screen reached through a `MediaStyle` notification carrying the session's token, alongside the
+existing mute/end-intercom actions in the same one notification. `ForegroundServiceTypePolicy`, the
+`intercomActive`/`musicPlaying` flags, `onStartCommand`'s dispatch, `START_NOT_STICKY`, and every
+other ADR-021 invariant are untouched — verified by diff, not merely by claim.
+
+**Finding D — HIGH/MEDIUM, CONFIRMED, fixed.** iOS had no `MPNowPlayingInfoCenter`/
+`MPRemoteCommandCenter` integration at all, despite ARCHITECTURE §6.2 specifying it and
+`UIBackgroundModes: audio` already being present. Implemented: a pure `NowPlayingInfoBuilder`
+(testable without `MediaPlayer`/`UIKit`) plus a thin `NowPlayingController` adapter routing
+play/pause/seek/next/previous straight to the one existing `MusicCoordinator` — no second queue/
+player owner.
+
+**Finding E — MEDIUM, CONFIRMED, fixed.** `MainActivity.attemptMusicPlay()`/`attemptPlayNow()`
+discarded `RideForegroundService.startMusicFromVisibleUi()`'s `Boolean` return value and called
+`MusicCoordinator.play()`/`playNow()` unconditionally — the intercom's equivalent start already
+checked this and the music path never did. Fixed to mirror the intercom's discipline exactly: a
+refused start records a named `MusicFailure.FOREGROUND_SERVICE_START_FAILED` (surfaced in the UI,
+never retried silently) instead of proceeding. `MainActivity` itself has no test harness, so a new
+androidTest (`MusicCoordinatorForegroundServiceFailureTest`) proves the deterministic seam the fix
+lives behind — the injectable refusal-recording method and its clear-on-success contract — rather
+than depending on a real `ForegroundServiceStartNotAllowedException`.
+
+**Finding F — MEDIUM, CONFIRMED (dead code), no behaviour change.** iOS `MusicAudioSession.deactivate()`
+is genuinely unused. The underlying "session stays active after music-only playback ends" behaviour
+was already correctly documented in four places (the class's own doc, STATUS, ARCHITECTURE,
+REQUIREMENTS) as a deliberate Phase 6 deferral — calling `deactivate()` unconditionally could tear
+down a session the intercom depends on, since `AVAudioSession` is one shared OS-level resource. The
+one thing that needed fixing was the method's own doc comment, which read as though a composition
+root already called it "at the right moment" — corrected to say plainly that nothing calls it yet
+and why, removing the one misleading claim found.
+
+**Finding G — CONFIRMED, fixed.** `docs/STATUS.md`'s own phase table still said "Phases 3–8 Not
+started" alongside a top-of-file claim of "Phase 3 IMPLEMENTATION COMPLETE" three lines above it;
+and two "no Android device or emulator" problem-table rows (15, 22) had not been updated after
+`RideLink_API36` was created and used for real Phase 3 instrumented tests earlier in the same
+document. All three corrected — narrowly, to state exactly what the emulator's existing use does
+and does not cover (Phase 3 local-music instrumented tests; not Phase 1a/1b/2a/2b control-plane,
+security, or WebRTC evidence), not broadened into a claim the emulator resolves problems 15/22
+outright.
+
+**Phase 2b regression check — CONFIRMED, reported without a fix, per this pass's own scope limit.**
+`VoiceController.stopAndAwaitRelease()`'s outer 5 s failure-protection timeout starts before
+`engine.stop()`/`engine.release()`/the wire send run, while `AndroidVoiceAudioSession.close()`'s
+inner 5 s route-transition timeout only starts counting after that work completes — so the outer
+timeout is structurally guaranteed to fire at or before the inner one, never the "5 s + 5 s
+independent" budget a naive reading suggests. `StopReleaseResult.TimedOut`'s own documentation
+already accepts `close()` may still be legitimately in flight when this happens — but the caller's
+actual next step, `SessionCoordinator.releaseVoiceAndAwait()` calling `VoiceController.shutdown()`,
+does not merely tolerate that: `shutdown()`'s `consumerJob?.cancel()` actively cancels the
+coroutine still running `close()`, aborting it before `unregisterPlatformCallbacks()` (and the
+post-close intercom-gate update) can run. ADR-021 Amendment A2's own "What did not change" section
+already named the mechanism (`shutdown()`'s unstructured concurrent `apply()`) as a known,
+deliberately-unfixed latent concern; this pass traced it through to a concrete consequence — a
+leaked `AudioManager` callback registration and a skipped gate update, not merely a theoretical
+race — and confirms it is real, still present, and covered by no existing test.
+**Do not consider Phase 2b closed until this timeout-ownership incoherence is resolved.** No fix
+attempted here, per this pass's explicit brief.
+
+**A real crash found and fixed while verifying Finding C**, in code this pass itself authored, not
+a pre-existing defect: the new `MusicCoordinatorForegroundServiceFailureTest` (Finding E) didn't
+cancel-and-join `MusicCoordinator`'s background-hashing coroutine (Finding B's fix, launched
+unstructured from the constructor) before closing the test's in-memory Room database in `tearDown`,
+so an in-flight query could throw `IllegalStateException: connection pool has been closed` after
+the test's assertions had already passed — fatal to the instrumentation process. Fixed by having the
+test own and cancel-and-join its own `CoroutineScope`'s `Job` before closing the database. Confirmed
+this has no production equivalent: `AppContainer` never closes the Room database while the app-
+lifetime scope is alive.
+
+**Verification, this pass, all run directly (not merely reported by the agents that implemented the
+fixes):**
+
+- Android: `./gradlew test ktlintCheck detekt lint assembleDebug assembleRelease` — all green.
+  **527 unit tests, 0 failures** (was 526, +1: the FGS-failure test's own regression coverage
+  folded into existing suites plus the new library/DAO regression tests). Real instrumented tests
+  on `RideLink_API36`: `:data` **34/34** passed, `:app` **4/4** passed (the new
+  `MusicCoordinatorForegroundServiceFailureTest`, including after the teardown-race fix above).
+- iOS: `swift test --package-path Packages/RideLinkCore` **207/207** (was 201, +6: `LocalEntryId`
+  format tests). `swift test --package-path Packages/RideLinkPlatform` **219/219** (was 212, +7: the
+  false-collision/identity regression tests plus `NowPlayingInfoBuilderTests`). `xcodebuild` Debug
+  **and** Release, unsigned, simulator — both **BUILD SUCCEEDED**, zero new warnings.
+- Repository-wide grep confirms no stale `findByQuickId`/`allQuickIds()`/`deleteByQuickId` (the old
+  Android DAO surface) or quickId-as-filename/skip-if-exists pattern (the old iOS import shape)
+  remains anywhere.
+
+**What this pass did not do, deliberately:** Phase 4 (file transfer), Phase 5 (sync/shared queue),
+Phase 6 (intercom/music coexistence arbitration — `MusicAudioSession`/audio-focus ducking remain
+exactly as undone as before), any weakening of TLS/SPKI/SAS/trust-gate/host-only-ICE/WebRTC pins,
+and no fix for the Phase 2b timeout-ownership finding above.
+
+---
+
 ## 3. Tests passed / pending
 
 **Passed and verified in the Phase 2b session (4 September 2026, tenth), by actually running the
@@ -2037,7 +2190,7 @@ session and route), and integration tests I-01…I-25. Full list in `docs/TEST_P
 | 12 | AGP 9.x dropped the separate `org.jetbrains.kotlin.android` Gradle plugin; Compose BOM / `androidx.core` / `androidx.lifecycle` versions newer than the ones pinned this session require `compileSdk 37` | Low, but easy to regress | Documented in §1. Don't bump these three dependency versions without checking the compileSdk requirement first |
 | 13 | `RideLink.xcodeproj`'s `project.pbxproj` was hand-authored (no Apple CLI creates one, and `xcodegen`/`tuist` weren't installed without asking). It resolves, builds, and runs on-simulator, but has not been opened in the Xcode GUI to confirm it looks/behaves like a normal project (no Assets.xcassets/app icon, minimal build settings) | Low | Open it in Xcode once to sanity-check; add an app icon when one exists. Not urgent — sideloaded personal builds don't need a store-quality icon |
 | 14 | SwiftLint / SwiftFormat (ARCHITECTURE §10.2) are not installed on this machine | Low | Install when convenient; not blocking — ktlint/detekt (Android) are clean, Swift Xcode builds show zero compiler warnings |
-| 15 | **No Android device or emulator available in this development environment** — no `adb` on `PATH`, no AVD configured. `PlainControlTransportPhase1a` and `NsdDiscoveryController` are therefore unverified against Android's real network stack | **High (blocks the Phase 1a gate)** | Needs either a physical OnePlus Nord 5 with USB debugging, or an AVD image + emulator installed via `sdkmanager`. Neither was set up this session — not attempted without asking, since it changes the toolchain |
+| 15 | ~~**No Android device or emulator available in this development environment**~~ **Partially resolved (Phase 3 session, §2q).** An Android emulator (`RideLink_API36`) now exists and has run real Phase 3 instrumented tests and a manual local-music walkthrough. **Still open:** `PlainControlTransportPhase1a`/`NsdDiscoveryController` (Phase 1a discovery/transport), and everything else Phase 1a/1b/2a/2b needs from a real Android network/audio/WebRTC stack, remain unverified on it — the emulator's use so far is scoped exactly to Phase 3's local-music claims (§2q, TEST_PLAN §4.3), not a general "Android now has a device" resolution. No **physical** Android device exists in this environment | **High (blocks the Phase 1a gate)** | The emulator can now also carry Phase 1a/1b/2a/2b evidence if run against them; a physical OnePlus Nord 5 with USB debugging is still needed for the real two-phone gates (§7) |
 | 16 | **No physical iPhone available** — only the simulator, which does not exercise real mDNS multicast or real `Network.framework` Bonjour behaviour between two independent radios. Phase 1b adds to this: the iOS **Keychain** path (a permanent key, `SecIdentityCreate` over a Keychain-resident key, survival across restart/upgrade) is exercised only with a *transient* key, because an unsigned `swift test` binary has no keychain entitlement | **High (blocks the Phase 1a and 1b gates)** | Needs a physical iPhone 17 Pro Max with a Personal Team signing identity (CLAUDE.md "Apple Signing") — a user decision, not made here |
 | 17 | **`detekt` cannot run on this machine without `-Dorg.gradle.java.home=…`** — the Gradle daemon inherits Temurin 25, detekt 1.23.8 is handed `25.0.3` as a JVM target and fails with a bare version string. Pre-existing, local-only (CI's daemon is JDK 21, so CI has always been green), and **not** fixable by setting `jvmTarget`/`jdkHome` on the task — both were tried and neither helped | Low | Use the flag (it is in every §3 command), or set `org.gradle.java.home` in `~/.gradle/gradle.properties`. A committed daemon-JVM criterion (`gradle/gradle-daemon-jvm.properties`) would fix it portably but risks breaking CI if the criterion cannot be satisfied there, so it was not done blind |
 | 18 | **`ControlSessionManager` is the largest class in the codebase, and Phase 2a made it larger.** detekt's `LargeClass` fired the first time the voice wiring went in inline; the whole voice half was extracted to `VoiceSignalRelay` on both platforms in response, leaving ~20 lines of wiring, and there is no smaller way to attach a subsystem to it. The class was **already at 608 counted lines before Phase 2a touched it**, so `config/detekt/detekt.yml` now documents a `LargeClass` threshold with the reason. That headroom is the last of it | **Medium** (was Low) | Unchanged and now overdue: extract a `PairingController` owning the socket-facing half (`beginPairing`, `sendPairRequest`, `applyPairingStep`, `succeedPairing`, `failPairing`, `handlePairingFrame`, `activateAuthenticatedSession`), as a change that is **only** that refactor. It touches the pairing and trust-gate paths, which is precisely why it must not ride along with a feature |
@@ -2046,7 +2199,7 @@ session and route), and integration tests I-01…I-25. Full list in `docs/TEST_P
 | 20 | **`SessionCoordinator` itself is still not directly unit-testable on either platform** — Android's needs a concrete `NsdDiscoveryController` (an Android type), and iOS's lives in the app target, which has no test target. That is precisely the gap the §2g bug hid in: a `when`/`switch` no suite could reach. It is now *mostly* closed by moving the decision into `SessionGate` (pure, mirrored, vector-pinned), leaving the coordinator a thin applier — but "thin" is a code reading, not a test | Medium | Either (a) give `NsdDiscoveryController` an interface and add an `app`-module test, or (b) add a test target to `RideLink.xcodeproj`. Do **not** let logic drift back into the coordinator in the meantime: anything with a decision in it belongs behind `SessionGate` or another pure, mirrored type |
 | 30 | **VOX has no microphone-driven level source on either platform.** The threshold/hangover state machine is implemented, deterministic and vector-pinned; nothing supplies it a level. Neither pinned WebRTC distribution exposes a fast per-frame input level through public API — the only level either offers is `audioLevel`/`totalAudioEnergy` on the statistics report, which RideLink polls every 2 s, three orders of magnitude too slow to gate speech. [ADR-021 §6](DECISIONS/ADR-021-intercom-transmission-and-capture-ownership.md) declines to hand-write a detector to fill the gap, for the same reason ADR-003 declines custom echo/noise DSP: an unmeasured detector is worse than an honest gap. **Selecting Mode B today means the gate cannot open**, `voxLevelSourceAvailable` is `false`, and the intercom card says so on screen | Medium | Two options when it matters: an `AudioDeviceModule` raw-PCM samples callback plus a *measured* detector (Android has `JavaAudioDeviceModule.setSamplesReadyCallback`; Apple has no public equivalent), or accept PTT/continuous as the shipped gates. **Do not implement either before A-14** — the threshold that matters is the one a helmet unit sees at 100 km/h, and nothing has measured it |
 | 31 | **`assertEquals` immediately after an await on a *different* observable is a race, and this codebase now has three examples of it.** Phase 2b's stress pass caught one (§3: a wire frame is visible a few instructions before the diagnostics describing it); problem 28 was two more, in a different subsystem. The shape is always the same: two independently-published values, one awaited, the other asserted | Low | A discipline, not a fix: when a test awaits X and asserts Y, await Y too. Worth a `tools/` lint if it recurs a fourth time |
-| 22 | **The Android WebRTC media path has no test of any kind.** `PeerConnectionFactory.initialize` requires an Android `Context`, so `WebRtcVoiceEngine` on Android cannot be exercised by a JVM unit test, and no emulator or device is available here. It compiles and is wired; that is the entire claim. The iOS side has a real two-engine media test because the XCFramework carries a macOS slice — Android has no equivalent | **High (blocks the Phase 2a gate)** | An emulator would give a first signal (`sdkmanager` + an AVD, which changes the toolchain and was not attempted without asking); the real answer is V-01…V-11 on the phones |
+| 22 | **The Android WebRTC media path has no test of any kind.** `PeerConnectionFactory.initialize` requires an Android `Context`, so `WebRtcVoiceEngine` on Android cannot be exercised by a JVM unit test. An Android emulator (`RideLink_API36`) now exists (Phase 3 session, §2q) and has run real Room/Media3 instrumented tests, but **nothing has run `WebRtcVoiceEngine`/`PeerConnectionFactory` on it** — the emulator's use so far is Phase 3 local-music-only, not a resolution of this problem. It compiles and is wired; that is still the entire claim for the voice/WebRTC path. The iOS side has a real two-engine media test because the XCFramework carries a macOS slice — Android has no equivalent | **High (blocks the Phase 2a gate)** | The emulator that now exists can give a first signal for this specifically (run `WebRtcVoiceEngine`'s instrumented tests on `RideLink_API36`) without waiting for a physical phone; the real answer is still V-01…V-11 on the phones |
 | 23 | **Neither audio-session implementation has ever run.** `AndroidVoiceAudioSession` (`AudioManager`, `MODE_IN_COMMUNICATION`, `setCommunicationDevice`) and `IosVoiceAudioSession` (`AVAudioSession` two-configuration switch, all three notifications) are untestable off-device — `AVAudioSession` does not exist on macOS. **Narrowed by Phase 2b, not closed:** every *decision* either of them used to make now lives in `AudioSessionLifecycle`, a shared pure reducer with mirrored suites on both platforms (§2m), and both route mappers and Android's device selector are pure and tested. What remains untested is the **API calls themselves** — whether `setCategory`/`setActive` actually provoke a `.categoryChange` notification, whether `setCommunicationDevice` reaches a helmet unit, whether the duplex configuration yields a duplex route, and how long the switch takes | **High (blocks the Phase 2a/2b gates)** | V-01…V-11, IA-01…IA-09 and A-12…A-15 |
 | 24 | **Every value in both route mappers marked `assumed` is a reasoned guess.** *(Unchanged by Phase 2b — no hardware was measured, so nothing moved off `assumed` and both mappers' tests still assert it.)* `TYPE_BLUETOOTH_SCO`/`.bluetoothHFP` → `duplex_wideband` assumes mSBC rather than CVSD; `input_forces_output` for all Bluetooth is ADR-016's central claim asserted, not measured; LE Audio is deliberately *not* claimed to preserve music quality. Both mappers report `confidence: assumed` and their tests **assert** that, so the tests are what will change when the measurement exists | Medium | A-12/A-13, then A-15 flips `confidence` and fills `docs/PHASE0_RESULTS.md` |
 | 25 | **`RideForegroundService` has never started.** Whether the `microphone` foreground-service type is accepted, whether capture survives a screen lock, whether the notification's mute/end actions work from a lock screen, and whether `ForegroundServiceStartNotAllowedException` fires in practice are all device facts. **Narrowed by Phase 2b, not closed:** the *decision* to start is `RideStartPolicy`, pure and exhausted over its whole 2^7 request cross-product including "no decision ever opens capture from the background" (§2m), and the service gained the two lock-screen actions ARCHITECTURE §6.4 requires. The platform behaviour is still entirely unverified | **High (blocks the Phase 2a/2b gates)** | V-08, AF-01, AF-05 |
@@ -2097,20 +2250,30 @@ Not blocking Phase 1. Answers needed before Phase 6.
 ## 7. Next exact task
 
 **Phase 3 — local music player. IMPLEMENTATION COMPLETE — REAL-DEVICE LOCAL-MUSIC GATE PENDING**
-(§2q). Library import/index/search, a local queue, and local playback are done on both platforms,
-verified by real execution this machine can run (a real Android emulator; real `AVAudioEngine`/
-GRDB/AVFoundation/CryptoKit under `swift test` on macOS, since none of those four is iOS-only). What
-remains: everything an actual phone would show — a real document-picker walkthrough on a device
-(the iOS half of this specifically, since this sandboxed macOS environment has no interactive
-Simulator.app window to drive one), real storage/battery behaviour over a realistic personal
-library, and the two audio-focus/ducking gaps §2q names as honestly out of scope this phase (Phase
-6's job). The Phase 2b real-device intercom gate below is unchanged by any of this — Phase 3 was
-started under a deliberate, explicit override of that gate rather than a claim that it closed (§1's
-amendment).
+(§2q, closure-audited in §2r). Library import/index/search, a local queue, local playback, Android
+`MediaSession` (ADR-022) and iOS `MPNowPlayingInfoCenter`/`MPRemoteCommandCenter` are done on both
+platforms, verified by real execution this machine can run (a real Android emulator; real
+`AVAudioEngine`/GRDB/AVFoundation/CryptoKit under `swift test` on macOS, since none of those four is
+iOS-only). The closure audit's seven confirmed findings (A–G) are all fixed and verified — see §2r
+for exactly what each was and how it was closed, including the CRITICAL local-identity bug (Finding
+A) that would have silently merged or lost distinct files' bytes. What remains: everything an actual
+phone would show — a real document-picker walkthrough on a device (the iOS half of this
+specifically, since this sandboxed macOS environment has no interactive Simulator.app window to
+drive one), real storage/battery behaviour over a realistic personal library, and the two
+audio-focus/ducking gaps §2q names as honestly out of scope this phase (Phase 6's job). The Phase 2b
+real-device intercom gate below is unchanged by any of this — Phase 3 was started under a
+deliberate, explicit override of that gate rather than a claim that it closed (§1's amendment).
 
 **Phase 2b — intercom integration and audio lifecycle. IMPLEMENTATION COMPLETE, REAL-DEVICE INTERCOM
-GATE PENDING.** Everything below is done and verified by the automatable tests this machine can run.
-What remains is hardware.
+GATE PENDING — AND, as of §2r, ONE CONFIRMED TIMEOUT-OWNERSHIP DEFECT NOT YET FIXED.** Everything
+below is done and verified by the automatable tests this machine can run, **except** the timing
+relationship between `VoiceController.stopAndAwaitRelease()`'s outer failure-protection timeout and
+`AndroidVoiceAudioSession.close()`'s inner route-transition timeout: the outer one is structurally
+guaranteed to fire first, and the caller's next step (`VoiceController.shutdown()`) actively cancels
+`close()` while it may still be legitimately running, leaking a platform callback registration and
+skipping a gate update. Confirmed in §2r; **not fixed**, per that pass's explicit scope limit —
+next session's exact first task for Phase 2b, before anything else in this section may be called
+closed. What otherwise remains is hardware.
 
 **The eleventh session (§2n, ADR-021 Amendment A1) hardened eight real ordering/lifecycle bugs found
 by independent review — real generation-tagging and priority draining in iOS's notification path,
