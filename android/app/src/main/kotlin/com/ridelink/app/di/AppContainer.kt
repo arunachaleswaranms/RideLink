@@ -8,6 +8,7 @@ import com.ridelink.app.music.MusicCoordinator
 import com.ridelink.app.service.RideCommand
 import com.ridelink.app.service.RideCommandBus
 import com.ridelink.app.service.RideForegroundService
+import com.ridelink.app.service.RideMediaSessionSource
 import com.ridelink.app.session.ForegroundServiceController
 import com.ridelink.app.session.SessionCoordinator
 import com.ridelink.app.session.SessionEnvironment
@@ -199,6 +200,11 @@ class AppContainer(
             )
         installRideNotificationCommands()
         observeMusicActivity()
+        // ADR-022: hand RideForegroundService the one real player and the one real queue owner so
+        // its MediaSession is a control surface in front of them, never a second player or a second
+        // queue owner. Set once, here, well before any user action can start that service.
+        RideMediaSessionSource.player = musicPlayer.media3Player
+        RideMediaSessionSource.coordinator = musicCoordinator
     }
 
     /**

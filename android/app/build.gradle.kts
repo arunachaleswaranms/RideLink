@@ -13,6 +13,7 @@ android {
         targetSdk = 36
         versionCode = 1
         versionName = "0.1.0"
+        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
     buildTypes {
@@ -53,12 +54,25 @@ dependencies {
     // AppContainer builds the one Room instance directly (RideLinkDatabase's class lives in
     // :data, but Room.databaseBuilder itself is not re-exported by an `implementation` dependency).
     implementation(libs.room.runtime)
+    // ADR-022: RideForegroundService builds the one real `MediaSession` here, in `app` — the one
+    // module allowed to depend on both `audio` (where the real ExoPlayer lives) and the session it
+    // is attached to. `androidx-media` is the older support-media artifact `MediaStyle`/
+    // `MediaSessionCompat.Token` come from; media3-session only pulls it in at runtime, not compile
+    // time (see the version catalog comment).
+    implementation(libs.media3.session)
+    implementation(libs.androidx.media)
 
     debugImplementation(libs.compose.ui.tooling)
 
     testImplementation(libs.junit.jupiter)
     testImplementation(libs.kotlin.test)
     testImplementation(libs.kotlin.test.junit5)
+
+    androidTestImplementation(libs.androidx.test.runner)
+    androidTestImplementation(libs.androidx.test.junit)
+    androidTestImplementation(libs.junit4)
+    androidTestImplementation(libs.kotlin.test)
+    androidTestImplementation(libs.kotlinx.coroutines.test)
 }
 
 tasks.withType<Test> {

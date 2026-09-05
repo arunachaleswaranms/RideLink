@@ -8,6 +8,7 @@ androidxTestRunner = "1.7.0"
 androidxTestJunit = "1.3.0"
 junit4 = "4.13.2"
 media3 = "1.11.0"
+androidxMedia = "1.7.0"
 composeBom = "2026.04.01"
 coreKtx = "1.18.0"
 activityCompose = "1.13.0"
@@ -52,6 +53,11 @@ junit4 = { group = "junit", name = "junit", version.ref = "junit4" }
 media3-exoplayer = { group = "androidx.media3", name = "media3-exoplayer", version.ref = "media3" }
 media3-session = { group = "androidx.media3", name = "media3-session", version.ref = "media3" }
 media3-common = { group = "androidx.media3", name = "media3-common", version.ref = "media3" }
+# Not media3 — the older support-media artifact, needed for `androidx.media.app.NotificationCompat.MediaStyle`
+# and `MediaSessionCompat.Token`, which media3-session depends on only at *runtime* (its Gradle
+# metadata puts it in the runtime variant, not the api one) so it is not on any module's compile
+# classpath unless declared directly (ADR-022).
+androidx-media = { group = "androidx.media", name = "media", version.ref = "androidxMedia" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }

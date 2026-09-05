@@ -119,8 +119,16 @@ value class ContentHash(
 /**
  * `SHA-256(size_bytes ‖ first 64 KiB ‖ last 64 KiB)` (ADR-005) — the cheap tier computed at scan
  * time, before the authoritative [ContentHash] is known. Same wire format as [ContentHash]
- * (PROTOCOL §8.1: `"quick_id": "sha256:77bd…"`) and used as the stable local index key: it survives
- * a rename, unlike a path, and is available immediately, unlike the full hash.
+ * (PROTOCOL §8.1: `"quick_id": "sha256:77bd…"`) and available immediately, unlike the full hash.
+ *
+ * **Not authoritative identity, and never used to decide two files are the same content** (ADR-005
+ * Amendment A1, this phase's closure-audit hardening pass). Two files over 128 KiB with the same
+ * size and identical first/last 64 KiB but a different middle would collide onto the same
+ * [QuickId] while being genuinely different content — not a SHA-256 collision, just a consequence
+ * of only sampling part of the file. `QuickId`'s only legitimate roles are indexing/change
+ * detection (has *this same, already-known* location's file changed since last seen?) and
+ * catalogue display; [LocalEntryId] is the real per-row identity, and [ContentHash] is the only
+ * thing authoritative enough to ever justify merging two rows.
  */
 @JvmInline
 value class QuickId(
@@ -134,5 +142,32 @@ value class QuickId(
         private val FORMAT = Regex("^sha256:[0-9a-f]{64}$")
 
         fun parse(value: String): QuickId? = if (FORMAT.matches(value)) QuickId(value) else null
+    }
+}
+
+/**
+ * This phone's own local identity for one library row (ADR-005 Amendment A1). Generated once, the
+ * moment a location is first indexed, and never recomputed or derived from the file's bytes — unlike
+ * [QuickId] (a lossy 128 KiB sample) or [ContentHash] (authoritative but lazy), a [LocalEntryId] has
+ * no relationship to content at all, so two distinct files can never collide onto the same one. It
+ * is what a player/queue/artwork cache must key on to unambiguously mean *this specific row*, now
+ * that [QuickId] is no longer guaranteed unique across rows.
+ *
+ * Never sent over the wire and never persisted past a reindex-from-scratch — this is local
+ * bookkeeping only, the same way [LocalTrackLocation][com.ridelink.core.library.LocalTrackLocation]
+ * is.
+ */
+@JvmInline
+value class LocalEntryId(
+    val value: String,
+) {
+    init {
+        require(FORMAT.matches(value)) { "LocalEntryId must be a lowercase UUID" }
+    }
+
+    companion object {
+        private val FORMAT = Regex("^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+
+        fun parse(value: String): LocalEntryId? = if (FORMAT.matches(value)) LocalEntryId(value) else null
     }
 }

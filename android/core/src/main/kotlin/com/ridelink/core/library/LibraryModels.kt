@@ -1,5 +1,6 @@
 package com.ridelink.core.library
 
+import com.ridelink.core.model.LocalEntryId
 import com.ridelink.core.model.Track
 
 /**
@@ -39,8 +40,14 @@ enum class DecodeStatus {
  * since REQUIREMENTS §16 already defines exactly the fields Phase 3 needs), where it lives on this
  * phone, and this phone's own bookkeeping about it. Never shared, never sent — Phase 3 is local-only
  * (this phase's brief §2/§28).
+ *
+ * [localEntryId] — not [Track.quickId] — is this row's real identity (ADR-005 Amendment A1). It is
+ * generated once, when [location] is first indexed, and carried forward unchanged across every
+ * rescan that finds the same location again or detects it changed in place; it is never recomputed
+ * from content and never shared with any other row, even one whose [Track.quickId] happens to match.
  */
 data class LibraryEntry(
+    val localEntryId: LocalEntryId,
     val track: Track,
     val location: LocalTrackLocation,
     val decodeStatus: DecodeStatus,

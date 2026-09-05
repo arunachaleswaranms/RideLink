@@ -25,9 +25,22 @@ fun MusicSection(
     val entries by musicCoordinator.libraryEntries.collectAsState()
     val queueState by musicCoordinator.queueState.collectAsState()
     val playerState by musicCoordinator.playerState.collectAsState()
-    val currentEntry = queueState.currentItem?.let { item -> entries.firstOrNull { it.track.quickId == item.quickId } }
+    val lastMusicStartRefusal by musicCoordinator.lastMusicStartRefusal.collectAsState()
+    // Matched by localEntryId, not quickId (ADR-005 Amendment A1) — quickId is not guaranteed
+    // unique across entries, so matching on it could show the wrong track's metadata/artwork here.
+    val currentEntry = queueState.currentItem?.let { item -> entries.firstOrNull { it.localEntryId == item.localEntryId } }
 
     Text("Local Music", style = MaterialTheme.typography.headlineSmall)
+
+    // This phase's closure-audit hardening pass (Finding E): named rather than silent when Android
+    // refuses to start the ride foreground service for music — never retried automatically.
+    if (lastMusicStartRefusal != null) {
+        Text(
+            "Could not start music — bring RideLink to the front and try again",
+            color = MaterialTheme.colorScheme.error,
+            style = MaterialTheme.typography.bodySmall,
+        )
+    }
 
     NowPlayingCard(
         playerState = playerState,

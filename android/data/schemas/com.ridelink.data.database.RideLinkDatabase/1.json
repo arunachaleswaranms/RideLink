@@ -2,16 +2,22 @@
   "formatVersion": 1,
   "database": {
     "version": 1,
-    "identityHash": "570a3c403c24c945f25919a55880b2f4",
+    "identityHash": "fb3927403d8e696842afb79ce6cb8dc9",
     "entities": [
       {
         "tableName": "tracks",
-        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `quickId` TEXT NOT NULL, `contentHash` TEXT, `title` TEXT NOT NULL, `artist` TEXT NOT NULL, `album` TEXT NOT NULL, `durationMs` INTEGER NOT NULL, `filename` TEXT NOT NULL, `codec` TEXT NOT NULL, `bitrateKbps` INTEGER NOT NULL, `artworkRef` TEXT, `sizeBytes` INTEGER NOT NULL, `locationUri` TEXT NOT NULL, `decodeStatus` TEXT NOT NULL, `indexedAtMonoUs` INTEGER NOT NULL, `lastSeenAtMonoUs` INTEGER NOT NULL)",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `localEntryId` TEXT NOT NULL, `quickId` TEXT NOT NULL, `contentHash` TEXT, `title` TEXT NOT NULL, `artist` TEXT NOT NULL, `album` TEXT NOT NULL, `durationMs` INTEGER NOT NULL, `filename` TEXT NOT NULL, `codec` TEXT NOT NULL, `bitrateKbps` INTEGER NOT NULL, `artworkRef` TEXT, `sizeBytes` INTEGER NOT NULL, `locationUri` TEXT NOT NULL, `decodeStatus` TEXT NOT NULL, `indexedAtMonoUs` INTEGER NOT NULL, `lastSeenAtMonoUs` INTEGER NOT NULL)",
         "fields": [
           {
             "fieldPath": "id",
             "columnName": "id",
             "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "localEntryId",
+            "columnName": "localEntryId",
+            "affinity": "TEXT",
             "notNull": true
           },
           {
@@ -111,13 +117,31 @@
         },
         "indices": [
           {
-            "name": "index_tracks_quickId",
+            "name": "index_tracks_localEntryId",
             "unique": true,
+            "columnNames": [
+              "localEntryId"
+            ],
+            "orders": [],
+            "createSql": "CREATE UNIQUE INDEX IF NOT EXISTS `index_tracks_localEntryId` ON `${TABLE_NAME}` (`localEntryId`)"
+          },
+          {
+            "name": "index_tracks_locationUri",
+            "unique": true,
+            "columnNames": [
+              "locationUri"
+            ],
+            "orders": [],
+            "createSql": "CREATE UNIQUE INDEX IF NOT EXISTS `index_tracks_locationUri` ON `${TABLE_NAME}` (`locationUri`)"
+          },
+          {
+            "name": "index_tracks_quickId",
+            "unique": false,
             "columnNames": [
               "quickId"
             ],
             "orders": [],
-            "createSql": "CREATE UNIQUE INDEX IF NOT EXISTS `index_tracks_quickId` ON `${TABLE_NAME}` (`quickId`)"
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_tracks_quickId` ON `${TABLE_NAME}` (`quickId`)"
           },
           {
             "name": "index_tracks_contentHash",
@@ -184,7 +208,7 @@
     ],
     "setupQueries": [
       "CREATE TABLE IF NOT EXISTS room_master_table (id INTEGER PRIMARY KEY,identity_hash TEXT)",
-      "INSERT OR REPLACE INTO room_master_table (id,identity_hash) VALUES(42, '570a3c403c24c945f25919a55880b2f4')"
+      "INSERT OR REPLACE INTO room_master_table (id,identity_hash) VALUES(42, 'fb3927403d8e696842afb79ce6cb8dc9')"
     ]
   }
 }

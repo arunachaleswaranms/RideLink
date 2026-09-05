@@ -10,11 +10,17 @@ import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
+import android.support.v4.media.session.MediaSessionCompat
+import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
+import androidx.media.app.NotificationCompat.MediaStyle
+import androidx.media3.session.MediaSession
 import com.ridelink.app.R
+import com.ridelink.app.music.MusicCoordinator
 import com.ridelink.core.audiopolicy.ForegroundServiceTypeNeed
 import com.ridelink.core.audiopolicy.ForegroundServiceTypePolicy
 import java.util.concurrent.atomic.AtomicBoolean
+import androidx.media3.common.Player as Media3Player
 
 /**
  * What the ride notification's own controls ask the app to do.
@@ -48,6 +54,28 @@ object RideCommandBus {
     fun dispatch(command: RideCommand) {
         handler?.invoke(command)
     }
+}
+
+/**
+ * The one-hop bridge from the composition root's already-built player and queue owner to this
+ * service's `MediaSession` (ADR-022) — the same shape and reasoning as [RideCommandBus] above, just
+ * carrying the opposite direction's wiring. `AppContainer` sets both fields once, at process start,
+ * well before any user action can start this service; [RideForegroundService.onCreate] reads them
+ * once to build the session. Volatile, not a queue, for the same reason [RideCommandBus] is not
+ * one: there is nothing to buffer — either the one real player/coordinator pair is wired by the
+ * time this service instance is created, or the notification falls back to its pre-ADR-022 shape
+ * for that instance (see [RideForegroundService.buildNotification]).
+ *
+ * `player` is `androidx.media3.common.Player`, never `androidx.media3.exoplayer.ExoPlayer` —
+ * [MusicSessionPlayer] only needs the platform-neutral Media3 surface, and narrowing the type here
+ * keeps this bridge from becoming a second way to reach ExoPlayer-specific behaviour.
+ */
+object RideMediaSessionSource {
+    @Volatile
+    var player: Media3Player? = null
+
+    @Volatile
+    var coordinator: MusicCoordinator? = null
 }
 
 /**
@@ -93,8 +121,48 @@ object RideCommandBus {
  * compiles and is wired; that is all anyone may conclude from it.
  */
 class RideForegroundService : Service() {
+    /**
+     * ADR-022: a real, system-integrated `MediaSession`, owned by this service exactly the way the
+     * ADR requires — built here in [onCreate], released in [onDestroy], wired to the one real
+     * player [RideMediaSessionSource] was handed, never a second player or a second queue owner.
+     * `null` only if this instance was created before `AppContainer` finished wiring
+     * [RideMediaSessionSource] (should not happen in practice — `AppContainer` exists before any
+     * user action can start this service — but this is a foreground service the platform is free to
+     * recreate, so it is read defensively rather than assumed non-null).
+     */
+    private var mediaSession: MediaSession? = null
+
+    @androidx.media3.common.util.UnstableApi // MusicSessionPlayer (a ForwardingPlayer) is opt-in in this Media3 version.
+    override fun onCreate() {
+        super.onCreate()
+        val player = RideMediaSessionSource.player
+        val coordinator = RideMediaSessionSource.coordinator
+        if (player != null && coordinator != null) {
+            mediaSession =
+                MediaSession
+                    .Builder(this, MusicSessionPlayer(player, coordinator))
+                    .setId(MEDIA_SESSION_ID)
+                    .build()
+        }
+    }
+
+    override fun onDestroy() {
+        // Only the session, never the player: `MediaSession.release()` tears down this service's
+        // own control surface (listeners, connected controllers) and nothing else. The real
+        // `ExoPlayer` behind [RideMediaSessionSource.player] is owned by `AppContainer`/
+        // `ExoPlayerMusicPlayer` for the lifetime of the whole process, not by this service, which
+        // the platform is free to create and destroy independently of a ride ever happening.
+        mediaSession?.release()
+        mediaSession = null
+        super.onDestroy()
+    }
+
     override fun onBind(intent: Intent?): IBinder? = null
 
+    // Lint-only, no behaviour change: refreshForegroundState (unmodified below) calls the
+    // @UnstableApi buildNotification, and the annotation must propagate to every caller in the
+    // chain up to here. onStartCommand's own action dispatch is exactly as it was before ADR-022.
+    @androidx.media3.common.util.UnstableApi
     override fun onStartCommand(
         intent: Intent?,
         flags: Int,
@@ -140,6 +208,7 @@ class RideForegroundService : Service() {
      * so every path through [onStartCommand] is covered, not only the ones that go through
      * [stopIntercom]/[stopMusic].
      */
+    @androidx.media3.common.util.UnstableApi // buildNotification (below) is opt-in in this Media3 version.
     private fun refreshForegroundState(muted: Boolean) {
         val needs = ForegroundServiceTypePolicy.requiredTypes(intercomActive.get(), musicPlaying.get())
         if (needs.isEmpty()) {
@@ -183,36 +252,62 @@ class RideForegroundService : Service() {
 
     /**
      * Ongoing and non-dismissible while the service runs (ARCHITECTURE §6.4), and it carries the two
-     * actions the lock screen needs: mute and end-intercom.
+     * actions the lock screen needs: mute and end-intercom — exactly as before ADR-022.
      *
      * It names no peer and no device: a notification is visible on a lock screen to anyone holding the
      * phone, which makes it the same kind of surface as an mDNS TXT record (ARCHITECTURE §11).
+     *
+     * **ADR-022 addition**: `NotificationCompat.Builder`, not the bare platform `Notification.Builder`
+     * used before this ADR, so a `MediaStyle` (`androidx.media.app.NotificationCompat.MediaStyle`) can
+     * carry [mediaSession]'s compat token. That token is what turns this into a real, system-integrated
+     * media notification — the play/pause/skip-next/skip-previous transport controls it exposes reach
+     * the lock screen through the session itself ("the system reads transport-control affordances from
+     * a `MediaStyle` notification's session token regardless of what kind of component created that
+     * session," ADR-022 §2), never through a `PendingIntent` this method builds, and never by adding a
+     * third/fourth custom action here — [onStartCommand]'s action dispatch stays exactly as it was.
+     * [mediaSession] can be `null` (see its own KDoc); the notification degrades to its pre-ADR-022
+     * shape rather than crashing.
+     *
+     * The two custom actions keep their existing order in the compact view (this phase's judgement
+     * call — neither the ADR nor the brief pins an exact ordering): mute first, end-intercom second,
+     * unchanged from what shipped before this ADR.
      */
-    private fun buildNotification(muted: Boolean): Notification =
-        Notification
-            .Builder(this, CHANNEL_ID)
-            .setContentTitle(getString(R.string.ride_notification_title))
-            .setContentText(
-                getString(
-                    if (muted) R.string.ride_notification_text_muted else R.string.ride_notification_text,
-                ),
-            ).setSmallIcon(R.drawable.ic_launcher_foreground)
-            .setOngoing(true)
-            .addAction(
-                Notification.Action
-                    .Builder(
-                        null,
-                        getString(if (muted) R.string.ride_action_unmute else R.string.ride_action_mute),
-                        commandIntent(ACTION_TOGGLE_MUTE, REQUEST_TOGGLE_MUTE),
-                    ).build(),
-            ).addAction(
-                Notification.Action
-                    .Builder(
-                        null,
-                        getString(R.string.ride_action_end_intercom),
-                        commandIntent(ACTION_END_INTERCOM, REQUEST_END_INTERCOM),
-                    ).build(),
-            ).build()
+    @androidx.media3.common.util.UnstableApi // MediaSession.platformToken (below) is opt-in in this Media3 version.
+    private fun buildNotification(muted: Boolean): Notification {
+        val builder =
+            NotificationCompat
+                .Builder(this, CHANNEL_ID)
+                .setContentTitle(getString(R.string.ride_notification_title))
+                .setContentText(
+                    getString(
+                        if (muted) R.string.ride_notification_text_muted else R.string.ride_notification_text,
+                    ),
+                ).setSmallIcon(R.drawable.ic_launcher_foreground)
+                .setOngoing(true)
+                .addAction(
+                    NotificationCompat.Action
+                        .Builder(
+                            NO_ACTION_ICON,
+                            getString(if (muted) R.string.ride_action_unmute else R.string.ride_action_mute),
+                            commandIntent(ACTION_TOGGLE_MUTE, REQUEST_TOGGLE_MUTE),
+                        ).build(),
+                ).addAction(
+                    NotificationCompat.Action
+                        .Builder(
+                            NO_ACTION_ICON,
+                            getString(R.string.ride_action_end_intercom),
+                            commandIntent(ACTION_END_INTERCOM, REQUEST_END_INTERCOM),
+                        ).build(),
+                )
+        mediaSession?.let { session ->
+            builder.setStyle(
+                MediaStyle()
+                    .setMediaSession(MediaSessionCompat.Token.fromToken(session.platformToken))
+                    .setShowActionsInCompactView(MUTE_ACTION_INDEX, END_INTERCOM_ACTION_INDEX),
+            )
+        }
+        return builder.build()
+    }
 
     private fun commandIntent(
         action: String,
@@ -230,6 +325,16 @@ class RideForegroundService : Service() {
     companion object {
         private const val CHANNEL_ID = "ridelink.ride"
         private const val NOTIFICATION_ID = 1
+
+        // ADR-022. A fixed id, not the Media3 default: this service only ever has one real session,
+        // and the same reasoning "not a machine-specific detail" already applies elsewhere in this file.
+        private const val MEDIA_SESSION_ID = "ridelink.ride"
+
+        // NotificationCompat.Action's int-icon constructor with 0 means "no icon," matching the bare
+        // platform Notification.Action.Builder's `null` icon this file used before ADR-022.
+        private const val NO_ACTION_ICON = 0
+        private const val MUTE_ACTION_INDEX = 0
+        private const val END_INTERCOM_ACTION_INDEX = 1
         private const val ACTION_START_INTERCOM = "com.ridelink.ride.START_INTERCOM"
         private const val ACTION_START_MUSIC = "com.ridelink.ride.START_MUSIC"
         private const val ACTION_UPDATE_MUSIC_PLAYING = "com.ridelink.ride.UPDATE_MUSIC_PLAYING"

@@ -4,6 +4,7 @@ import com.ridelink.core.library.DecodeStatus
 import com.ridelink.core.library.LibraryEntry
 import com.ridelink.core.library.LocalTrackLocation
 import com.ridelink.core.model.ContentHash
+import com.ridelink.core.model.LocalEntryId
 import com.ridelink.core.model.QuickId
 import com.ridelink.core.model.Track
 import com.ridelink.data.database.TrackEntity
@@ -15,6 +16,7 @@ import com.ridelink.data.database.TrackEntity
  */
 fun TrackEntity.toDomain(): LibraryEntry =
     LibraryEntry(
+        localEntryId = LocalEntryId(localEntryId),
         track =
             Track(
                 contentHash = contentHash?.let { ContentHash.parse(it) },
@@ -37,6 +39,7 @@ fun TrackEntity.toDomain(): LibraryEntry =
 
 fun LibraryEntry.toEntity(): TrackEntity =
     TrackEntity(
+        localEntryId = localEntryId.value,
         quickId = track.quickId.value,
         contentHash = track.contentHash?.value,
         title = track.title,

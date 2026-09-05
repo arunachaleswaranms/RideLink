@@ -207,10 +207,21 @@ class MainActivity : ComponentActivity() {
      * playback state changes) is a safe no-op while the service is not yet running, by
      * construction, so the **first** start for music alone has to happen here, exactly once,
      * before actually calling play.
+     *
+     * This phase's closure-audit hardening pass (Finding E): [RideForegroundService.startMusicFromVisibleUi]
+     * returns `false` when the platform refused the start (`ForegroundServiceStartNotAllowedException`
+     * and friends, caught inside it) — that return value used to be discarded, so playback proceeded
+     * as though background ownership were established even when Android rejected it. Never retried
+     * silently from here; [MusicCoordinator.onForegroundServiceStartFailed] records the refusal for
+     * the UI, mirroring [attemptIntercomStart]'s existing discipline for its own foreground-service
+     * start.
      */
     private fun attemptMusicPlay(musicCoordinator: MusicCoordinator) {
         if (!foregroundVisible) return
-        RideForegroundService.startMusicFromVisibleUi(this)
+        if (!RideForegroundService.startMusicFromVisibleUi(this)) {
+            musicCoordinator.onForegroundServiceStartFailed()
+            return
+        }
         musicCoordinator.play()
     }
 
@@ -229,7 +240,10 @@ class MainActivity : ComponentActivity() {
         entry: LibraryEntry,
     ) {
         if (!foregroundVisible) return
-        RideForegroundService.startMusicFromVisibleUi(this)
+        if (!RideForegroundService.startMusicFromVisibleUi(this)) {
+            musicCoordinator.onForegroundServiceStartFailed()
+            return
+        }
         musicCoordinator.playNow(entry)
     }
 

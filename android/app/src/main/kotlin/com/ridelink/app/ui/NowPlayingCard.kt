@@ -84,6 +84,7 @@ private fun playerFailureLabel(failure: com.ridelink.core.player.MusicFailure): 
         com.ridelink.core.player.MusicFailure.UNSUPPORTED_FORMAT -> "unsupported format"
         com.ridelink.core.player.MusicFailure.STORAGE_IO -> "storage error"
         com.ridelink.core.player.MusicFailure.CANCELLED -> "cancelled"
+        com.ridelink.core.player.MusicFailure.FOREGROUND_SERVICE_START_FAILED -> "bring RideLink to the front and try again"
     }
 
 private const val MILLIS_PER_SECOND = 1000L

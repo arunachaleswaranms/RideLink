@@ -3,48 +3,68 @@ package com.ridelink.core.library
 import com.ridelink.core.model.QuickId
 
 /**
- * Decides what a scan pass means for the library, from [QuickId] sets alone — no I/O, no file
- * handles, no clock (CLAUDE.md rule 9). [QuickId] rather than [com.ridelink.core.model.ContentHash]
- * is the right key here: it is always known immediately at scan time (ADR-005), unlike the full
- * hash, which is computed lazily.
+ * Decides what a scan pass means for the library, from location/[QuickId] pairs alone — no I/O, no
+ * file handles, no clock (CLAUDE.md rule 9).
  *
- * **Two files with byte-identical content collapse to one [QuickId]** — this is the intended
- * duplicate-detection behaviour (FR-010, this phase's brief §7): "same content, different
- * filename" is not two library entries, it is one entry whose location may point at either copy.
- * If a rescan sees both, [discoveredQuickIds] contains the id exactly once regardless (it's a
- * `Set`), so [reconcile] treats it as a single still-present track — the platform layer decides
- * which of the two on-disk locations a duplicate's single row points at, by upserting with
- * whichever location the most recent scan produced.
+ * **ADR-005 Amendment A1 (this phase's closure-audit hardening pass).** This used to reconcile on
+ * bare `Set<QuickId>`, which meant two *different* locations sharing a [QuickId] collapsed into one
+ * library row — safe only because [QuickId] was (wrongly) assumed to prove identity. It does not:
+ * `QuickId` samples only the size plus the first/last 64 KiB, so two files over 128 KiB that differ
+ * solely in the middle produce the *same* `QuickId` while being genuinely different content. That is
+ * not a SHA-256 collision, just a consequence of sampling, and it is deterministic and constructible,
+ * not merely theoretical.
  *
- * A **rename** is invisible here by design: the content is unchanged, so its [QuickId] is
- * unchanged, so it lands in [ReconciliationPlan.stillPresentQuickIds] — no reindex, no hash
- * recomputation (brief §19: "avoid hashing the same unchanged file repeatedly"). The platform
- * layer still updates the stored location/filename for a still-present id on every scan, because
- * the *location* may have moved even though the *identity* has not.
+ * The identity this reconciles on now is **[LocalTrackLocation]** — one row per on-disk location,
+ * which can never falsely collide, because two distinct files are, definitionally, at two distinct
+ * locations. [QuickId] is demoted to exactly the roles ADR-005 actually grants it: comparing the
+ * freshly-discovered `QuickId` for an **already-known** location against its previously-stored one is
+ * a safe, cheap way to detect "this specific file changed in place" (the consequence ADR-005 already
+ * documents: "A file edited in place changes both hashes; `quick_id` detects it cheaply on rescan"),
+ * because both values are known to describe the same location — there is no cross-location
+ * comparison anywhere in this file.
+ *
+ * **A rename is no longer invisible.** The previous design treated a same-`QuickId` reappearance at a
+ * new location as the same row, moved. That relied on exactly the unsafe cross-location `QuickId`
+ * comparison this amendment removes, so it is not preserved: a renamed file now surfaces as one
+ * [ReconciliationPlan.missingLocations] entry plus one [ReconciliationPlan.newLocations] entry —
+ * Phase 3 does not attempt to reconcile the two by content, deliberately (see [TrackEntity][com.ridelink.data.database.TrackEntity]'s
+ * doc: real cross-row duplicate collapsing is Phase 4/5 transfer scope, not a Phase 3 concern).
  */
 object IndexReconciliation {
     fun reconcile(
-        previousQuickIds: Set<QuickId>,
-        discoveredQuickIds: Set<QuickId>,
-    ): ReconciliationPlan =
-        ReconciliationPlan(
-            newQuickIds = discoveredQuickIds - previousQuickIds,
-            stillPresentQuickIds = discoveredQuickIds.intersect(previousQuickIds),
-            missingQuickIds = previousQuickIds - discoveredQuickIds,
+        previous: Map<LocalTrackLocation, QuickId>,
+        discovered: Map<LocalTrackLocation, QuickId>,
+    ): ReconciliationPlan {
+        val stillPresent = discovered.keys.intersect(previous.keys)
+        val unchanged = stillPresent.filterTo(mutableSetOf()) { discovered.getValue(it) == previous.getValue(it) }
+        return ReconciliationPlan(
+            newLocations = discovered.keys - previous.keys,
+            unchangedLocations = unchanged,
+            changedLocations = stillPresent - unchanged,
+            missingLocations = previous.keys - discovered.keys,
         )
+    }
 }
 
 /**
- * @property newQuickIds Not indexed before; the full pipeline (hash/metadata/artwork) must run.
- * @property stillPresentQuickIds Indexed before and seen again; only [LibraryEntry.lastSeenAtMonoUs]
- *   and, if it changed, [LocalTrackLocation] need updating.
- * @property missingQuickIds Indexed before, not seen this scan; the platform layer marks the
+ * @property newLocations Never indexed before; the full pipeline (hash/metadata/artwork) must run
+ *   and a fresh [com.ridelink.core.model.LocalEntryId] is generated.
+ * @property unchangedLocations Indexed before, seen again, and [QuickId] unchanged since last scan —
+ *   only [LibraryEntry.lastSeenAtMonoUs] (and, if it had gone missing, [LibraryEntry.decodeStatus])
+ *   need updating. The existing [com.ridelink.core.model.LocalEntryId] is untouched.
+ * @property changedLocations Indexed before, seen again, but [QuickId] differs from last time — the
+ *   file at this same location was edited in place. The full pipeline reruns for this location, but
+ *   its existing [com.ridelink.core.model.LocalEntryId] is preserved (this is still the same row) and
+ *   its [com.ridelink.core.model.ContentHash] is invalidated back to unknown, since the old hash no
+ *   longer describes the current bytes.
+ * @property missingLocations Indexed before, not seen this scan; the platform layer marks the
  *   corresponding [LibraryEntry.decodeStatus] as [DecodeStatus.MISSING] rather than deleting the
  *   row — a removable drive or an unmounted SAF tree can bring a "missing" file back on the next
  *   scan (brief §10's "file removed" case is a state, not a deletion).
  */
 data class ReconciliationPlan(
-    val newQuickIds: Set<QuickId>,
-    val stillPresentQuickIds: Set<QuickId>,
-    val missingQuickIds: Set<QuickId>,
+    val newLocations: Set<LocalTrackLocation>,
+    val unchangedLocations: Set<LocalTrackLocation>,
+    val changedLocations: Set<LocalTrackLocation>,
+    val missingLocations: Set<LocalTrackLocation>,
 )

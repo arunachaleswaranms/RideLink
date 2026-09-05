@@ -4,9 +4,10 @@ import android.content.Context
 import android.net.Uri
 import androidx.media3.common.C
 import androidx.media3.common.MediaItem
+import androidx.media3.common.MediaMetadata
 import androidx.media3.common.PlaybackException
 import androidx.media3.exoplayer.ExoPlayer
-import com.ridelink.core.model.QuickId
+import com.ridelink.core.model.LocalEntryId
 import com.ridelink.core.player.MusicFailure
 import com.ridelink.core.player.PlaybackCommand
 import com.ridelink.core.player.Player
@@ -38,6 +39,15 @@ class ExoPlayerMusicPlayer(
     private val mainScope: CoroutineScope,
 ) : Player {
     private val exoPlayer: ExoPlayer = ExoPlayer.Builder(context.applicationContext).build()
+
+    /**
+     * The real `androidx.media3.common.Player` this instance wraps, exposed only so the composition
+     * root (`app`) can attach a real `androidx.media3.session.MediaSession` around the *same* player
+     * `MusicCoordinator` already drives (ADR-022) — never through [com.ridelink.core.player.Player],
+     * which must stay platform-free (ADR-014). Nothing in `audio` or `core` reads this; the one
+     * caller is `RideForegroundService`'s composition-root wiring in `app`.
+     */
+    val media3Player: Media3Player get() = exoPlayer
 
     @Volatile
     private var cachedState: PlayerState = PlayerState()
@@ -76,7 +86,7 @@ class ExoPlayerMusicPlayer(
     override suspend fun execute(command: PlaybackCommand): Result<Unit> =
         withContext(Dispatchers.Main.immediate) {
             when (command) {
-                is PlaybackCommand.Load -> load(command.quickId, command.location.uri)
+                is PlaybackCommand.Load -> load(command.localEntryId, command.location.uri, command.title, command.artist)
                 PlaybackCommand.Play -> exoPlayer.play()
                 PlaybackCommand.Pause -> exoPlayer.pause()
                 is PlaybackCommand.Seek -> {
@@ -97,14 +107,30 @@ class ExoPlayerMusicPlayer(
         }
 
     private fun load(
-        quickId: QuickId,
+        localEntryId: LocalEntryId,
         uri: String,
+        title: String?,
+        artist: String?,
     ) {
         stopPositionTicking()
-        cachedState = PlayerState(quickId = quickId)
+        cachedState = PlayerState(localEntryId = localEntryId)
         emit(cachedState)
         runCatching {
-            exoPlayer.setMediaItem(MediaItem.fromUri(Uri.parse(uri)))
+            val mediaItem =
+                MediaItem
+                    .Builder()
+                    .setUri(Uri.parse(uri))
+                    // Real title/artist here (ADR-022), not left to whatever embedded tags the file
+                    // happens to carry — the one place a lock-screen/MediaSession metadata query
+                    // (`Player.getMediaMetadata()`) gets a real answer rather than an empty one.
+                    .setMediaMetadata(
+                        MediaMetadata
+                            .Builder()
+                            .setTitle(title)
+                            .setArtist(artist)
+                            .build(),
+                    ).build()
+            exoPlayer.setMediaItem(mediaItem)
             exoPlayer.prepare()
         }.onFailure { error ->
             updateState { it.copy(error = classify(error)) }

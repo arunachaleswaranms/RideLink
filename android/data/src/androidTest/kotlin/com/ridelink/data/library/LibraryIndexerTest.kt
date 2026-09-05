@@ -63,6 +63,17 @@ class LibraryIndexerTest {
         return Uri.fromFile(outFile)
     }
 
+    /** Writes [bytes] directly (no asset involved) and returns a `file://` [Uri] for it — used to
+     *  construct exact, deterministic byte patterns a pre-baked asset cannot express concisely. */
+    private fun writeRawFixture(
+        name: String,
+        bytes: ByteArray,
+    ): Uri {
+        val outFile = File(context.filesDir, "fixture-${System.nanoTime()}-$name")
+        outFile.writeBytes(bytes)
+        return Uri.fromFile(outFile)
+    }
+
     @Test
     fun importingANormalTrackExtractsRealMetadataAndArtwork() =
         runBlocking {
@@ -109,11 +120,69 @@ class LibraryIndexerTest {
         }
 
     @Test
-    fun byteIdenticalDuplicatesDedupToOneLibraryEntry() =
+    fun byteIdenticalDuplicatesAtTwoLocationsRemainTwoIndependentEntries() =
         runBlocking {
+            // ADR-005 Amendment A1: Phase 3 no longer collapses rows by QuickId at index time — real,
+            // authoritative duplicate collapsing (FR-010) is Phase 4/5 transfer scope, keyed on
+            // ContentHash once both sides have it, never performed eagerly here. Two byte-identical
+            // files at two different locations are, correctly, two independent local library rows in
+            // Phase 3's catalogue.
             indexer.importFiles(listOf(fixtureUri("duplicate_a.m4a"), fixtureUri("duplicate_b.m4a")))
             val entries = repository.observe(LibraryQuery()).first()
-            assertEquals(1, entries.size, "byte-identical content must dedup to exactly one entry (FR-010)")
+            assertEquals(2, entries.size)
+            assertEquals(2, entries.map { it.localEntryId }.toSet().size, "each location must have its own distinct identity")
+            assertEquals(
+                1,
+                entries.map { it.track.quickId }.toSet().size,
+                "both really do share one QuickId, as byte-identical files should",
+            )
+        }
+
+    @Test
+    fun twoFilesSharingAQuickIdButDifferingInTheMiddleAreNeverCollapsedIntoOneEntry() =
+        runBlocking {
+            // ADR-005 Amendment A1 / this phase's closure-audit CRITICAL finding, reproduced with real
+            // bytes through the real indexing pipeline. QuickId = SHA-256(size || first 64 KiB ||
+            // last 64 KiB) samples only part of the file: two files over 128 KiB with the same size and
+            // identical first/last 64 KiB windows but a different middle collide onto the same QuickId
+            // while being genuinely different content. This is not a SHA-256 collision — it is a
+            // deterministic, constructible consequence of sampling, reproduced exactly here rather than
+            // hoped for.
+            val windowSize = 64 * 1024
+            val shared = ByteArray(windowSize) { (it % 256).toByte() }
+            val middleA = ByteArray(4096) { 0xAA.toByte() }
+            val middleB = ByteArray(4096) { 0xBB.toByte() }
+            val bytesA = shared + middleA + shared
+            val bytesB = shared + middleB + shared
+            assertEquals(bytesA.size, bytesB.size)
+            assertTrue(bytesA.size > 128 * 1024, "the fixture must exceed ADR-005's 128 KiB small-file threshold")
+
+            val uriA = writeRawFixture("collision_a.m4a", bytesA)
+            val uriB = writeRawFixture("collision_b.m4a", bytesB)
+
+            val quickIdA = ContentHashing.computeQuickId(context.contentResolver, uriA)
+            val quickIdB = ContentHashing.computeQuickId(context.contentResolver, uriB)
+            assertEquals(quickIdA, quickIdB, "the two fixtures must share a QuickId for this test to be meaningful")
+
+            val contentHashA = ContentHashing.computeContentHash(context.contentResolver, uriA)
+            val contentHashB = ContentHashing.computeContentHash(context.contentResolver, uriB)
+            assertTrue(
+                contentHashA != contentHashB,
+                "different middle bytes must produce different ContentHash — proves this is not a SHA-256 collision",
+            )
+
+            indexer.importFiles(listOf(uriA, uriB))
+            val entries = repository.observe(LibraryQuery()).first()
+            assertEquals(2, entries.size, "two different files sharing a QuickId must never collapse into one library row")
+            assertEquals(2, entries.map { it.localEntryId }.toSet().size, "each must keep its own distinct LocalEntryId")
+            assertEquals(1, entries.map { it.track.quickId }.toSet().size, "confirms both really do share the same QuickId")
+
+            // Once the authoritative hash is known for both, they are still correctly distinguishable —
+            // the background pass must not accidentally merge them either.
+            indexer.completeContentHashing()
+            val hashed = repository.observe(LibraryQuery()).first()
+            assertEquals(2, hashed.size)
+            assertEquals(2, hashed.mapNotNull { it.track.contentHash }.toSet().size, "the two rows' authoritative hashes must differ")
         }
 
     @Test
@@ -205,9 +274,26 @@ class LibraryIndexerTest {
             indexer.importFiles(listOf(fixtureUri("normal.m4a")))
             val before = repository.observe(LibraryQuery()).first().single()
             assertNull(before.track.contentHash, "the fast indexing path must not compute the full hash")
-            indexer.completeContentHashing(listOf(before))
+            indexer.completeContentHashing()
             val after = repository.observe(LibraryQuery()).first().single()
             assertNotNull(after.track.contentHash)
-            assertEquals(before.track.quickId, after.track.quickId, "hashing must not change identity")
+            assertEquals(before.localEntryId, after.localEntryId, "hashing must not change this row's identity")
+            assertEquals(before.track.quickId, after.track.quickId)
+        }
+
+    @Test
+    fun completeContentHashingReadsTheRepositoryDirectlyRatherThanACallerSnapshot() =
+        runBlocking {
+            // This phase's closure-audit hardening pass (Finding B): completeContentHashing must not
+            // depend on a caller-supplied list that could go stale — it must resume exactly whatever
+            // the repository currently reports as missing a hash, including rows imported after any
+            // snapshot the caller might have taken.
+            indexer.importFiles(listOf(fixtureUri("normal.m4a"), fixtureUri("no_artwork.m4a")))
+            assertEquals(2, repository.observe(LibraryQuery()).first().count { it.track.contentHash == null })
+            indexer.completeContentHashing()
+            assertEquals(0, repository.observe(LibraryQuery()).first().count { it.track.contentHash == null })
+            // A second call with nothing left to do must not fail or touch anything.
+            indexer.completeContentHashing()
+            assertEquals(0, repository.observe(LibraryQuery()).first().count { it.track.contentHash == null })
         }
 }

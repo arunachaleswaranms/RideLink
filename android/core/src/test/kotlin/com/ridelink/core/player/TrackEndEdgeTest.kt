@@ -1,6 +1,6 @@
 package com.ridelink.core.player
 
-import com.ridelink.core.model.QuickId
+import com.ridelink.core.model.LocalEntryId
 import kotlin.test.Test
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
@@ -14,14 +14,14 @@ import kotlin.test.assertTrue
  * fixes (see [TrackEndEdge]'s own KDoc).
  */
 class TrackEndEdgeTest {
-    private val track = QuickId("sha256:" + "aa".repeat(32))
+    private val track = LocalEntryId("aa000000-0000-0000-0000-000000000000")
 
     private fun playing(positionMs: Long = 0) =
-        PlayerState(quickId = track, positionMs = positionMs, durationMs = DURATION_MS, playing = true)
+        PlayerState(localEntryId = track, positionMs = positionMs, durationMs = DURATION_MS, playing = true)
 
-    private fun ended() = PlayerState(quickId = track, positionMs = DURATION_MS, durationMs = DURATION_MS, playing = false)
+    private fun ended() = PlayerState(localEntryId = track, positionMs = DURATION_MS, durationMs = DURATION_MS, playing = false)
 
-    private fun missing() = PlayerState(quickId = track, error = MusicFailure.FILE_MISSING)
+    private fun missing() = PlayerState(localEntryId = track, error = MusicFailure.FILE_MISSING)
 
     @Test
     fun `not done to ended fires exactly once`() {
@@ -50,7 +50,7 @@ class TrackEndEdgeTest {
 
     @Test
     fun `ended to a fresh load's reset state never fires`() {
-        val freshLoad = PlayerState(quickId = track)
+        val freshLoad = PlayerState(localEntryId = track)
         assertFalse(TrackEndEdge.advancedNow(previous = ended(), current = freshLoad))
     }
 
@@ -66,7 +66,7 @@ class TrackEndEdgeTest {
 
     @Test
     fun `a decode failure does not count as done`() {
-        val decodeFailed = PlayerState(quickId = track, error = MusicFailure.DECODE_FAILED)
+        val decodeFailed = PlayerState(localEntryId = track, error = MusicFailure.DECODE_FAILED)
         assertFalse(TrackEndEdge.advancedNow(previous = playing(0), current = decodeFailed))
     }
 

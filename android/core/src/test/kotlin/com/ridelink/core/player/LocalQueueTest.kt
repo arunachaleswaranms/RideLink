@@ -1,17 +1,17 @@
 package com.ridelink.core.player
 
-import com.ridelink.core.model.QuickId
+import com.ridelink.core.model.LocalEntryId
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
-private fun hash(byte: String): QuickId = QuickId("sha256:" + byte.repeat(32))
+private fun localId(byte: String): LocalEntryId = LocalEntryId(byte.padEnd(8, '0').take(8) + "-0000-0000-0000-000000000000")
 
 private fun item(
     id: String,
     hashByte: String = id,
-): LocalQueueItem = LocalQueueItem(id = id, quickId = hash(hashByte), insertedAtMonoUs = 0L)
+): LocalQueueItem = LocalQueueItem(id = id, localEntryId = localId(hashByte), insertedAtMonoUs = 0L)
 
 class LocalQueueTest {
     @Test
@@ -24,7 +24,7 @@ class LocalQueueTest {
 
     @Test
     fun `duplicate track added twice produces two independent queue entries`() {
-        val sameTrack = hash("aa")
+        val sameTrack = localId("aa")
         val first = LocalQueueItem("q1", sameTrack, 0)
         val second = LocalQueueItem("q2", sameTrack, 1)
         var state = LocalQueue.reduce(LocalQueueState(), LocalQueueAction.Add(first)).state
@@ -40,7 +40,7 @@ class LocalQueueTest {
         val state = LocalQueueState(items = listOf(item("a1"), item("b2")))
         val outcome = LocalQueue.reduce(state, LocalQueueAction.Next)
         assertEquals("a1", outcome.state.currentId)
-        assertEquals(listOf(LocalQueueEffect.LoadAndPlay(hash("a1"))), outcome.effects)
+        assertEquals(listOf(LocalQueueEffect.LoadAndPlay(localId("a1"))), outcome.effects)
     }
 
     @Test
@@ -72,11 +72,11 @@ class LocalQueueTest {
         var state = LocalQueueState(items = listOf(item("a1"), item("b2"), item("c3")), currentId = "a1")
         val toB = LocalQueue.reduce(state, LocalQueueAction.Next)
         assertEquals("b2", toB.state.currentId)
-        assertEquals(listOf(LocalQueueEffect.LoadAndPlay(hash("b2"))), toB.effects)
+        assertEquals(listOf(LocalQueueEffect.LoadAndPlay(localId("b2"))), toB.effects)
         state = toB.state
         val backToA = LocalQueue.reduce(state, LocalQueueAction.Previous)
         assertEquals("a1", backToA.state.currentId)
-        assertEquals(listOf(LocalQueueEffect.LoadAndPlay(hash("a1"))), backToA.effects)
+        assertEquals(listOf(LocalQueueEffect.LoadAndPlay(localId("a1"))), backToA.effects)
     }
 
     @Test
@@ -85,7 +85,7 @@ class LocalQueueTest {
         val outcome = LocalQueue.reduce(state, LocalQueueAction.Remove("b2"))
         assertEquals(listOf(item("a1"), item("c3")), outcome.state.items)
         assertEquals("c3", outcome.state.currentId)
-        assertEquals(listOf(LocalQueueEffect.LoadAndPlay(hash("c3"))), outcome.effects)
+        assertEquals(listOf(LocalQueueEffect.LoadAndPlay(localId("c3"))), outcome.effects)
     }
 
     @Test
@@ -135,7 +135,7 @@ class LocalQueueTest {
         val state = LocalQueueState(items = listOf(item("a1"), item("b2"), item("c3")), currentId = "a1")
         val outcome = LocalQueue.reduce(state, LocalQueueAction.Select("c3"))
         assertEquals("c3", outcome.state.currentId)
-        assertEquals(listOf(LocalQueueEffect.LoadAndPlay(hash("c3"))), outcome.effects)
+        assertEquals(listOf(LocalQueueEffect.LoadAndPlay(localId("c3"))), outcome.effects)
     }
 
     @Test

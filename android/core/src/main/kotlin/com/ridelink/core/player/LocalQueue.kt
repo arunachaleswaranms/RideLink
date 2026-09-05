@@ -1,12 +1,15 @@
 package com.ridelink.core.player
 
-import com.ridelink.core.model.QuickId
+import com.ridelink.core.model.LocalEntryId
 
 /**
  * One local-only queue slot. [id] is a fresh identifier per insertion (a ULID, matching
- * [com.ridelink.core.model.SessionId]'s convention) — **not** derived from [quickId] — so the
+ * [com.ridelink.core.model.SessionId]'s convention) — **not** derived from [localEntryId] — so the
  * same track can be queued more than once (brief §14's "duplicate track added" case) as two
  * distinct, independently removable/movable entries.
+ *
+ * [localEntryId], not [com.ridelink.core.model.QuickId] (ADR-005 Amendment A1): `QuickId` is not
+ * guaranteed unique across library rows, so it cannot safely name *which* row this queue slot plays.
  *
  * Deliberately has no `addedBy: PeerId` or `status: QueueItemStatus` the way the existing wire
  * [com.ridelink.core.model.QueueItem] does — those are Phase 5 shared-queue-replication concepts.
@@ -14,7 +17,7 @@ import com.ridelink.core.model.QuickId
  */
 data class LocalQueueItem(
     val id: String,
-    val quickId: QuickId,
+    val localEntryId: LocalEntryId,
     val insertedAtMonoUs: Long,
 )
 
@@ -62,7 +65,7 @@ sealed class LocalQueueAction {
  *  [com.ridelink.core.audiopolicy.IntercomAction]). */
 sealed class LocalQueueEffect {
     data class LoadAndPlay(
-        val quickId: QuickId,
+        val localEntryId: LocalEntryId,
     ) : LocalQueueEffect()
 
     object StopPlayback : LocalQueueEffect()
@@ -125,7 +128,7 @@ object LocalQueue {
             successor != null ->
                 LocalQueueOutcome(
                     state.copy(items = newItems, currentId = successor.id),
-                    listOf(LocalQueueEffect.LoadAndPlay(successor.quickId)),
+                    listOf(LocalQueueEffect.LoadAndPlay(successor.localEntryId)),
                 )
             else -> LocalQueueOutcome(state.copy(items = newItems, currentId = null), listOf(LocalQueueEffect.StopPlayback))
         }
@@ -168,7 +171,7 @@ object LocalQueue {
             return if (delta > 0 && first != null) {
                 LocalQueueOutcome(
                     state.copy(currentId = first.id),
-                    listOf(LocalQueueEffect.LoadAndPlay(first.quickId)),
+                    listOf(LocalQueueEffect.LoadAndPlay(first.localEntryId)),
                 )
             } else {
                 LocalQueueOutcome(state, emptyList())
@@ -177,7 +180,7 @@ object LocalQueue {
         val target = state.items.getOrNull(currentIndex + delta)
         return when {
             target != null ->
-                LocalQueueOutcome(state.copy(currentId = target.id), listOf(LocalQueueEffect.LoadAndPlay(target.quickId)))
+                LocalQueueOutcome(state.copy(currentId = target.id), listOf(LocalQueueEffect.LoadAndPlay(target.localEntryId)))
             // Next past the last item: brief §14's "last item ends" case. Deliberately no wraparound.
             delta > 0 -> LocalQueueOutcome(state.copy(currentId = null), listOf(LocalQueueEffect.StopPlayback))
             // Previous at the first item: brief §14's "previous at first item" case. Stays put.
@@ -190,6 +193,6 @@ object LocalQueue {
         id: String,
     ): LocalQueueOutcome {
         val target = state.items.firstOrNull { it.id == id } ?: return LocalQueueOutcome(state, emptyList())
-        return LocalQueueOutcome(state.copy(currentId = id), listOf(LocalQueueEffect.LoadAndPlay(target.quickId)))
+        return LocalQueueOutcome(state.copy(currentId = id), listOf(LocalQueueEffect.LoadAndPlay(target.localEntryId)))
     }
 }
