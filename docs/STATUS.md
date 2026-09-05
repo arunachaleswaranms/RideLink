@@ -2281,6 +2281,13 @@ exactly what §2u's own emulator/simulator checks already were.
 network between two physical devices, mDNS discovery of a real peer's catalogue, any storage or
 battery measurement, or a transfer over an actual multi-hop or lossy network path.
 
+**CI green on both platforms on the first fresh run, not re-run to green:** run
+[33976164558](https://github.com/arunachaleswaranms/RideLink/actions/runs/33976164558) (run
+number 27), head commit `86c5117` (this session's docs commit, immediately following the two
+fix/test commits `9525398`/`2336b21`). Android: `core unit tests`, `all unit tests`, `ktlint`,
+`detekt`, `lint`, `assembleDebug`, `assembleRelease` — all seven green. iOS: `RideLinkCore` tests,
+`RideLinkPlatform` tests, unsigned Debug **and** Release simulator builds — all four green.
+
 ---
 
 ## 3. Tests passed / pending
