@@ -29,6 +29,13 @@ public actor BulkTokenTable {
     }
 
     /// 32 CSPRNG bytes, hex-encoded (64 lowercase hex characters) — PROTOCOL §8.2.
+    ///
+    /// Closure-audit Finding M: a `transferId` is minted fresh by the requester (ADR-023 §2), so a
+    /// second `issue` for one already carrying a still-live, unconsumed entry means a peer resent
+    /// (or replayed) a `TRANSFER_REQUEST` reusing an id it already used. Silently overwriting that
+    /// entry would invalidate a still-outstanding token with no signal to whoever was about to
+    /// consume it. `tryIssue` is the safe entry point; `issue` is kept for callers that have already
+    /// decided a collision cannot happen and would rather fail loudly than check.
     public func issue(transferId: TransferId, generation: Int64) -> String {
         var bytes = [UInt8](repeating: 0, count: Self.tokenBytes)
         let status = SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes)
@@ -36,6 +43,16 @@ public actor BulkTokenTable {
         let token = bytes.map { String(format: "%02x", $0) }.joined()
         entries[transferId] = Entry(token: token, generation: generation, mintedAtMonoUs: monotonicNowUs())
         return token
+    }
+
+    /// See `issue`'s Finding M discussion. Returns `nil` — rather than silently overwriting — if
+    /// `transferId` already has a live (unconsumed, not-yet-expired) entry; the caller must not
+    /// construct/send an offer in that case.
+    public func tryIssue(transferId: TransferId, generation: Int64) -> String? {
+        if let existing = entries[transferId], !existing.consumed, monotonicNowUs() - existing.mintedAtMonoUs <= Self.ttlUs {
+            return nil
+        }
+        return issue(transferId: transferId, generation: generation)
     }
 
     /// Single-use: a second call for the same `transferId` fails even with the right token, because
@@ -53,7 +70,7 @@ public actor BulkTokenTable {
             entries.removeValue(forKey: transferId)
             return false
         }
-        if entry.token != presentedToken { return false }
+        guard constantTimeEquals(entry.token, presentedToken) else { return false }
         entry.consumed = true
         entries[transferId] = entry
         return true
@@ -71,4 +88,21 @@ public actor BulkTokenTable {
 
     private static let tokenBytes = 32
     private static let ttlUs: Int64 = 30_000_000
+}
+
+/// Closure-audit Finding L: a hex-encoded, single-use bulk-transfer token is a security-sensitive
+/// authorization secret (ADR-023 §2), so its comparison should not leak timing information about
+/// how many leading characters matched, even though the practical severity is low — this check
+/// runs over an already TLS/SPKI-authenticated local link, not across the open Internet. Fixed-time
+/// in the number of characters compared: every character pair is compared, and the result is
+/// accumulated with bitwise OR rather than short-circuiting on the first mismatch.
+private func constantTimeEquals(_ a: String, _ b: String) -> Bool {
+    let aBytes = Array(a.utf8)
+    let bBytes = Array(b.utf8)
+    guard aBytes.count == bBytes.count else { return false }
+    var diff: UInt8 = 0
+    for i in 0..<aBytes.count {
+        diff |= aBytes[i] ^ bBytes[i]
+    }
+    return diff == 0
 }

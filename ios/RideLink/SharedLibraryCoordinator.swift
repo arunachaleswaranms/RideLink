@@ -53,13 +53,24 @@ private struct PendingOffer {
 /// (ADR-023).
 ///
 /// **Concurrency (brief §20).** One active transfer at a time; further requests queue FIFO —
-/// `downloadQueue` enforces this at this layer, and `TransferManager`'s own actor isolation
-/// enforces it again at the bulk-transport layer, for the reason that type's doc comment gives.
+/// `downloadQueue` enforces this at this layer, and `TransferManager`'s own explicit
+/// `transferInProgress` gate enforces it again at the bulk-transport layer (Finding E — actor
+/// reentrancy alone does not).
 ///
-/// **Playback (brief §19)** of a verified cached file goes through the existing
-/// `MusicCoordinator`/queue/player — this class never creates a second player or queue, and never
-/// synchronizes the peer's playback. It only ever hands back a file URL via [cachedFile]; the
-/// composition root is what wires that into `MusicCoordinator`.
+/// **Playback (brief §19)** of a verified cached or Phase-4 cache-only file goes through the
+/// existing `MusicCoordinator`/queue/player — this class never creates a second player or queue,
+/// and never synchronizes the peer's playback. It only ever hands back a file URL via
+/// [cachedFile]; the composition root is what wires that into `MusicCoordinator`.
+///
+/// **Operation ownership (closure audit, ADR-023 Amendment A1).** [transferFence] is the "small
+/// authoritative operation-generation guard" this pass introduces in place of routing every step
+/// through `TransferReducer` (brief §16): a superseded transfer operation — cancelled by the user,
+/// invalidated by a session boundary, or replaced by a fresher one — can never again mutate
+/// `downloadStates`/`activeDownload`, no matter how late its own `Task`'s cleanup eventually runs.
+/// Inbound `MANIFEST_*` handling gets the equivalent guard from `sessionEpoch`, a small lock-backed
+/// counter captured at message-dispatch time and re-checked at apply time (Finding S) — a plain
+/// generation read cannot be used there directly since the dispatch closure runs synchronously,
+/// off `@MainActor`, and cannot `await` across into `ControlSessionManager`'s own actor.
 @Observable
 @MainActor
 public final class SharedLibraryCoordinator {
@@ -74,12 +85,38 @@ public final class SharedLibraryCoordinator {
     private let cacheRepository: TransferCacheRepository
     private let contentResolver: LocalContentResolver
     private let monotonicNowUs: @Sendable () -> Int64
+    /// Finding I: the hash of whatever cache-only track `MusicCoordinator`'s player currently has
+    /// open, if any — included in every cache-commit's `locked` set so an actively playing cache
+    /// entry is never evicted out from under the player.
+    private let activeCacheHash: @MainActor () -> ContentHash?
 
     private var syncState = ManifestSyncState(liveRevision: 0)
     private var downloadQueue: [ContentHash] = []
     private var activeDownload: ContentHash?
+    private var activeDownloadTask: Task<Void, Never>?
     private var pendingOfferTransferId: TransferId?
     private var pendingOfferContinuation: CheckedContinuation<PendingOffer?, Never>?
+
+    /// The transfer_id this coordinator is currently *serving* to a peer (provider role), if any —
+    /// Finding N: a peer's `TRANSFER_CANCEL` is only honoured if it names this exact transfer.
+    private var activeServeTransferId: TransferId?
+
+    /// Finding R: a real, monotonically-increasing catalogue revision — bumped only when the
+    /// generated entry set actually differs from what was last served, never a hardcoded constant.
+    /// `kind` remains always `.full` and `sinceRevision` is still ignored: delta sync itself stays
+    /// out of V1 scope (brief §22's explicitly permitted "correct V1 simplification"), disclosed in
+    /// ADR-023 Amendment A1 rather than silently implied by a meaningless-but-present revision.
+    private var catalogueRevision: Int64 = 0
+    private var lastServedEntries: [ManifestEntry]?
+
+    private let transferFence = OperationFence()
+
+    /// Finding S: bumped on every session boundary so a manifest message dispatched under an old
+    /// session — read off the wire and handed to `ManifestSinkAdapter` a moment before the boundary
+    /// — is provably distinguishable from one belonging to whatever session comes after it. See the
+    /// `SessionEpoch` type below for why this cannot simply be `ControlSessionManager.currentAuthGeneration`
+    /// read directly at dispatch time.
+    private let sessionEpoch = SessionEpoch()
 
     private static let negotiationTimeoutNs: UInt64 = 10_000_000_000
     private static let chunkSizeBytes = TransferBounds.chunkSize
@@ -90,7 +127,8 @@ public final class SharedLibraryCoordinator {
         libraryRepository: LibraryRepository,
         libraryDatabaseQueue: DatabaseQueue,
         libraryIndexer: LibraryIndexer,
-        monotonicNowUs: @escaping @Sendable () -> Int64
+        monotonicNowUs: @escaping @Sendable () -> Int64,
+        activeCacheHash: @escaping @MainActor () -> ContentHash? = { nil }
     ) {
         self.controlSessionManager = controlSessionManager
         self.bulkTransport = bulkTransport
@@ -106,12 +144,22 @@ public final class SharedLibraryCoordinator {
             cacheRepository: cacheRepository
         )
         self.monotonicNowUs = monotonicNowUs
+        self.activeCacheHash = activeCacheHash
 
         let manager = controlSessionManager
+        let epoch = sessionEpoch
         Task { [weak self] in
             let manifestRelay = await manager.manifestRelay()
             await manifestRelay.setSink(ManifestSinkAdapter { message in
-                Task { @MainActor in self?.handleManifestMessage(message) }
+                // Finding S: `ManifestSink.submit` is a synchronous, non-async protocol requirement
+                // (it must not block the relay actor's read loop), so it cannot `await` across into
+                // `ControlSessionManager`'s own actor to read a generation directly. `epoch.current()`
+                // is the same lock-protected-counter pattern `ReceivedCounter` already uses elsewhere
+                // in this file for exactly this "safely read from outside MainActor" need — captured
+                // here, at message-dispatch time, and re-checked once the scheduled `@MainActor` Task
+                // below actually runs.
+                let capturedEpoch = epoch.current()
+                Task { @MainActor in self?.handleManifestMessage(message, epoch: capturedEpoch) }
             })
             let transferRelay = await manager.transferRelay()
             await transferRelay.setSink(TransferSinkAdapter { message in
@@ -154,12 +202,6 @@ public final class SharedLibraryCoordinator {
     /// forwarded rather than self-subscribed.
     public func handleConnected() {
         onSessionBoundary()
-        let transport = bulkTransport
-        let manager = controlSessionManager
-        Task {
-            let generation = await manager.currentAuthGeneration
-            await transport.onNewGeneration(generation)
-        }
         requestCatalogue()
     }
 
@@ -167,20 +209,36 @@ public final class SharedLibraryCoordinator {
     /// the session that opened it.
     public func handleLinkLost() {
         onSessionBoundary()
-        let transport = bulkTransport
-        Task { await transport.close() }
     }
 
+    /// Closure-audit Findings B/D: one explicit lifecycle owner for everything a session boundary
+    /// must invalidate. `bulkTransport.close()` (ADR-023 §1) tears down the listener *and* clears
+    /// every outstanding token; `transferFence` supersedes so a stale transfer completion dispatched
+    /// just before this boundary can't mutate whatever comes after it (brief §17), and `sessionEpoch`
+    /// bumping gives manifest handling the equivalent protection (brief §23); the active download's
+    /// Task is cancelled, its `.part` removed and its state marked terminal rather than left dangling.
     private func onSessionBoundary() {
         // brief §6/§22: a peer's catalogue is session/peer-scoped and must never leak across a
         // reconnect or a different peer — replaced wholesale, never merged with what came before.
         remoteEntries = []
         syncState = ManifestSyncState(liveRevision: 0)
-        downloadQueue = []
-        activeDownload = nil
-        pendingOfferTransferId = nil
+        sessionEpoch.bump()
+        let transport = bulkTransport
+        Task { await transport.close() }
+
+        let hashToClear = activeDownload
+        transferFence.supersede()
         pendingOfferContinuation?.resume(returning: nil)
         pendingOfferContinuation = nil
+        activeDownloadTask?.cancel()
+        activeDownloadTask = nil
+        activeServeTransferId = nil
+        downloadQueue = []
+        activeDownload = nil
+        if let hash = hashToClear {
+            cacheStorage.deletePart(hash)
+            downloadStates[hash.value] = DownloadState(status: .failed, error: .connectionLost)
+        }
     }
 
     /// Requests the peer's full catalogue — called once per session, on [handleConnected].
@@ -198,24 +256,53 @@ public final class SharedLibraryCoordinator {
         guard !isVerifiedCached(hash) else { return }
         guard !downloadQueue.contains(hash), activeDownload != hash else { return }
         downloadQueue.append(hash)
-        setState(hash, DownloadState(status: .queued))
+        // No fence token exists yet (one is minted in pumpQueue when this hash is actually
+        // dequeued) — a direct write is safe: nothing is "in flight" for this hash to race with,
+        // since the two guards above just proved it was neither queued nor active.
+        downloadStates[hash.value] = DownloadState(status: .queued)
         pumpQueue()
     }
 
+    /// Closure-audit Findings C/N: a real, terminal cancellation — not merely a UI-state change.
+    /// Supersedes the active operation's fence token (so its own late `finishDownload`/`setState`
+    /// calls become inert no matter how far the original `Task` has already run), cancels the
+    /// tracked `Task`, force-closes whatever bulk socket that task might be blocked on, deletes the
+    /// `.part` file so a re-request never races a still-writing old task (brief §18), and — PROTOCOL
+    /// §8.2 — tells the peer with `TRANSFER_CANCEL` rather than relying on the connection merely
+    /// dropping.
     public func cancelDownload(_ contentHash: ContentHash) {
         downloadQueue.removeAll { $0 == contentHash }
-        if activeDownload == contentHash {
-            pendingOfferContinuation?.resume(returning: nil)
-            pendingOfferContinuation = nil
-            setState(contentHash, DownloadState(status: .cancelled))
-            activeDownload = nil
-            pumpQueue()
+        guard activeDownload == contentHash else { return }
+        let transferId = pendingOfferTransferId
+        transferFence.supersede()
+        pendingOfferContinuation?.resume(returning: nil)
+        pendingOfferContinuation = nil
+        activeDownloadTask?.cancel()
+        activeDownloadTask = nil
+        let transport = bulkTransport
+        Task { await transport.cancelActive() }
+        cacheStorage.deletePart(contentHash)
+        // Authoritative terminal write: cancellation itself is never subject to the fence check
+        // that guards a late completion — this *is* the write that must win.
+        downloadStates[contentHash.value] = DownloadState(status: .cancelled)
+        activeDownload = nil
+        if let transferId {
+            let relay = controlSessionManager
+            Task { _ = await relay.transferRelay().send(.cancel(transferId: transferId, reason: "user_cancelled")) }
         }
+        pumpQueue()
     }
 
     // MARK: - manifest: both roles, since both peers are symmetric
 
-    private func handleManifestMessage(_ message: ManifestMessage) {
+    /// Closure-audit Finding S: `epoch` is `sessionEpoch`'s value as it was the moment this message
+    /// was read off the wire, captured in the `sink` closure at `init`. If a session boundary has
+    /// since bumped `sessionEpoch` by the time this `Task` actually runs, the message is a stale
+    /// artefact of a torn-down session and is dropped before it can touch
+    /// `syncState`/`remoteEntries` — the concrete mechanism behind "a late PAGE/END from session A
+    /// must never mutate session B's catalogue."
+    private func handleManifestMessage(_ message: ManifestMessage, epoch: Int64) {
+        guard epoch == sessionEpoch.current() else { return }
         switch message {
         case .request(let sinceRevision, let maxPageBytes):
             serveManifestRequest(sinceRevision: sinceRevision, maxPageBytes: maxPageBytes)
@@ -257,10 +344,14 @@ public final class SharedLibraryCoordinator {
         let relayHolder = controlSessionManager
         Task {
             guard let entries = try? await generator.generate() else { return }
+            if lastServedEntries == nil || entries != lastServedEntries {
+                catalogueRevision += 1
+                lastServedEntries = entries
+            }
+            let revision = catalogueRevision
             let budget = min(ManifestPaging.manifestPageSoftLimitBytes, maxPageBytes)
             let pages = ManifestPaging.paginate(entries, budgetBytes: budget)
             let manifestId = ManifestId(Ulid.generate())
-            let revision: Int64 = 1
             let relay = await relayHolder.manifestRelay()
             _ = await relay.send(.begin(
                 manifestId: manifestId, kind: .full, manifestRevision: revision, baseRevision: nil,
@@ -283,33 +374,36 @@ public final class SharedLibraryCoordinator {
         guard activeDownload == nil, let next = downloadQueue.first else { return }
         downloadQueue.removeFirst()
         activeDownload = next
-        Task { await runDownload(next) }
+        let opToken = transferFence.begin()
+        activeDownloadTask = Task { await runDownload(next, opToken: opToken) }
     }
 
-    private func runDownload(_ hash: ContentHash) async {
+    private func runDownload(_ hash: ContentHash, opToken: Int64) async {
         let transferId = TransferId(Ulid.generate())
-        setState(hash, DownloadState(status: .negotiating))
         pendingOfferTransferId = transferId
+        setState(hash, DownloadState(status: .negotiating), opToken: opToken)
         _ = await controlSessionManager.transferRelay().send(.request(contentHash: hash, transferId: transferId))
 
         guard let offer = await withOfferTimeout() else {
-            finishDownload(hash, DownloadState(status: .failed, error: .notFound))
+            finishDownload(hash, DownloadState(status: .failed, error: .notFound), opToken: opToken)
             return
         }
         guard let peerSpki = await controlSessionManager.currentPeerSpki, let peerHost = await controlSessionManager.currentPeerHost else {
-            finishDownload(hash, DownloadState(status: .failed, error: .connectionLost))
+            finishDownload(hash, DownloadState(status: .failed, error: .connectionLost), opToken: opToken)
             return
         }
 
-        setState(hash, DownloadState(status: .transferring, totalBytes: offer.sizeBytes))
+        setState(hash, DownloadState(status: .transferring, totalBytes: offer.sizeBytes), opToken: opToken)
         guard let handle = try? cacheStorage.openPartForWrite(hash) else {
-            finishDownload(hash, DownloadState(status: .failed, error: .ioError))
+            finishDownload(hash, DownloadState(status: .failed, error: .ioError), opToken: opToken)
             return
         }
         let received = ReceivedCounter()
         let expectedChunkCount = (offer.sizeBytes + Int64(Self.chunkSizeBytes) - 1) / Int64(Self.chunkSizeBytes)
         let sink = DownloadChunkSink(handle: handle, storage: cacheStorage, received: received) { [weak self] bytes in
-            Task { @MainActor in self?.setState(hash, DownloadState(status: .transferring, bytesReceived: bytes, totalBytes: offer.sizeBytes)) }
+            Task { @MainActor in
+                self?.setState(hash, DownloadState(status: .transferring, bytesReceived: bytes, totalBytes: offer.sizeBytes), opToken: opToken)
+            }
         }
         let outcome: BulkFetchOutcome
         if let port = UInt16(exactly: offer.bulkPort) {
@@ -324,18 +418,26 @@ public final class SharedLibraryCoordinator {
 
         guard outcome == .ok else {
             cacheStorage.deletePart(hash)
-            finishDownload(hash, DownloadState(status: .failed, error: outcome.asTransferError))
+            finishDownload(hash, DownloadState(status: .failed, error: outcome.asTransferError), opToken: opToken)
             return
         }
-        setState(hash, DownloadState(status: .verifying, totalBytes: offer.sizeBytes))
+        setState(hash, DownloadState(status: .verifying, totalBytes: offer.sizeBytes), opToken: opToken)
         switch cacheStorage.promote(hash, expectedSizeBytes: offer.sizeBytes) {
         case .promoted:
-            try? cacheRepository.commit(hash, sizeBytes: offer.sizeBytes, nowMonoUs: monotonicNowUs(), locked: [hash])
-            _ = await controlSessionManager.transferRelay().send(.result(transferId: transferId, ok: true, sha256: hash))
-            finishDownload(hash, DownloadState(status: .complete, totalBytes: offer.sizeBytes))
+            // Closure-audit Finding P: promote-then-commit must not report success unless the
+            // metadata commit itself actually succeeded — `try?` here used to silently swallow a
+            // commit failure and still send `TRANSFER_RESULT(ok: true)`/mark `.complete`.
+            do {
+                try cacheRepository.commit(hash, sizeBytes: offer.sizeBytes, nowMonoUs: monotonicNowUs(), locked: Set([activeCacheHash(), hash].compactMap { $0 }))
+                _ = await controlSessionManager.transferRelay().send(.result(transferId: transferId, ok: true, sha256: hash))
+                finishDownload(hash, DownloadState(status: .complete, totalBytes: offer.sizeBytes), opToken: opToken)
+            } catch {
+                _ = await controlSessionManager.transferRelay().send(.result(transferId: transferId, ok: false, sha256: nil))
+                finishDownload(hash, DownloadState(status: .failed, error: .ioError), opToken: opToken)
+            }
         case let failure:
             _ = await controlSessionManager.transferRelay().send(.result(transferId: transferId, ok: false, sha256: nil))
-            finishDownload(hash, DownloadState(status: .failed, error: failure.asTransferError))
+            finishDownload(hash, DownloadState(status: .failed, error: failure.asTransferError), opToken: opToken)
         }
     }
 
@@ -356,13 +458,22 @@ public final class SharedLibraryCoordinator {
         }
     }
 
-    private func finishDownload(_ hash: ContentHash, _ state: DownloadState) {
-        setState(hash, state)
+    private func finishDownload(_ hash: ContentHash, _ state: DownloadState, opToken: Int64) {
+        setState(hash, state, opToken: opToken)
+        guard transferFence.isCurrent(opToken) else { return } // superseded — cancellation/session-boundary already cleaned up
         if activeDownload == hash { activeDownload = nil }
+        activeDownloadTask = nil
         pumpQueue()
     }
 
-    private func setState(_ hash: ContentHash, _ state: DownloadState) {
+    /// Closure-audit Findings C/D/O/P/S (terminal-state rule, brief §17): `opToken` must still be
+    /// the fence's current operation for this write to apply. A cancelled or session-superseded
+    /// operation's own in-flight `Task` keeps running (cooperative cancellation is not
+    /// instantaneous), but every state write it attempts after being superseded is silently dropped
+    /// — `CANCELLED -> COMPLETE`, `FAILED -> COMPLETE`, and "old-session COMPLETE mutating new-session
+    /// state" are all made structurally impossible by this one check, not by timing.
+    private func setState(_ hash: ContentHash, _ state: DownloadState, opToken: Int64) {
+        guard transferFence.isCurrent(opToken) else { return }
         downloadStates[hash.value] = state
     }
 
@@ -379,12 +490,23 @@ public final class SharedLibraryCoordinator {
                 ))
                 pendingOfferContinuation = nil
             }
-        case .progress, .result, .cancel:
+        case .progress, .result:
             // brief §28: peer-reported progress is never trusted or displayed; the requester
-            // already knows its own outcome from its own verification; a cancel is reacted to by
-            // the bulk connection dropping, not this message.
+            // already knows its own outcome from its own verification.
             break
+        case .cancel(let transferId, _):
+            handlePeerCancel(transferId)
         }
+    }
+
+    /// Closure-audit Finding N: PROTOCOL §8.2 — `TRANSFER_CANCEL` is valid from either side at any
+    /// time and both drop the bulk connection. Only honoured if `transferId` names the transfer this
+    /// coordinator is *currently* serving (provider role) — a cancel for a stale, foreign, or
+    /// already-finished transfer_id is a no-op, never a way to disrupt an unrelated transfer.
+    private func handlePeerCancel(_ transferId: TransferId) {
+        guard activeServeTransferId == transferId else { return }
+        let transport = bulkTransport
+        Task { await transport.cancelActive() }
     }
 
     private func serveTransferRequest(contentHash: ContentHash, transferId: TransferId) async {
@@ -396,20 +518,60 @@ public final class SharedLibraryCoordinator {
             // timeout is what resolves this, exactly as an unreachable peer would.
             return
         }
+        // Closure-audit Finding Q: never construct/send an offer the peer's own codec would have to
+        // reject — check the bound here, on the sender, rather than relying solely on the
+        // receiver's `TransferCodec.parseOffer` size check.
+        guard sizeBytes <= TransferBounds.maxTransferSizeBytes else { return }
         guard let port = try? await bulkTransport.ensureListening(), let bulkPort = Int(exactly: port) else { return }
+        // Closure-audit Finding A: read the *live* current authenticated generation both at
+        // issuance and again, independently, at consumption time — never a value captured once and
+        // replayed. A stale closure over a captured `let` would defeat ADR-023 §3's whole
+        // "reconnect invalidates every outstanding token" guarantee.
         let generation = await controlSessionManager.currentAuthGeneration
-        let token = await bulkTransport.issueToken(transferId: transferId, generation: generation)
+        guard let token = await bulkTransport.tryIssueToken(transferId: transferId, generation: generation) else {
+            return
+        }
         let chunkCount = Int((sizeBytes + Int64(Self.chunkSizeBytes) - 1) / Int64(Self.chunkSizeBytes))
         _ = await controlSessionManager.transferRelay().send(.offer(
             transferId: transferId, sizeBytes: sizeBytes, chunkSize: Self.chunkSizeBytes,
             chunkCount: chunkCount, bulkPort: bulkPort, bulkToken: token
         ))
         guard let handle = try? FileHandle(forReadingFrom: fileURL) else { return }
+        activeServeTransferId = transferId
+        defer { if activeServeTransferId == transferId { activeServeTransferId = nil } }
         let source = FileChunkSource(handle: handle, chunkSize: Self.chunkSizeBytes)
+        let manager = controlSessionManager
         _ = await bulkTransport.serve(
-            transferId: transferId, expectedPeerSpki: peerSpki, currentGeneration: { generation }, source: source
+            transferId: transferId, expectedPeerSpki: peerSpki,
+            currentGeneration: { await manager.currentAuthGeneration }, source: source
         )
         try? handle.close()
+    }
+}
+
+/// Closure-audit Finding S: a tiny thread-safe counter, mirroring `ReceivedCounter` below, so the
+/// non-async `ManifestSinkAdapter` closure (called synchronously from `ManifestRelay`'s own actor,
+/// which cannot `await` back into `ControlSessionManager`) can read "which session is this message
+/// being dispatched under" without an actor hop, then have the scheduled `@MainActor` `Task`
+/// re-check it once it actually runs.
+private final class SessionEpoch: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value: Int64 = 0
+
+    /// Called only from `onSessionBoundary()`, on `@MainActor` — invalidates whatever epoch was
+    /// current, exactly like `OperationFence.supersede()`.
+    @discardableResult
+    func bump() -> Int64 {
+        lock.lock()
+        defer { lock.unlock() }
+        value += 1
+        return value
+    }
+
+    func current() -> Int64 {
+        lock.lock()
+        defer { lock.unlock() }
+        return value
     }
 }
 

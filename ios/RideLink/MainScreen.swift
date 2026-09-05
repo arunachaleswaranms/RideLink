@@ -107,13 +107,23 @@ struct MainScreen: View {
 
     @Environment(\.scenePhase) private var scenePhase
 
-    /// Mirrors Android's `MainActivity.attemptPlaySharedTrackLocally`: finds the Phase 3 library
-    /// row sharing this entry's `content_hash` and plays it through the one existing player/queue
-    /// — never a second player, never synchronized with the peer (brief §19).
+    /// Mirrors Android's `MainActivity.attemptPlaySharedTrackLocally`. Two cases, per closure-audit
+    /// Finding G:
+    ///
+    /// 1. A Phase 3 imported `LibraryEntry` already shares this entry's `content_hash` — play it
+    ///    exactly like a local library row, unchanged from before this pass.
+    /// 2. Otherwise, the track exists only as a verified Phase-4 cache entry (never imported) —
+    ///    `SharedLibraryCoordinator.cachedFile` hands back its on-disk location, and
+    ///    `MusicCoordinator.playExternalVerifiedCachedTrack` plays it through the *same* one
+    ///    player/queue. There is still no second, cache-file-only player.
     private func playSharedTrackLocally(_ entry: ManifestEntry) {
         guard let hash = entry.contentHash, case .success(let musicCoordinator) = music else { return }
-        guard let localEntry = musicCoordinator.libraryEntries.first(where: { $0.track.contentHash == hash }) else { return }
-        musicCoordinator.playNow(localEntry)
+        if let localEntry = musicCoordinator.libraryEntries.first(where: { $0.track.contentHash == hash }) {
+            musicCoordinator.playNow(localEntry)
+            return
+        }
+        guard let sharedLibrary = coordinator.sharedLibrary, let fileURL = sharedLibrary.cachedFile(hash) else { return }
+        musicCoordinator.playExternalVerifiedCachedTrack(hash, fileURL: fileURL)
     }
 }
 

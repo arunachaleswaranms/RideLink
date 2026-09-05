@@ -83,6 +83,7 @@ fun MainScreen(
     val intercomRefusal by coordinator.lastIntercomRefusal.collectAsState()
     val remoteEntries by sharedLibraryCoordinator.remoteEntries.collectAsState()
     val downloadStates by sharedLibraryCoordinator.downloadStates.collectAsState()
+    val cachedHashes by sharedLibraryCoordinator.cachedHashes.collectAsState()
     val localEntries by musicCoordinator.libraryEntries.collectAsState()
 
     Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
@@ -141,6 +142,7 @@ fun MainScreen(
                     remoteEntries = remoteEntries,
                     localEntries = localEntries,
                     downloadStates = downloadStates,
+                    cachedHashes = cachedHashes,
                     onDownload = sharedLibraryCoordinator::requestDownload,
                     onCancel = { entry -> entry.contentHash?.let(sharedLibraryCoordinator::cancelDownload) },
                     onPlayLocally = onPlaySharedTrackLocally,

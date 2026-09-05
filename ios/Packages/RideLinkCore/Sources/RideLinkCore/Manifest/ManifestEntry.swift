@@ -54,6 +54,16 @@ public struct ManifestEntry: Sendable, Equatable {
         self.hasArtwork = hasArtwork
     }
 
+    /// Closure-audit Finding F: a stable UI-row identity that does **not** collapse two entries
+    /// sharing a `QuickId` but carrying different `ContentHash` values onto one row — `QuickId` is
+    /// only a 128 KiB sample and is not guaranteed unique across files (ADR-005 Amendment A1),
+    /// exactly the failure mode a bare `ForEach(..., id: \.quickId.value)` hit. Falls back to
+    /// `QuickId` alone only while `ContentHash` is still absent (background hashing incomplete) —
+    /// two such rows sharing both `QuickId` and no `ContentHash` yet remain a known, narrow edge
+    /// case this manifest wire shape has no per-entry id field to resolve fully. Pure and
+    /// SwiftUI-free by design, so it is unit-testable here rather than only inside a view.
+    public var rowId: String { "\(quickId.value)|\(contentHash?.value ?? "")" }
+
     public static let fieldContentHash = "content_hash"
     public static let fieldQuickId = "quick_id"
     public static let fieldWorkKey = "work_key"

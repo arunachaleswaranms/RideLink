@@ -37,7 +37,9 @@ struct RideLinkApp: App {
             coordinator.attachSharedLibrary(
                 libraryRepository: musicCoordinator.libraryRepositoryForSharedLibrary,
                 libraryDatabaseQueue: musicCoordinator.libraryDatabaseQueueForSharedLibrary,
-                libraryIndexer: musicCoordinator.libraryIndexerForSharedLibrary
+                libraryIndexer: musicCoordinator.libraryIndexerForSharedLibrary,
+                // Finding I: never evict a cache-only file the player currently has open.
+                activeCacheHash: { [weak musicCoordinator] in musicCoordinator?.activeExternalCacheHash }
             )
         }
     }

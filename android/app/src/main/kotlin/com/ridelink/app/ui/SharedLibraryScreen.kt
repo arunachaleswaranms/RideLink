@@ -34,6 +34,11 @@ fun SharedLibraryScreen(
     remoteEntries: List<ManifestEntry>,
     localEntries: List<LibraryEntry>,
     downloadStates: Map<String, DownloadState>,
+    /** Closure-audit Finding H: the persisted verified-cache truth
+     *  ([com.ridelink.app.library.SharedLibraryCoordinator.cachedHashes]) — sourced from
+     *  [com.ridelink.data.transfer.TransferCacheRepository], not from [downloadStates] alone, so a
+     *  hash committed in an earlier session or before a process restart still shows as cached. */
+    cachedHashes: Set<String>,
     onDownload: (ManifestEntry) -> Unit,
     onCancel: (ManifestEntry) -> Unit,
     onPlayLocally: (ManifestEntry) -> Unit,
@@ -52,7 +57,10 @@ fun SharedLibraryScreen(
                 val hash = entry.contentHash
                 val isLocal = hash != null && hash.value in localHashes
                 val download = hash?.let { downloadStates[it.value] }
-                val isCached = download?.status == TransferStatus.COMPLETE
+                // Finding H: persisted cache truth, not session-scoped download status alone — a
+                // `download?.status == COMPLETE` fallback is kept only for the same-session case
+                // where `refreshCachedHashes()`'s own async re-query hasn't yet landed.
+                val isCached = (hash != null && hash.value in cachedHashes) || download?.status == TransferStatus.COMPLETE
                 SharedTrackRow(
                     entry = entry,
                     isLocal = isLocal,
@@ -90,15 +98,14 @@ private fun SharedTrackRow(
             }
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 when {
-                    // brief §19: playback reuses the one existing player/queue, which is keyed on a
-                    // Phase 3 LocalEntryId — a cache-only file (never imported) has none yet, so
-                    // "Play" is offered only once the same content_hash also exists as a local row.
-                    // Wiring cache-only playback through the player is a deliberate next step, not
-                    // done in this minimal pass (see docs/STATUS.md).
-                    isLocal -> Button(onClick = onPlayLocally) { Text("Play") }
+                    // Closure-audit Finding G: playback reuses the one existing player/queue for
+                    // both a Phase 3 imported row (`isLocal`) *and* a verified Phase-4 cache-only
+                    // file that was never imported (`isCached`) — see
+                    // `MusicCoordinator.playExternalVerifiedCachedTrack`. Provenance stays distinct
+                    // internally (never a fake imported row), but both are "Play" from here.
+                    isLocal || isCached -> Button(onClick = onPlayLocally) { Text("Play") }
                     download != null && download.status in ACTIVE_STATUSES ->
                         Button(onClick = onCancel) { Text("Cancel") }
-                    isCached -> Unit
                     else -> Button(onClick = onDownload, enabled = entry.contentHash != null) { Text("Download") }
                 }
             }

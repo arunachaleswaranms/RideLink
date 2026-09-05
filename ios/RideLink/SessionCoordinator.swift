@@ -202,7 +202,8 @@ public final class SessionCoordinator {
     public func attachSharedLibrary(
         libraryRepository: LibraryRepository,
         libraryDatabaseQueue: DatabaseQueue,
-        libraryIndexer: LibraryIndexer
+        libraryIndexer: LibraryIndexer,
+        activeCacheHash: @escaping @MainActor () -> ContentHash? = { nil }
     ) {
         guard sharedLibrary == nil else { return }
         sharedLibrary = SharedLibraryCoordinator(
@@ -211,7 +212,8 @@ public final class SessionCoordinator {
             libraryRepository: libraryRepository,
             libraryDatabaseQueue: libraryDatabaseQueue,
             libraryIndexer: libraryIndexer,
-            monotonicNowUs: monotonicNowUs
+            monotonicNowUs: monotonicNowUs,
+            activeCacheHash: activeCacheHash
         )
     }
 

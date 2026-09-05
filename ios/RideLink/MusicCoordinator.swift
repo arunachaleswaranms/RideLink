@@ -65,6 +65,30 @@ public final class MusicCoordinator {
     /// row already hashed is simply skipped), but avoids redundant concurrent DB reads.
     private var hashingTask: Task<Void, Never>?
 
+    /// Closure-audit Finding G: a verified Phase-4 cache-only track (never imported into the Phase 3
+    /// library — see `playExternalVerifiedCachedTrack`) played through the *existing* queue/player.
+    /// Never written to `LibraryRepository` — provenance stays distinct (ADR-023 §6 / brief §19:
+    /// LOCAL IMPORTED and VERIFIED PEER CACHE are different storage origins), and this dictionary is
+    /// the only place that association exists. The `LocalEntryId` key is a fresh, opaque token
+    /// minted at play time purely so the *existing* `LocalQueue`/`Player` can carry an identity for
+    /// it — never looked up against `repository`, and never persisted past this process's lifetime.
+    private struct ExternalCacheSource {
+        let contentHash: ContentHash
+        let location: LocalTrackLocation
+    }
+
+    private var externalCacheSources: [LocalEntryId: ExternalCacheSource] = [:]
+
+    /// Closure-audit Finding I: the `ContentHash` currently loaded from `externalCacheSources`, if
+    /// any — so a caller committing a *new* Phase-4 cache entry (`TransferCacheRepository.commit`)
+    /// can include it in that call's `locked` set and never evict the file this coordinator's own
+    /// player has open. `nil` whenever nothing playing right now is a cache-only track (including
+    /// "nothing is playing" and "a Phase 3 imported track is playing").
+    public var activeExternalCacheHash: ContentHash? {
+        guard let item = queueState.currentItem else { return nil }
+        return externalCacheSources[item.localEntryId]?.contentHash
+    }
+
     public init(monotonicNowUs: @escaping @Sendable () -> Int64 = { Int64(DispatchTime.now().uptimeNanoseconds / 1000) }) throws {
         self.monotonicNowUs = monotonicNowUs
         let directories = try Self.makeDirectories()
@@ -175,6 +199,19 @@ public final class MusicCoordinator {
         LocalQueueItem(id: UUID().uuidString, localEntryId: entry.localEntryId, insertedAtMonoUs: monotonicNowUs())
     }
 
+    /// Closure-audit Finding G: plays a verified Phase-4 cache-only file — one that exists only as
+    /// `TransferCacheRepository`'s committed, whole-file-SHA-256-verified bytes, never imported into
+    /// the Phase 3 library — through the *existing* one player/one queue, exactly like `playNow`
+    /// does for an imported `LibraryEntry`. brief §24: local-only playback on *this* device; no
+    /// peer command, no synchronized playback, no second player.
+    public func playExternalVerifiedCachedTrack(_ contentHash: ContentHash, fileURL: URL) {
+        let entryId = LocalEntryId(UUID().uuidString.lowercased())
+        externalCacheSources[entryId] = ExternalCacheSource(contentHash: contentHash, location: LocalTrackLocation(uri: fileURL.absoluteString))
+        let item = LocalQueueItem(id: UUID().uuidString, localEntryId: entryId, insertedAtMonoUs: monotonicNowUs())
+        dispatch(.add(item))
+        dispatch(.select(id: item.id))
+    }
+
     public func removeFromQueue(id: String) { dispatch(.remove(id: id)) }
     public func moveInQueue(id: String, toIndex: Int) { dispatch(.move(id: id, toIndex: toIndex)) }
     public func clearQueue() { dispatch(.clear) }
@@ -225,6 +262,11 @@ public final class MusicCoordinator {
     }
 
     private func loadAndPlay(_ localEntryId: LocalEntryId) async {
+        if let external = externalCacheSources[localEntryId] {
+            await player.execute(.load(localEntryId: localEntryId, location: external.location))
+            await player.execute(.play)
+            return
+        }
         guard let entry = try? repository.findByLocalEntryId(localEntryId) else { return }
         let resolvedUri = indexer.resolvedUrl(for: entry).absoluteString
         await player.execute(.load(localEntryId: localEntryId, location: LocalTrackLocation(uri: resolvedUri)))

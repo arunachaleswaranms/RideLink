@@ -213,6 +213,8 @@ class AppContainer(
             controlSessionManager = controlSessionManager,
             nextTransferId = { TransferId(Ulid.generate()) },
             nextManifestId = { ManifestId(Ulid.generate()) },
+            // Finding I: never evict a cache-only file the player currently has open.
+            activeCacheHash = { musicCoordinator.activeExternalCacheHash.value },
         )
 
     val sessionCoordinator: SessionCoordinator

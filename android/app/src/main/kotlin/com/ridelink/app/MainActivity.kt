@@ -8,6 +8,7 @@ import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.material3.MaterialTheme
 import androidx.lifecycle.lifecycleScope
+import com.ridelink.app.library.SharedLibraryCoordinator
 import com.ridelink.app.music.MusicCoordinator
 import com.ridelink.app.service.RideForegroundService
 import com.ridelink.app.session.SessionCoordinator
@@ -98,7 +99,11 @@ class MainActivity : ComponentActivity() {
                             onImportFolder = { pickFolder.launch(null) },
                             onImportFiles = { pickFiles.launch(arrayOf("audio/*")) },
                             onPlaySharedTrackLocally = { entry ->
-                                attemptPlaySharedTrackLocally(appContainer.musicCoordinator, entry)
+                                attemptPlaySharedTrackLocally(
+                                    appContainer.musicCoordinator,
+                                    appContainer.sharedLibraryCoordinator,
+                                    entry,
+                                )
                             },
                         )
                     },
@@ -253,19 +258,38 @@ class MainActivity : ComponentActivity() {
     }
 
     /**
-     * [attemptPlayNow]'s twin for the shared-library screen's "Play" affordance (brief §19): the
-     * verified cached file reuses the *same* one player/queue, so this looks up the local
-     * [LibraryEntry] that shares the tapped [ManifestEntry]'s `content_hash` — [SharedLibraryScreen]
-     * only ever enables "Play" once that local row already exists — and plays it exactly like a
-     * local library row. There is deliberately no second, cache-file-only playback path.
+     * [attemptPlayNow]'s twin for the shared-library screen's "Play" affordance (brief §19). Two
+     * cases, per closure-audit Finding G:
+     *
+     * 1. A Phase 3 imported [LibraryEntry] already shares this [ManifestEntry]'s `content_hash` —
+     *    play it exactly like a local library row, unchanged from before this pass.
+     * 2. Otherwise, the track exists only as a verified Phase-4 cache entry (never imported) —
+     *    [SharedLibraryCoordinator.cachedFile] hands back its on-disk location, and
+     *    [MusicCoordinator.playExternalVerifiedCachedTrack] plays it through the *same* one
+     *    player/queue, held to the identical foreground-visible discipline as every other first
+     *    play of a track (ARCHITECTURE §6.4). There is still no second, cache-file-only player.
      */
+    @Suppress("ReturnCount") // one early-out per case in Finding G's KDoc, in that order
     private fun attemptPlaySharedTrackLocally(
         musicCoordinator: MusicCoordinator,
+        sharedLibraryCoordinator: SharedLibraryCoordinator,
         entry: ManifestEntry,
     ) {
         val hash = entry.contentHash ?: return
-        val localEntry = musicCoordinator.libraryEntries.value.find { it.track.contentHash == hash } ?: return
-        attemptPlayNow(musicCoordinator, localEntry)
+        val localEntry = musicCoordinator.libraryEntries.value.find { it.track.contentHash == hash }
+        if (localEntry != null) {
+            attemptPlayNow(musicCoordinator, localEntry)
+            return
+        }
+        if (!foregroundVisible) return
+        lifecycleScope.launch {
+            val file = sharedLibraryCoordinator.cachedFile(hash) ?: return@launch
+            if (!RideForegroundService.startMusicFromVisibleUi(this@MainActivity)) {
+                musicCoordinator.onForegroundServiceStartFailed()
+                return@launch
+            }
+            musicCoordinator.playExternalVerifiedCachedTrack(hash, file, entry.title, entry.artist)
+        }
     }
 
     private fun notificationsGranted(): Boolean =

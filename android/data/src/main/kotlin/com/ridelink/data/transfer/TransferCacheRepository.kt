@@ -26,6 +26,20 @@ class TransferCacheRepository(
 
     suspend fun verifiedEntry(contentHash: ContentHash): TransferCacheEntity? = dao.findVerified(contentHash.value)
 
+    /**
+     * Closure-audit Finding H: every currently verified hash, sourced from the persisted table —
+     * never from a caller's in-memory, session-scoped transfer-progress state. The verified cache
+     * outlives any control session and any process restart (ADR-023 §6); a caller computing
+     * "is this cached" from a session-scoped map alone would under-report a hash committed in an
+     * earlier session or before the app was last killed.
+     */
+    suspend fun verifiedHashes(): Set<ContentHash> =
+        dao
+            .all()
+            .filter { it.verified }
+            .map { ContentHash(it.contentHash) }
+            .toSet()
+
     /** @return the readable, verified media file, touching its last-access time, or null if not cached. */
     @Suppress("ReturnCount")
     suspend fun open(

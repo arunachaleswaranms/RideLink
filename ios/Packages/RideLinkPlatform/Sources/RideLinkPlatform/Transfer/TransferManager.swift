@@ -11,20 +11,56 @@ import RideLinkCore
 /// instead of its JSON envelope framing, which the bulk plane never uses.
 ///
 /// An `actor`, per ARCHITECTURE §9.2 ("`SessionCoordinator`, `ControlChannel` and
-/// `TransferManager` are actors"). Where Android's `BulkTransportManager` needs an explicit
-/// `Mutex activeTransferMutex` to cap concurrency at one active transfer per session, an actor's
-/// own serialized execution already gives that for free: two overlapping calls to `serve`/`fetch`
-/// on the same `TransferManager` simply run one after the other, with no separate lock to get
-/// wrong.
+/// `TransferManager` are actors").
+///
+/// **Closure-audit Finding E — corrected.** This type's documentation used to claim an actor's own
+/// serialized execution caps concurrency at one active transfer for free, the way Android's
+/// `Mutex activeTransferMutex` does. That is not true: Swift actors are *reentrant* across a
+/// suspension point (`await`), and `serve`/`fetch` both suspend repeatedly — `listener.accept()`,
+/// every socket read/write. A second, unstructured call can run its synchronous prologue while the
+/// first is parked at one of those `await`s, so nothing here previously stopped two concurrent
+/// bulk operations. [transferInProgress] is the explicit gate that actually enforces brief §20's
+/// "one active transfer per session" cap — acquired synchronously, with no `await` between the
+/// check and the set, so two overlapping calls cannot both win it.
 public actor TransferManager {
     public let tokenTable: BulkTokenTable
 
     private let tlsChannel: TlsControlChannel
     private var listener: ControlListener?
 
+    /// Finding E's gate — see the type doc comment above. `true` while a `serve`/`fetch` call owns
+    /// the one active-transfer slot; a second concurrent call is rejected outright rather than
+    /// queued, matching this pass's brief-sanctioned "reject, don't busy-wait" design.
+    private var transferInProgress = false
+
+    /// Finding C/D/N: the socket a `serve`/`fetch` call currently holds, so [cancelActive] can force
+    /// it closed — unblocking whatever blocking read/accept the active operation is parked in —
+    /// rather than merely requesting `Task` cancellation, which a suspended socket call does not
+    /// observe until it next unblocks on its own.
+    private var activeSocket: ControlConnection?
+
     public init(tlsChannel: TlsControlChannel, monotonicNowUs: @escaping @Sendable () -> Int64) {
         self.tlsChannel = tlsChannel
         self.tokenTable = BulkTokenTable(monotonicNowUs: monotonicNowUs)
+    }
+
+    private func acquireTransferSlot() -> Bool {
+        guard !transferInProgress else { return false }
+        transferInProgress = true
+        return true
+    }
+
+    private func releaseTransferSlot() {
+        transferInProgress = false
+    }
+
+    /// Closure-audit Finding C/D/N: forcibly unblocks and terminates whatever `serve`/`fetch` call
+    /// is currently in flight, if any — a user cancellation, a session/link loss, or a peer's
+    /// `TRANSFER_CANCEL` for the transfer this manager is actively serving/fetching. Closing the
+    /// socket, not merely requesting `Task` cancellation, is what actually unblocks a blocking
+    /// `accept()`/read/write. Idempotent and safe to call when nothing is active.
+    public func cancelActive() {
+        activeSocket?.close()
     }
 
     /// Opens the listener on first need; a later call just returns the already-bound port.
@@ -39,6 +75,12 @@ public actor TransferManager {
         await tokenTable.issue(transferId: transferId, generation: generation)
     }
 
+    /// Finding M: see `BulkTokenTable.tryIssue` — `nil` if `transferId` already has a live,
+    /// unconsumed token, rather than silently invalidating it.
+    public func tryIssueToken(transferId: TransferId, generation: Int64) async -> String? {
+        await tokenTable.tryIssue(transferId: transferId, generation: generation)
+    }
+
     /// Call on every fresh authentication (ADR-023 §3) — sweeps tokens from any earlier generation.
     public func onNewGeneration(_ generation: Int64) async {
         await tokenTable.sweepBelow(generation)
@@ -48,6 +90,7 @@ public actor TransferManager {
     public func close() async {
         listener?.close()
         listener = nil
+        cancelActive()
         await tokenTable.clear()
     }
 
@@ -60,9 +103,15 @@ public actor TransferManager {
         currentGeneration: @Sendable () async -> Int64,
         source: any ChunkSource
     ) async -> BulkServeOutcome {
+        guard acquireTransferSlot() else { return .ioError } // Finding E: one active transfer at a time
+        defer { releaseTransferSlot() }
         guard let listener else { return .ioError }
         guard let socket = try? await listener.accept() else { return .ioError }
-        defer { socket.close() }
+        activeSocket = socket
+        defer {
+            socket.close()
+            if activeSocket === socket { activeSocket = nil }
+        }
 
         guard let peerSpki = socket.security?.peerIdentitySpkiSha256, peerSpki == expectedPeerSpki else {
             return .notAuthorized
@@ -98,10 +147,16 @@ public actor TransferManager {
         expectedChunkCount: Int64,
         sink: any ChunkSink
     ) async -> BulkFetchOutcome {
+        guard acquireTransferSlot() else { return .connectionLost } // Finding E: one active transfer at a time
+        defer { releaseTransferSlot() }
         guard let socket = try? await tlsChannel.connect(host: host, port: port) else {
             return .connectionLost
         }
-        defer { socket.close() }
+        activeSocket = socket
+        defer {
+            socket.close()
+            if activeSocket === socket { activeSocket = nil }
+        }
 
         guard let peerSpki = socket.security?.peerIdentitySpkiSha256, peerSpki == expectedPeerSpki else {
             return .notAuthorized
@@ -124,6 +179,14 @@ public actor TransferManager {
             switch BulkFraming.parseAll(buffer) {
             case .parsed(let frames, let leftover):
                 for frame in frames {
+                    // Closure-audit Finding K: PROTOCOL §8.2's explicit chunk_index only means
+                    // something if it is checked. Reject anything but the exact expected next
+                    // index — duplicate, skipped, out-of-order, or a frame beyond the offer's own
+                    // declared chunk_count — rather than merely counting frames and trusting the
+                    // final whole-file hash to catch it.
+                    guard received < expectedChunkCount, Int64(frame.chunkIndex) == received else {
+                        return .protocolError
+                    }
                     await sink.onChunk(index: Int64(frame.chunkIndex), bytes: frame.payload)
                     received += 1
                 }
@@ -133,6 +196,17 @@ public actor TransferManager {
             case .invalid:
                 return .protocolError
             }
+        }
+        // Finding K (section 12): satisfying `expectedChunkCount` is not by itself proof that
+        // nothing more was sent. `buffer` here is whatever `BulkFraming` could not yet fully parse
+        // when the loop above stopped reading — a non-empty leftover is the start of an extra
+        // frame already received but never counted. A well-behaved provider (`serve`) closes its
+        // socket immediately after its last chunk, so one more read is expected to see EOF;
+        // anything else — more bytes, not a clean close — means the provider sent past its own
+        // declared chunk_count.
+        guard buffer.isEmpty else { return .protocolError }
+        if let trailing = await socket.readRawBytes(maxLength: readBuf), !trailing.isEmpty {
+            return .protocolError
         }
         return .ok
     }

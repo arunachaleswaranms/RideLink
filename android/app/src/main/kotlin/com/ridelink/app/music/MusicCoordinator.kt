@@ -3,6 +3,8 @@ package com.ridelink.app.music
 import com.ridelink.core.library.LibraryEntry
 import com.ridelink.core.library.LibraryQuery
 import com.ridelink.core.library.LibrarySort
+import com.ridelink.core.library.LocalTrackLocation
+import com.ridelink.core.model.ContentHash
 import com.ridelink.core.model.LocalEntryId
 import com.ridelink.core.player.LocalQueue
 import com.ridelink.core.player.LocalQueueAction
@@ -25,8 +27,11 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import java.io.File
+import java.util.UUID
 import android.net.Uri as PlatformUri
 
 /**
@@ -96,6 +101,36 @@ class MusicCoordinator(
      *  row already hashed is simply skipped), but avoids redundant concurrent DB reads. */
     private var hashingJob: Job? = null
 
+    /**
+     * Closure-audit Finding G: a verified Phase-4 cache-only track (never imported into the Phase 3
+     * library — see [playExternalVerifiedCachedTrack]) played through the *existing* queue/player.
+     * Never written to [LibraryRepository] — provenance stays distinct (ADR-023 §6 / brief §19:
+     * LOCAL IMPORTED and VERIFIED PEER CACHE are different storage origins), and this map is the
+     * only place that association exists. [LocalEntryId] here is a fresh, opaque token minted at
+     * play time purely so the *existing* [LocalQueue]/[Player] can carry an identity for it — never
+     * looked up against [repository], and never persisted past this process's lifetime.
+     */
+    private data class ExternalCacheSource(
+        val contentHash: ContentHash,
+        val location: LocalTrackLocation,
+        val title: String?,
+        val artist: String?,
+    )
+
+    private val externalCacheSources = mutableMapOf<LocalEntryId, ExternalCacheSource>()
+
+    /**
+     * Closure-audit Finding I: the [ContentHash] currently loaded from [externalCacheSources], if
+     * any — so a caller committing a *new* Phase-4 cache entry (`TransferCacheRepository.commit`)
+     * can include it in that call's `locked` set and never evict the file this coordinator's own
+     * player has open. `null` whenever nothing playing right now is a cache-only track (including
+     * "nothing is playing" and "a Phase 3 imported track is playing").
+     */
+    val activeExternalCacheHash: StateFlow<ContentHash?> =
+        _queueState
+            .map { state -> state.currentItem?.localEntryId?.let { externalCacheSources[it]?.contentHash } }
+            .stateIn(scope, SharingStarted.WhileSubscribed(), null)
+
     init {
         scope.launch {
             player.setStateSink { state ->
@@ -145,6 +180,27 @@ class MusicCoordinator(
 
     private fun newItem(entry: LibraryEntry): LocalQueueItem =
         LocalQueueItem(id = nextQueueItemId(), localEntryId = entry.localEntryId, insertedAtMonoUs = monotonicNowUs())
+
+    /**
+     * Closure-audit Finding G: plays a verified Phase-4 cache-only file — one that exists only as
+     * [com.ridelink.data.transfer.TransferCacheRepository]'s committed, whole-file-SHA-256-verified
+     * bytes, never imported into the Phase 3 library — through the *existing* one player/one queue,
+     * exactly like [playNow] does for an imported [LibraryEntry]. brief §24: this is local-only
+     * playback on *this* device; no peer command, no synchronized playback, no second player.
+     */
+    fun playExternalVerifiedCachedTrack(
+        contentHash: ContentHash,
+        file: File,
+        title: String?,
+        artist: String?,
+    ) {
+        _lastMusicStartRefusal.value = null
+        val entryId = LocalEntryId(UUID.randomUUID().toString())
+        externalCacheSources[entryId] = ExternalCacheSource(contentHash, LocalTrackLocation(file.toURI().toString()), title, artist)
+        val item = LocalQueueItem(id = nextQueueItemId(), localEntryId = entryId, insertedAtMonoUs = monotonicNowUs())
+        dispatch(LocalQueueAction.Add(item))
+        dispatch(LocalQueueAction.Select(item.id))
+    }
 
     fun removeFromQueue(id: String) = dispatch(LocalQueueAction.Remove(id))
 
@@ -215,6 +271,12 @@ class MusicCoordinator(
     }
 
     private suspend fun loadAndPlay(localEntryId: LocalEntryId) {
+        val external = externalCacheSources[localEntryId]
+        if (external != null) {
+            player.execute(PlaybackCommand.Load(localEntryId, external.location, external.title, external.artist))
+            player.execute(PlaybackCommand.Play)
+            return
+        }
         val entry = repository.findByLocalEntryId(localEntryId) ?: return
         player.execute(PlaybackCommand.Load(localEntryId, entry.location, entry.track.title, entry.track.artist))
         player.execute(PlaybackCommand.Play)

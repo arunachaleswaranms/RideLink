@@ -10,7 +10,9 @@ import com.ridelink.core.model.ContentHash
 import com.ridelink.core.model.ManifestId
 import com.ridelink.core.model.TransferId
 import com.ridelink.core.protocol.ManifestMessage
+import com.ridelink.core.protocol.TransferBounds
 import com.ridelink.core.protocol.TransferMessage
+import com.ridelink.core.transfer.OperationFence
 import com.ridelink.core.transfer.TransferError
 import com.ridelink.core.transfer.TransferStatus
 import com.ridelink.data.transfer.CacheStorage
@@ -29,6 +31,7 @@ import com.ridelink.network.transfer.ChunkSource
 import com.ridelink.network.transfer.TransferSink
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -63,8 +66,22 @@ data class DownloadState(
  * [downloadQueue]. **Playback (brief §19)** of a verified cached file goes through the existing
  * [com.ridelink.app.music.MusicCoordinator]/queue/player — this class never creates a second
  * player or a second queue, and never synchronizes the peer's playback.
+ *
+ * **Operation ownership (closure audit, ADR-023 Amendment A1).** [transferFence] is the "small
+ * authoritative operation-generation guard" this pass introduces in place of routing every step
+ * through [com.ridelink.core.transfer.TransferReducer] (brief §16): a superseded transfer
+ * operation — cancelled by the user, invalidated by a session boundary, or replaced by a fresher
+ * one — can never again mutate [downloadStates]/[activeDownload], no matter how late its own
+ * coroutine's cleanup eventually runs. Inbound `MANIFEST_*` handling gets the equivalent guard for
+ * free from [ControlSessionManager.currentAuthGeneration] itself, captured at message-dispatch
+ * time and re-checked at apply time (Finding S). [bulkTransport] is closed on every session
+ * boundary (Finding B) and the bulk-token generation supplied to it is re-read live at consumption
+ * time, never captured at issuance (Finding A).
+ *
+ * One collaborator per Phase 4 layer (core/network/data) in the constructor below, matching
+ * `AppContainer`'s own composition-root style.
  */
-@Suppress("LongParameterList") // one collaborator per Phase 4 layer (core/network/data), matching AppContainer's own composition-root style
+@Suppress("LongParameterList", "TooManyFunctions")
 class SharedLibraryCoordinator(
     private val scope: CoroutineScope,
     private val monotonicNowUs: () -> Long,
@@ -76,6 +93,10 @@ class SharedLibraryCoordinator(
     private val controlSessionManager: ControlSessionManager,
     private val nextTransferId: () -> TransferId,
     private val nextManifestId: () -> ManifestId,
+    /** Finding I: the hash of whatever cache-only track [com.ridelink.app.music.MusicCoordinator]'s
+     *  player currently has open, if any — included in every cache-commit's `locked` set so an
+     *  actively playing cache entry is never evicted out from under the player. */
+    private val activeCacheHash: () -> ContentHash? = { null },
 ) {
     private val _remoteEntries = MutableStateFlow<List<ManifestEntry>>(emptyList())
     val remoteEntries: StateFlow<List<ManifestEntry>> = _remoteEntries.asStateFlow()
@@ -83,15 +104,39 @@ class SharedLibraryCoordinator(
     private val _downloadStates = MutableStateFlow<Map<String, DownloadState>>(emptyMap())
     val downloadStates: StateFlow<Map<String, DownloadState>> = _downloadStates.asStateFlow()
 
+    /** Finding H: persisted verified-cache truth, independent of [downloadStates] — survives a
+     *  process restart, unlike the session-scoped map above. */
+    private val _cachedHashes = MutableStateFlow<Set<String>>(emptySet())
+    val cachedHashes: StateFlow<Set<String>> = _cachedHashes.asStateFlow()
+
     private var syncMachine: ManifestSyncStateMachine? = null
     private val transferMutex = Mutex()
     private val downloadQueue = ArrayDeque<ContentHash>()
     private var activeDownload: ContentHash? = null
+    private var activeDownloadJob: Job? = null
     private var pendingOffer: CompletableDeferred<TransferMessage.Offer>? = null
     private var pendingOfferTransferId: TransferId? = null
 
+    /** The transfer_id this coordinator is currently *serving* to a peer (provider role), if any —
+     *  Finding N: a peer's `TRANSFER_CANCEL` is only honoured if it names this exact transfer. */
+    private var activeServeTransferId: TransferId? = null
+
+    /** Finding R: a real, monotonically-increasing catalogue revision — bumped only when the
+     *  generated entry set actually differs from what was last served, never a hardcoded constant.
+     *  `kind` remains always `FULL` and `since_revision` is still ignored: delta sync itself stays
+     *  out of V1 scope (brief §22's explicitly permitted "correct V1 simplification"), disclosed in
+     *  ADR-023 Amendment A1 rather than silently implied by a meaningless-but-present revision. */
+    private var catalogueRevision = 0L
+    private var lastServedEntries: List<ManifestEntry>? = null
+
+    private val transferFence = OperationFence()
+
     init {
-        controlSessionManager.manifest.sink = ManifestSink { message -> scope.launch { handleManifestMessage(message) } }
+        controlSessionManager.manifest.sink =
+            ManifestSink { message ->
+                val generation = controlSessionManager.currentAuthGeneration
+                scope.launch { handleManifestMessage(message, generation) }
+            }
         controlSessionManager.transfer.sink = TransferSink { message -> scope.launch { handleTransferMessage(message) } }
         scope.launch {
             controlSessionManager.events.collect { event ->
@@ -105,6 +150,7 @@ class SharedLibraryCoordinator(
                 }
             }
         }
+        scope.launch { refreshCachedHashes() }
     }
 
     /** True once bytes have arrived, been whole-file verified, **and** committed — never merely queued or transferring. */
@@ -112,6 +158,10 @@ class SharedLibraryCoordinator(
 
     /** brief §19: hands a verified cached file's location to the caller, which plays it through the *existing* player. */
     suspend fun cachedFile(contentHash: ContentHash): File? = cacheRepository.open(contentHash, monotonicNowUs())
+
+    private suspend fun refreshCachedHashes() {
+        _cachedHashes.value = cacheRepository.verifiedHashes().map { it.value }.toSet()
+    }
 
     /** Requests the peer's full catalogue — called once per session, on [ControlEvent.Connected]. */
     fun requestCatalogue() {
@@ -130,39 +180,98 @@ class SharedLibraryCoordinator(
             transferMutex.withLock {
                 if (hash in downloadQueue || activeDownload == hash) return@withLock
                 downloadQueue.addLast(hash)
-                setState(hash, DownloadState(TransferStatus.QUEUED))
+                // No operation token exists yet (one is minted in pumpQueue when this hash is
+                // actually dequeued) — a direct write is safe: nothing is "in flight" for this hash
+                // to race with, since the two guards above just proved it was neither queued nor active.
+                writeState(hash, DownloadState(TransferStatus.QUEUED))
             }
             pumpQueue()
         }
     }
 
+    /**
+     * Closure-audit Findings C/N: a real, terminal cancellation — not merely a UI-state change.
+     * Supersedes the active operation's fence token (so its own late `finishDownload`/`setState`
+     * calls become inert no matter how far the original coroutine has already run), cancels the
+     * tracked [Job], force-closes whatever bulk socket that job might be blocked on, deletes the
+     * `.part` file so a re-request never races a still-writing old task (brief §18), and — PROTOCOL
+     * §8.2 — tells the peer with `TRANSFER_CANCEL` rather than relying on the connection merely
+     * dropping.
+     */
     fun cancelDownload(contentHash: ContentHash) {
         scope.launch {
             transferMutex.withLock { downloadQueue.remove(contentHash) }
-            if (activeDownload == contentHash) {
-                pendingOffer?.cancel()
-                setState(contentHash, DownloadState(TransferStatus.CANCELLED))
+            if (activeDownload != contentHash) return@launch
+            val transferId = pendingOfferTransferId
+            transferFence.supersede()
+            pendingOffer?.cancel()
+            pendingOffer = null
+            activeDownloadJob?.cancel()
+            activeDownloadJob = null
+            bulkTransport.cancelActive()
+            cacheStorage.deletePart(contentHash)
+            // Authoritative terminal write: cancellation itself is never subject to the fence check
+            // that guards a late completion — this *is* the write that must win.
+            writeState(contentHash, DownloadState(TransferStatus.CANCELLED))
+            transferMutex.withLock { activeDownload = null }
+            if (transferId != null) {
+                controlSessionManager.transfer.send(TransferMessage.Cancel(transferId, "user_cancelled"))
             }
+            pumpQueue()
         }
     }
 
+    /**
+     * Closure-audit Findings B/D: one explicit lifecycle owner for everything a session boundary
+     * must invalidate. [bulkTransport] closing (ADR-023 §1) tears down the listener *and* clears
+     * every outstanding token; [transferFence] supersedes so a stale transfer completion dispatched
+     * just before this boundary can't mutate whatever comes after it (brief §17), and the bumped
+     * [ControlSessionManager.currentAuthGeneration] a fresh `Connected` implies gives manifest
+     * handling the equivalent protection (brief §23); the active download's `.part` is removed and
+     * its state marked terminal rather than left dangling.
+     */
     private fun onSessionBoundary() {
         // brief §6/§22: a peer's catalogue is session/peer-scoped and must never leak across a
         // reconnect or a different peer — replaced wholesale, never merged with what came before.
         _remoteEntries.value = emptyList()
         syncMachine = null
+        // ADR-023 §1: the bulk listener and every outstanding token die with the session that
+        // opened them — never sprinkled as ad hoc close() calls elsewhere (brief §2).
+        bulkTransport.close()
+        val hashToClear = activeDownload
+        transferFence.supersede()
         scope.launch {
+            pendingOffer?.cancel()
+            pendingOffer = null
+            activeDownloadJob?.cancel()
+            activeDownloadJob = null
+            activeServeTransferId = null
             transferMutex.withLock {
                 downloadQueue.clear()
                 activeDownload = null
             }
-            pendingOffer?.cancel()
+            hashToClear?.let { hash ->
+                cacheStorage.deletePart(hash)
+                writeState(hash, DownloadState(TransferStatus.FAILED, error = TransferError.CONNECTION_LOST))
+            }
         }
     }
 
     // --- manifest: both roles, since both peers are symmetric --------------------------------------
 
-    private suspend fun handleManifestMessage(message: ManifestMessage) {
+    /**
+     * Closure-audit Finding S: [generation] is [ControlSessionManager.currentAuthGeneration] as it
+     * was the moment this message was read off the wire, captured in the `sink` lambda at [init].
+     * If the session has since moved on to a new authenticated generation by the time this
+     * coroutine actually runs, the message is a stale artefact of a torn-down session and is
+     * dropped before it can touch [syncMachine]/[remoteEntries] — the concrete mechanism behind
+     * "a late PAGE/END from session A must never mutate session B's catalogue."
+     */
+    private suspend fun handleManifestMessage(
+        message: ManifestMessage,
+        generation: Long,
+    ) {
+        if (generation != controlSessionManager.currentAuthGeneration) return
         when (message) {
             is ManifestMessage.Request -> serveManifestRequest(message)
             is ManifestMessage.Begin -> {
@@ -213,10 +322,14 @@ class SharedLibraryCoordinator(
 
     private suspend fun serveManifestRequest(request: ManifestMessage.Request) {
         val entries = manifestGenerator.generate()
+        if (lastServedEntries == null || entries != lastServedEntries) {
+            catalogueRevision += 1
+            lastServedEntries = entries
+        }
+        val revision = catalogueRevision
         val budget = minOf(ManifestPaging.MANIFEST_PAGE_SOFT_LIMIT_BYTES, request.maxPageBytes)
         val pages = ManifestPaging.paginate(entries, budget)
         val manifestId = nextManifestId()
-        val revision = 1L
         controlSessionManager.manifest.send(
             ManifestMessage.Begin(manifestId, ManifestKind.FULL, revision, null, entries.size, 0, pages.size, "ridelink-manifest-v1"),
         )
@@ -238,39 +351,45 @@ class SharedLibraryCoordinator(
                     if (activeDownload != null) return@withLock null
                     downloadQueue.removeFirstOrNull()?.also { activeDownload = it }
                 }
-            if (next != null) runDownload(next)
+            if (next != null) {
+                val opToken = transferFence.begin()
+                activeDownloadJob = scope.launch { runDownload(next, opToken) }
+            }
         }
     }
 
-    @Suppress("ReturnCount")
-    private suspend fun runDownload(hash: ContentHash) {
+    @Suppress("ReturnCount", "LongMethod")
+    private suspend fun runDownload(
+        hash: ContentHash,
+        opToken: Long,
+    ) {
         val transferId = nextTransferId()
-        setState(hash, DownloadState(TransferStatus.NEGOTIATING))
+        pendingOfferTransferId = transferId
+        setState(hash, DownloadState(TransferStatus.NEGOTIATING), opToken)
         val deferred = CompletableDeferred<TransferMessage.Offer>()
         pendingOffer = deferred
-        pendingOfferTransferId = transferId
         controlSessionManager.transfer.send(TransferMessage.Request(hash, transferId))
 
         val offer = withTimeoutOrNull(NEGOTIATION_TIMEOUT_MS) { deferred.await() }
         if (offer == null) {
-            finishDownload(hash, DownloadState(TransferStatus.FAILED, error = TransferError.NOT_FOUND))
+            finishDownload(hash, DownloadState(TransferStatus.FAILED, error = TransferError.NOT_FOUND), opToken)
             return
         }
         val peerSpki = controlSessionManager.currentPeerSpki
         val peerHost = controlSessionManager.currentPeerHost
         if (peerSpki == null || peerHost == null) {
-            finishDownload(hash, DownloadState(TransferStatus.FAILED, error = TransferError.CONNECTION_LOST))
+            finishDownload(hash, DownloadState(TransferStatus.FAILED, error = TransferError.CONNECTION_LOST), opToken)
             return
         }
 
-        setState(hash, DownloadState(TransferStatus.TRANSFERRING, totalBytes = offer.sizeBytes))
+        setState(hash, DownloadState(TransferStatus.TRANSFERRING, totalBytes = offer.sizeBytes), opToken)
         val stream = cacheStorage.openPartForWrite(hash)
         var received = 0L
         val sink =
             ChunkSink { _, bytes ->
                 cacheStorage.appendChunk(stream, bytes)
                 received += bytes.size
-                setState(hash, DownloadState(TransferStatus.TRANSFERRING, bytesReceived = received, totalBytes = offer.sizeBytes))
+                setState(hash, DownloadState(TransferStatus.TRANSFERRING, bytesReceived = received, totalBytes = offer.sizeBytes), opToken)
             }
         val outcome =
             bulkTransport.fetch(peerHost, offer.bulkPort, offer.bulkToken, peerSpki, offer.chunkCount.toLong(), sink)
@@ -278,19 +397,32 @@ class SharedLibraryCoordinator(
 
         if (outcome != BulkFetchOutcome.OK) {
             cacheStorage.deletePart(hash)
-            finishDownload(hash, DownloadState(TransferStatus.FAILED, error = outcome.toTransferError()))
+            finishDownload(hash, DownloadState(TransferStatus.FAILED, error = outcome.toTransferError()), opToken)
             return
         }
-        setState(hash, DownloadState(TransferStatus.VERIFYING, totalBytes = offer.sizeBytes))
+        setState(hash, DownloadState(TransferStatus.VERIFYING, totalBytes = offer.sizeBytes), opToken)
         when (val promoteResult = cacheStorage.promote(hash, offer.sizeBytes)) {
             PromoteResult.PROMOTED -> {
-                cacheRepository.commit(hash, offer.sizeBytes, monotonicNowUs())
-                controlSessionManager.transfer.send(TransferMessage.Result(transferId, true, hash))
-                finishDownload(hash, DownloadState(TransferStatus.COMPLETE, totalBytes = offer.sizeBytes))
+                // Closure-audit Finding P: promote-then-commit must not report success unless the
+                // metadata commit itself actually succeeded — a thrown exception here used to
+                // propagate uncaught, permanently wedging the one-active-transfer queue (activeDownload
+                // never cleared) rather than surfacing as a clean, terminal FAILED.
+                val committed =
+                    runCatching {
+                        cacheRepository.commit(hash, offer.sizeBytes, monotonicNowUs(), locked = setOfNotNull(activeCacheHash()))
+                    }.isSuccess
+                if (committed) {
+                    refreshCachedHashes()
+                    controlSessionManager.transfer.send(TransferMessage.Result(transferId, true, hash))
+                    finishDownload(hash, DownloadState(TransferStatus.COMPLETE, totalBytes = offer.sizeBytes), opToken)
+                } else {
+                    controlSessionManager.transfer.send(TransferMessage.Result(transferId, false, null))
+                    finishDownload(hash, DownloadState(TransferStatus.FAILED, error = TransferError.IO_ERROR), opToken)
+                }
             }
             else -> {
                 controlSessionManager.transfer.send(TransferMessage.Result(transferId, false, null))
-                finishDownload(hash, DownloadState(TransferStatus.FAILED, error = promoteResult.toTransferError()))
+                finishDownload(hash, DownloadState(TransferStatus.FAILED, error = promoteResult.toTransferError()), opToken)
             }
         }
     }
@@ -298,10 +430,13 @@ class SharedLibraryCoordinator(
     private fun finishDownload(
         hash: ContentHash,
         state: DownloadState,
+        opToken: Long,
     ) {
-        setState(hash, state)
+        setState(hash, state, opToken)
+        if (!transferFence.isCurrent(opToken)) return // superseded — cancellation/session-boundary already cleaned up
         scope.launch {
             transferMutex.withLock { if (activeDownload == hash) activeDownload = null }
+            activeDownloadJob = null
             pumpQueue()
         }
     }
@@ -310,7 +445,27 @@ class SharedLibraryCoordinator(
         if (pendingOfferTransferId == message.transferId) pendingOffer?.complete(message)
     }
 
+    /**
+     * Closure-audit Findings C/D/O/P/S (terminal-state rule, brief §17): [opToken] must still be
+     * the fence's current operation for this write to apply. A cancelled or session-superseded
+     * operation's own in-flight coroutine keeps running (cooperative cancellation is not
+     * instantaneous), but every state write it attempts after being superseded is silently dropped
+     * — `CANCELLED -> COMPLETE`, `FAILED -> COMPLETE`, and "old-session COMPLETE mutating new-session
+     * state" are all made structurally impossible by this one check, not by timing.
+     */
     private fun setState(
+        hash: ContentHash,
+        state: DownloadState,
+        opToken: Long,
+    ) {
+        if (!transferFence.isCurrent(opToken)) return
+        writeState(hash, state)
+    }
+
+    /** The unguarded write itself — used directly only where no fence token exists yet ([requestDownload]'s
+     *  `QUEUED`) or where the write *is* the authoritative terminal one the fence exists to protect
+     *  ([cancelDownload]'s `CANCELLED`, [onSessionBoundary]'s session-loss `FAILED`). */
+    private fun writeState(
         hash: ContentHash,
         state: DownloadState,
     ) {
@@ -325,17 +480,37 @@ class SharedLibraryCoordinator(
             is TransferMessage.Offer -> onOfferReceived(message)
             is TransferMessage.Progress -> Unit // brief §28: peer-reported progress is never trusted or displayed
             is TransferMessage.Result -> Unit // the requester already knows its own outcome from its own verification
-            is TransferMessage.Cancel -> Unit // the bulk connection dropping is what the provider actually reacts to
+            is TransferMessage.Cancel -> handlePeerCancel(message)
         }
     }
 
+    /**
+     * Closure-audit Finding N: PROTOCOL §8.2 — `TRANSFER_CANCEL` is valid from either side at any
+     * time and both drop the bulk connection. Only honoured if [message] names the transfer this
+     * coordinator is *currently* serving (provider role) — a cancel for a stale, foreign, or
+     * already-finished transfer_id is a no-op, never a way to disrupt an unrelated transfer.
+     */
+    private fun handlePeerCancel(message: TransferMessage.Cancel) {
+        if (activeServeTransferId == message.transferId) {
+            bulkTransport.cancelActive()
+        }
+    }
+
+    @Suppress("ReturnCount") // one early-out per guard (peer identity, size bound, token collision), in that order
     private suspend fun serveTransferRequest(request: TransferMessage.Request) {
         val peerSpki = controlSessionManager.currentPeerSpki ?: return
         when (val resolution = contentResolver.resolve(request.contentHash, monotonicNowUs())) {
             is ContentResolution.Found -> {
+                // Closure-audit Finding Q: never construct/send an offer the peer's own codec would
+                // have to reject — check the bound here, on the sender, rather than relying solely
+                // on the receiver's TransferCodec.parseOffer size check.
+                if (resolution.sizeBytes > TransferBounds.MAX_TRANSFER_SIZE_BYTES) return
                 val port = bulkTransport.ensureListening()
-                val generation = controlSessionManager.currentAuthGeneration
-                val token = bulkTransport.issueToken(request.transferId, generation)
+                // Closure-audit Finding A: read the *live* current authenticated generation both at
+                // issuance and again, independently, at consumption time — never a value captured
+                // once and replayed. A stale closure over a captured `val` would defeat ADR-023 §3's
+                // whole "reconnect invalidates every outstanding token" guarantee.
+                val token = bulkTransport.tryIssueToken(request.transferId, controlSessionManager.currentAuthGeneration) ?: return
                 val chunkCount = (resolution.sizeBytes + CHUNK_SIZE_BYTES - 1) / CHUNK_SIZE_BYTES
                 controlSessionManager.transfer.send(
                     TransferMessage.Offer(
@@ -347,16 +522,26 @@ class SharedLibraryCoordinator(
                         token,
                     ),
                 )
+                activeServeTransferId = request.transferId
                 scope.launch {
                     val input = resolution.open()
-                    val source =
-                        ChunkSource {
-                            val buffer = ByteArray(CHUNK_SIZE_BYTES.toInt())
-                            val n = input.read(buffer)
-                            if (n <= 0) null else buffer.copyOf(n)
-                        }
-                    bulkTransport.serve(request.transferId, peerSpki, { generation }, source)
-                    input.close()
+                    try {
+                        val source =
+                            ChunkSource {
+                                val buffer = ByteArray(CHUNK_SIZE_BYTES.toInt())
+                                val n = input.read(buffer)
+                                if (n <= 0) null else buffer.copyOf(n)
+                            }
+                        bulkTransport.serve(
+                            request.transferId,
+                            peerSpki,
+                            { controlSessionManager.currentAuthGeneration },
+                            source,
+                        )
+                    } finally {
+                        input.close()
+                        if (activeServeTransferId == request.transferId) activeServeTransferId = null
+                    }
                 }
             }
             // No wire message exists for "cannot serve this request" (PROTOCOL §8.2 has no

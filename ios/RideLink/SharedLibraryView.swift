@@ -24,7 +24,9 @@ struct SharedLibraryView: View {
                     .foregroundStyle(.secondary)
             }
             VStack(spacing: 4) {
-                ForEach(coordinator.remoteEntries, id: \.quickId.value) { entry in
+                // Closure-audit Finding F: `quickId` alone is not guaranteed unique across entries
+                // (ADR-005 Amendment A1) — `rowId` is the stable, collision-resistant identity.
+                ForEach(coordinator.remoteEntries, id: \.rowId) { entry in
                     SharedTrackRow(
                         entry: entry,
                         availability: coordinator.availability(for: entry),
@@ -62,16 +64,16 @@ private struct SharedTrackRow: View {
                 ProgressView(value: Double(download.bytesReceived), total: Double(download.totalBytes))
             }
             HStack(spacing: 8) {
-                if availability.hasLocal {
-                    // brief §19: playback reuses the one existing player/queue, which is keyed on a
-                    // Phase 3 LocalEntryId — a cache-only file (never imported) has none yet, so
-                    // "Play" is offered only once the same content_hash also exists as a local row.
-                    // Wiring cache-only playback through the player is a deliberate next step, not
-                    // done in this minimal pass (see docs/STATUS.md).
+                // Closure-audit Finding G: playback reuses the one existing player/queue for both a
+                // Phase 3 imported row (`hasLocal`) *and* a verified Phase-4 cache-only file that
+                // was never imported (`hasCached`) — see `MusicCoordinator.playExternalVerifiedCachedTrack`.
+                // Provenance stays distinct internally (never a fake imported row), but both are
+                // "Play" from here.
+                if availability.hasLocal || availability.hasCached {
                     Button("Play", action: onPlayLocally).buttonStyle(.borderedProminent)
                 } else if let download, activeStatuses.contains(download.status) {
                     Button("Cancel", action: onCancel).buttonStyle(.bordered)
-                } else if !availability.hasCached {
+                } else {
                     Button("Download", action: onDownload)
                         .buttonStyle(.bordered)
                         .disabled(entry.contentHash == nil)

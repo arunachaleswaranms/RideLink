@@ -53,6 +53,15 @@ class BulkTransportManager(
     /** Brief §20: one active transfer per session — additional requests queue above this manager. */
     private val activeTransferMutex = Mutex()
 
+    /**
+     * Closure-audit Finding C/D: the socket a [serve]/[fetch] call currently holds, so an external
+     * caller ([cancelActive]) can force it closed — unblocking whatever blocking read/accept the
+     * active operation is parked in — rather than merely requesting coroutine cancellation, which
+     * a blocking socket call does not observe until it next unblocks on its own.
+     */
+    @Volatile
+    private var activeSocket: ControlSocket? = null
+
     /** Opens the listener on first need; a later call just returns the already-bound port. */
     suspend fun ensureListening(): Int =
         listenerMutex.withLock {
@@ -64,6 +73,13 @@ class BulkTransportManager(
         generation: Long,
     ): String = tokenTable.issue(transferId, generation)
 
+    /** Finding M: see [BulkTokenTable.tryIssue] — `null` if [transferId] already has a live,
+     *  unconsumed token, rather than silently invalidating it. */
+    fun tryIssueToken(
+        transferId: TransferId,
+        generation: Long,
+    ): String? = tokenTable.tryIssue(transferId, generation)
+
     /** Call on every fresh authentication (ADR-023 §3) — sweeps tokens from any earlier generation. */
     fun onNewGeneration(generation: Long) {
         tokenTable.sweepBelow(generation)
@@ -74,6 +90,20 @@ class BulkTransportManager(
         runCatching { listener?.close() }
         listener = null
         tokenTable.clear()
+        cancelActive()
+    }
+
+    /**
+     * Closure-audit Finding C/D/N: forcibly unblocks and terminates whatever [serve]/[fetch] call is
+     * currently in flight, if any — a user cancellation, a session/link loss, or a peer's
+     * `TRANSFER_CANCEL` for the transfer this manager is actively serving/fetching. Closing the
+     * socket, not merely requesting coroutine cancellation, is what actually unblocks a blocking
+     * `accept()`/read/write: [serve]/[fetch]'s own `finally` block sees the resulting IOException and
+     * returns a non-OK outcome promptly instead of hanging until some other event unblocks it.
+     * Idempotent and safe to call when nothing is active.
+     */
+    fun cancelActive() {
+        runCatching { activeSocket?.close() }
     }
 
     /**
@@ -100,6 +130,7 @@ class BulkTransportManager(
                 } catch (io: IOException) {
                     return BulkServeOutcome.IO_ERROR
                 }
+            activeSocket = socket
             try {
                 val peerSpki = socket.security?.peerIdentitySpkiSha256
                 if (peerSpki == null || peerSpki != expectedPeerSpki) return BulkServeOutcome.NOT_AUTHORIZED
@@ -120,6 +151,7 @@ class BulkTransportManager(
                 BulkServeOutcome.IO_ERROR
             } finally {
                 socket.close()
+                if (activeSocket === socket) activeSocket = null
             }
         }
 
@@ -140,6 +172,7 @@ class BulkTransportManager(
                 } catch (io: IOException) {
                     return BulkFetchOutcome.CONNECTION_LOST
                 }
+            activeSocket = socket
             try {
                 val peerSpki = socket.security?.peerIdentitySpkiSha256
                 if (peerSpki == null || peerSpki != expectedPeerSpki) return BulkFetchOutcome.NOT_AUTHORIZED
@@ -154,6 +187,14 @@ class BulkTransportManager(
                     when (val result = BulkFraming.parseAll(buffer)) {
                         is BulkFraming.ParseResult.Parsed -> {
                             for (frame in result.frames) {
+                                // Closure-audit Finding K: PROTOCOL §8.2's explicit chunk_index only
+                                // means something if it is checked. Reject anything but the exact
+                                // expected next index — duplicate, skipped, out-of-order, or a frame
+                                // beyond the offer's own declared chunk_count — rather than merely
+                                // counting frames and trusting the final whole-file hash to catch it.
+                                if (received >= expectedChunkCount || frame.chunkIndex != received) {
+                                    return BulkFetchOutcome.PROTOCOL_ERROR
+                                }
                                 sink.onChunk(frame.chunkIndex, frame.payload)
                                 received += 1
                             }
@@ -163,11 +204,22 @@ class BulkTransportManager(
                         is BulkFraming.ParseResult.Invalid -> return BulkFetchOutcome.PROTOCOL_ERROR
                     }
                 }
+                // Closure-audit Finding K (section 12): satisfying `expectedChunkCount` is not by
+                // itself proof that nothing more was sent. `buffer` here is whatever [BulkFraming]
+                // could not yet fully parse when the loop above stopped reading — a non-empty
+                // leftover is the start of an extra frame already received but never counted. A
+                // well-behaved provider ([serve]) closes its socket immediately after its last
+                // chunk, so one more read is expected to see EOF; anything else — more bytes, not a
+                // clean close — means the provider sent past its own declared chunk_count.
+                if (buffer.isNotEmpty()) return BulkFetchOutcome.PROTOCOL_ERROR
+                val trailing = withContext(ioDispatcher) { socket.readRawBytes(readBuf, 0, readBuf.size) }
+                if (trailing > 0) return BulkFetchOutcome.PROTOCOL_ERROR
                 BulkFetchOutcome.OK
             } catch (io: IOException) {
                 BulkFetchOutcome.IO_ERROR
             } finally {
                 socket.close()
+                if (activeSocket === socket) activeSocket = null
             }
         }
 
