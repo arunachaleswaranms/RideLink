@@ -187,4 +187,207 @@ final class TransferManagerTests: XCTestCase {
         let reassembled = received.reduce(into: [UInt8]()) { acc, entry in acc.append(contentsOf: entry.1) }
         XCTAssertEqual(big, reassembled)
     }
+
+    // MARK: - Closure-audit Finding E: actor reentrancy does not by itself cap concurrency
+
+    func testASecondConcurrentServeCallIsRejectedRatherThanQueued() async throws {
+        let alice = try TestTlsSupport.freshIdentity()
+        let bob = try TestTlsSupport.freshIdentity()
+        let server = manager(alice)
+        let client = manager(bob)
+
+        let port = try await server.ensureListening()
+        let transferId1 = TransferId("01J9Z4M3RT8V2W5X7Y9Z1A3B5H")
+        let transferId2 = TransferId("01J9Z4M3RT8V2W5X7Y9Z1A3B5K")
+        let generation: Int64 = 1
+        let token1 = await server.issueToken(transferId: transferId1, generation: generation)
+        _ = await server.issueToken(transferId: transferId2, generation: generation)
+
+        // Launched as a Task so it can suspend inside `listener.accept()` while nothing has
+        // connected yet — the exact reentrancy window Finding E identified: the doc comment this
+        // pass corrected claimed an actor's own serialized execution already prevented a second
+        // overlapping call, which is false across a suspension point.
+        async let firstServe: BulkServeOutcome = server.serve(
+            transferId: transferId1, expectedPeerSpki: bob.identitySpkiSha256,
+            currentGeneration: { generation }, source: ArrayChunkSource([[UInt8](repeating: 0, count: 10)]))
+
+        // Give the first call a moment to actually reach its `accept()` suspension point.
+        try await Task.sleep(nanoseconds: 200_000_000)
+
+        let secondOutcome = await server.serve(
+            transferId: transferId2, expectedPeerSpki: bob.identitySpkiSha256,
+            currentGeneration: { generation }, source: ArrayChunkSource([[UInt8](repeating: 0, count: 10)]))
+        XCTAssertEqual(.ioError, secondOutcome, "a second concurrent serve() must be rejected, not queued behind the first")
+
+        // Let the first one complete normally, proving the gate does not wedge the real operation.
+        let fetchResult = await client.fetch(
+            host: "127.0.0.1", port: port, token: token1, expectedPeerSpki: alice.identitySpkiSha256,
+            expectedChunkCount: 1, sink: RecordingChunkSink())
+        let firstOutcome = await firstServe
+        XCTAssertEqual(.ok, fetchResult)
+        XCTAssertEqual(.ok, firstOutcome)
+    }
+
+    // MARK: - Closure-audit Findings C/D/N: cancelActive force-closes a stuck in-flight operation
+
+    func testCancelActiveUnblocksAFetchGenuinelyStuckWaitingForChunksThatWillNeverArrive() async throws {
+        let alice = try TestTlsSupport.freshIdentity()
+        let bob = try TestTlsSupport.freshIdentity()
+        let server = manager(alice)
+        let client = manager(bob)
+
+        let port = try await server.ensureListening()
+        let transferId = TransferId("01J9Z4M3RT8V2W5X7Y9Z1A3B5J")
+        let generation: Int64 = 1
+        let token = await server.issueToken(transferId: transferId, generation: generation)
+        // The server sends one chunk, then hangs (never sends chunk 2, never closes) — the socket
+        // stays genuinely open with the client's read loop blocked in a real blocking socket read,
+        // exactly the state a user-cancelled or session-lost transfer leaves behind if nothing ever
+        // force-closes the connection.
+        let hangingSource = HangingAfterFirstChunkSource(firstChunk: [UInt8](repeating: 0, count: 10))
+
+        async let serveResult: BulkServeOutcome = server.serve(
+            transferId: transferId, expectedPeerSpki: bob.identitySpkiSha256,
+            currentGeneration: { generation }, source: hangingSource)
+        async let fetchResult: BulkFetchOutcome = client.fetch(
+            host: "127.0.0.1", port: port, token: token, expectedPeerSpki: alice.identitySpkiSha256,
+            expectedChunkCount: 5, sink: RecordingChunkSink())
+
+        // Give the real loopback connection time to actually deliver the one chunk the server does
+        // send, so the client is genuinely parked waiting for more.
+        try await Task.sleep(nanoseconds: 300_000_000)
+        await client.cancelActive()
+
+        let outcome = await fetchResult
+        XCTAssertTrue(
+            outcome == .connectionLost || outcome == .ioError,
+            "a force-closed fetch must return promptly with a failure outcome, never hang"
+        )
+        await hangingSource.release()
+        _ = await serveResult
+    }
+
+    func testCancelActiveIsASafeNoOpWhenNothingIsActive() async throws {
+        let alice = try TestTlsSupport.freshIdentity()
+        let server = manager(alice)
+        await server.cancelActive()
+        await server.cancelActive()
+    }
+
+    // MARK: - Closure-audit Finding K: frame ordering/count validation
+
+    /// Writes raw, deliberately malformed RLB1 frames directly to a socket — bypassing
+    /// `TransferManager.serve`'s own always-sequential `ChunkSource` loop entirely, since that API
+    /// has no way to construct an out-of-order/duplicate/extra frame. Consumes and discards the
+    /// token bytes exactly like a real provider would, without validating them — this harness is
+    /// testing the *requester*'s (`fetch`) framing validation, not the provider's authorization.
+    private static func writeRawFrames(_ listener: ControlListener, _ frames: [(UInt32, [UInt8])]) async throws {
+        let socket = try await listener.accept()
+        var tokenBytes: [UInt8] = []
+        while tokenBytes.count < 32 {
+            guard let chunk = await socket.readRawBytes(maxLength: 32 - tokenBytes.count) else { break }
+            tokenBytes.append(contentsOf: chunk)
+        }
+        for (index, payload) in frames {
+            try await socket.writeRawBytes(BulkFraming.encodeFrame(chunkIndex: index, payload: payload))
+        }
+        socket.close()
+    }
+
+    func testADuplicateChunkIndexIsRejectedAsAProtocolErrorNotMerelyCounted() async throws {
+        let alice = try TestTlsSupport.freshIdentity()
+        let bob = try TestTlsSupport.freshIdentity()
+        let client = manager(bob)
+        let rawServer = TestTlsSupport.channel(alice)
+        let listener = try await rawServer.bind()
+        defer { listener.close() }
+
+        async let serverTask: Void = try Self.writeRawFrames(listener, [(0, [UInt8](repeating: 0, count: 10)), (0, [UInt8](repeating: 0, count: 10))])
+        let fetchResult = await client.fetch(
+            host: "127.0.0.1", port: listener.localPort, token: String(repeating: "0", count: 64),
+            expectedPeerSpki: alice.identitySpkiSha256, expectedChunkCount: 2, sink: RecordingChunkSink())
+        _ = try await serverTask
+
+        XCTAssertEqual(.protocolError, fetchResult)
+    }
+
+    func testASkippedChunkIndexIsRejectedAsAProtocolError() async throws {
+        let alice = try TestTlsSupport.freshIdentity()
+        let bob = try TestTlsSupport.freshIdentity()
+        let client = manager(bob)
+        let rawServer = TestTlsSupport.channel(alice)
+        let listener = try await rawServer.bind()
+        defer { listener.close() }
+
+        async let serverTask: Void = try Self.writeRawFrames(listener, [(0, [UInt8](repeating: 0, count: 10)), (2, [UInt8](repeating: 0, count: 10))])
+        let fetchResult = await client.fetch(
+            host: "127.0.0.1", port: listener.localPort, token: String(repeating: "0", count: 64),
+            expectedPeerSpki: alice.identitySpkiSha256, expectedChunkCount: 3, sink: RecordingChunkSink())
+        _ = try await serverTask
+
+        XCTAssertEqual(.protocolError, fetchResult)
+    }
+
+    func testAnOutOfOrderChunkIndexIsRejectedAsAProtocolError() async throws {
+        let alice = try TestTlsSupport.freshIdentity()
+        let bob = try TestTlsSupport.freshIdentity()
+        let client = manager(bob)
+        let rawServer = TestTlsSupport.channel(alice)
+        let listener = try await rawServer.bind()
+        defer { listener.close() }
+
+        async let serverTask: Void = try Self.writeRawFrames(listener, [(1, [UInt8](repeating: 0, count: 10)), (0, [UInt8](repeating: 0, count: 10))])
+        let fetchResult = await client.fetch(
+            host: "127.0.0.1", port: listener.localPort, token: String(repeating: "0", count: 64),
+            expectedPeerSpki: alice.identitySpkiSha256, expectedChunkCount: 2, sink: RecordingChunkSink())
+        _ = try await serverTask
+
+        XCTAssertEqual(.protocolError, fetchResult)
+    }
+
+    func testAnExtraFrameBeyondTheOffersDeclaredChunkCountIsRejected() async throws {
+        let alice = try TestTlsSupport.freshIdentity()
+        let bob = try TestTlsSupport.freshIdentity()
+        let client = manager(bob)
+        let rawServer = TestTlsSupport.channel(alice)
+        let listener = try await rawServer.bind()
+        defer { listener.close() }
+
+        // expectedChunkCount below is 1 — this second, in-sequence frame is still one frame too
+        // many and must be rejected, not silently accepted because the earlier count was already
+        // satisfied by a *different* code path.
+        async let serverTask: Void = try Self.writeRawFrames(listener, [(0, [UInt8](repeating: 0, count: 10)), (1, [UInt8](repeating: 0, count: 10))])
+        let fetchResult = await client.fetch(
+            host: "127.0.0.1", port: listener.localPort, token: String(repeating: "0", count: 64),
+            expectedPeerSpki: alice.identitySpkiSha256, expectedChunkCount: 1, sink: RecordingChunkSink())
+        _ = try await serverTask
+
+        XCTAssertEqual(.protocolError, fetchResult)
+    }
+}
+
+/// A `ChunkSource` that yields one chunk, then suspends indefinitely until `release()` is called —
+/// modelling a transfer stuck mid-stream so `cancelActive` has something real to unblock.
+private actor HangingAfterFirstChunkSource: ChunkSource {
+    private let firstChunk: [UInt8]
+    private var served = false
+    private var continuation: CheckedContinuation<Void, Never>?
+
+    init(firstChunk: [UInt8]) { self.firstChunk = firstChunk }
+
+    func nextChunk() async -> [UInt8]? {
+        if !served {
+            served = true
+            return firstChunk
+        }
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            self.continuation = continuation
+        }
+        return nil
+    }
+
+    func release() {
+        continuation?.resume()
+        continuation = nil
+    }
 }

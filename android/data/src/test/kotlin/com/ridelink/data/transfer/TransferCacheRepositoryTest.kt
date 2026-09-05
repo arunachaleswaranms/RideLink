@@ -130,4 +130,43 @@ class TransferCacheRepositoryTest {
 
             assertTrue(repo.isVerifiedCached(inUse), "a locked entry survives even as the oldest one")
         }
+
+    // --- Closure-audit Finding H: persisted cache truth, independent of any caller's session state ---
+
+    @Test
+    fun `verifiedHashes reflects the persisted table, not any in-memory session state`() =
+        runTest {
+            val repo = TransferCacheRepository(storage, dao)
+            assertEquals(emptySet(), repo.verifiedHashes())
+
+            val a = promoteAndCommit(repo, ByteArray(10) { it.toByte() }, nowMonoUs = 1_000)
+            val b = promoteAndCommit(repo, ByteArray(20) { (it + 1).toByte() }, nowMonoUs = 2_000)
+
+            assertEquals(setOf(a, b), repo.verifiedHashes())
+        }
+
+    @Test
+    fun `verifiedHashes survives a fresh repository instance over the same storage - process-restart parity`() =
+        runTest {
+            val first = TransferCacheRepository(storage, dao)
+            val hash = promoteAndCommit(first, ByteArray(10) { it.toByte() }, nowMonoUs = 1_000)
+
+            // A brand new repository instance wrapping the *same* dao/storage — modelling a fresh
+            // `AppContainer` after a process restart, where no in-memory session state (a
+            // coordinator's `DownloadState` map) survives at all. Finding H: cache truth must not
+            // depend on that map ever having existed this process.
+            val afterRestart = TransferCacheRepository(storage, dao)
+            assertEquals(setOf(hash), afterRestart.verifiedHashes())
+            assertTrue(afterRestart.isVerifiedCached(hash))
+        }
+
+    @Test
+    fun `verifiedHashes drops a hash whose row was evicted`() =
+        runTest {
+            val repo = TransferCacheRepository(storage, dao, maxCacheBytes = 150)
+            val old = promoteAndCommit(repo, ByteArray(100) { it.toByte() }, nowMonoUs = 1_000)
+            promoteAndCommit(repo, ByteArray(100) { (it + 1).toByte() }, nowMonoUs = 2_000)
+
+            assertFalse(old in repo.verifiedHashes(), "an evicted hash must not still be reported as cached")
+        }
 }
