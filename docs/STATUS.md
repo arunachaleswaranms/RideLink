@@ -1777,6 +1777,15 @@ fixes):**
 - Repository-wide grep confirms no stale `findByQuickId`/`allQuickIds()`/`deleteByQuickId` (the old
   Android DAO surface) or quickId-as-filename/skip-if-exists pattern (the old iOS import shape)
   remains anywhere.
+- The two new CRITICAL regression suites re-run directly against the real `RideLink_API36` emulator,
+  **50 consecutive times each, 0 failures**: `LibraryIndexerTest#twoFilesSharingAQuickIdButDifferingInTheMiddleAreNeverCollapsedIntoOneEntry`
+  (Finding A's own regression) and the full `MusicCoordinatorForegroundServiceFailureTest` suite
+  (Finding E, which also re-exercises the `tearDown` teardown-race fix above on every iteration).
+
+**CI is green on both platforms on the first fresh run, not re-run to green:** run
+[33944612086](https://github.com/arunachaleswaranms/RideLink/actions/runs/33944612086), head commit
+`1b313bc`. Android job **7m18s**, iOS job **5m2s**, both succeeded — the only annotations are
+pre-existing Node.js/action-version deprecation notices unrelated to this pass.
 
 **What this pass did not do, deliberately:** Phase 4 (file transfer), Phase 5 (sync/shared queue),
 Phase 6 (intercom/music coexistence arbitration — `MusicAudioSession`/audio-focus ducking remain
