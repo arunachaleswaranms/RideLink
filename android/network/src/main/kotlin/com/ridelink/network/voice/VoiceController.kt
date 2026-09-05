@@ -251,6 +251,15 @@ class VoiceController(
     internal val pendingStopCompletionCount: Int
         get() = synchronized(mailboxLock) { pendingStopCompletions.size }
 
+    /**
+     * Guards [shutdown] itself, not the release it waits for: several concurrent/repeated calls must
+     * settle on the same outcome rather than each re-offering `StopRequested` and registering its own
+     * waiter forever (this phase's timeout-ownership hardening pass, Issue 1/7). Once true, a later
+     * [shutdown] call is an immediate no-op — the mailbox, the doorbell and [consumerJob] are already
+     * gone, so a second wait would have nothing left to ever resolve it.
+     */
+    private var isShutDown = false
+
     init {
         engine.setEventSink { event -> offer(engineEventToInput(event)) }
         audioSession.setRouteSink { snapshot -> publishRoute(snapshot) }
@@ -388,9 +397,50 @@ class VoiceController(
         offer(VoiceInput.SignalReceived(signal, newVoiceSessionId()))
     }
 
-    /** Releases every task this controller owns. After this, no callback can mutate anything. */
+    /**
+     * Releases every task this controller owns. After this, no callback can mutate anything.
+     *
+     * **Waits for a deliberate release to actually finish before cancelling anything — never the
+     * other way around.** This phase's timeout-ownership hardening pass (the confirmed-but-unfixed
+     * concern `docs/STATUS.md` §2r recorded): the previous implementation called `apply(StopRequested)`
+     * **directly**, on whatever coroutine called `shutdown()`, racing [consumerJob]'s own `apply` calls
+     * over the unsynchronized `state` field, and then cancelled [consumerJob] unconditionally — which,
+     * whenever `stopAndAwaitRelease()` had just given up waiting on the *same* release (its 5 s window
+     * having elapsed at or before `audioSession.close()`'s own inner route-settlement window, never
+     * independent of it), aborted `close()` mid-flight, before `unregisterPlatformCallbacks()` and the
+     * post-close intercom-gate update could run: a leaked `AudioManager` callback registration and a
+     * gate stuck open, not merely a theoretical race.
+     *
+     * Fixed by making `shutdown()` a caller of the exact same completion signal
+     * [stopAndAwaitRelease] uses — [pendingStopCompletions], resolved only from [consumerJob] once
+     * `StopRequested` has been fully applied — rather than a second, competing entry point into
+     * `apply`. The one difference from [stopAndAwaitRelease] is deliberate: **there is no caller-side
+     * timeout here.** `shutdown()` must not give up early, because giving up here means cancelling
+     * [consumerJob] out from under whatever it is still doing — exactly the failure this pass exists to
+     * remove. Waiting is safe rather than an unbounded hang because the only suspension a `StopRequested`
+     * application can be doing is `audioSession.close()`'s own inner route-settlement wait, which is
+     * itself bounded by [com.ridelink.core.audiopolicy.RouteTransitionTracker.DEFAULT_TIMEOUT_US] as
+     * failure protection — `shutdown()` adds no second, competing bound; it simply outlasts the one that
+     * already exists.
+     *
+     * Idempotent: a second call, concurrent or later, is a no-op — [isShutDown] is checked and set
+     * atomically under [mailboxLock] before anything else runs, so a repeated call cannot re-offer
+     * `StopRequested` into a mailbox nothing will ever drain again (the first call's [consumerJob] is
+     * already cancelled and its [doorbell] already closed) and hang forever waiting on a completion
+     * nothing can resolve.
+     */
     suspend fun shutdown() {
-        apply(VoiceInput.StopRequested)
+        val alreadyShutDown =
+            synchronized(mailboxLock) {
+                val was = isShutDown
+                isShutDown = true
+                was
+            }
+        if (alreadyShutDown) return
+        val completion = CompletableDeferred<Unit>()
+        synchronized(mailboxLock) { pendingStopCompletions.add(completion) }
+        offer(VoiceInput.StopRequested)
+        completion.await()
         diagnosticsPollJob?.cancel()
         consumerJob?.cancel()
         doorbell.close()

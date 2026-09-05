@@ -258,6 +258,32 @@ All three are code fixes with laptop-testable coverage where the logic is pure o
 whether `setCommunicationDevice` actually fires `OnCommunicationDeviceChangedListener` in the
 corrected order, and with the corrected timing, on real hardware — is unchanged and still pending.
 
+The Phase 3 closure-audit pass (fifteenth session) found one more defect in this same family and
+reported it **without a fix**, out of that pass's own scope: `stopAndAwaitRelease()`'s outer
+caller-facing timeout and `AndroidVoiceAudioSession.close()`'s inner route-settlement timeout are
+both nominally five seconds, but the outer one starts first — so it is structurally guaranteed to
+fire at or before the inner one, never independently of it — and `SessionCoordinator.releaseVoiceAndAwait()`'s
+unconditional next step, `VoiceController.shutdown()`, read that timeout as license to cancel the
+consumer coroutine still running `close()`, aborting it before `unregisterPlatformCallbacks()` and
+the post-close intercom-gate update could run: a leaked `AudioManager` callback registration and a
+gate left stuck open, not merely a theoretical race. The sixteenth session's hardening pass fixed
+this: `shutdown()` now awaits the exact same completion signal `stopAndAwaitRelease()` uses,
+**without a caller-side timeout of its own** — it must not give up early, because giving up means
+cancelling the consumer out from under whatever it is still doing. Waiting is safe rather than an
+unbounded hang because the only suspension involved is `close()`'s own inner route-settlement wait,
+already bounded by `RouteTransitionTracker.DEFAULT_TIMEOUT_US`. `shutdown()` is also now idempotent
+(a second, concurrent or later call is a no-op) and no longer calls `apply(.stopRequested)` directly
+— it goes through the same mailbox `stopAndAwaitRelease()` does, removing a data race on `state`
+that existed alongside the cancellation bug. New coverage: `VoiceControllerStopAwaitTest` (Android,
+`network`) — `shutdown()` waits for an in-flight release rather than cancelling it, the exact
+regression shape (a timed-out `stopAndAwaitRelease()` immediately followed by `shutdown()` on the
+same stalled release), and repeated/concurrent `shutdown()` calls are idempotent; and
+`SessionCoordinatorEndingEffectTest` (Android, `app`) — the same regression proven one layer up,
+through the real `ENDING` effect. Both are pure/fake-driven and REAL-DEVICE INTERCOM GATE PENDING
+like the rest of this section; iOS's `VoiceController` has no equivalent caller-facing timeout on
+its own `shutdown()` (it directly awaits its single release path to completion), so this defect was
+Android-only and iOS needed no change, only a clean regression re-run.
+
 | ID | Procedure | Pass condition | Phase |
 |---|---|---|---|
 | AF-01 | START RIDE from a resumed Activity with all permissions granted, intercom enabled | Service starts with types `mediaPlayback\|microphone`; capture opens; no exception | 1/6 |

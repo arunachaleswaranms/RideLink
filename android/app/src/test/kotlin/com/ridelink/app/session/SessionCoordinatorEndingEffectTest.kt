@@ -106,6 +106,40 @@ class SessionCoordinatorEndingEffectTest {
             assertEquals(0, fgs.stopCalls, "a timed-out release must never be treated as proof capture was released")
         }
 
+    /**
+     * The exact regression this pass fixes (`docs/STATUS.md` §2r's confirmed-but-unfixed concern):
+     * `stopAndAwaitRelease()`'s own short caller-facing window gives up on the stalled `close()` above,
+     * and `releaseVoiceAndAwait()`'s very next, unconditional step — `VoiceController.shutdown()` — must
+     * not read that as license to cancel the release it was still waiting on. Before this pass,
+     * `shutdown()`'s `consumerJob?.cancel()` did exactly that, aborting `close()` before it could ever
+     * finish. Proven here by completing the gate the previous test left permanently stalled and
+     * confirming `close()` still runs to completion afterward — impossible if `shutdown()` had cancelled
+     * the coroutine running it.
+     */
+    @Test
+    fun `shutdown after a release timeout still lets the same stalled release finish`() =
+        withConnectedSession(stopAwaitTimeoutMs = SHORT_TIMEOUT_MS) { coordinator, fgs, audio ->
+            coordinator.startIntercom()
+            awaitTrue("capture open") { audio.isOpen }
+            val closeGate = CompletableDeferred<Unit>()
+            audio.closeGate = closeGate
+
+            coordinator.handleControlEvent(ControlEvent.LinkLost(LinkLossReason.BYE))
+
+            // Long enough that stopAndAwaitRelease's short timeout has definitely fired and
+            // releaseVoiceAndAwait has moved on to VoiceController.shutdown() — the exact moment the
+            // pre-fix code cancelled the coroutine still running audioSession.close().
+            delay(SHORT_TIMEOUT_MS * SETTLE_TIMEOUT_MULTIPLIER)
+            assertEquals(0, fgs.stopCalls, "a timed-out release must never be treated as proof capture was released")
+            assertEquals(0, audio.closeCaptureCount, "close() is still legitimately in flight")
+
+            // The platform (or the test) finally confirms the route change. If `shutdown()` had
+            // cancelled the coroutine still running `close()` (the pre-fix bug), this would never
+            // increment — the confirmation would have nowhere left to land.
+            closeGate.complete(Unit)
+            awaitTrue("close() actually finished, not aborted mid-flight") { audio.closeCaptureCount == 1 }
+        }
+
     /** Link loss (not BYE) must never release capture or stop the foreground service. */
     @Test
     fun `a network link loss does not release capture or stop the foreground service`() =

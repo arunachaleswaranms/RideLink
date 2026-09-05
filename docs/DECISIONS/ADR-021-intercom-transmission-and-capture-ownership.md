@@ -769,3 +769,112 @@ Full suites: Android `test ktlintCheck detekt lint assembleDebug assembleRelease
 `docs/STATUS.md` §2p and §3 for exact counts. iOS untouched by this pass (Android-only finding, no
 shared type changed): `RideLinkCore`/`RideLinkPlatform` `swift test` and `xcodebuild` Debug/Release
 simulator builds re-run clean as a regression check, unchanged counts.
+
+## Amendment A4 — 5 September 2026 — the caller-wait timeout and the release it waits for were fighting over the same job
+
+**Status of the ADR: still Accepted.** The Phase 3 closure-audit pass (fifteenth session) found one
+more defect in this same family and reported it, deliberately, **without a fix** — that pass's brief
+forbade mixing a Phase 2b redesign into a Phase 3 pass (`docs/STATUS.md` §2r). This is the dedicated
+follow-up pass that closes it. Confirmed against the actual code before anything changed; fixed in
+the platform driver layer only, exactly as A1–A3: no pure reducer's decision table, no wire shape,
+no security property moved.
+
+### The finding
+
+`VoiceController.stopAndAwaitRelease()`'s caller-facing failure-protection window
+(`STOP_AWAIT_TIMEOUT_MS`, 5 s) and `AndroidVoiceAudioSession.close()`'s inner route-settlement
+failure-protection window (`RouteTransitionTracker.DEFAULT_TIMEOUT_US`, also 5 s) are not the
+independent "5 s + 5 s" budget a naive reading suggests. The outer window starts counting the moment
+`stopAndAwaitRelease()` registers its waiter, before the consumer coroutine has even been scheduled
+to begin `engine.release()`/`audioSession.close()`; the inner window starts counting only once that
+work has actually begun. The outer timeout is therefore structurally guaranteed to fire at or before
+the inner one, never independently of it — so a caller can, and in practice does, give up on a
+release that is still legitimately in flight.
+
+`StopReleaseResult.TimedOut`'s own documentation already said this is not a failure of the release
+itself. What Amendment A2's Finding 2 did not account for is the caller's actual next step:
+`SessionCoordinator.releaseVoiceAndAwait()` calls `VoiceController.shutdown()` **unconditionally**,
+regardless of the result `stopAndAwaitRelease()` just returned. `shutdown()` called
+`apply(VoiceInput.StopRequested)` **directly**, on whatever coroutine invoked it — racing
+the consumer coroutine's own `apply` calls over the unsynchronized `state` field — and then called
+`consumerJob?.cancel()` unconditionally. Whenever `shutdown()` ran while the consumer coroutine was
+still genuinely suspended inside `close()`'s route-settlement wait (the exact case a `TimedOut`
+result implies is common, given the two windows' relative starts above), that cancellation aborted
+`close()` mid-flight — before `unregisterPlatformCallbacks()` and the post-close intercom-gate
+update (`offerIntercom(CaptureOpen(false))`) could run. The consequence was concrete, not
+theoretical: a leaked `AudioManager.OnCommunicationDeviceChangedListener`/`AudioDeviceCallback`
+registration, and a transmission gate left believing capture was still open when it was not.
+
+### The fix
+
+**There is exactly one release operation — the `StopRequested` application the mailbox's single
+consumer already runs — and now two independent caller-waits over it, neither of which may cancel
+it.** `stopAndAwaitRelease()` was already correct on this point (Amendment A2, Finding 2): its
+`withTimeoutOrNull` abandons *waiting* on `pendingStopCompletions` without touching the consumer or
+the `CompletableDeferred` other callers may still be waiting on. `shutdown()` is rewritten to be the
+same kind of caller: it registers its own waiter in `pendingStopCompletions`, offers `StopRequested`
+through the ordinary mailbox (never a direct `apply` call), and suspends on that waiter's
+completion — with **no caller-side timeout of its own**. Giving up early here was exactly the bug:
+`shutdown()` must not treat "I stopped waiting" as license to cancel the consumer coroutine that is
+still doing the release. Waiting unconditionally is safe rather than an unbounded hang because the
+only suspension a `StopRequested` application can be doing is `close()`'s own inner route-settlement
+wait, which is already bounded by `RouteTransitionTracker.DEFAULT_TIMEOUT_US` as failure protection;
+`shutdown()` adds no second, competing bound — it simply outlasts the one that already exists. Only
+once that completion resolves does `shutdown()` cancel `diagnosticsPollJob`/`consumerJob` and close
+the mailboxes, matching this ADR's own required order: release finishes, *then* background
+resources are freed, never the other way around.
+
+`shutdown()` is also now idempotent by construction (a new `isShutDown` flag, checked and set
+atomically under the same lock that guards `pendingStopCompletions`): a second call, concurrent or
+long afterward, is an immediate no-op, so a repeated `stopAndAwaitRelease()`/`shutdown()`/`shutdown()`
+sequence cannot re-offer `StopRequested` into a mailbox nothing will ever drain again and hang
+forever waiting on a completion nothing can resolve. Removing `shutdown()`'s direct, unmailboxed
+`apply` call also removes the concurrent-mutation-of-`state` hazard that came with it — a side
+benefit, not a second finding, since it falls directly out of routing `shutdown()` through the same
+single-consumer path every other input already uses.
+
+Neither `AndroidVoiceAudioSession.close()` nor `TransitionSettlementGate` needed a change: both were
+already correct (Amendments A1–A3 already fixed their internal ordering and settlement logic). The
+whole defect was in how `VoiceController.shutdown()` reacted to a caller-facing timeout it does not
+itself own.
+
+### iOS
+
+Inspected and found not to have the same flaw. `VoiceController` on iOS is an actor with no
+`stopAndAwaitRelease`/`StopReleaseResult` equivalent at all: `shutdown()` directly `await`s
+`apply(.stopRequested)` to completion, with no caller-facing timeout wrapping that wait in the first
+place, so there is no second timeout to race against and nothing for a `shutdown()` to cancel out
+from under. No iOS code changed; `swift test` for both packages and `xcodebuild` Debug/Release
+simulator builds were re-run as a regression check only.
+
+### Verification
+
+- `VoiceControllerStopAwaitTest` (Android, `network`) — three new cases: `shutdown()` does not
+  return while a gated `close()` is still in flight, and the `close()` it was waiting on is observed
+  to have actually run once the gate opens (not aborted mid-flight); the exact regression shape —
+  `stopAndAwaitRelease()` times out on a stalled `close()`, `shutdown()` is called immediately
+  afterward on the same stalled release, and the release is still allowed to finish; and repeated/
+  concurrent `shutdown()` calls are idempotent, release capture exactly once, and leak no waiter.
+  Confirmed against the pre-fix code first — both new regression tests fail there, reproducing the
+  leaked listener/skipped gate update directly, before passing against the fix.
+- `SessionCoordinatorEndingEffectTest` (Android, `app`) — the same regression proven one layer up,
+  through the real `ENDING` effect: a `BYE`-driven release stalls past `stopAndAwaitRelease()`'s short
+  test timeout, `releaseVoiceAndAwait()` moves on to `shutdown()`, and the stalled `close()` is later
+  observed to complete — impossible had `shutdown()` cancelled the coroutine running it.
+- Full suites: Android `test ktlintCheck detekt lint assembleDebug assembleRelease` — **531 unit
+  tests, 0 failures** (was 527, +4: the three new `VoiceControllerStopAwaitTest` cases and the one new
+  `SessionCoordinatorEndingEffectTest` case). iOS `RideLinkCore` **207/207**, `RideLinkPlatform`
+  **219/219** (both unchanged), `xcodebuild` Debug **and** Release simulator builds green, zero new
+  warnings.
+- The four new/changed Android JVM suites (`VoiceControllerStopAwaitTest`,
+  `SessionCoordinatorEndingEffectTest`, run together with the full `network`/`app` module suites they
+  live in) were run **100 consecutive times** against the fix, with `--rerun-tasks` so nothing was
+  served from cache: **100/100 clean, 0 failures.** See `docs/STATUS.md` §2s for the exact command and
+  the isolation note (an early attempt run concurrently with an unrelated background Gradle
+  invocation produced spurious daemon-contention failures unrelated to this fix, the same class of
+  issue Amendment A2 recorded; re-run in isolation, all runs are clean).
+- Real-emulator regression check on `RideLink_API36` (no new instrumented tests added — this fix
+  touches no Android framework type, only the pure-JVM-testable `network` module driver): the Phase 3
+  closure-audit's own `:data`/`:app` instrumented suites re-run clean, confirming this change does not
+  regress Android foreground-service-type ownership (`MICROPHONE` / `MEDIA_PLAYBACK` / both, and the
+  stop-one-keep-the-other orderings) — see `docs/STATUS.md` §2s for the exact counts.

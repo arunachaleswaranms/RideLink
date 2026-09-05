@@ -154,6 +154,90 @@ class VoiceControllerStopAwaitTest {
             withTimeout(AWAIT_TIMEOUT_MS) { voice.shutdown() }
         }
 
+    /**
+     * This phase's timeout-ownership hardening pass, the confirmed-but-unfixed concern
+     * `docs/STATUS.md` §2r recorded: `shutdown()` must wait for a release already in flight to
+     * actually finish, never cancel it out from under itself. Proven the same way
+     * `stopAndAwaitRelease does not return until the fake audio session has actually closed` proves it
+     * for that call: `shutdown()` must not return while `close()` is legitimately gated, and once the
+     * gate opens, `close()` must be observed to have actually run — not aborted mid-flight.
+     */
+    @Test
+    fun `shutdown waits for an in-flight release rather than cancelling it`() =
+        withIntercom { voice, fakes ->
+            voice.start()
+            fakes.awaitEngineCall("createOffer")
+            fakes.await("capture open") { fakes.audio.isOpen }
+
+            val closeGate = CompletableDeferred<Unit>()
+            fakes.audio.closeGate = closeGate
+
+            val shutdownJob = async { voice.shutdown() }
+
+            fakes.awaitEngineCall("release")
+            fakes.settle()
+            assertFalse(shutdownJob.isCompleted, "shutdown() must not return while close() is still gated")
+            assertEquals(0, fakes.audio.closeCaptureCount, "close() has not finished yet")
+
+            closeGate.complete(Unit)
+            withTimeout(AWAIT_TIMEOUT_MS) { shutdownJob.await() }
+            assertEquals(1, fakes.audio.closeCaptureCount, "close() must be allowed to run to completion")
+            assertEquals(0, voice.pendingStopCompletionCount)
+        }
+
+    /**
+     * The exact regression this pass fixes: `stopAndAwaitRelease()` gives up on a stalled `close()`
+     * (its own short caller-facing window elapsing), and the caller's very next step —
+     * `SessionCoordinator.releaseVoiceAndAwait()`'s unconditional `controller.shutdown()` — must not
+     * read that timeout as license to cancel the release `stopAndAwaitRelease()` was still waiting on.
+     * Before this pass, `shutdown()`'s `consumerJob?.cancel()` did exactly that, aborting `close()`
+     * before its post-close intercom-gate update could run.
+     */
+    @Test
+    fun `shutdown called right after stopAndAwaitRelease times out still lets the same release finish`() =
+        withIntercom(stopAwaitTimeoutMs = SHORT_TIMEOUT_MS) { voice, fakes ->
+            voice.start()
+            fakes.awaitEngineCall("createOffer")
+            fakes.await("capture open") { fakes.audio.isOpen }
+
+            val closeGate = CompletableDeferred<Unit>()
+            fakes.audio.closeGate = closeGate
+
+            val firstResult = withTimeout(AWAIT_TIMEOUT_MS) { voice.stopAndAwaitRelease() }
+            assertEquals(StopReleaseResult.TimedOut, firstResult, "the stalled close() must surface as a timeout")
+
+            // Exactly `releaseVoiceAndAwait`'s own next step: shutdown() runs unconditionally,
+            // regardless of the result above, while the release it timed out on is still in flight.
+            val shutdownJob = async { voice.shutdown() }
+            fakes.settle()
+            assertFalse(shutdownJob.isCompleted, "shutdown() must keep waiting for the same still-gated release")
+            assertEquals(0, fakes.audio.closeCaptureCount, "the pre-fix bug aborted close() at roughly this point")
+
+            closeGate.complete(Unit)
+            withTimeout(AWAIT_TIMEOUT_MS) { shutdownJob.await() }
+            assertEquals(1, fakes.audio.closeCaptureCount, "close() must have been allowed to finish, not aborted")
+            assertEquals(0, voice.pendingStopCompletionCount, "no waiter — timed-out or shutdown's own — may leak")
+        }
+
+    /** Repeated/concurrent shutdown is idempotent: no double release, no hang, no crash. */
+    @Test
+    fun `repeated shutdown calls are idempotent`() =
+        withIntercom { voice, fakes ->
+            voice.start()
+            fakes.awaitEngineCall("createOffer")
+            fakes.await("capture open") { fakes.audio.isOpen }
+
+            val shutdowns = List(CONCURRENT_STOP_CALLERS) { async { voice.shutdown() } }
+            withTimeout(AWAIT_TIMEOUT_MS) { shutdowns.forEach { it.await() } }
+
+            assertEquals(1, fakes.audio.closeCaptureCount, "capture is released exactly once, however many shutdowns raced")
+            assertEquals(0, voice.pendingStopCompletionCount)
+
+            // A shutdown well after the first has already torn everything down must still be a safe no-op.
+            withTimeout(AWAIT_TIMEOUT_MS) { voice.shutdown() }
+            assertEquals(1, fakes.audio.closeCaptureCount, "a later shutdown must never re-run the release")
+        }
+
     /** A link loss keeps capture open — `stopAndAwaitRelease` is not what a blip goes through. */
     @Test
     fun `a link loss does not resolve a pending stopAndAwaitRelease call`() =
