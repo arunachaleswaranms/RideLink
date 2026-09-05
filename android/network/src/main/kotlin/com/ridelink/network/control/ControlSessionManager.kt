@@ -656,6 +656,10 @@ class ControlSessionManager(
     val currentPeerSpki: SpkiHash?
         get() = if (authenticated) activeSocket?.security?.peerIdentitySpkiSha256 else null
 
+    /** The current peer's control-connection host address — reused to dial the bulk connection (ADR-023). */
+    val currentPeerHost: String?
+        get() = if (authenticated) activeSocket?.remoteHost else null
+
     /**
      * Starts PROTOCOL §4.5 pairing on the surviving connection. The six digits come from the TLS
      * exporter for **this** handshake (§4.5.1), which is what makes the comparison a real

@@ -15,6 +15,7 @@ import com.ridelink.app.ui.MainScreen
 import com.ridelink.app.ui.SecureTransportUnavailableScreen
 import com.ridelink.core.audiopolicy.RideStartDecision
 import com.ridelink.core.library.LibraryEntry
+import com.ridelink.core.manifest.ManifestEntry
 import com.ridelink.network.voice.StopReleaseResult
 import kotlinx.coroutines.launch
 
@@ -86,6 +87,7 @@ class MainActivity : ComponentActivity() {
                         MainScreen(
                             coordinator = appContainer.sessionCoordinator,
                             musicCoordinator = appContainer.musicCoordinator,
+                            sharedLibraryCoordinator = appContainer.sharedLibraryCoordinator,
                             deviceDescription = deviceDescription,
                             onStartIntercom = {
                                 attemptIntercomStart(appContainer.sessionCoordinator, requestPermissionsIfMissing = true)
@@ -95,6 +97,9 @@ class MainActivity : ComponentActivity() {
                             onPlayNow = { entry -> attemptPlayNow(appContainer.musicCoordinator, entry) },
                             onImportFolder = { pickFolder.launch(null) },
                             onImportFiles = { pickFiles.launch(arrayOf("audio/*")) },
+                            onPlaySharedTrackLocally = { entry ->
+                                attemptPlaySharedTrackLocally(appContainer.musicCoordinator, entry)
+                            },
                         )
                     },
                     // The only way to land here is a device-identity failure. There is deliberately
@@ -245,6 +250,22 @@ class MainActivity : ComponentActivity() {
             return
         }
         musicCoordinator.playNow(entry)
+    }
+
+    /**
+     * [attemptPlayNow]'s twin for the shared-library screen's "Play" affordance (brief §19): the
+     * verified cached file reuses the *same* one player/queue, so this looks up the local
+     * [LibraryEntry] that shares the tapped [ManifestEntry]'s `content_hash` — [SharedLibraryScreen]
+     * only ever enables "Play" once that local row already exists — and plays it exactly like a
+     * local library row. There is deliberately no second, cache-file-only playback path.
+     */
+    private fun attemptPlaySharedTrackLocally(
+        musicCoordinator: MusicCoordinator,
+        entry: ManifestEntry,
+    ) {
+        val hash = entry.contentHash ?: return
+        val localEntry = musicCoordinator.libraryEntries.value.find { it.track.contentHash == hash } ?: return
+        attemptPlayNow(musicCoordinator, localEntry)
     }
 
     private fun notificationsGranted(): Boolean =

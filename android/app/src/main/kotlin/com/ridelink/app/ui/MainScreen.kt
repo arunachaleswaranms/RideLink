@@ -24,9 +24,11 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import com.ridelink.app.library.SharedLibraryCoordinator
 import com.ridelink.app.music.MusicCoordinator
 import com.ridelink.app.session.SessionCoordinator
 import com.ridelink.core.library.LibraryEntry
+import com.ridelink.core.manifest.ManifestEntry
 import com.ridelink.core.sessionfsm.SessionStatus
 import com.ridelink.network.control.ControlDiagnostics
 import com.ridelink.network.control.ControlState
@@ -50,6 +52,7 @@ import com.ridelink.network.control.PairingPrompt
 fun MainScreen(
     coordinator: SessionCoordinator,
     musicCoordinator: MusicCoordinator,
+    sharedLibraryCoordinator: SharedLibraryCoordinator,
     deviceDescription: String,
     /**
      * Routed through the Activity on purpose. ARCHITECTURE §6.4 steps 4–6: the microphone foreground
@@ -66,6 +69,7 @@ fun MainScreen(
     onPlayNow: (LibraryEntry) -> Unit,
     onImportFolder: () -> Unit,
     onImportFiles: () -> Unit,
+    onPlaySharedTrackLocally: (ManifestEntry) -> Unit,
 ) {
     val state by coordinator.state.collectAsState()
     val peers by coordinator.discoveredPeers.collectAsState()
@@ -77,6 +81,9 @@ fun MainScreen(
     val policy by coordinator.intercomPolicy.collectAsState()
     val peerAudioState by coordinator.peerAudioState.collectAsState()
     val intercomRefusal by coordinator.lastIntercomRefusal.collectAsState()
+    val remoteEntries by sharedLibraryCoordinator.remoteEntries.collectAsState()
+    val downloadStates by sharedLibraryCoordinator.downloadStates.collectAsState()
+    val localEntries by musicCoordinator.libraryEntries.collectAsState()
 
     Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
         Column(
@@ -126,6 +133,17 @@ fun MainScreen(
                     onToggleMute = { coordinator.setMicrophoneMuted(!voice.userMuted) },
                     onPushToTalkHeld = coordinator::setPushToTalkHeld,
                     onSelectPolicy = coordinator::selectIntercomPolicy,
+                )
+
+                // PROTOCOL §8's catalogue plane, gated the same way voice is: brief §22, an
+                // unpaired peer must never receive or exchange the shared library.
+                SharedLibraryScreen(
+                    remoteEntries = remoteEntries,
+                    localEntries = localEntries,
+                    downloadStates = downloadStates,
+                    onDownload = sharedLibraryCoordinator::requestDownload,
+                    onCancel = { entry -> entry.contentHash?.let(sharedLibraryCoordinator::cancelDownload) },
+                    onPlayLocally = onPlaySharedTrackLocally,
                 )
             }
 

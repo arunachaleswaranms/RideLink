@@ -4,6 +4,7 @@ import android.content.Context
 import android.os.Build
 import android.os.SystemClock
 import androidx.room.Room
+import com.ridelink.app.library.SharedLibraryCoordinator
 import com.ridelink.app.music.MusicCoordinator
 import com.ridelink.app.service.RideCommand
 import com.ridelink.app.service.RideCommandBus
@@ -16,12 +17,19 @@ import com.ridelink.audio.player.ExoPlayerMusicPlayer
 import com.ridelink.audio.route.AndroidVoiceAudioSession
 import com.ridelink.audio.route.AudioEndpointPreference
 import com.ridelink.core.logging.InMemoryLogSink
+import com.ridelink.core.model.ManifestId
+import com.ridelink.core.model.TransferId
+import com.ridelink.core.model.Ulid
 import com.ridelink.core.security.TrustedPeerStore
 import com.ridelink.core.security.UtcTime
 import com.ridelink.data.database.RideLinkDatabase
 import com.ridelink.data.library.ArtworkCache
 import com.ridelink.data.library.LibraryIndexer
 import com.ridelink.data.library.LibraryRepository
+import com.ridelink.data.transfer.CacheStorage
+import com.ridelink.data.transfer.LocalContentResolver
+import com.ridelink.data.transfer.ManifestGenerator
+import com.ridelink.data.transfer.TransferCacheRepository
 import com.ridelink.data.trustedpeers.FileTrustedPeerStore
 import com.ridelink.data.trustedpeers.LocalPeerIdStore
 import com.ridelink.network.control.ConnTiebreakGenerator
@@ -31,6 +39,7 @@ import com.ridelink.network.discovery.NsdDiscoveryController
 import com.ridelink.network.security.AndroidKeystoreIdentityStore
 import com.ridelink.network.security.DeviceIdentity
 import com.ridelink.network.security.TlsControlChannel
+import com.ridelink.network.transfer.BulkTransportManager
 import com.ridelink.network.voice.StopReleaseResult
 import com.ridelink.network.voice.VoiceController
 import com.ridelink.network.voice.WebRtcVoiceEngine
@@ -147,6 +156,9 @@ class AppContainer(
     private val musicDatabase =
         Room
             .databaseBuilder(context, RideLinkDatabase::class.java, RideLinkDatabase.DATABASE_NAME)
+            // Phase 4's migration 1->2 (TransferCacheEntity, brief §16/§38): a real migration path,
+            // not a destructive fallback — a user's Phase 3 imported library must survive untouched.
+            .addMigrations(RideLinkDatabase.MIGRATION_1_2)
             .build()
 
     private val libraryRepository = LibraryRepository(musicDatabase.trackDao())
@@ -169,6 +181,38 @@ class AppContainer(
             scope = appScope,
             monotonicNowUs = monotonicNowUs,
             nextQueueItemId = { UUID.randomUUID().toString() },
+        )
+
+    /**
+     * Phase 4's shared-library stack (ADR-023). [bulkTransport] deliberately gets its **own**
+     * [TlsControlChannel] instance rather than reusing [controlChannel] — the bulk plane is a
+     * second, independent TCP listener (ADR-015's "the bulk plane is authorised per transfer… and
+     * must not inherit a control connection's role") — but the **same** [deviceIdentity], so its
+     * certificate and `identity_spki_sha256` are identical to the control connection's, which is
+     * what the SPKI pin check on both ends depends on.
+     */
+    private val cacheStorage = CacheStorage(File(context.filesDir, "transfer_cache"))
+
+    private val transferCacheRepository = TransferCacheRepository(cacheStorage, musicDatabase.transferCacheDao())
+
+    private val manifestGenerator = ManifestGenerator(libraryRepository)
+
+    private val localContentResolver = LocalContentResolver(context.contentResolver, libraryRepository, transferCacheRepository)
+
+    private val bulkTransport = BulkTransportManager(TlsControlChannel(deviceIdentity), monotonicNowUs)
+
+    val sharedLibraryCoordinator: SharedLibraryCoordinator =
+        SharedLibraryCoordinator(
+            scope = appScope,
+            monotonicNowUs = monotonicNowUs,
+            manifestGenerator = manifestGenerator,
+            cacheRepository = transferCacheRepository,
+            cacheStorage = cacheStorage,
+            contentResolver = localContentResolver,
+            bulkTransport = bulkTransport,
+            controlSessionManager = controlSessionManager,
+            nextTransferId = { TransferId(Ulid.generate()) },
+            nextManifestId = { ManifestId(Ulid.generate()) },
         )
 
     val sessionCoordinator: SessionCoordinator
@@ -205,6 +249,9 @@ class AppContainer(
         // queue owner. Set once, here, well before any user action can start that service.
         RideMediaSessionSource.player = musicPlayer.media3Player
         RideMediaSessionSource.coordinator = musicCoordinator
+        // Brief §12: nothing partial ever survives a process restart as a candidate to resume —
+        // a `.part` left over from a killed process is swept, never treated as in-progress.
+        appScope.launch { cacheStorage.sweepIncomplete() }
     }
 
     /**
