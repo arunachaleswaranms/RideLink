@@ -756,7 +756,22 @@ Invariants, all from §11 and the brief's transfer rules:
   is further bound to the authenticated control session that authorised the transfer — one bulk
   listener per session (not per transfer), a single-use token per transfer, both invalidated the
   moment that session ends or a reconnect starts a new one
-  ([ADR-023](DECISIONS/ADR-023-bulk-transfer-session-binding.md)).
+  ([ADR-023](DECISIONS/ADR-023-bulk-transfer-session-binding.md), Amendment A1).
+- **Operation ownership** ([ADR-023](DECISIONS/ADR-023-bulk-transfer-session-binding.md) Amendment
+  A1): `SharedLibraryCoordinator`'s transfer state is fenced by a small pure, mirrored primitive —
+  `core.transfer.OperationFence` / `RideLinkCore.Transfer.OperationFence` — rather than by routing
+  every step through `TransferReducer` (a deliberate, disclosed simplification, not a second state
+  machine). A superseded operation (cancelled by the user, or invalidated by a session boundary)
+  can never again mutate transfer state, however late its own coroutine/`Task` cleanup runs;
+  `BulkTransportManager.cancelActive()` / `TransferManager.cancelActive()` force-close the socket an
+  active transfer holds, so cancellation actually stops the I/O rather than merely requesting
+  cooperative cancellation.
+- **Cache-only playback** (brief §19): a verified Phase-4 cache entry that was never imported into
+  the Phase 3 library still plays through the *existing* one player/one queue —
+  `MusicCoordinator.playExternalVerifiedCachedTrack` (and its Swift mirror) mint a fresh, local-only
+  `LocalEntryId` for it, held in a small coordinator-owned map, never written to
+  `LibraryRepository`. Provenance stays distinct: LOCAL IMPORTED and VERIFIED PEER CACHE are
+  different storage origins, never merged into one row.
 - Progress and cancellation throughout; `.part` files are swept on startup.
 - Chunk indices are explicit in the frames, so **resume** is a later addition (skip received indices) and not an architectural change. Deferred from V1, per FR-011's "if practical".
 

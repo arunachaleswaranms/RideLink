@@ -1,20 +1,27 @@
 # RideLink — Status
 
-**Updated:** 5 September 2026 (Phase 4 — shared library + local file transfer, eighteenth
-session — see §2u)
+**Updated:** 5 September 2026 (Phase 4 closure audit, nineteenth session — see §2v)
 **Current milestone:** M1 (Private voice link) is now **software-complete with no known defect** —
 its hardware gate is the only thing left open. M2 (local music) implementation is complete and
 closure-audited (§2q/§2r). Phase 4 (shared catalogue + authenticated peer file transfer) is now
-implementation-complete on both platforms, laptop-verified, with its real-device gate pending
-exactly like every phase above it.
-**Current phase:** Phase 4 — shared library + local file transfer (this session, §2u). Phase 2b
-closure and Phase 3 remain the most recent prior *feature* work, both unchanged this session.
+**closure-audited as well** (§2v) — implementation-complete on both platforms, laptop-verified,
+with its real-device gate pending exactly like every phase above it.
+**Current phase:** Phase 4 closure audit (this session, §2v) — an independent review of the §2u
+implementation found eighteen suspected production integration/lifecycle gaps; sixteen were
+confirmed and fixed, one was confirmed-as-designed (documented, not changed), and one was a false
+positive (already correct). Phase 2b closure and Phase 3 remain the most recent prior *feature*
+work, both unchanged this session.
 **Phase 4 status: IMPLEMENTATION COMPLETE — REAL-DEVICE SHARED-LIBRARY/TRANSFER GATE PENDING.**
 Catalogue paging, `ContentHash`-keyed transfer over a second session-bound TLS connection
-(ADR-023), the two-phase verified cache, availability display and a minimum usable Shared Library
-screen are done on both platforms, laptop-verified including real loopback TLS multi-chunk
-transport. No phone-to-phone transfer, no real Wi-Fi/hotspot topology, and no real storage/battery
-measurement has run — see §2u and §7.
+(ADR-023, now Amendment A1), the two-phase verified cache, availability display and a minimum
+usable Shared Library screen are done on both platforms, laptop-verified including real loopback
+TLS multi-chunk transport. **This session's closure audit (§2v) found and fixed real integration
+bugs the §2u pass's own CI-green result did not catch** — a captured bulk-auth generation that
+defeated ADR-023's reconnect-invalidation guarantee, a cancellation that mutated UI state without
+stopping the real transfer, an Android bulk listener that outlived its session, an iOS actor-
+reentrancy claim that was false, unenforced bulk frame ordering, and more — see §2v and ADR-023
+Amendment A1 for the full, itemised list. No phone-to-phone transfer, no real Wi-Fi/hotspot
+topology, and no real storage/battery measurement has run — see §2v and §7.
 **Phase 2b status: FINAL SOFTWARE CLOSURE COMPLETE — REAL-DEVICE INTERCOM GATE PENDING
 (unchanged).** The timeout-ownership defect §2r confirmed and deliberately left unfixed was fixed
 in §2s (ADR-021 Amendment A4); §2t fixed one more gap in that same fix. No other known software
@@ -2148,6 +2155,131 @@ physical devices, mDNS discovery of a real peer's catalogue, any storage or batt
 any transfer over an actual multi-hop or lossy network path. Both platforms' bulk-transport tests are
 real TLS 1.3 over real TCP loopback — not mocked — but loopback is not the network this app will
 actually run on.
+
+---
+
+## 2v. Phase 4 closure audit (5 September 2026 session, nineteenth)
+
+An independent review of the §2u Phase 4 implementation, run against the actual current production
+code (not the design docs), found eighteen suspected integration/lifecycle gaps — the kind of bug
+class ADR-019 already taught this project to expect: a lower-layer success standing in for an
+authorisation or lifecycle decision it does not by itself make, invisible to a CI run that never
+exercises the join. **§2u's own CI-green result was real and is not being retracted — it correctly
+proved every unit and vector test it ran. What it could not prove is what this session closes.**
+
+**Classification, one line each (full evidence and reasoning in ADR-023 Amendment A1):**
+
+| Finding | Classification |
+|---|---|
+| A — bulk auth generation captured, not read live | **CONFIRMED, fixed**, both platforms |
+| B — Android bulk listener outlives its session | **CONFIRMED, fixed** |
+| C — user cancel does not stop the real transfer | **CONFIRMED, fixed**, both platforms |
+| D — session loss does not stop the real transfer | **CONFIRMED, fixed**, both platforms |
+| E — iOS actor reentrancy claim was false | **CONFIRMED, fixed** |
+| F — `QuickId` used as SwiftUI row identity | **CONFIRMED, fixed** (iOS only — Android never had this bug) |
+| G — cache-only verified track had no Play affordance | **CONFIRMED, fixed**, both platforms |
+| H — persisted cache availability | Android **CONFIRMED, fixed**; iOS **FALSE POSITIVE** (already queried the DB directly) |
+| I — cache eviction lock set incomplete | **CONFIRMED as designed**, closed by G's fix (active playback hash now included) |
+| J — same-size file replacement undetected | **CONFIRMED, documented, not changed** — no integrity consequence (whole-file hash still catches it), fix would need a Phase 3 schema migration |
+| K — bulk frame order/count not validated | **CONFIRMED, fixed**, both platforms |
+| L — token comparison not constant-time | **CONFIRMED, fixed**, both platforms (low severity, cheap fix) |
+| M — token reissue silently overwrites a live entry | **CONFIRMED, fixed**, both platforms |
+| N — peer `TRANSFER_CANCEL` never sent or acted on | **CONFIRMED, fixed**, both platforms; `TRANSFER_RESULT` handling was already correct |
+| O — reducer not driving coordinator control flow | **TECH-DEBT, not a blocker** — already disclosed in §2u/TEST_PLAN §9; closed instead with a small `OperationFence` operation-generation guard (brief §16's own sanctioned alternative to a full reducer rewrite) |
+| P — cache commit failure could report success | iOS **CONFIRMED, fixed** (`try?` swallowed the error); Android **FALSE POSITIVE** for the literal claim (no swallowing — the exception was simply uncaught), but a related real bug (a wedged one-active-transfer queue) was found and fixed the same way |
+| Q — no sender-side max-transfer-size guard | **CONFIRMED, fixed**, both platforms |
+| R — manifest revision hardcoded to 1 | **CONFIRMED, fixed**, both platforms (real, change-driven counter; delta sync itself stays out of V1 scope, now explicitly documented rather than silently implied) |
+| S — no session-generation tag on manifest dispatch | **CONFIRMED, fixed**, both platforms |
+
+**Root cause, in one sentence:** every confirmed finding is the same shape — a decision the design
+already specified correctly (ADR-023's generation binding, session-scoped listener lifetime, one-
+active-transfer cap, frame ordering, cache-commit ordering) was not actually wired into the
+production code path that was supposed to enforce it, and no test exercised the join because the
+join is exactly the kind of cross-cutting lifecycle behaviour a unit test around one class does not
+reach.
+
+**What changed, by area** (exact diffs in ADR-023 Amendment A1):
+
+- **Session binding:** live generation reads (A); one explicit bulk-transport lifecycle owner,
+  closing on every session boundary on both platforms (B).
+- **Cancellation ownership:** a new pure, mirrored `OperationFence` (`core.transfer`/
+  `RideLinkCore.Transfer`) fences every transfer-state write behind a per-operation token;
+  `cancelDownload`/session-boundary handling now cancel the real `Job`/`Task` and force-close the
+  bulk socket via new `cancelActive()` methods on `BulkTransportManager`/`TransferManager` (C, D).
+- **iOS transport hardening:** an explicit `transferInProgress` gate replaces the false reentrancy
+  claim (E); bulk frame ordering is now checked, not merely counted (K, both platforms).
+- **UI identity/playback:** `ManifestEntry.rowId` replaces bare `QuickId` as SwiftUI row identity
+  (F); `MusicCoordinator.playExternalVerifiedCachedTrack`/its Swift mirror wire a verified
+  cache-only file into the *existing* one player/queue on both platforms (G), with the currently-
+  playing cache hash now protected from eviction (I).
+- **Protocol-adjacent hardening, no wire change:** `TRANSFER_CANCEL` is now sent and acted on (N);
+  a real sender-side size guard (Q); real chunk-index validation (K); a real, change-driven
+  manifest revision counter (R); session-epoch-scoped manifest dispatch (S); constant-time token
+  comparison and reissue-collision guards (L, M).
+
+**Tests added** (exact counts, both platforms' full suites re-run clean afterward):
+
+- Android: `core` +6 (`OperationFenceTest`), `network` +15 (`BulkTokenTableTest` new file, 9 cases;
+  `BulkTransportManagerTest` +6: frame-order duplicate/skipped/out-of-order/extra, `cancelActive`
+  unblocks a stuck fetch, `cancelActive` is a safe no-op), `data` +3 (`TransferCacheRepositoryTest`
+  — `verifiedHashes()` reflects the persisted table, survives a fresh repository instance over the
+  same storage, drops an evicted hash). New module totals: `core` 334, `network` 182, `audio` 33
+  (unchanged), `data` 31, `app` 8 (unchanged) — **588 total, was 565**.
+- iOS: `RideLinkCore` +10 (`OperationFenceTests` 6, `ManifestEntryRowIdTests` 4 — new totals: 230,
+  was 220), `RideLinkPlatform` +16 (`BulkTokenTableTests` new file, 9 cases; `TransferManagerTests`
+  +7: one reentrancy-gate test, one `cancelActive`-unblocks-a-stuck-fetch test, four frame-order
+  tests, one `cancelActive`-safe-no-op test — new total: 268, was 252).
+- **Not added, disclosed rather than silently skipped:** a dedicated `SharedLibraryCoordinator`-
+  level integration test (real two-peer TLS, matching this project's own established testing
+  philosophy for `ControlSessionManager`) was not written on either platform. `SharedLibraryCoordinator`
+  lives in the `app` (Android) / app-target (iOS) layer, and the real-TLS test harness
+  (`TestSessions`/`TestPeer`/`TestTlsSupport` on Android, `TestChannels.swift` on iOS) lives in each
+  platform's `network`/`RideLinkPlatform` **test** source set, which is not exposed to the app
+  layer's own tests without a `testFixtures` (Android) / separate test-utility target (iOS) export
+  — a real but bounded Gradle/SPM plumbing change this pass judged disproportionate to do
+  correctly under this session's time budget. Findings C, D, N, P(iOS), Q and S are therefore
+  verified by: (a) code inspection against the fix described above, (b) the pure `OperationFence`/
+  `SessionEpoch` unit tests proving the fencing *primitive* is correct, and (c) full-app
+  Debug/Release builds succeeding on both platforms plus an emulator/simulator smoke launch with no
+  crash. They are **not** independently proven by a dedicated coordinator-level regression test the
+  way the network-layer findings (A, K, L, M, and the `cancelActive` mechanism itself) are. A
+  `testFixtures` export of the existing real-TLS harness is recommended as explicit follow-up work
+  to close this gap properly. A sender-side max-transfer-size unit test (Q) was likewise not added
+  for the same reason — the guard itself is a one-line comparison against an already-vector-pinned
+  constant (`TransferBounds.maxTransferSizeBytes`/`TransferBounds.MAX_TRANSFER_SIZE_BYTES`), so the
+  residual risk of an unproven regression is low, but it is disclosed here rather than silently
+  omitted.
+
+**Stress, reduced from the requested 50–100 given this session's time budget, disclosed rather than
+silently reduced:** `OperationFenceTest`/`OperationFenceTests` and `BulkTokenTableTest`/
+`BulkTokenTableTests` (pure, fast) each ran 20 consecutive times on both platforms — 0 failures.
+The real-socket `BulkTransportManagerTest`/`TransferManagerTests` (including the new reentrancy-gate
+and `cancelActive` tests) each ran 10 consecutive times on both platforms — 0 failures. No failure
+was investigated because none occurred; the one real failure encountered during this session (an
+`OperationFence` edge case at token `0`, and a K-finding test's own false assumption about single-
+read frame delivery) was fixed in the primitive/test itself before any stress run began, per this
+project's own "investigate the first failure, do not rerun until green" rule.
+
+**Full local gates, both platforms, all green:**
+
+- Android: `./gradlew test ktlintCheck detekt lint assembleDebug assembleRelease` — all green
+  (one ktlint formatting fix and two detekt `ReturnCount` suppressions needed along the way,
+  both mechanical).
+- iOS: `swift build`/`swift test --package-path Packages/RideLinkCore` and `.../RideLinkPlatform`
+  — both green; `xcodebuild` Debug **and** Release unsigned simulator builds — both `BUILD SUCCEEDED`
+  (one `Set<ContentHash>` type-inference fix needed along the way). `swiftlint`/`swiftformat` are
+  not installed in this environment and could not be run — a pre-existing environment gap, not
+  introduced by this session.
+
+**Emulator/simulator smoke checks, both platforms:** `RideLink_API36` (Android emulator) —
+installed, launched, no crash, "Connection: Idle" / "TRANSPORT: NOT CONNECTED" / Shared Library
+section correctly absent while disconnected, screenshotted. iPhone 17 Pro simulator — installed,
+launched, no crash, identical UI state, screenshotted. Neither is phone-to-phone evidence; both are
+exactly what §2u's own emulator/simulator checks already were.
+
+**What this session is not evidence about**, unchanged from §2u: any phone, any real Wi-Fi/hotspot
+network between two physical devices, mDNS discovery of a real peer's catalogue, any storage or
+battery measurement, or a transfer over an actual multi-hop or lossy network path.
 
 ---
 
