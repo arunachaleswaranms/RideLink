@@ -173,3 +173,49 @@ public struct LocalEntryId: Hashable, Sendable {
         }
     }
 }
+
+/// Crockford base32, 26 characters — the ULID shape PROTOCOL's schema already pins for
+/// `session_id`/`msg_id`. Shared by `ManifestId` and `TransferId` below.
+private func isValidUlid(_ s: String) -> Bool {
+    s.count == 26 && s.allSatisfy { crockfordBase32Alphabet.contains($0) }
+}
+
+private let crockfordBase32Alphabet = Set("0123456789ABCDEFGHJKMNPQRSTVWXYZ")
+
+/// PROTOCOL §8.1 — identifies one manifest synchronisation attempt. Fresh per attempt (ADR-013
+/// rule 10: a restart is always from a fresh id, which is what makes a restart unambiguous). Never
+/// derived from `manifest_revision` or from library content.
+public struct ManifestId: Hashable, Sendable {
+    public let value: String
+
+    public init(_ value: String) {
+        precondition(ManifestId.isValid(value), "ManifestId must be a 26-character Crockford-base32 ULID")
+        self.value = value
+    }
+
+    /// Non-trapping constructor for a value that arrives off the wire — see `PeerId.parse`.
+    public static func parse(_ value: String) -> ManifestId? {
+        isValid(value) ? ManifestId(value) : nil
+    }
+
+    private static func isValid(_ s: String) -> Bool { isValidUlid(s) }
+}
+
+/// PROTOCOL §8.2 / ADR-023 — identifies one file transfer. Minted by the requester, unpredictable,
+/// never derived from `ContentHash` alone. Scoped to the control session that issued it — a
+/// reconnect's new session never honours an old session's `TransferId` (ADR-023 §3).
+public struct TransferId: Hashable, Sendable {
+    public let value: String
+
+    public init(_ value: String) {
+        precondition(TransferId.isValid(value), "TransferId must be a 26-character Crockford-base32 ULID")
+        self.value = value
+    }
+
+    /// Non-trapping constructor for a value that arrives off the wire — see `PeerId.parse`.
+    public static func parse(_ value: String) -> TransferId? {
+        isValid(value) ? TransferId(value) : nil
+    }
+
+    private static func isValid(_ s: String) -> Bool { isValidUlid(s) }
+}
