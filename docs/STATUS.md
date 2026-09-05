@@ -1976,8 +1976,9 @@ regression check only.
   The Phase 3 closure audit's own `:data`/`:app` instrumented suites were re-run to prove Android
   foreground-service-type ownership is unaffected: `:data` **34/34** passed, `:app` **4/4** passed.
 - **CI is green on both platforms on the first fresh run, not re-run to green:** run
-  [PENDING — filled in after push], head commit `[PENDING]`. Android job **[PENDING]**, iOS job
-  **[PENDING]**, both succeeded.
+  [33962497218](https://github.com/arunachaleswaranms/RideLink/actions/runs/33962497218), head
+  commit `27d82c0`. Android job **7m6s**, iOS job **5m49s**, both succeeded — the only annotations
+  are pre-existing Node.js/action-version deprecation notices unrelated to this pass.
 
 **What this pass did not do, deliberately:** Phase 3, Phase 4, Phase 5, Phase 6, any weakening of
 TLS/SPKI/SAS/trust-gate/host-only-ICE/WebRTC pins, any change to a pure reducer or shared vector
