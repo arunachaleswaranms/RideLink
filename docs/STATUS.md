@@ -1879,8 +1879,9 @@ only.
   (pure, `core`, exhaustively covering `MICROPHONE`/`MEDIA_PLAYBACK`/both/neither and every
   stop-one-keep-the-other transition) is part of the 321 `core` tests above and is unchanged.
 - **CI is green on both platforms on the first fresh run, not re-run to green:** run
-  [<!-- ci-run-id -->](https://github.com/arunachaleswaranms/RideLink/actions/runs/<!-- ci-run-id -->),
-  head commit `<!-- head-sha -->`. Android job, iOS job — both succeeded.
+  [33957398193](https://github.com/arunachaleswaranms/RideLink/actions/runs/33957398193), head commit
+  `20fc5a9`. Android job **4m58s**, iOS job **6m58s**, both succeeded — the only annotations are
+  pre-existing Node.js/action-version deprecation notices unrelated to this pass.
 
 **What this pass did not do, deliberately:** Phase 3, Phase 4, Phase 5, Phase 6, any weakening of
 TLS/SPKI/SAS/trust-gate/host-only-ICE/WebRTC pins, any change to a pure reducer or shared vector
