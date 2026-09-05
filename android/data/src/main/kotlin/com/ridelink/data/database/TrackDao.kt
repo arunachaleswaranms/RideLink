@@ -24,7 +24,12 @@ import kotlinx.coroutines.flow.Flow
  * sorting an already-matched result set is simpler than four near-duplicate `ORDER BY` queries, and
  * REQUIREMENTS' scale ("realistic personal library size") does not call for a parameterized-sort
  * query.
+ *
+ * Two Phase 4 lookups ([findAllSyncEligible], [findByContentHash]) were added onto this same
+ * interface rather than a new one, because both are simple projections of the one `tracks` table
+ * this DAO already owns.
  */
+@Suppress("TooManyFunctions")
 @Dao
 interface TrackDao {
     @Query("SELECT * FROM tracks WHERE localEntryId = :localEntryId")
@@ -33,6 +38,16 @@ interface TrackDao {
     @Query("SELECT * FROM tracks WHERE locationUri = :locationUri")
     suspend fun findByLocationUri(locationUri: String): TrackEntity?
 
+    /**
+     * Phase 4's transfer-serving lookup (brief §9): `content_hash` is **not** unique at the schema
+     * level (ADR-005 — two rows may legitimately share one, being byte-identical files), so this
+     * returns the first match by `id`. Any row sharing a `content_hash` is, by definition, an
+     * equally valid source for those bytes; this DAO does not need to try a second one if the
+     * first fails to open (the caller reports a plain I/O failure rather than searching further).
+     */
+    @Query("SELECT * FROM tracks WHERE contentHash = :contentHash AND decodeStatus = 'INDEXED' ORDER BY id LIMIT 1")
+    suspend fun findByContentHash(contentHash: String): TrackEntity?
+
     @Query("SELECT locationUri, quickId FROM tracks")
     suspend fun allLocationsAndQuickIds(): List<LocationQuickIdRow>
 
@@ -40,6 +55,16 @@ interface TrackDao {
      *  snapshot — a row is sync/transfer-eligible only once it leaves this list. */
     @Query("SELECT * FROM tracks WHERE contentHash IS NULL")
     suspend fun findMissingContentHash(): List<TrackEntity>
+
+    /**
+     * Phase 4's manifest generator (brief §5): every row that is both usable (`INDEXED`, never
+     * `MISSING`/`UNSUPPORTED`/`CORRUPT`) and sync-eligible (`contentHash` present — ADR-005). A
+     * one-shot suspend query, deliberately not [observeAll]'s `Flow` — manifest generation must not
+     * depend on a UI collector currently being active. Ordered by `contentHash` so two generation
+     * passes over an unchanged library produce byte-identical manifest ordering.
+     */
+    @Query("SELECT * FROM tracks WHERE contentHash IS NOT NULL AND decodeStatus = 'INDEXED' ORDER BY contentHash ASC")
+    suspend fun findAllSyncEligible(): List<TrackEntity>
 
     /** A genuinely new location, never indexed before. Never expected to conflict on [locationUri]
      *  or [com.ridelink.data.database.TrackEntity.localEntryId] — [OnConflictStrategy.ABORT] means a

@@ -44,9 +44,15 @@ class LibraryRepository(
 
     suspend fun findByLocationUri(locationUri: String): LibraryEntry? = dao.findByLocationUri(locationUri)?.toDomain()
 
+    /** Phase 4's transfer-serving lookup — see [com.ridelink.data.database.TrackDao.findByContentHash]. */
+    suspend fun findByContentHash(contentHash: ContentHash): LibraryEntry? = dao.findByContentHash(contentHash.value)?.toDomain()
+
     /** Every row still missing its authoritative [ContentHash] — ADR-005's lazy background hashing
      *  pass reads this directly rather than a possibly-stale UI snapshot. */
     suspend fun entriesMissingContentHash(): List<LibraryEntry> = dao.findMissingContentHash().map { it.toDomain() }
+
+    /** Phase 4's manifest generator input: every indexed, content-hashed row, deterministically ordered. */
+    suspend fun allSyncEligible(): List<LibraryEntry> = dao.findAllSyncEligible().map { it.toDomain() }
 
     /** A location never indexed before — [entry] carries a freshly-generated
      *  [com.ridelink.core.model.LocalEntryId] the caller must have already assigned. */
