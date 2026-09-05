@@ -2135,8 +2135,13 @@ vector-pinned regardless — it is simply not yet the thing driving the coordina
   machine — 100 runs, 100 passed, 0 failed.** Android's equivalent 100-consecutive-run pass over the
   seven new pure Kotlin vector test classes was run and recorded earlier this session, also 0
   failures; the corresponding temporary script was deleted afterward as in every prior stress pass.
-- **CI: not yet observed for this phase's own commits** — pushing and recording one fresh CI run is
-  Stage 12, not yet run as of this write-up. See §7.
+- **CI green on both platforms on the first fresh run, not re-run to green:** run
+  [33971871405](https://github.com/arunachaleswaranms/RideLink/actions/runs/33971871405), head
+  commit `4487d93` (this session's docs-evidence commit, immediately following `00ed45d`'s Stage 9
+  code). Android: `core unit tests`, `all unit tests`, `ktlint`, `detekt`, `lint`, `assembleDebug`,
+  `assembleRelease` — all seven green. iOS: `RideLinkCore` tests, `RideLinkPlatform` tests, unsigned
+  Debug **and** Release simulator builds — all four green. Nothing was re-run and no step was
+  skipped except the failure-only test-report upload (correctly skipped, since nothing failed).
 
 **What none of this is evidence about:** any phone, any real Wi-Fi or hotspot network between two
 physical devices, mDNS discovery of a real peer's catalogue, any storage or battery measurement, or
@@ -2624,17 +2629,18 @@ Not blocking Phase 1. Answers needed before Phase 6.
 **Phase 4 — shared library + local file transfer. IMPLEMENTATION COMPLETE — REAL-DEVICE
 SHARED-LIBRARY/TRANSFER GATE PENDING (this session, §2u).** Every laptop-runnable gate is green on
 both platforms, including real loopback-TLS multi-chunk transport, a real emulator smoke check
-(Stage 8, earlier this session) and a real simulator smoke check (Stage 9, §2u). **The exact next
-task is Stage 12**: push this session's commits and observe exactly one fresh CI run — not yet done
-as of this write-up — then record the run ID/SHA/per-job result in a follow-up docs commit, the same
-two-commit convention `e4740d6`'s own history already uses. `docs/TEST_PLAN.md` also still needs its
-Phase 4 rows (already speced under L1–L4) marked verified-vs-pending to match this session's actual
-evidence; `docs/PROTOCOL.md`/`docs/ARCHITECTURE.md` needed no further change beyond what ADR-023 and
-the existing §8.3 update already record. **What remains for Phase 4 specifically, once CI is green:
+(Stage 8, earlier this session) and a real simulator smoke check (Stage 9, §2u), and CI is green on
+the first fresh run — [33971871405](https://github.com/arunachaleswaranms/RideLink/actions/runs/33971871405),
+head commit `4487d93`, all eleven Android+iOS jobs' steps green, nothing re-run. `docs/TEST_PLAN.md`
+already carries this session's Phase 4 exit-gate row (§9) marked verified-vs-pending against this
+actual evidence; `docs/PROTOCOL.md`/`docs/ARCHITECTURE.md` needed no further change beyond what
+ADR-023 and the existing §8.3 update already record. **What remains for Phase 4 specifically:
 everything a real phone-to-phone Wi-Fi/hotspot topology would show** — actual mDNS discovery of a
 peer's live catalogue, a transfer over a real (not loopback) network path, and any storage/battery
 measurement over a realistic personal library. No TEST_PLAN hardware-gate IDs exist yet for Phase 4
-specifically; adding them is part of the docs follow-up above.
+specifically beyond the pre-existing I-10/I-11/I-23/I-24 (§9); a dedicated Phase-4 device-gate
+checklist mirroring §2b/§5.1's A-/V-numbered rows is a reasonable next-session addition, not done
+this session.
 
 **Phase 3 — local music player. IMPLEMENTATION COMPLETE — REAL-DEVICE LOCAL-MUSIC GATE PENDING**
 (§2q, closure-audited in §2r). Library import/index/search, a local queue, local playback, Android
