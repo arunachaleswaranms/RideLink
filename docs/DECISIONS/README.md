@@ -26,6 +26,8 @@ Consequences · Alternatives considered.
 | [019](ADR-019-connected-means-authenticated.md) | `Connected` means the trust gate passed, not that TLS came up | Accepted |
 | [020](ADR-020-webrtc-voice-foundation.md) | Phase 2a voice foundation: pinned WebRTC distributions, leader-is-offerer, host-only ICE, and the `stop`/`release` audio-session split | Accepted · **amended A1** (2 Sep 2026 — the Apple pin moves to M152 because upstream deleted M151) · **A2** (2 Sep 2026 — the generation guard is strict) |
 | [021](ADR-021-intercom-transmission-and-capture-ownership.md) | Phase 2b intercom: one capture owner, one policy object, transmission gated at the audio track and never at the device | Accepted |
+| [022](ADR-022-media-session-without-mediasessionservice.md) | A real `MediaSession`, owned by the existing ride foreground service, without subclassing `MediaSessionService` | Accepted |
+| [023](ADR-023-bulk-transfer-session-binding.md) | Bulk transfer session binding, listener lifecycle and cache trust model | Accepted |
 
 ADRs 011–016 and the three amendments came out of the pre-Phase-1 correction pass recorded in
 [`../STATUS.md`](../STATUS.md#2-what-changed-in-the-correction-pass). ADRs 017–018 came out of the
@@ -50,6 +52,17 @@ Bluetooth endpoint between its profiles even by accident. It also moves the whol
 executed off a device; records the resolution of a contradiction in PROTOCOL §4.4's own wording about
 `intercom_mode`; and states plainly which parts are **not** done — VOX has no level source on either
 platform, no route `confidence` moved from `assumed`, and nothing in the phase ran on a phone.
+
+ADR-022 came out of the Phase 3 closure-audit hardening pass — Android's `Track`/`Now Playing`
+integration needed a real `MediaSession`, and the existing architecture's ride foreground service
+already owns the lifecycle a `MediaSessionService` would otherwise duplicate.
+
+ADR-023 answers what Phase 4's own wire spec (PROTOCOL §8.2, ARCHITECTURE §8.3) left unsaid: how
+long the bulk listener lives, what binds a `bulk_token` and an in-flight transfer to *the current*
+authenticated session rather than to the peer in general, and what makes a verified cache entry
+trustworthy enough to serve or play. It extends ADR-015's already-settled "the bulk plane is
+authorised per transfer, not by the control connection" position with the session-generation guard
+that makes a reconnect's old transfer state inert rather than merely unlikely to resurface.
 
 **Adding one:** next free number, update this table, link it from the relevant section of
 `ARCHITECTURE.md`.

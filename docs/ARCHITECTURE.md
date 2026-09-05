@@ -746,8 +746,17 @@ Invariants, all from §11 and the brief's transfer rules:
 - Bounded memory: one chunk in flight; stream straight to disk. Never buffer a whole file.
 - Write to `cache/incoming/<content_hash>.part`, never into the library.
 - On `COMPLETE`: verify byte count **and** recompute SHA-256 over what was written to disk — not over what we think we received.
-- **Atomic promote only on match**: `rename()` into the library. A mismatch deletes the partial and reports failure. There is no path by which an unverified byte becomes a library track.
-- The bulk connection is pinned to the same `identity_spki_sha256` as the control connection.
+- **Atomic promote only on match**: `rename()` into an app-owned **verified transfer cache** —
+  distinct from the Phase 3 library table, not merged into it (REQUIREMENTS §16's
+  `TrackPresence{local_available, cached, …}` already keeps these as separate booleans). A peer's
+  catalogue disappearing after disconnect, or a cache entry later being evicted, must never delete
+  or shadow a track the user actually imported. A mismatch deletes the partial and reports failure;
+  there is no path by which an unverified byte becomes trusted content.
+- The bulk connection is pinned to the same `identity_spki_sha256` as the control connection, and
+  is further bound to the authenticated control session that authorised the transfer — one bulk
+  listener per session (not per transfer), a single-use token per transfer, both invalidated the
+  moment that session ends or a reconnect starts a new one
+  ([ADR-023](DECISIONS/ADR-023-bulk-transfer-session-binding.md)).
 - Progress and cancellation throughout; `.part` files are swept on startup.
 - Chunk indices are explicit in the frames, so **resume** is a later addition (skip received indices) and not an architectural change. Deferred from V1, per FR-011's "if practical".
 
