@@ -171,3 +171,45 @@ value class LocalEntryId(
         fun parse(value: String): LocalEntryId? = if (FORMAT.matches(value)) LocalEntryId(value) else null
     }
 }
+
+/** Crockford base32, 26 characters — the ULID shape PROTOCOL's schema already pins for `session_id`/`msg_id`. */
+private val ULID_FORMAT = Regex("^[0-9A-HJKMNP-TV-Z]{26}$")
+
+/**
+ * PROTOCOL §8.1 — identifies one manifest synchronisation attempt. Fresh per attempt (ADR-013
+ * rule 10: a restart is always from a fresh id, which is what makes a restart unambiguous). Never
+ * derived from `manifest_revision` or from library content.
+ */
+@JvmInline
+value class ManifestId(
+    val value: String,
+) {
+    init {
+        require(ULID_FORMAT.matches(value)) { "ManifestId must be a 26-character Crockford-base32 ULID" }
+    }
+
+    companion object {
+        /** Non-throwing constructor for a value that arrives off the wire. */
+        fun parse(value: String): ManifestId? = if (ULID_FORMAT.matches(value)) ManifestId(value) else null
+    }
+}
+
+/**
+ * PROTOCOL §8.2 / ADR-023 — identifies one file transfer. Minted by the requester, unpredictable,
+ * never derived from [ContentHash] alone (ADR-023 §2/§24 of the brief: a transfer_id must not be
+ * guessable from the content it names). Scoped to the control session that issued it — a
+ * reconnect's new session never honours an old session's [TransferId] (ADR-023 §3).
+ */
+@JvmInline
+value class TransferId(
+    val value: String,
+) {
+    init {
+        require(ULID_FORMAT.matches(value)) { "TransferId must be a 26-character Crockford-base32 ULID" }
+    }
+
+    companion object {
+        /** Non-throwing constructor for a value that arrives off the wire. */
+        fun parse(value: String): TransferId? = if (ULID_FORMAT.matches(value)) TransferId(value) else null
+    }
+}
