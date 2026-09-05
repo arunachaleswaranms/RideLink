@@ -95,6 +95,61 @@ public enum ManifestCodec {
         }
     }
 
+    /// The `MANIFEST_*` type a given `ManifestMessage` wire-encodes as.
+    public static func wireType(_ message: ManifestMessage) -> String {
+        switch message {
+        case .request: return ManifestMessageTypes.request
+        case .begin: return ManifestMessageTypes.begin
+        case .page: return ManifestMessageTypes.page
+        case .end: return ManifestMessageTypes.end
+        case .abort: return ManifestMessageTypes.abort
+        }
+    }
+
+    /// The outbound side of `parse` — the shape lives here, once, shared by both directions.
+    public static func encode(_ message: ManifestMessage) -> [String: JSONValue] {
+        switch message {
+        case .request(let sinceRevision, let maxPageBytes):
+            return [
+                fieldSinceRevision: sinceRevision.map { JSONValue.number(Double($0)) } ?? .null,
+                fieldMaxPageBytes: .number(Double(maxPageBytes)),
+            ]
+        case .begin(let manifestId, let kind, let manifestRevision, let baseRevision, let totalEntries, let totalRemoved, let pageCount, let digestAlg):
+            return [
+                fieldManifestId: .string(manifestId.value),
+                fieldKind: .string(kind.wire),
+                fieldManifestRevision: .number(Double(manifestRevision)),
+                fieldBaseRevision: baseRevision.map { JSONValue.number(Double($0)) } ?? .null,
+                fieldTotalEntries: .number(Double(totalEntries)),
+                fieldTotalRemoved: .number(Double(totalRemoved)),
+                fieldPageCount: pageCount.map { JSONValue.number(Double($0)) } ?? .null,
+                fieldDigestAlg: .string(digestAlg),
+            ]
+        case .page(let manifestId, let manifestRevision, let pageIndex, let entries, let removed):
+            return [
+                fieldManifestId: .string(manifestId.value),
+                fieldManifestRevision: .number(Double(manifestRevision)),
+                fieldPageIndex: .number(Double(pageIndex)),
+                fieldEntries: .array(entries.map { JSONValue.object($0.toJSONObject()) }),
+                fieldRemoved: .array(removed.map { JSONValue.string($0.value) }),
+            ]
+        case .end(let manifestId, let manifestRevision, let pageCount, let totalEntries, let totalRemoved, let digest):
+            return [
+                fieldManifestId: .string(manifestId.value),
+                fieldManifestRevision: .number(Double(manifestRevision)),
+                fieldPageCount: .number(Double(pageCount)),
+                fieldTotalEntries: .number(Double(totalEntries)),
+                fieldTotalRemoved: .number(Double(totalRemoved)),
+                fieldDigest: .string(digest),
+            ]
+        case .abort(let manifestId, let reason):
+            return [
+                fieldManifestId: .string(manifestId.value),
+                fieldReason: .string(reason),
+            ]
+        }
+    }
+
     private static func parseRequest(_ payload: [String: JSONValue]) -> Result {
         guard let sinceOutcome = nullableLong(payload, fieldSinceRevision) else {
             return missingOrWrongType(payload, fieldSinceRevision)

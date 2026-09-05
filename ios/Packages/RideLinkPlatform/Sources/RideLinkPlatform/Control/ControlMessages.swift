@@ -270,6 +270,22 @@ public enum ControlMessages {
         )
     }
 
+    /// A frame built from an already wire-shaped payload rather than one of the typed builders
+    /// above. Used by `ManifestRelay`/`TransferRelay` (PROTOCOL §8.1/§8.2), whose message shapes
+    /// live in `ManifestCodec`/`TransferCodec` (shared with Android, pinned by `protocol/vectors/`)
+    /// rather than a second hand-written builder here — the same reasoning `voiceSignal` and
+    /// `audioState` already give.
+    public static func raw(
+        localPeerId: PeerId,
+        type: String,
+        sessionId: SessionId,
+        seq: Int64,
+        sentAtMonoUs: Int64,
+        payload: JSONObject
+    ) -> Envelope {
+        envelope(localPeerId: localPeerId, type: type, sessionId: sessionId, seq: seq, sentAtMonoUs: sentAtMonoUs, payload: payload)
+    }
+
     private static func envelope(
         localPeerId: PeerId,
         type: String,

@@ -156,6 +156,13 @@ public actor ControlSessionManager {
     /// which has completed TLS but not RideLink authentication cannot invoke anything reserved for
     /// an authenticated session. Transport alive != session authenticated.
     private var authenticated = false
+    /// ADR-023 §3's "session generation": a monotonically increasing counter, incremented once per
+    /// successful `activateAuthenticatedSession()` — including a reconnect's re-authentication of
+    /// the *same* wire `session_id`. Anything scoped to a bulk transfer (its token, its listener) is
+    /// scoped to this number, never to `session_id`, so a reconnect can never let a stale transfer's
+    /// token or completion apply to the new one. Mirrors Android's `ControlSessionManager
+    /// .authenticationGeneration` exactly.
+    private var authenticationGeneration: Int64 = 0
     private let pingRequests = PingRequestRegistry()
 
     private struct PendingActivation {
@@ -200,6 +207,32 @@ public actor ControlSessionManager {
     public func audioStateRelay() -> AudioStateRelay { audioState }
 
     private lazy var audioState: AudioStateRelay = AudioStateRelay(
+        localPeerId: localPeerId,
+        monotonicNowUs: monotonicNowUs,
+        nextSeq: { [seqCounter] in seqCounter.nextSeq() },
+        activeSessionId: { [weak self] in await self?.currentSessionId() ?? SessionId("n/a") },
+        authenticatedWriter: { [weak self] in await self?.authenticatedWriter() }
+    )
+
+    /// The `MANIFEST_*` half of the control plane (PROTOCOL §8.1), extracted for the same reason
+    /// `voice`/`audioState` are. `MANIFEST_*` is likewise absent from `preAuthenticationFrameTypes`
+    /// (brief §22: unpaired peers never receive the catalogue).
+    public func manifestRelay() -> ManifestRelay { manifest }
+
+    private lazy var manifest: ManifestRelay = ManifestRelay(
+        localPeerId: localPeerId,
+        monotonicNowUs: monotonicNowUs,
+        nextSeq: { [seqCounter] in seqCounter.nextSeq() },
+        activeSessionId: { [weak self] in await self?.currentSessionId() ?? SessionId("n/a") },
+        authenticatedWriter: { [weak self] in await self?.authenticatedWriter() }
+    )
+
+    /// The `TRANSFER_*` half of the control plane (PROTOCOL §8.2) — the small negotiation messages
+    /// only; the bulk byte stream itself never touches this class (ADR-023). Extracted for the same
+    /// reason as `manifest`.
+    public func transferRelay() -> TransferRelay { transfer }
+
+    private lazy var transfer: TransferRelay = TransferRelay(
         localPeerId: localPeerId,
         monotonicNowUs: monotonicNowUs,
         nextSeq: { [seqCounter] in seqCounter.nextSeq() },
@@ -502,10 +535,32 @@ public actor ControlSessionManager {
         guard let pending = pendingActivation, activeSocket === pending.socket else { return }
         pendingActivation = nil
         authenticated = true
+        // ADR-023 §3: a fresh, strictly-increasing generation per activation — including a
+        // reconnect's re-authentication of the *same* wire session_id. Anything scoped to a bulk
+        // transfer (its token, its listener) is scoped to this number, never to session_id, so a
+        // reconnect can never let a stale transfer's token or completion apply to the new one.
+        authenticationGeneration += 1
         updateDiagnostics { $0.controlState = .connected }
         emit(.connected(
             remotePeerId: pending.remotePeerId, sessionId: pending.sessionId, isLocalLeader: pending.isLocalLeader))
         clockSyncTask = Task { await self.clockSyncLoop(socket: pending.socket) }
+    }
+
+    /// ADR-023's session-generation guard, exposed for `TransferManager`: strictly increases on
+    /// every `activateAuthenticatedSession`, including a reconnect that re-authenticates the same
+    /// wire `session_id`. Never decreases and never resets — a bulk token or an in-flight transfer
+    /// state tagged with a past value is permanently stale.
+    public var currentAuthGeneration: Int64 { authenticationGeneration }
+
+    /// The current peer's pinned identity, or nil before/without authentication (ADR-012, ADR-023 §4).
+    public var currentPeerSpki: SpkiHash? {
+        authenticated ? activeSocket?.security?.peerIdentitySpkiSha256 : nil
+    }
+
+    /// The current peer's control-connection host address — reused to dial the bulk connection
+    /// (ADR-023).
+    public var currentPeerHost: String? {
+        authenticated ? activeSocket?.remoteHost : nil
     }
 
     // MARK: - PROTOCOL §4.5 pairing
@@ -692,6 +747,12 @@ public actor ControlSessionManager {
             if VoiceMessageTypes.all.contains(envelope.type) {
                 await voice.countPreAuthenticationDrop()
             }
+            if ManifestMessageTypes.all.contains(envelope.type) {
+                await manifest.countPreAuthenticationDrop()
+            }
+            if TransferMessageTypes.all.contains(envelope.type) {
+                await transfer.countPreAuthenticationDrop()
+            }
             return
         }
         switch envelope.type {
@@ -727,6 +788,14 @@ public actor ControlSessionManager {
             await audioState.deliver(payload: payload)
         case VoiceMessageTypes.offer, VoiceMessageTypes.answer, VoiceMessageTypes.ice, VoiceMessageTypes.state:
             await voice.deliver(type: envelope.type, payload: envelope.payload)
+        // Reachable only past the guard above, so only for an authenticated peer (PROTOCOL §8.1).
+        case ManifestMessageTypes.request, ManifestMessageTypes.begin, ManifestMessageTypes.page,
+            ManifestMessageTypes.end, ManifestMessageTypes.abort:
+            await manifest.deliver(type: envelope.type, payload: envelope.payload)
+        // Reachable only past the guard above, so only for an authenticated peer (PROTOCOL §8.2).
+        case TransferMessageTypes.request, TransferMessageTypes.offer, TransferMessageTypes.progress,
+            TransferMessageTypes.result, TransferMessageTypes.cancel:
+            await transfer.deliver(type: envelope.type, payload: envelope.payload)
         case "BYE":
             await endConnection(socket, reason: .bye)
         case "ERROR":
@@ -958,6 +1027,8 @@ public actor ControlSessionManager {
         // teardown path may depend on the other having run.
         await voice.reset()
         await audioState.reset()
+        await manifest.reset()
+        await transfer.reset()
         pendingActivation = nil
         updatePairingPrompt(nil)
         endedDeliberately = true

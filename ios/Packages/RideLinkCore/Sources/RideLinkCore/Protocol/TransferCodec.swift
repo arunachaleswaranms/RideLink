@@ -88,6 +88,54 @@ public enum TransferCodec {
         }
     }
 
+    /// The `TRANSFER_*` type a given `TransferMessage` wire-encodes as.
+    public static func wireType(_ message: TransferMessage) -> String {
+        switch message {
+        case .request: return TransferMessageTypes.request
+        case .offer: return TransferMessageTypes.offer
+        case .progress: return TransferMessageTypes.progress
+        case .result: return TransferMessageTypes.result
+        case .cancel: return TransferMessageTypes.cancel
+        }
+    }
+
+    /// The outbound side of `parse` — the shape lives here, once, shared by both directions.
+    public static func encode(_ message: TransferMessage) -> [String: JSONValue] {
+        switch message {
+        case .request(let contentHash, let transferId):
+            return [
+                fieldContentHash: .string(contentHash.value),
+                fieldTransferId: .string(transferId.value),
+            ]
+        case .offer(let transferId, let sizeBytes, let chunkSize, let chunkCount, let bulkPort, let bulkToken):
+            return [
+                fieldTransferId: .string(transferId.value),
+                fieldSizeBytes: .number(Double(sizeBytes)),
+                fieldChunkSize: .number(Double(chunkSize)),
+                fieldChunkCount: .number(Double(chunkCount)),
+                fieldBulkPort: .number(Double(bulkPort)),
+                fieldBulkToken: .string(bulkToken),
+            ]
+        case .progress(let transferId, let bytes, let pct):
+            return [
+                fieldTransferId: .string(transferId.value),
+                fieldBytes: .number(Double(bytes)),
+                fieldPct: .number(Double(pct)),
+            ]
+        case .result(let transferId, let ok, let sha256):
+            return [
+                fieldTransferId: .string(transferId.value),
+                fieldOk: .bool(ok),
+                fieldSha256: sha256.map { JSONValue.string($0.value) } ?? .null,
+            ]
+        case .cancel(let transferId, let reason):
+            return [
+                fieldTransferId: .string(transferId.value),
+                fieldReason: .string(reason),
+            ]
+        }
+    }
+
     private static func parseRequest(_ payload: [String: JSONValue]) -> Result {
         guard let contentHash = requiredContentHash(payload, fieldContentHash) else {
             return rejectContentHash(payload, fieldContentHash)

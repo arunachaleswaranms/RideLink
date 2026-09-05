@@ -185,6 +185,17 @@ public final class ControlConnection: @unchecked Sendable {
         }
     }
 
+    /// The remote peer's address, as reported by `Network.framework`'s own view of the connection.
+    /// `"unknown"` mirrors Android's `ControlSocket.remoteHost` fallback — used only to dial the
+    /// bulk connection back to the same host the control connection is already talking to
+    /// (ADR-023), never for anything security-relevant (that is the SPKI pin, not this).
+    public var remoteHost: String {
+        if case .hostPort(let host, _) = connection.currentPath?.remoteEndpoint ?? connection.endpoint {
+            return "\(host)"
+        }
+        return "unknown"
+    }
+
     public func writeFrame(_ envelope: Envelope) async throws {
         let bytes = try EnvelopeCodec.encode(envelope)
         guard bytes.count <= FrameLimits.maxControlFrameBytes else {
@@ -236,6 +247,31 @@ public final class ControlConnection: @unchecked Sendable {
             return .frame(envelope, versionOk: versionOk)
         case .failure(let errorCode):
             return .malformed(errorCode: errorCode)
+        }
+    }
+
+    /// PROTOCOL §8.2's bulk plane — raw byte I/O that bypasses the JSON envelope framing entirely.
+    /// Never called from the control read loop; used only by the bulk transport (ADR-023), which
+    /// reuses this same TLS+SPKI-pinned connection machinery for its own, differently-framed
+    /// (RLB1) connection rather than duplicating the TLS setup. Mirrors Android's
+    /// `ControlSocket.writeRawBytes`/`readRawBytes` addition to `Framing.kt`.
+    public func writeRawBytes(_ bytes: [UInt8]) async throws {
+        try await send(Data(bytes))
+    }
+
+    /// Reads whatever is available in one receive call, up to `maxLength` bytes (may be fewer).
+    /// `nil` at EOF or on any error — there is no separate "negative length" sentinel the way a
+    /// blocking `InputStream.read` needs, because `Network.framework`'s completion already
+    /// distinguishes "some bytes" from "the connection is done".
+    public func readRawBytes(maxLength: Int) async -> [UInt8]? {
+        await withCheckedContinuation { (continuation: CheckedContinuation<[UInt8]?, Never>) in
+            connection.receive(minimumIncompleteLength: 1, maximumLength: maxLength) { data, _, _, _ in
+                if let data, !data.isEmpty {
+                    continuation.resume(returning: [UInt8](data))
+                } else {
+                    continuation.resume(returning: nil)
+                }
+            }
         }
     }
 
