@@ -44,7 +44,10 @@ struct LibraryView: View {
             // lazy library screen outside the shared scroll container is a Ride-Mode-era (Phase 7)
             // concern, not this one.
             VStack(alignment: .leading, spacing: 4) {
-                ForEach(entries, id: \.track.quickId) { entry in
+                // Keyed by localEntryId, not track.quickId (ADR-005 Amendment A1) — quickId is not
+                // guaranteed unique across entries, and a duplicate SwiftUI `ForEach` id is undefined
+                // behaviour, not merely a display glitch.
+                ForEach(entries, id: \.localEntryId) { entry in
                     TrackRow(entry: entry, onAddToQueue: { onAddToQueue(entry) }, onPlayNow: { onPlayNow(entry) })
                 }
             }

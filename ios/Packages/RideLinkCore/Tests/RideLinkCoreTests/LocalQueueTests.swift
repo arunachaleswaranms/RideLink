@@ -2,10 +2,10 @@ import Foundation
 import XCTest
 @testable import RideLinkCore
 
-private func quickIdFor(_ byte: String) -> QuickId { QuickId("sha256:" + String(repeating: byte, count: 32)) }
+private func localEntryIdFor(_ byte: String) -> LocalEntryId { LocalEntryId("00000000-0000-4000-8000-\(String(repeating: byte, count: 6))") }
 
 private func item(_ id: String, hashByte: String? = nil) -> LocalQueueItem {
-    LocalQueueItem(id: id, quickId: quickIdFor(hashByte ?? id), insertedAtMonoUs: 0)
+    LocalQueueItem(id: id, localEntryId: localEntryIdFor(hashByte ?? id), insertedAtMonoUs: 0)
 }
 
 final class LocalQueueTests: XCTestCase {
@@ -17,9 +17,9 @@ final class LocalQueueTests: XCTestCase {
     }
 
     func testDuplicateTrackAddedTwiceProducesTwoIndependentQueueEntries() {
-        let sameTrack = quickIdFor("aa")
-        let first = LocalQueueItem(id: "q1", quickId: sameTrack, insertedAtMonoUs: 0)
-        let second = LocalQueueItem(id: "q2", quickId: sameTrack, insertedAtMonoUs: 1)
+        let sameTrack = localEntryIdFor("aa")
+        let first = LocalQueueItem(id: "q1", localEntryId: sameTrack, insertedAtMonoUs: 0)
+        let second = LocalQueueItem(id: "q2", localEntryId: sameTrack, insertedAtMonoUs: 1)
         var state = LocalQueue.reduce(LocalQueueState(), .add(first)).state
         state = LocalQueue.reduce(state, .add(second)).state
         XCTAssertEqual(2, state.items.count)
@@ -31,7 +31,7 @@ final class LocalQueueTests: XCTestCase {
         let state = LocalQueueState(items: [item("a1"), item("b2")])
         let outcome = LocalQueue.reduce(state, .next)
         XCTAssertEqual("a1", outcome.state.currentId)
-        XCTAssertEqual([.loadAndPlay(quickIdFor("a1"))], outcome.effects)
+        XCTAssertEqual([.loadAndPlay(localEntryIdFor("a1"))], outcome.effects)
     }
 
     func testPreviousFromNoSelectionIsANoOp() {
@@ -59,10 +59,10 @@ final class LocalQueueTests: XCTestCase {
         let state = LocalQueueState(items: [item("a1"), item("b2"), item("c3")], currentId: "a1")
         let toB = LocalQueue.reduce(state, .next)
         XCTAssertEqual("b2", toB.state.currentId)
-        XCTAssertEqual([.loadAndPlay(quickIdFor("b2"))], toB.effects)
+        XCTAssertEqual([.loadAndPlay(localEntryIdFor("b2"))], toB.effects)
         let backToA = LocalQueue.reduce(toB.state, .previous)
         XCTAssertEqual("a1", backToA.state.currentId)
-        XCTAssertEqual([.loadAndPlay(quickIdFor("a1"))], backToA.effects)
+        XCTAssertEqual([.loadAndPlay(localEntryIdFor("a1"))], backToA.effects)
     }
 
     func testRemovingTheCurrentItemHandsPlaybackToItsSuccessor() {
@@ -70,7 +70,7 @@ final class LocalQueueTests: XCTestCase {
         let outcome = LocalQueue.reduce(state, .remove(id: "b2"))
         XCTAssertEqual([item("a1"), item("c3")], outcome.state.items)
         XCTAssertEqual("c3", outcome.state.currentId)
-        XCTAssertEqual([.loadAndPlay(quickIdFor("c3"))], outcome.effects)
+        XCTAssertEqual([.loadAndPlay(localEntryIdFor("c3"))], outcome.effects)
     }
 
     func testRemovingTheCurrentLastItemStopsPlayback() {
@@ -114,7 +114,7 @@ final class LocalQueueTests: XCTestCase {
         let state = LocalQueueState(items: [item("a1"), item("b2"), item("c3")], currentId: "a1")
         let outcome = LocalQueue.reduce(state, .select(id: "c3"))
         XCTAssertEqual("c3", outcome.state.currentId)
-        XCTAssertEqual([.loadAndPlay(quickIdFor("c3"))], outcome.effects)
+        XCTAssertEqual([.loadAndPlay(localEntryIdFor("c3"))], outcome.effects)
     }
 
     func testSelectOfAnUnknownIdIsANoOp() {

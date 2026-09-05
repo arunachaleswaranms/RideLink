@@ -7,9 +7,12 @@ import RideLinkCore
 /// `com.ridelink.data.library.LibraryMapping`.
 enum LibraryMapping {
     static func toDomain(_ record: TrackRecord) -> LibraryEntry? {
-        guard let quickId = QuickId.parse(record.quickId), let decodeStatus = decodeStatus(fromStored: record.decodeStatus)
+        guard let localEntryId = LocalEntryId.parse(record.localEntryId),
+              let quickId = QuickId.parse(record.quickId),
+              let decodeStatus = decodeStatus(fromStored: record.decodeStatus)
         else { return nil }
         return LibraryEntry(
+            localEntryId: localEntryId,
             track: Track(
                 contentHash: record.contentHash.flatMap(ContentHash.parse),
                 quickId: quickId,
@@ -33,6 +36,7 @@ enum LibraryMapping {
     static func toRecord(_ entry: LibraryEntry, id: Int64? = nil) -> TrackRecord {
         TrackRecord(
             id: id,
+            localEntryId: entry.localEntryId.value,
             quickId: entry.track.quickId.value,
             contentHash: entry.track.contentHash?.value,
             title: entry.track.title,

@@ -1,21 +1,24 @@
 import Foundation
 
 /// One local-only queue slot. `id` is a fresh identifier per insertion (a ULID, matching
-/// `SessionId`'s convention) — **not** derived from `quickId` — so the same track can be queued
+/// `SessionId`'s convention) — **not** derived from `localEntryId` — so the same track can be queued
 /// more than once (brief §14's "duplicate track added" case) as two distinct, independently
 /// removable/movable entries.
+///
+/// `localEntryId`, not `QuickId` (ADR-005 Amendment A1): `QuickId` is not guaranteed unique across
+/// library rows, so it cannot safely name *which* row this queue slot plays.
 ///
 /// Deliberately has no `addedBy: PeerId` or `status: QueueItemStatus` the way the existing wire
 /// `QueueItem` does — those are Phase 5 shared-queue-replication concepts. This is the local queue
 /// that exists before there is anyone to share it with.
 public struct LocalQueueItem: Sendable, Equatable {
     public let id: String
-    public let quickId: QuickId
+    public let localEntryId: LocalEntryId
     public let insertedAtMonoUs: Int64
 
-    public init(id: String, quickId: QuickId, insertedAtMonoUs: Int64) {
+    public init(id: String, localEntryId: LocalEntryId, insertedAtMonoUs: Int64) {
         self.id = id
-        self.quickId = quickId
+        self.localEntryId = localEntryId
         self.insertedAtMonoUs = insertedAtMonoUs
     }
 }
@@ -57,7 +60,7 @@ public enum LocalQueueAction: Sendable, Equatable {
 /// What the queue owner must do in response — a diff, not a restatement (same convention as
 /// `RideLinkCore.AudioPolicy`'s `IntercomAction`).
 public enum LocalQueueEffect: Sendable, Equatable {
-    case loadAndPlay(QuickId)
+    case loadAndPlay(LocalEntryId)
     case stopPlayback
 }
 
@@ -117,7 +120,7 @@ public enum LocalQueue {
             let successor = newItems[removedIndex]
             return LocalQueueOutcome(
                 state: LocalQueueState(items: newItems, currentId: successor.id),
-                effects: [.loadAndPlay(successor.quickId)]
+                effects: [.loadAndPlay(successor.localEntryId)]
             )
         } else {
             return LocalQueueOutcome(state: LocalQueueState(items: newItems, currentId: nil), effects: [.stopPlayback])
@@ -148,12 +151,12 @@ public enum LocalQueue {
             guard delta > 0, let first = state.items.first else {
                 return LocalQueueOutcome(state: state, effects: [])
             }
-            return LocalQueueOutcome(state: LocalQueueState(items: state.items, currentId: first.id), effects: [.loadAndPlay(first.quickId)])
+            return LocalQueueOutcome(state: LocalQueueState(items: state.items, currentId: first.id), effects: [.loadAndPlay(first.localEntryId)])
         }
         let targetIndex = currentIndex + delta
         if targetIndex >= 0, targetIndex < state.items.count {
             let target = state.items[targetIndex]
-            return LocalQueueOutcome(state: LocalQueueState(items: state.items, currentId: target.id), effects: [.loadAndPlay(target.quickId)])
+            return LocalQueueOutcome(state: LocalQueueState(items: state.items, currentId: target.id), effects: [.loadAndPlay(target.localEntryId)])
         }
         if delta > 0 {
             // Next past the last item: brief §14's "last item ends" case. Deliberately no wraparound.
@@ -167,6 +170,6 @@ public enum LocalQueue {
         guard let target = state.items.first(where: { $0.id == id }) else {
             return LocalQueueOutcome(state: state, effects: [])
         }
-        return LocalQueueOutcome(state: LocalQueueState(items: state.items, currentId: id), effects: [.loadAndPlay(target.quickId)])
+        return LocalQueueOutcome(state: LocalQueueState(items: state.items, currentId: id), effects: [.loadAndPlay(target.localEntryId)])
     }
 }

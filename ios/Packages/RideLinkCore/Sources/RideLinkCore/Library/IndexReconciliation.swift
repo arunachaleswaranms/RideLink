@@ -1,42 +1,75 @@
 import Foundation
 
-/// @property newQuickIds Not indexed before; the full pipeline (hash/metadata/artwork) must run.
-/// @property stillPresentQuickIds Indexed before and seen again; only `LibraryEntry.lastSeenAtMonoUs`
-///   and, if it changed, `LocalTrackLocation` need updating.
-/// @property missingQuickIds Indexed before, not seen this scan; the platform layer marks the
+/// Decides what a scan pass means for the library, from location/`QuickId` pairs alone — no I/O, no
+/// file handles, no clock (CLAUDE.md rule 9). Mirrors `com.ridelink.core.library.IndexReconciliation`.
+///
+/// **ADR-005 Amendment A1 (this phase's closure-audit hardening pass).** This used to reconcile on
+/// bare `Set<QuickId>`, which meant two *different* locations sharing a `QuickId` collapsed into one
+/// library row — safe only because `QuickId` was (wrongly) assumed to prove identity. It does not:
+/// `QuickId` samples only the size plus the first/last 64 KiB, so two files over 128 KiB that differ
+/// solely in the middle produce the *same* `QuickId` while being genuinely different content. That is
+/// not a SHA-256 collision, just a consequence of sampling, and it is deterministic and constructible,
+/// not merely theoretical.
+///
+/// The identity this reconciles on now is **`LocalTrackLocation`** — one row per on-disk location,
+/// which can never falsely collide, because two distinct files are, definitionally, at two distinct
+/// locations. `QuickId` is demoted to exactly the roles ADR-005 actually grants it: comparing the
+/// freshly-discovered `QuickId` for an **already-known** location against its previously-stored one is
+/// a safe, cheap way to detect "this specific file changed in place" (the consequence ADR-005 already
+/// documents: "A file edited in place changes both hashes; `quick_id` detects it cheaply on rescan"),
+/// because both values are known to describe the same location — there is no cross-location
+/// comparison anywhere in this file.
+///
+/// **A rename is no longer invisible.** The previous design treated a same-`QuickId` reappearance at a
+/// new location as the same row, moved. That relied on exactly the unsafe cross-location `QuickId`
+/// comparison this amendment removes, so it is not preserved: a renamed file now surfaces as one
+/// `ReconciliationPlan.missingLocations` entry plus one `ReconciliationPlan.newLocations` entry —
+/// Phase 3 does not attempt to reconcile the two by content, deliberately (real cross-row duplicate
+/// collapsing is Phase 4/5 transfer scope, not a Phase 3 concern).
+///
+/// **`RideLinkPlatform.LibraryIndexer` does not call this type directly** — a real, deliberate
+/// divergence documented on `LibraryIndexer` itself, not an oversight. iOS copies every picked file
+/// into this app's own container on import and never rescans an external location afterward (ADR-009:
+/// "no reliance on an external security-scoped URL indefinitely"), so there is no live external
+/// reference whose disappearance a batch reconciliation pass could detect the way Android's persisted
+/// SAF permission allows — `LibraryIndexer` instead looks up a single location at a time via
+/// `LibraryRepository.findByLocationUri`. This type still exists, pinned by its own tests, so the pure
+/// reconciliation logic stays identical to Android's the moment either platform gains a real
+/// rescan-by-location caller.
+public enum IndexReconciliation {
+    public static func reconcile(
+        previous: [LocalTrackLocation: QuickId],
+        discovered: [LocalTrackLocation: QuickId]
+    ) -> ReconciliationPlan {
+        let previousLocations = Set(previous.keys)
+        let discoveredLocations = Set(discovered.keys)
+        let stillPresent = discoveredLocations.intersection(previousLocations)
+        let unchanged = stillPresent.filter { discovered[$0] == previous[$0] }
+        return ReconciliationPlan(
+            newLocations: discoveredLocations.subtracting(previousLocations),
+            unchangedLocations: unchanged,
+            changedLocations: stillPresent.subtracting(unchanged),
+            missingLocations: previousLocations.subtracting(discoveredLocations)
+        )
+    }
+}
+
+/// @property newLocations Never indexed before; the full pipeline (hash/metadata/artwork) must run
+///   and a fresh `LocalEntryId` is generated.
+/// @property unchangedLocations Indexed before, seen again, and `QuickId` unchanged since last scan —
+///   only `LibraryEntry.lastSeenAtMonoUs` (and, if it had gone missing, `LibraryEntry.decodeStatus`)
+///   need updating. The existing `LocalEntryId` is untouched.
+/// @property changedLocations Indexed before, seen again, but `QuickId` differs from last time — the
+///   file at this same location was edited in place. The full pipeline reruns for this location, but
+///   its existing `LocalEntryId` is preserved (this is still the same row) and its `ContentHash` is
+///   invalidated back to unknown, since the old hash no longer describes the current bytes.
+/// @property missingLocations Indexed before, not seen this scan; the platform layer marks the
 ///   corresponding `LibraryEntry.decodeStatus` as `.missing` rather than deleting the row — a
 ///   removable drive or an unmounted security-scoped bookmark can bring a "missing" file back on the
 ///   next scan (brief §10's "file removed" case is a state, not a deletion).
 public struct ReconciliationPlan: Sendable, Equatable {
-    public let newQuickIds: Set<QuickId>
-    public let stillPresentQuickIds: Set<QuickId>
-    public let missingQuickIds: Set<QuickId>
-}
-
-/// Decides what a scan pass means for the library, from `QuickId` sets alone — no I/O, no file
-/// handles, no clock (CLAUDE.md rule 9). `QuickId` rather than `ContentHash` is the right key here:
-/// it is always known immediately at scan time (ADR-005), unlike the full hash, which is computed
-/// lazily.
-///
-/// **Two files with byte-identical content collapse to one `QuickId`** — this is the intended
-/// duplicate-detection behaviour (FR-010, this phase's brief §7): "same content, different
-/// filename" is not two library entries, it is one entry whose location may point at either copy.
-/// If a rescan sees both, `discoveredQuickIds` contains the id exactly once regardless (it's a
-/// `Set`), so `reconcile` treats it as a single still-present track — the platform layer decides
-/// which of the two on-disk locations a duplicate's single row points at, by upserting with
-/// whichever location the most recent scan produced.
-///
-/// A **rename** is invisible here by design: the content is unchanged, so its `QuickId` is
-/// unchanged, so it lands in `stillPresentQuickIds` — no reindex, no hash recomputation (brief §19:
-/// "avoid hashing the same unchanged file repeatedly"). The platform layer still updates the stored
-/// location/filename for a still-present id on every scan, because the *location* may have moved
-/// even though the *identity* has not.
-public enum IndexReconciliation {
-    public static func reconcile(previousQuickIds: Set<QuickId>, discoveredQuickIds: Set<QuickId>) -> ReconciliationPlan {
-        ReconciliationPlan(
-            newQuickIds: discoveredQuickIds.subtracting(previousQuickIds),
-            stillPresentQuickIds: discoveredQuickIds.intersection(previousQuickIds),
-            missingQuickIds: previousQuickIds.subtracting(discoveredQuickIds)
-        )
-    }
+    public let newLocations: Set<LocalTrackLocation>
+    public let unchangedLocations: Set<LocalTrackLocation>
+    public let changedLocations: Set<LocalTrackLocation>
+    public let missingLocations: Set<LocalTrackLocation>
 }

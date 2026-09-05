@@ -10,6 +10,10 @@ import RideLinkCore
 /// requires the *matching* to be database-native (done, via FTS5), not the sort, and a personal
 /// library's result set is small enough that sorting it in memory is simpler than four near-duplicate
 /// `ORDER BY` queries.
+///
+/// **Identity note (ADR-005 Amendment A1):** every method below is keyed by `LocalEntryId` or by
+/// `LocalTrackLocation`'s `uri` — never by `QuickId`, which is not guaranteed unique across rows and
+/// must never be used to look up or mutate "the" row for a given value.
 public final class LibraryRepository: Sendable {
     private let dbQueue: DatabaseQueue
 
@@ -42,58 +46,133 @@ public final class LibraryRepository: Sendable {
         return stream
     }
 
-    public func allQuickIds() throws -> Set<QuickId> {
+    /// Every currently-known location and the `quickId` last recorded for it — exactly what
+    /// `RideLinkCore.Library.IndexReconciliation` needs to decide new/unchanged/changed/missing, and
+    /// nothing else (never a full row read for a whole-library scan).
+    public func allLocationsAndQuickIds() throws -> [LocalTrackLocation: QuickId] {
         try dbQueue.read { db in
-            try String.fetchAll(db, sql: "SELECT quickId FROM track")
+            try Row.fetchAll(db, sql: "SELECT locationUri, quickId FROM \(TrackRecord.databaseTableName)")
         }
-        .compactMap(QuickId.parse)
-        .reduce(into: Set<QuickId>()) { $0.insert($1) }
+        .reduce(into: [LocalTrackLocation: QuickId]()) { result, row in
+            guard let quickId = QuickId.parse(row["quickId"]) else { return }
+            result[LocalTrackLocation(uri: row["locationUri"])] = quickId
+        }
     }
 
-    public func findByQuickId(_ quickId: QuickId) throws -> LibraryEntry? {
+    public func findByLocalEntryId(_ localEntryId: LocalEntryId) throws -> LibraryEntry? {
         try dbQueue.read { db in
-            try TrackRecord.filter(Column("quickId") == quickId.value).fetchOne(db)
+            try TrackRecord.filter(Column("localEntryId") == localEntryId.value).fetchOne(db)
         }
         .flatMap(LibraryMapping.toDomain)
     }
 
-    public func upsert(_ entry: LibraryEntry) throws {
+    public func findByLocationUri(_ locationUri: String) throws -> LibraryEntry? {
+        try dbQueue.read { db in
+            try TrackRecord.filter(Column("locationUri") == locationUri).fetchOne(db)
+        }
+        .flatMap(LibraryMapping.toDomain)
+    }
+
+    /// Every row still missing its authoritative `ContentHash` — ADR-005's lazy background hashing
+    /// pass reads this directly rather than a possibly-stale UI snapshot.
+    public func entriesMissingContentHash() throws -> [LibraryEntry] {
+        try dbQueue.read { db in
+            try TrackRecord.filter(Column("contentHash") == nil).fetchAll(db)
+        }
+        .compactMap(LibraryMapping.toDomain)
+    }
+
+    /// A location never indexed before — `entry` carries a freshly-generated `LocalEntryId` the
+    /// caller must have already assigned. A `localEntryId` or `locationUri` collision on insert would
+    /// mean two different rows were assigned the same fresh identity, or that the caller failed to
+    /// find an existing row that was already there — either way a bug to surface loudly (GRDB's plain
+    /// `insert`, not an upsert, so a `UNIQUE` violation throws rather than silently replacing an
+    /// unrelated row, matching `TrackDao.insertNew`'s `OnConflictStrategy.ABORT`).
+    public func insertNew(_ entry: LibraryEntry) throws {
         try dbQueue.write { db in
-            let existingId = try Int64.fetchOne(
-                db, sql: "SELECT id FROM track WHERE quickId = ?", arguments: [entry.track.quickId.value]
-            )
-            var record = LibraryMapping.toRecord(entry, id: existingId)
-            try record.save(db)
+            var record = LibraryMapping.toRecord(entry)
+            try record.insert(db)
         }
     }
 
-    /// A location this scan saw again — `IndexReconciliation.stillPresentQuickIds`. Brings a
-    /// `.missing` row back to `.indexed` and updates the location in case a rename moved it, without
-    /// recomputing anything else.
-    public func touchSeen(quickId: QuickId, locationUri: String, atMonoUs: Int64) throws {
+    /// The same `IndexReconciliation.ReconciliationPlan.changedLocations` row, re-indexed after an
+    /// in-place edit: `entry` must carry the *existing* row's `LocalEntryId` and `LocalTrackLocation`
+    /// unchanged — only its metadata/`quickId`/`contentHash`/decode status are refreshed.
+    /// `indexedAtMonoUs` is deliberately absent from the `UPDATE` column list, exactly like
+    /// `TrackDao.updateReindexed`'s SQL: the row's original index time is preserved, never overwritten
+    /// by whatever timestamp a re-index happened to build its `LibraryEntry` with.
+    public func updateReindexed(_ entry: LibraryEntry) throws {
         try dbQueue.write { db in
             try db.execute(
                 sql: """
-                UPDATE track SET locationUri = ?, decodeStatus = ?, lastSeenAtMonoUs = ?
-                WHERE quickId = ?
+                UPDATE \(TrackRecord.databaseTableName) SET
+                    quickId = ?, contentHash = NULL, title = ?, artist = ?, album = ?, durationMs = ?,
+                    filename = ?, codec = ?, bitrateKbps = ?, artworkRef = ?, sizeBytes = ?,
+                    decodeStatus = ?, lastSeenAtMonoUs = ?
+                WHERE localEntryId = ?
                 """,
-                arguments: [locationUri, LibraryMapping.storedValue(for: .indexed), atMonoUs, quickId.value]
+                arguments: [
+                    entry.track.quickId.value,
+                    entry.track.title,
+                    entry.track.artist,
+                    entry.track.album,
+                    entry.track.durationMs,
+                    entry.track.filename,
+                    entry.track.codec,
+                    entry.track.bitrateKbps,
+                    entry.track.artworkRef,
+                    entry.track.sizeBytes,
+                    LibraryMapping.storedValue(for: entry.decodeStatus),
+                    entry.lastSeenAtMonoUs,
+                    entry.localEntryId.value,
+                ]
             )
         }
     }
 
-    /// A previously-indexed location this scan did not find — `IndexReconciliation.missingQuickIds`.
-    public func markMissing(quickId: QuickId, atMonoUs: Int64) throws {
+    /// ADR-005's lazy background pass: fills in the authoritative `ContentHash` for a row that
+    /// already exists, identified by its `LocalEntryId` — never by `quickId`, and never by
+    /// re-deriving which row "should" get it from content alone.
+    public func updateContentHash(localEntryId: LocalEntryId, contentHash: ContentHash?) throws {
         try dbQueue.write { db in
             try db.execute(
-                sql: "UPDATE track SET decodeStatus = ?, lastSeenAtMonoUs = ? WHERE quickId = ?",
-                arguments: [LibraryMapping.storedValue(for: .missing), atMonoUs, quickId.value]
+                sql: "UPDATE \(TrackRecord.databaseTableName) SET contentHash = ? WHERE localEntryId = ?",
+                arguments: [contentHash?.value, localEntryId.value]
             )
+        }
+    }
+
+    /// A location this scan saw again with an unchanged `quickId` —
+    /// `IndexReconciliation.ReconciliationPlan.unchangedLocations`. Brings a `.missing` row back to
+    /// `.indexed` without touching identity or metadata.
+    public func touchSeen(locationUri: String, atMonoUs: Int64) throws {
+        try dbQueue.write { db in
+            try db.execute(
+                sql: "UPDATE \(TrackRecord.databaseTableName) SET decodeStatus = ?, lastSeenAtMonoUs = ? WHERE locationUri = ?",
+                arguments: [LibraryMapping.storedValue(for: .indexed), atMonoUs, locationUri]
+            )
+        }
+    }
+
+    /// A previously-indexed location this scan did not find —
+    /// `IndexReconciliation.ReconciliationPlan.missingLocations`.
+    public func markMissing(locationUri: String, atMonoUs: Int64) throws {
+        try dbQueue.write { db in
+            try db.execute(
+                sql: "UPDATE \(TrackRecord.databaseTableName) SET decodeStatus = ?, lastSeenAtMonoUs = ? WHERE locationUri = ?",
+                arguments: [LibraryMapping.storedValue(for: .missing), atMonoUs, locationUri]
+            )
+        }
+    }
+
+    public func deleteByLocalEntryId(_ localEntryId: LocalEntryId) throws {
+        try dbQueue.write { db in
+            try db.execute(sql: "DELETE FROM \(TrackRecord.databaseTableName) WHERE localEntryId = ?", arguments: [localEntryId.value])
         }
     }
 
     public func deleteAll() throws {
-        try dbQueue.write { db in try db.execute(sql: "DELETE FROM track") }
+        try dbQueue.write { db in try db.execute(sql: "DELETE FROM \(TrackRecord.databaseTableName)") }
     }
 
     public func count() throws -> Int {

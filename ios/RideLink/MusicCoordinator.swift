@@ -25,9 +25,12 @@ public final class MusicCoordinator {
     /// The library entry the queue's current item resolves to, if any — the same derived lookup
     /// `MusicSection`'s Android counterpart does at the UI layer, done here once instead of in every
     /// view that needs it.
+    ///
+    /// Matched by `localEntryId`, not `quickId` (ADR-005 Amendment A1) — `quickId` is not guaranteed
+    /// unique across entries, so matching on it could show the wrong track's metadata/artwork here.
     public var currentEntry: LibraryEntry? {
         guard let item = queueState.currentItem else { return nil }
-        return libraryEntries.first { $0.track.quickId == item.quickId }
+        return libraryEntries.first { $0.localEntryId == item.localEntryId }
     }
 
     private let repository: LibraryRepository
@@ -37,6 +40,10 @@ public final class MusicCoordinator {
     private var audioSessionActivated = false
     private let monotonicNowUs: @Sendable () -> Int64
     private var libraryObservationTask: Task<Void, Never>?
+    /// Guards `completeContentHashingInBackground` against launching a second concurrent pass while
+    /// one is already running — not correctness-critical (each pass re-reads the repository and a
+    /// row already hashed is simply skipped), but avoids redundant concurrent DB reads.
+    private var hashingTask: Task<Void, Never>?
 
     public init(monotonicNowUs: @escaping @Sendable () -> Int64 = { Int64(DispatchTime.now().uptimeNanoseconds / 1000) }) throws {
         self.monotonicNowUs = monotonicNowUs
@@ -56,6 +63,11 @@ public final class MusicCoordinator {
         let sink = MainActorStateSink { [weak self] state in self?.handlePlayerState(state) }
         Task { await self.player.setStateSink(sink.receive) }
         observeLibrary()
+        // ADR-005's background pass, actually wired to run (this phase's closure-audit hardening
+        // pass — previously this method existed but nothing ever called it). Kicked off once at
+        // composition time so rows left unhashed by a previous session's interrupted pass resume,
+        // and again after every import below so newly-added rows do not wait for the next app launch.
+        completeContentHashingInBackground()
     }
 
     private static func makeDirectories() throws -> (database: URL, music: URL, caches: URL) {
@@ -94,19 +106,33 @@ public final class MusicCoordinator {
     }
 
     public func importFiles(_ urls: [URL]) {
-        Task { try? await indexer.importFiles(urls) }
+        Task {
+            try? await indexer.importFiles(urls)
+            completeContentHashingInBackground()
+        }
     }
 
     public func importFolder(_ url: URL) {
-        Task { try? await indexer.importFolder(url) }
+        Task {
+            try? await indexer.importFolder(url)
+            completeContentHashingInBackground()
+        }
     }
 
-    /// Fills in the authoritative hash for every row still missing one (ADR-005's background pass) —
-    /// safe to call repeatedly, since it only ever touches rows still missing a hash.
+    /// Fills in the authoritative hash for every row still missing one — the ADR-005 background
+    /// pass. Safe to call repeatedly and from any context: `LibraryIndexer.completeContentHashing`
+    /// re-queries the repository for rows missing a hash on every call, so it never depends on a
+    /// possibly-stale `libraryEntries` snapshot and always resumes exactly the rows a previous,
+    /// possibly-cancelled pass had not yet reached (this phase's closure-audit hardening pass — the
+    /// method existed before this pass but had no production caller anywhere, so `content_hash`
+    /// never actually got filled in). `hashingTask` only prevents launching a redundant *concurrent*
+    /// pass; it is never required for correctness.
     public func completeContentHashingInBackground() {
-        let missing = libraryEntries.filter { $0.track.contentHash == nil }
-        guard !missing.isEmpty else { return }
-        Task { try? await indexer.completeContentHashing(missing) }
+        guard hashingTask == nil else { return }
+        hashingTask = Task {
+            try? await indexer.completeContentHashing()
+            hashingTask = nil
+        }
     }
 
     // MARK: - Queue and playback
@@ -125,7 +151,7 @@ public final class MusicCoordinator {
     }
 
     private func newItem(_ entry: LibraryEntry) -> LocalQueueItem {
-        LocalQueueItem(id: UUID().uuidString, quickId: entry.track.quickId, insertedAtMonoUs: monotonicNowUs())
+        LocalQueueItem(id: UUID().uuidString, localEntryId: entry.localEntryId, insertedAtMonoUs: monotonicNowUs())
     }
 
     public func removeFromQueue(id: String) { dispatch(.remove(id: id)) }
@@ -168,19 +194,19 @@ public final class MusicCoordinator {
         queueState = outcome.state
         for effect in outcome.effects {
             switch effect {
-            case .loadAndPlay(let quickId):
+            case .loadAndPlay(let localEntryId):
                 activateAudioSessionIfNeeded()
-                Task { await self.loadAndPlay(quickId) }
+                Task { await self.loadAndPlay(localEntryId) }
             case .stopPlayback:
                 Task { await self.player.execute(.stop) }
             }
         }
     }
 
-    private func loadAndPlay(_ quickId: QuickId) async {
-        guard let entry = try? repository.findByQuickId(quickId) else { return }
-        let resolvedUri = indexer.resolvedUrl(for: entry.location).absoluteString
-        await player.execute(.load(quickId: quickId, location: LocalTrackLocation(uri: resolvedUri)))
+    private func loadAndPlay(_ localEntryId: LocalEntryId) async {
+        guard let entry = try? repository.findByLocalEntryId(localEntryId) else { return }
+        let resolvedUri = indexer.resolvedUrl(for: entry).absoluteString
+        await player.execute(.load(localEntryId: localEntryId, location: LocalTrackLocation(uri: resolvedUri)))
         await player.execute(.play)
     }
 

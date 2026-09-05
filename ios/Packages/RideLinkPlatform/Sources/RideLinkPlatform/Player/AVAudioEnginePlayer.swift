@@ -50,8 +50,8 @@ public actor AVAudioEnginePlayer: Player {
 
     public func execute(_ command: PlaybackCommand) async {
         switch command {
-        case let .load(quickId, location):
-            await load(quickId: quickId, location: location)
+        case let .load(localEntryId, location):
+            await load(localEntryId: localEntryId, location: location)
         case .play:
             playCommand()
         case .pause:
@@ -88,7 +88,7 @@ public actor AVAudioEnginePlayer: Player {
     /// `LocalTrackLocation` with that absolute URL's string before constructing a
     /// `PlaybackCommand.load` — exactly mirroring how `com.ridelink.audio.player.ExoPlayerMusicPlayer`
     /// expects an already-openable `content://` URI, never a bare relative reference.
-    private func load(quickId: QuickId, location: LocalTrackLocation) async {
+    private func load(localEntryId: LocalEntryId, location: LocalTrackLocation) async {
         stopPositionTicking()
         playerNode.stop()
         generation += 1
@@ -96,11 +96,11 @@ public actor AVAudioEnginePlayer: Player {
         audioFile = nil
         totalFrames = 0
         sampleRate = 1
-        cachedState = PlayerState(quickId: quickId)
+        cachedState = PlayerState(localEntryId: localEntryId)
         emit(cachedState)
 
         guard let url = URL(string: location.uri) ?? URL(fileURLWithPath: location.uri) as URL? else {
-            updateState { _ in PlayerState(quickId: quickId, error: .fileMissing) }
+            updateState { _ in PlayerState(localEntryId: localEntryId, error: .fileMissing) }
             return
         }
         // Checked explicitly, before ever calling AVAudioFile: a real bug found by actually running
@@ -112,7 +112,7 @@ public actor AVAudioEnginePlayer: Player {
         // Android, so file-missing is answered by a direct existence check instead of by
         // interpreting an opaque OSStatus.
         guard FileManager.default.fileExists(atPath: url.path) else {
-            updateState { _ in PlayerState(quickId: quickId, error: .fileMissing) }
+            updateState { _ in PlayerState(localEntryId: localEntryId, error: .fileMissing) }
             return
         }
         do {
@@ -120,9 +120,9 @@ public actor AVAudioEnginePlayer: Player {
             audioFile = file
             totalFrames = file.length
             sampleRate = file.processingFormat.sampleRate
-            updateState { _ in PlayerState(quickId: quickId, durationMs: durationMs(forFrames: totalFrames)) }
+            updateState { _ in PlayerState(localEntryId: localEntryId, durationMs: durationMs(forFrames: totalFrames)) }
         } catch {
-            updateState { _ in PlayerState(quickId: quickId, error: classify(error)) }
+            updateState { _ in PlayerState(localEntryId: localEntryId, error: classify(error)) }
         }
     }
 
@@ -258,7 +258,7 @@ private extension PlayerState {
     /// (Swift has no Kotlin-style data-class `copy`), and repeating the full 6-argument initializer
     /// at every call site above would bury each actual change in five unrelated field repeats.
     func copy(
-        quickId: QuickId? = nil,
+        localEntryId: LocalEntryId? = nil,
         positionMs: Int64? = nil,
         durationMs: Int64? = nil,
         playing: Bool? = nil,
@@ -266,7 +266,7 @@ private extension PlayerState {
         error: MusicFailure?? = nil
     ) -> PlayerState {
         PlayerState(
-            quickId: quickId ?? self.quickId,
+            localEntryId: localEntryId ?? self.localEntryId,
             positionMs: positionMs ?? self.positionMs,
             durationMs: durationMs ?? self.durationMs,
             playing: playing ?? self.playing,

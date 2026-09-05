@@ -41,15 +41,15 @@ final class AVAudioEnginePlayerTests: XCTestCase {
     }
 
     func testLoadingARealTrackReportsARealDuration() async throws {
-        let hash = QuickId("sha256:" + String(repeating: "a1", count: 32))
-        await player.execute(.load(quickId: hash, location: try location("normal.m4a")))
+        let id = LocalEntryId("00000000-0000-4000-8000-a1a1a1a1a1a1")
+        await player.execute(.load(localEntryId: id, location: try location("normal.m4a")))
         let ready = try await firstState { $0.durationMs > 0 }
-        XCTAssertEqual(ready.quickId, hash)
+        XCTAssertEqual(ready.localEntryId, id)
         XCTAssertGreaterThan(ready.durationMs, 0, "a real AAC file must report a real, positive duration")
     }
 
     func testPlayPauseAndPositionAdvancement() async throws {
-        await player.execute(.load(quickId: QuickId("sha256:" + String(repeating: "b2", count: 32)), location: try location("normal.m4a")))
+        await player.execute(.load(localEntryId: LocalEntryId("00000000-0000-4000-8000-b2b2b2b2b2b2"), location: try location("normal.m4a")))
         _ = try await firstState { $0.durationMs > 0 }
         await player.execute(.play)
         let playing = try await firstState { $0.playing }
@@ -63,7 +63,7 @@ final class AVAudioEnginePlayerTests: XCTestCase {
 
     func testSeekMovesPosition() async throws {
         let seekTargetMs: Int64 = 200
-        await player.execute(.load(quickId: QuickId("sha256:" + String(repeating: "c3", count: 32)), location: try location("normal.m4a")))
+        await player.execute(.load(localEntryId: LocalEntryId("00000000-0000-4000-8000-c3c3c3c3c3c3"), location: try location("normal.m4a")))
         _ = try await firstState { $0.durationMs > 0 }
         await player.execute(.seek(positionMs: seekTargetMs))
         let sought = try await firstState { $0.positionMs >= seekTargetMs }
@@ -71,7 +71,7 @@ final class AVAudioEnginePlayerTests: XCTestCase {
     }
 
     func testStopResetsPositionAndPlayingState() async throws {
-        await player.execute(.load(quickId: QuickId("sha256:" + String(repeating: "d4", count: 32)), location: try location("normal.m4a")))
+        await player.execute(.load(localEntryId: LocalEntryId("00000000-0000-4000-8000-d4d4d4d4d4d4"), location: try location("normal.m4a")))
         _ = try await firstState { $0.durationMs > 0 }
         await player.execute(.play)
         _ = try await firstState { $0.playing }
@@ -84,7 +84,7 @@ final class AVAudioEnginePlayerTests: XCTestCase {
     func testLoadingAMissingFileReportsFileMissing() async throws {
         let missingUrl = FileManager.default.temporaryDirectory.appendingPathComponent("does-not-exist-\(UUID().uuidString).m4a")
         await player.execute(
-            .load(quickId: QuickId("sha256:" + String(repeating: "e5", count: 32)), location: LocalTrackLocation(uri: missingUrl.absoluteString))
+            .load(localEntryId: LocalEntryId("00000000-0000-4000-8000-e5e5e5e5e5e5"), location: LocalTrackLocation(uri: missingUrl.absoluteString))
         )
         let failed = try await firstState { $0.error != nil }
         XCTAssertEqual(failed.error, .fileMissing)
@@ -98,7 +98,7 @@ final class AVAudioEnginePlayerTests: XCTestCase {
         try Data(repeating: 0x2A, count: 256).write(to: garbageUrl)
         defer { try? FileManager.default.removeItem(at: garbageUrl) }
         await player.execute(
-            .load(quickId: QuickId("sha256:" + String(repeating: "f6", count: 32)), location: LocalTrackLocation(uri: garbageUrl.absoluteString))
+            .load(localEntryId: LocalEntryId("00000000-0000-4000-8000-f6f6f6f6f6f6"), location: LocalTrackLocation(uri: garbageUrl.absoluteString))
         )
         let failed = try await firstState { $0.error != nil }
         XCTAssertTrue(
@@ -111,7 +111,7 @@ final class AVAudioEnginePlayerTests: XCTestCase {
         // normal.m4a is ~0.5s — short enough to reach the real end of track within the test's own
         // timeout rather than needing a fake clock, proving the real AVAudioPlayerNode completion
         // callback path end to end.
-        await player.execute(.load(quickId: QuickId("sha256:" + String(repeating: "07", count: 32)), location: try location("normal.m4a")))
+        await player.execute(.load(localEntryId: LocalEntryId("00000000-0000-4000-8000-070707070707"), location: try location("normal.m4a")))
         _ = try await firstState { $0.durationMs > 0 }
         await player.execute(.play)
         let ended = try await firstState(timeout: 15) { $0.ended }

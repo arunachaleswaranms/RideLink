@@ -140,3 +140,36 @@ public struct QuickId: Hashable, Sendable {
         return hex.count == 64 && hex.allSatisfy { $0.isHexDigit && !$0.isUppercase }
     }
 }
+
+/// This phone's own local identity for one library row (ADR-005 Amendment A1). Generated once, the
+/// moment a location is first indexed, and never recomputed or derived from the file's bytes —
+/// unlike `QuickId` (a lossy 128 KiB sample) or `ContentHash` (authoritative but lazy), a
+/// `LocalEntryId` has no relationship to content at all, so two distinct files can never collide
+/// onto the same one. It is what a player/queue/artwork cache must key on to unambiguously mean
+/// *this specific row*, now that `QuickId` is no longer guaranteed unique across rows.
+///
+/// Never sent over the wire and never persisted past a reindex-from-scratch — this is local
+/// bookkeeping only, the same way `LocalTrackLocation` is.
+public struct LocalEntryId: Hashable, Sendable {
+    public let value: String
+
+    public init(_ value: String) {
+        precondition(LocalEntryId.isValid(value), "LocalEntryId must be a lowercase UUID")
+        self.value = value
+    }
+
+    /// Non-trapping constructor for a value read back from storage — see `ContentHash.parse`'s
+    /// identical reasoning: a malformed persisted row must not crash a read.
+    public static func parse(_ value: String) -> LocalEntryId? {
+        isValid(value) ? LocalEntryId(value) : nil
+    }
+
+    private static func isValid(_ s: String) -> Bool {
+        let groups = s.split(separator: "-", omittingEmptySubsequences: false)
+        let expectedLengths = [8, 4, 4, 4, 12]
+        guard groups.count == expectedLengths.count else { return false }
+        return zip(groups, expectedLengths).allSatisfy { group, length in
+            group.count == length && group.allSatisfy { $0.isHexDigit && !$0.isUppercase }
+        }
+    }
+}

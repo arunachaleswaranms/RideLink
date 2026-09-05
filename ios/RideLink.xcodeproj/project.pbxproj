@@ -16,6 +16,7 @@
 		4D03A698B88180C2FC1025BB /* LibraryView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0023ABA3739D0956B97F5D06 /* LibraryView.swift */; };
 		8CC1F9EF0519CE5C87A6742D /* NowPlayingCard.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8BD8DEA8F739B64B1756D784 /* NowPlayingCard.swift */; };
 		3D466877B4FE8FDA47C4C531 /* MusicSection.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8E0F2A55F37B2C20357CF56F /* MusicSection.swift */; };
+		3510E58703C74E0689A5E0D4 /* NowPlayingController.swift in Sources */ = {isa = PBXBuildFile; fileRef = CBD68362DD8444AD91A64AB4 /* NowPlayingController.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -30,6 +31,7 @@
 		0023ABA3739D0956B97F5D06 /* LibraryView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LibraryView.swift; sourceTree = "<group>"; };
 		8BD8DEA8F739B64B1756D784 /* NowPlayingCard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NowPlayingCard.swift; sourceTree = "<group>"; };
 		8E0F2A55F37B2C20357CF56F /* MusicSection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MusicSection.swift; sourceTree = "<group>"; };
+		CBD68362DD8444AD91A64AB4 /* NowPlayingController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NowPlayingController.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -63,6 +65,7 @@
 				0023ABA3739D0956B97F5D06 /* LibraryView.swift */,
 				8BD8DEA8F739B64B1756D784 /* NowPlayingCard.swift */,
 				8E0F2A55F37B2C20357CF56F /* MusicSection.swift */,
+				CBD68362DD8444AD91A64AB4 /* NowPlayingController.swift */,
 				D98B8F9B15BF0E88C459151B /* Info.plist */,
 			);
 			path = RideLink;
@@ -161,6 +164,7 @@
 				4D03A698B88180C2FC1025BB /* LibraryView.swift in Sources */,
 				8CC1F9EF0519CE5C87A6742D /* NowPlayingCard.swift in Sources */,
 				3D466877B4FE8FDA47C4C531 /* MusicSection.swift in Sources */,
+				3510E58703C74E0689A5E0D4 /* NowPlayingController.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

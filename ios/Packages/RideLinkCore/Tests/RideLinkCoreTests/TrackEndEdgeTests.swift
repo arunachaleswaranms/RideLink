@@ -2,20 +2,20 @@ import Foundation
 import XCTest
 @testable import RideLinkCore
 
-private let sampleHash = QuickId("sha256:" + String(repeating: "aa", count: 32))
+private let sampleId = LocalEntryId("3fa85f64-5717-4562-b3fc-2c963f66afa6")
 private let durationMs: Int64 = 509
 private let positionMidMs: Int64 = 200
 
 private func playing(_ positionMs: Int64 = 0) -> PlayerState {
-    PlayerState(quickId: sampleHash, positionMs: positionMs, durationMs: durationMs, playing: true)
+    PlayerState(localEntryId: sampleId, positionMs: positionMs, durationMs: durationMs, playing: true)
 }
 
 private func ended() -> PlayerState {
-    PlayerState(quickId: sampleHash, positionMs: durationMs, durationMs: durationMs, playing: false)
+    PlayerState(localEntryId: sampleId, positionMs: durationMs, durationMs: durationMs, playing: false)
 }
 
 private func missing() -> PlayerState {
-    PlayerState(quickId: sampleHash, error: .fileMissing)
+    PlayerState(localEntryId: sampleId, error: .fileMissing)
 }
 
 /// Exhausts `TrackEndEdge`. The mirror is `TrackEndEdgeTest` on Android; both exist because this
@@ -41,7 +41,7 @@ final class TrackEndEdgeTests: XCTestCase {
     }
 
     func testEndedToAFreshLoadsResetStateNeverFires() {
-        let freshLoad = PlayerState(quickId: sampleHash)
+        let freshLoad = PlayerState(localEntryId: sampleId)
         XCTAssertFalse(TrackEndEdge.advancedNow(previous: ended(), current: freshLoad))
     }
 
@@ -54,7 +54,7 @@ final class TrackEndEdgeTests: XCTestCase {
     }
 
     func testADecodeFailureDoesNotCountAsDone() {
-        let decodeFailed = PlayerState(quickId: sampleHash, error: .decodeFailed)
+        let decodeFailed = PlayerState(localEntryId: sampleId, error: .decodeFailed)
         XCTAssertFalse(TrackEndEdge.advancedNow(previous: playing(0), current: decodeFailed))
     }
 }

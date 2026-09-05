@@ -35,11 +35,19 @@ public final class MusicAudioSession: Sendable {
         try session.setActive(true)
     }
 
-    /// Deactivates the session once no music is playing and nothing else (the intercom) needs it —
-    /// the composition root's job to call at the right moment, matching
-    /// `RideForegroundService.stopMusic`'s "only actually stop if nothing else is active" shape on
-    /// Android. `.notifyOthersOnDeactivation` lets another app resume its own audio, matching what a
-    /// music-only app is expected to do when it steps back.
+    /// Deactivates the session. **Currently unused — no composition root calls this**
+    /// (this phase's closure-audit hardening pass, Finding F). That is a deliberate deferral, not an
+    /// oversight this doc used to describe as already wired: safely deciding *when* to deactivate
+    /// requires knowing whether the intercom also currently needs `AVAudioSession` (a shared,
+    /// single OS-level resource — see the class doc above), which is exactly the arbitration Phase 6
+    /// owns. Calling this unconditionally whenever music-only playback stops would be safe in
+    /// isolation but is not yet wired to avoid the false impression that doing so is a complete
+    /// answer once the intercom can also be active; today the session is deliberately left active
+    /// rather than risk tearing down a session the intercom might depend on. Revisit when Phase 6
+    /// arbitration exists — `RideForegroundService.stopMusic`'s "only actually stop if nothing else
+    /// is active" shape on Android is the pattern to match once there is something here to check
+    /// against. `.notifyOthersOnDeactivation` lets another app resume its own audio, matching what a
+    /// music-only app is expected to do when it steps back, whenever this method is actually wired.
     public func deactivate() throws {
         try session.setActive(false, options: [.notifyOthersOnDeactivation])
     }

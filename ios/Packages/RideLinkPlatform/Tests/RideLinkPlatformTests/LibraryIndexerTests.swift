@@ -43,6 +43,15 @@ final class LibraryIndexerTests: XCTestCase {
         return await iterator.next() ?? []
     }
 
+    /// Writes `bytes` directly to a fresh temp file and returns a `file://` URL for it — used to
+    /// construct exact, deterministic byte patterns a pre-baked fixture cannot express concisely.
+    /// Mirrors the Android instrumented test's `writeRawFixture`.
+    private func writeRawFixture(_ name: String, bytes: Data) throws -> URL {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("fixture-\(UUID().uuidString)-\(name)")
+        try bytes.write(to: url)
+        return url
+    }
+
     func testImportingANormalTrackExtractsRealMetadataAndArtwork() async throws {
         try await indexer.importFiles([TestMedia.url("normal.m4a")])
         let entries = await firstEntries()
@@ -83,10 +92,59 @@ final class LibraryIndexerTests: XCTestCase {
         XCTAssertNil(entry.track.artworkRef)
     }
 
-    func testByteIdenticalDuplicatesDedupToOneLibraryEntry() async throws {
+    func testByteIdenticalDuplicatesAtTwoLocationsRemainTwoIndependentEntries() async throws {
+        // ADR-005 Amendment A1: Phase 3 no longer collapses rows by QuickId at index time — real,
+        // authoritative duplicate collapsing (FR-010) is Phase 4/5 transfer scope, keyed on
+        // ContentHash once both sides have it, never performed eagerly here. Two byte-identical
+        // files at two different locations are, correctly, two independent local library rows in
+        // Phase 3's catalogue.
         try await indexer.importFiles([TestMedia.url("duplicate_a.m4a"), TestMedia.url("duplicate_b.m4a")])
         let entries = await firstEntries()
-        XCTAssertEqual(entries.count, 1, "byte-identical content must dedup to exactly one entry (FR-010)")
+        XCTAssertEqual(entries.count, 2, "two byte-identical files at two locations must remain two independent rows")
+        XCTAssertEqual(Set(entries.map(\.localEntryId)).count, 2, "each location must have its own distinct identity")
+        XCTAssertEqual(Set(entries.map(\.track.quickId)).count, 1, "both really do share one QuickId, as byte-identical files should")
+    }
+
+    func testTwoFilesSharingAQuickIdButDifferingInTheMiddleAreNeverCollapsedIntoOneEntry() async throws {
+        // ADR-005 Amendment A1 / this phase's closure-audit CRITICAL finding, reproduced with real
+        // bytes through the real indexing pipeline. QuickId = SHA-256(size || first 64 KiB ||
+        // last 64 KiB) samples only part of the file: two files over 128 KiB with the same size and
+        // identical first/last 64 KiB windows but a different middle collide onto the same QuickId
+        // while being genuinely different content. This is not a SHA-256 collision — it is a
+        // deterministic, constructible consequence of sampling, reproduced exactly here rather than
+        // hoped for.
+        let windowSize = 64 * 1024
+        let shared = Data((0..<windowSize).map { UInt8($0 % 256) })
+        let middleA = Data(repeating: 0xAA, count: 4096)
+        let middleB = Data(repeating: 0xBB, count: 4096)
+        let bytesA = shared + middleA + shared
+        let bytesB = shared + middleB + shared
+        XCTAssertEqual(bytesA.count, bytesB.count)
+        XCTAssertGreaterThan(bytesA.count, 128 * 1024, "the fixture must exceed ADR-005's 128 KiB small-file threshold")
+
+        let urlA = try writeRawFixture("collision_a.m4a", bytes: bytesA)
+        let urlB = try writeRawFixture("collision_b.m4a", bytes: bytesB)
+
+        let quickIdA = try ContentHashing.computeQuickId(fileURL: urlA)
+        let quickIdB = try ContentHashing.computeQuickId(fileURL: urlB)
+        XCTAssertEqual(quickIdA, quickIdB, "the two fixtures must share a QuickId for this test to be meaningful")
+
+        let contentHashA = try ContentHashing.computeContentHash(fileURL: urlA)
+        let contentHashB = try ContentHashing.computeContentHash(fileURL: urlB)
+        XCTAssertNotEqual(contentHashA, contentHashB, "different middle bytes must produce different ContentHash — proves this is not a SHA-256 collision")
+
+        try await indexer.importFiles([urlA, urlB])
+        let entries = await firstEntries()
+        XCTAssertEqual(entries.count, 2, "two different files sharing a QuickId must never collapse into one library row")
+        XCTAssertEqual(Set(entries.map(\.localEntryId)).count, 2, "each must keep its own distinct LocalEntryId")
+        XCTAssertEqual(Set(entries.map(\.track.quickId)).count, 1, "confirms both really do share the same QuickId")
+
+        // Once the authoritative hash is known for both, they are still correctly distinguishable —
+        // the background pass must not accidentally merge them either.
+        try await indexer.completeContentHashing()
+        let hashed = await firstEntries()
+        XCTAssertEqual(hashed.count, 2)
+        XCTAssertEqual(Set(hashed.compactMap(\.track.contentHash)).count, 2, "the two rows' authoritative hashes must differ")
     }
 
     func testSameMetadataDifferentContentDoesNotDedup() async throws {
@@ -127,7 +185,7 @@ final class LibraryIndexerTests: XCTestCase {
         try await indexer.importFiles([url])
         try await indexer.importFiles([url])
         let entries = await firstEntries()
-        XCTAssertEqual(entries.count, 1)
+        XCTAssertEqual(entries.count, 1, "the same source location reimported must update, not duplicate, its row")
     }
 
     func testSearchMatchesRealImportedMetadataCaseInsensitively() async throws {
@@ -169,11 +227,29 @@ final class LibraryIndexerTests: XCTestCase {
         let beforeEntries = await firstEntries()
         let before = try XCTUnwrap(beforeEntries.first)
         XCTAssertNil(before.track.contentHash, "the fast indexing path must not compute the full hash")
-        try await indexer.completeContentHashing([before])
+        try await indexer.completeContentHashing()
         let afterEntries = await firstEntries()
         let after = try XCTUnwrap(afterEntries.first)
         XCTAssertNotNil(after.track.contentHash)
-        XCTAssertEqual(before.track.quickId, after.track.quickId, "hashing must not change identity")
+        XCTAssertEqual(before.localEntryId, after.localEntryId, "hashing must not change this row's identity")
+        XCTAssertEqual(before.track.quickId, after.track.quickId)
+    }
+
+    func testCompleteContentHashingReadsTheRepositoryDirectlyRatherThanACallerSnapshot() async throws {
+        // This phase's closure-audit hardening pass (Finding B): completeContentHashing must not
+        // depend on a caller-supplied list that could go stale — it must resume exactly whatever the
+        // repository currently reports as missing a hash, including rows imported after any snapshot
+        // the caller might have taken.
+        try await indexer.importFiles([TestMedia.url("normal.m4a"), TestMedia.url("no_artwork.m4a")])
+        let beforeCount = await firstEntries().filter { $0.track.contentHash == nil }.count
+        XCTAssertEqual(beforeCount, 2)
+        try await indexer.completeContentHashing()
+        let afterCount = await firstEntries().filter { $0.track.contentHash == nil }.count
+        XCTAssertEqual(afterCount, 0)
+        // A second call with nothing left to do must not fail or touch anything.
+        try await indexer.completeContentHashing()
+        let stillZero = await firstEntries().filter { $0.track.contentHash == nil }.count
+        XCTAssertEqual(stillZero, 0)
     }
 }
 

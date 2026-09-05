@@ -4,7 +4,7 @@ import Foundation
 /// rule 9): a security-scoped bookmark or an app-owned relative path are both just strings at this
 /// layer — only `RideLinkPlatform.Library` knows how to open one. Never a display path
 /// (REQUIREMENTS §11's basename-only rule applies to `Track.filename`, not to this).
-public struct LocalTrackLocation: Sendable, Equatable {
+public struct LocalTrackLocation: Hashable, Sendable {
     public let uri: String
     public init(uri: String) { self.uri = uri }
 }
@@ -29,7 +29,13 @@ public enum DecodeStatus: Sendable, Equatable {
 /// since REQUIREMENTS §16 already defines exactly the fields Phase 3 needs), where it lives on this
 /// phone, and this phone's own bookkeeping about it. Never shared, never sent — Phase 3 is
 /// local-only (this phase's brief §2/§28).
+///
+/// `localEntryId` — not `Track.quickId` — is this row's real identity (ADR-005 Amendment A1). It is
+/// generated once, when `location` is first indexed, and carried forward unchanged across every
+/// rescan that finds the same location again or detects it changed in place; it is never recomputed
+/// from content and never shared with any other row, even one whose `Track.quickId` happens to match.
 public struct LibraryEntry: Sendable, Equatable {
+    public let localEntryId: LocalEntryId
     public let track: Track
     public let location: LocalTrackLocation
     public let decodeStatus: DecodeStatus
@@ -39,7 +45,15 @@ public struct LibraryEntry: Sendable, Equatable {
     /// the moment a rescan finds it again.
     public let lastSeenAtMonoUs: Int64
 
-    public init(track: Track, location: LocalTrackLocation, decodeStatus: DecodeStatus, indexedAtMonoUs: Int64, lastSeenAtMonoUs: Int64) {
+    public init(
+        localEntryId: LocalEntryId,
+        track: Track,
+        location: LocalTrackLocation,
+        decodeStatus: DecodeStatus,
+        indexedAtMonoUs: Int64,
+        lastSeenAtMonoUs: Int64
+    ) {
+        self.localEntryId = localEntryId
         self.track = track
         self.location = location
         self.decodeStatus = decodeStatus
