@@ -116,6 +116,30 @@ class ControlSocket internal constructor(
             }
         }
 
+    /**
+     * PROTOCOL §8.2's bulk plane — raw byte I/O that bypasses the JSON envelope framing entirely.
+     * Never called from the control read loop; used only by the bulk transport (ADR-023), which
+     * reuses this same TLS+SPKI-pinned socket machinery for its own, differently-framed (RLB1)
+     * connection rather than duplicating the TLS setup.
+     */
+    suspend fun writeRawBytes(bytes: ByteArray): Unit =
+        withContext(ioDispatcher) {
+            writeLock.withLock {
+                output.write(bytes)
+                output.flush()
+            }
+        }
+
+    /** @return the number of bytes actually read (may be less than [length]), or -1 at EOF. */
+    suspend fun readRawBytes(
+        buffer: ByteArray,
+        offset: Int,
+        length: Int,
+    ): Int =
+        withContext(ioDispatcher) {
+            input.read(buffer, offset, length)
+        }
+
     override fun close() {
         runCatching { socket.close() }
     }

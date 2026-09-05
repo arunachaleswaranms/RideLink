@@ -349,6 +349,22 @@ object ControlMessages {
         reason: String,
     ): Envelope = envelope(localPeerId, "BYE", sessionId, seq, sentAtMonoUs, buildJsonObject { put("reason", reason) })
 
+    /**
+     * A generic envelope builder for message families whose shape lives entirely in a `core`
+     * codec's own `encode` (`ManifestCodec`, `TransferCodec`) — mirrors [audioState]'s reasoning
+     * ("the shape lives in `core`... a second hand-written builder would be a second place for the
+     * two platforms to disagree") without needing one named function per `MANIFEST_*`/`TRANSFER_*`
+     * type here.
+     */
+    fun raw(
+        localPeerId: PeerId,
+        type: String,
+        sessionId: SessionId,
+        seq: Long,
+        sentAtMonoUs: Long,
+        payload: JsonObject,
+    ): Envelope = envelope(localPeerId, type, sessionId, seq, sentAtMonoUs, payload)
+
     private fun envelope(
         localPeerId: PeerId,
         type: String,

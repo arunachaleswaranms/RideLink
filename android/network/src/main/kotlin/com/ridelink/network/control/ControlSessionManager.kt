@@ -5,11 +5,15 @@ import com.ridelink.core.model.SessionId
 import com.ridelink.core.model.SpkiHash
 import com.ridelink.core.protocol.AudioStateMessageTypes
 import com.ridelink.core.protocol.Envelope
+import com.ridelink.core.protocol.ManifestMessageTypes
+import com.ridelink.core.protocol.TransferMessageTypes
 import com.ridelink.core.protocol.VoiceMessageTypes
 import com.ridelink.core.security.PinDecision
 import com.ridelink.core.security.TrustedPeer
 import com.ridelink.core.security.TrustedPeerStore
 import com.ridelink.core.sync.ClockSync
+import com.ridelink.network.manifest.ManifestRelay
+import com.ridelink.network.transfer.TransferRelay
 import com.ridelink.network.voice.AuthenticatedFrameWriter
 import com.ridelink.network.voice.VoiceSignalRelay
 import kotlinx.coroutines.CompletableDeferred
@@ -234,6 +238,9 @@ class ControlSessionManager(
     @Volatile
     private var authenticated = false
 
+    @Volatile
+    private var authenticationGeneration: Long = 0
+
     private data class PendingActivation(
         val socket: ControlSocket,
         val remotePeerId: PeerId,
@@ -292,6 +299,48 @@ class ControlSessionManager(
      */
     val audioState: AudioStateRelay =
         AudioStateRelay(
+            localPeerId = localPeerId,
+            monotonicNowUs = monotonicNowUs,
+            nextSeq = { seqCounter.nextSeq() },
+            activeSessionId = { activeSessionId },
+            authenticatedWriter = {
+                val socket = activeSocket
+                if (socket == null || !authenticated) {
+                    null
+                } else {
+                    AuthenticatedFrameWriter { envelope -> socket.writeFrame(envelope) }
+                }
+            },
+        )
+
+    /**
+     * The `MANIFEST_*` half of the control plane (PROTOCOL §8.1), extracted for the same reason
+     * [voice] and [audioState] are. `MANIFEST_*` is likewise absent from
+     * [PRE_AUTHENTICATION_FRAME_TYPES] (brief §22: unpaired peers never receive the catalogue).
+     */
+    val manifest: ManifestRelay =
+        ManifestRelay(
+            localPeerId = localPeerId,
+            monotonicNowUs = monotonicNowUs,
+            nextSeq = { seqCounter.nextSeq() },
+            activeSessionId = { activeSessionId },
+            authenticatedWriter = {
+                val socket = activeSocket
+                if (socket == null || !authenticated) {
+                    null
+                } else {
+                    AuthenticatedFrameWriter { envelope -> socket.writeFrame(envelope) }
+                }
+            },
+        )
+
+    /**
+     * The `TRANSFER_*` half of the control plane (PROTOCOL §8.2) — the small negotiation messages
+     * only; the bulk byte stream itself never touches this class (ADR-023). Extracted for the same
+     * reason as [manifest].
+     */
+    val transfer: TransferRelay =
+        TransferRelay(
             localPeerId = localPeerId,
             monotonicNowUs = monotonicNowUs,
             nextSeq = { seqCounter.nextSeq() },
@@ -585,10 +634,27 @@ class ControlSessionManager(
         if (activeSocket !== pending.socket) return
         pendingActivation = null
         authenticated = true
+        // ADR-023 §3: a fresh, strictly-increasing generation per activation — including a
+        // reconnect's re-authentication of the *same* wire session_id. Anything scoped to a
+        // bulk transfer (its token, its listener) is scoped to this number, never to session_id,
+        // so a reconnect can never let a stale transfer's token or completion apply to the new one.
+        authenticationGeneration += 1
         _diagnostics.update { it.copy(controlState = ControlState.CONNECTED) }
         _events.tryEmit(ControlEvent.Connected(pending.remotePeerId, pending.sessionId, pending.isLocalLeader))
         clockSyncJob = scope.launch { clockSyncLoop(pending.socket) }
     }
+
+    /**
+     * ADR-023's session-generation guard, exposed for [com.ridelink.network.transfer.BulkTransportManager]:
+     * strictly increases on every [activateAuthenticatedSession], including a reconnect that
+     * re-authenticates the same wire `session_id`. Never decreases and never resets — a bulk token
+     * or an in-flight transfer state tagged with a past value is permanently stale.
+     */
+    val currentAuthGeneration: Long get() = authenticationGeneration
+
+    /** The current peer's pinned identity, or null before/without authentication (ADR-012, ADR-023 §4). */
+    val currentPeerSpki: SpkiHash?
+        get() = if (authenticated) activeSocket?.security?.peerIdentitySpkiSha256 else null
 
     /**
      * Starts PROTOCOL §4.5 pairing on the surviving connection. The six digits come from the TLS
@@ -777,6 +843,8 @@ class ControlSessionManager(
             // "it happened and was refused" are different facts on a diagnostics screen.
             if (frame.envelope.type in VoiceMessageTypes.ALL) voice.countPreAuthenticationDrop()
             if (frame.envelope.type == AudioStateMessageTypes.AUDIO_STATE) audioState.countPreAuthenticationDrop()
+            if (frame.envelope.type in ManifestMessageTypes.ALL) manifest.countPreAuthenticationDrop()
+            if (frame.envelope.type in TransferMessageTypes.ALL) transfer.countPreAuthenticationDrop()
             return
         }
         when (frame.envelope.type) {
@@ -788,6 +856,14 @@ class ControlSessionManager(
                 voice.deliver(frame.envelope.type, payload)
             // Reachable only past the guard above, so only for an authenticated peer (PROTOCOL §4.1).
             AudioStateMessageTypes.AUDIO_STATE -> audioState.deliver(payload)
+            // Reachable only past the guard above, so only for an authenticated peer (PROTOCOL §8.1).
+            ManifestMessageTypes.REQUEST, ManifestMessageTypes.BEGIN, ManifestMessageTypes.PAGE,
+            ManifestMessageTypes.END, ManifestMessageTypes.ABORT,
+            -> manifest.deliver(frame.envelope.type, payload)
+            // Reachable only past the guard above, so only for an authenticated peer (PROTOCOL §8.2).
+            TransferMessageTypes.REQUEST, TransferMessageTypes.OFFER, TransferMessageTypes.PROGRESS,
+            TransferMessageTypes.RESULT, TransferMessageTypes.CANCEL,
+            -> transfer.deliver(frame.envelope.type, payload)
             "BYE" -> endConnection(socket, LinkLossReason.BYE)
             "ERROR" -> {
                 if (requiredBooleanField(payload, "fatal") != true) return
@@ -1050,6 +1126,8 @@ class ControlSessionManager(
         // teardown path may depend on the other having run.
         voice.reset()
         audioState.reset()
+        manifest.reset()
+        transfer.reset()
         pendingActivation = null
         _pairingPrompt.value = null
         endedDeliberately = true

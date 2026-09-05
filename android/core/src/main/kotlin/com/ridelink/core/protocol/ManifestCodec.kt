@@ -9,8 +9,10 @@ import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.longOrNull
+import kotlinx.serialization.json.put
 
 /** PROTOCOL §3 Catalogue group. */
 object ManifestMessageTypes {
@@ -94,7 +96,12 @@ enum class ManifestMessageRejection {
  * Parses and bounds-checks a `MANIFEST_*` payload. Total and non-throwing, mirroring
  * [AudioStateCodec]/[VoiceSignalCodec]: a malformed frame is dropped and the control connection
  * survives (PROTOCOL §2 rule 2, applied here the same way §7.4 applies it to `VOICE_*`).
+ *
+ * One object per message family, matching [AudioStateCodec]/[VoiceSignalCodec], rather than
+ * splitting parse/encode across two types for five sub-message shapes — that split would scatter
+ * each `FIELD_*` constant and rejection reason away from the one function pair that uses it.
  */
+@Suppress("TooManyFunctions")
 object ManifestCodec {
     private val VALID_ABORT_REASONS = setOf("library_changed", "page_oversize", "cancelled", "internal")
     private const val MAX_ENTRIES_PER_PAGE = com.ridelink.core.manifest.ManifestPaging.MAX_ENTRIES_PER_PAGE
@@ -137,6 +144,59 @@ object ManifestCodec {
             ManifestMessageTypes.END -> parseEnd(payload)
             ManifestMessageTypes.ABORT -> parseAbort(payload)
             else -> Result.Rejected(ManifestMessageRejection.UNKNOWN_TYPE)
+        }
+
+    /** The `MANIFEST_*` type a given [ManifestMessage] wire-encodes as. */
+    fun wireType(message: ManifestMessage): String =
+        when (message) {
+            is ManifestMessage.Request -> ManifestMessageTypes.REQUEST
+            is ManifestMessage.Begin -> ManifestMessageTypes.BEGIN
+            is ManifestMessage.Page -> ManifestMessageTypes.PAGE
+            is ManifestMessage.End -> ManifestMessageTypes.END
+            is ManifestMessage.Abort -> ManifestMessageTypes.ABORT
+        }
+
+    /** The outbound side of [parse] — the shape lives here, once, shared by both directions. */
+    fun encode(message: ManifestMessage): JsonObject =
+        when (message) {
+            is ManifestMessage.Request ->
+                buildJsonObject {
+                    put(FIELD_SINCE_REVISION, message.sinceRevision)
+                    put(FIELD_MAX_PAGE_BYTES, message.maxPageBytes)
+                }
+            is ManifestMessage.Begin ->
+                buildJsonObject {
+                    put(FIELD_MANIFEST_ID, message.manifestId.value)
+                    put(FIELD_KIND, message.kind.wire)
+                    put(FIELD_MANIFEST_REVISION, message.manifestRevision)
+                    put(FIELD_BASE_REVISION, message.baseRevision)
+                    put(FIELD_TOTAL_ENTRIES, message.totalEntries)
+                    put(FIELD_TOTAL_REMOVED, message.totalRemoved)
+                    put(FIELD_PAGE_COUNT, message.pageCount)
+                    put(FIELD_DIGEST_ALG, message.digestAlg)
+                }
+            is ManifestMessage.Page ->
+                buildJsonObject {
+                    put(FIELD_MANIFEST_ID, message.manifestId.value)
+                    put(FIELD_MANIFEST_REVISION, message.manifestRevision)
+                    put(FIELD_PAGE_INDEX, message.pageIndex)
+                    put(FIELD_ENTRIES, JsonArray(message.entries.map { it.toJsonObject() }))
+                    put(FIELD_REMOVED, JsonArray(message.removed.map { JsonPrimitive(it.value) }))
+                }
+            is ManifestMessage.End ->
+                buildJsonObject {
+                    put(FIELD_MANIFEST_ID, message.manifestId.value)
+                    put(FIELD_MANIFEST_REVISION, message.manifestRevision)
+                    put(FIELD_PAGE_COUNT, message.pageCount)
+                    put(FIELD_TOTAL_ENTRIES, message.totalEntries)
+                    put(FIELD_TOTAL_REMOVED, message.totalRemoved)
+                    put(FIELD_DIGEST, message.digest)
+                }
+            is ManifestMessage.Abort ->
+                buildJsonObject {
+                    put(FIELD_MANIFEST_ID, message.manifestId.value)
+                    put(FIELD_REASON, message.reason)
+                }
         }
 
     @Suppress("ReturnCount")

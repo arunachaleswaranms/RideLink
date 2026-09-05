@@ -5,8 +5,10 @@ import com.ridelink.core.model.TransferId
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.longOrNull
+import kotlinx.serialization.json.put
 
 /** PROTOCOL §3 Transfer group. */
 object TransferMessageTypes {
@@ -82,7 +84,11 @@ enum class TransferMessageRejection {
  * Parses and bounds-checks a `TRANSFER_*` payload. Total and non-throwing, mirroring
  * [AudioStateCodec]/[VoiceSignalCodec] — a malformed frame is dropped and the control connection
  * survives.
+ *
+ * One object per message family, matching [AudioStateCodec]/[VoiceSignalCodec] — see
+ * [ManifestCodec]'s identical note.
  */
+@Suppress("TooManyFunctions")
 object TransferCodec {
     sealed class Result {
         data class Parsed(
@@ -124,6 +130,52 @@ object TransferCodec {
             TransferMessageTypes.RESULT -> parseResult(payload)
             TransferMessageTypes.CANCEL -> parseCancel(payload)
             else -> Result.Rejected(TransferMessageRejection.UNKNOWN_TYPE)
+        }
+
+    /** The `TRANSFER_*` type a given [TransferMessage] wire-encodes as. */
+    fun wireType(message: TransferMessage): String =
+        when (message) {
+            is TransferMessage.Request -> TransferMessageTypes.REQUEST
+            is TransferMessage.Offer -> TransferMessageTypes.OFFER
+            is TransferMessage.Progress -> TransferMessageTypes.PROGRESS
+            is TransferMessage.Result -> TransferMessageTypes.RESULT
+            is TransferMessage.Cancel -> TransferMessageTypes.CANCEL
+        }
+
+    /** The outbound side of [parse] — the shape lives here, once, shared by both directions. */
+    fun encode(message: TransferMessage): JsonObject =
+        when (message) {
+            is TransferMessage.Request ->
+                buildJsonObject {
+                    put(FIELD_CONTENT_HASH, message.contentHash.value)
+                    put(FIELD_TRANSFER_ID, message.transferId.value)
+                }
+            is TransferMessage.Offer ->
+                buildJsonObject {
+                    put(FIELD_TRANSFER_ID, message.transferId.value)
+                    put(FIELD_SIZE_BYTES, message.sizeBytes)
+                    put(FIELD_CHUNK_SIZE, message.chunkSize)
+                    put(FIELD_CHUNK_COUNT, message.chunkCount)
+                    put(FIELD_BULK_PORT, message.bulkPort)
+                    put(FIELD_BULK_TOKEN, message.bulkToken)
+                }
+            is TransferMessage.Progress ->
+                buildJsonObject {
+                    put(FIELD_TRANSFER_ID, message.transferId.value)
+                    put(FIELD_BYTES, message.bytes)
+                    put(FIELD_PCT, message.pct)
+                }
+            is TransferMessage.Result ->
+                buildJsonObject {
+                    put(FIELD_TRANSFER_ID, message.transferId.value)
+                    put(FIELD_OK, message.ok)
+                    put(FIELD_SHA256, message.sha256?.value)
+                }
+            is TransferMessage.Cancel ->
+                buildJsonObject {
+                    put(FIELD_TRANSFER_ID, message.transferId.value)
+                    put(FIELD_REASON, message.reason)
+                }
         }
 
     @Suppress("ReturnCount")
