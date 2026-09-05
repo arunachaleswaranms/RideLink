@@ -40,8 +40,7 @@
           "page_count": 1,
           "total_entries": 1,
           "total_removed": 0,
-          "digest": "sha256:correct",
-          "expected_digest": "sha256:correct"
+          "digest": "sha256:064ec158e4c0a6dd3083f8f15675e88143f6c73869b527b31b2caeed9ed814b3"
         }
       ],
       "expect": {
@@ -254,8 +253,7 @@
           "page_count": 1,
           "total_entries": 1,
           "total_removed": 0,
-          "digest": "sha256:correct",
-          "expected_digest": "sha256:correct"
+          "digest": "sha256:064ec158e4c0a6dd3083f8f15675e88143f6c73869b527b31b2caeed9ed814b3"
         }
       ],
       "expect": {
@@ -351,8 +349,7 @@
           "page_count": 1,
           "total_entries": 2,
           "total_removed": 0,
-          "digest": "sha256:correct",
-          "expected_digest": "sha256:correct"
+          "digest": "sha256:064ec158e4c0a6dd3083f8f15675e88143f6c73869b527b31b2caeed9ed814b3"
         }
       ],
       "expect": {
@@ -395,8 +392,7 @@
           "page_count": 1,
           "total_entries": 1,
           "total_removed": 1,
-          "digest": "sha256:correct",
-          "expected_digest": "sha256:correct"
+          "digest": "sha256:064ec158e4c0a6dd3083f8f15675e88143f6c73869b527b31b2caeed9ed814b3"
         }
       ],
       "expect": {
@@ -438,8 +434,7 @@
           "page_count": 1,
           "total_entries": 1,
           "total_removed": 0,
-          "digest": "sha256:wrong",
-          "expected_digest": "sha256:correct"
+          "digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000"
         }
       ],
       "expect": {
@@ -542,8 +537,7 @@
           "page_count": 1,
           "total_entries": 1,
           "total_removed": 0,
-          "digest": "sha256:correct",
-          "expected_digest": "sha256:correct"
+          "digest": "sha256:064ec158e4c0a6dd3083f8f15675e88143f6c73869b527b31b2caeed9ed814b3"
         }
       ],
       "expect": {
@@ -643,8 +637,7 @@
           "page_count": 1,
           "total_entries": 1,
           "total_removed": 0,
-          "digest": "sha256:correct",
-          "expected_digest": "sha256:correct"
+          "digest": "sha256:064ec158e4c0a6dd3083f8f15675e88143f6c73869b527b31b2caeed9ed814b3"
         }
       ],
       "expect": {
@@ -906,8 +899,7 @@
           "page_count": 1,
           "total_entries": 1,
           "total_removed": 0,
-          "digest": "sha256:correct",
-          "expected_digest": "sha256:correct"
+          "digest": "sha256:064ec158e4c0a6dd3083f8f15675e88143f6c73869b527b31b2caeed9ed814b3"
         }
       ],
       "expect": {

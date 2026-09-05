@@ -14,8 +14,31 @@ Run:  python3 tools/generate_manifest_paging_errors_vectors.py
 
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
+
+
+def digest_for(entries: list[dict], removed: list[str]) -> str:
+    """PROTOCOL §8.1's exact MANIFEST_END digest — same algorithm as
+    generate_manifest_paging_vectors.py's `digest_for`, duplicated here (not imported) per this
+    project's convention that each generator is a fully independent transcription of the spec.
+    Used both to precompute [DEFAULT_ENTRY_DIGEST] below and inside [run_sync], so this file's
+    reference reducer validates a digest the same way the real receiver does — compared against
+    what was actually staged, never against a second externally supplied string.
+    """
+    h = hashlib.sha256()
+    for e in entries:
+        h.update((e.get("content_hash") or "").encode("utf-8"))
+        h.update(b"\x1f")
+        h.update(e["quick_id"].encode("utf-8"))
+        h.update(b"\x1e")
+    for r in removed:
+        h.update(b"-")
+        h.update(r.encode("utf-8"))
+        h.update(b"\x1e")
+    return "sha256:" + h.hexdigest()
+
 
 # --- a minimal reference reducer, transcribed from PROTOCOL §8.1 rules 1-10 --------------------
 
@@ -87,7 +110,8 @@ def run_sync(previous_revision: int, events: list[dict]) -> dict:
                     or len(open_sync["staged_removed"]) != open_sync["total_removed"]
                 ):
                     raise Aborted("manifest_sequence_error")
-                if ev["digest"] != ev["expected_digest"]:
+                real_digest = digest_for(open_sync["staged_entries"], open_sync["staged_removed"])
+                if ev["digest"] != real_digest:
                     raise Aborted("manifest_digest_mismatch")
                 committed = True
                 final_revision = open_sync["revision"]
@@ -119,6 +143,13 @@ def run_sync(previous_revision: int, events: list[dict]) -> dict:
 MID = "01J9Z4M3RT8V2W5X7Y9Z1A3B5C"
 OTHER_MID = "01J9Z4M3RT8V2W5X7Y9Z1A3B5D"
 
+# Every row below stages at most this one entry before reaching an End (none of these rows
+# exercise multi-entry digest content — that is manifest-paging/'s job). Precomputing its real
+# digest once keeps every happy-path End honestly self-consistent instead of a placeholder string
+# that a real digest computation would never produce.
+DEFAULT_ENTRY = {"content_hash": None, "quick_id": f"sha256:{'a' * 64}"}
+DEFAULT_ENTRY_DIGEST = digest_for([DEFAULT_ENTRY], [])
+
 
 def begin(*, kind_field="full", manifest_id=MID, manifest_revision=7, base_revision=None, total_entries=1, total_removed=0) -> dict:
     return {
@@ -138,12 +169,12 @@ def page(*, manifest_id=MID, manifest_revision=7, page_index, entries=None, remo
         "manifest_id": manifest_id,
         "manifest_revision": manifest_revision,
         "page_index": page_index,
-        "entries": entries if entries is not None else [{"content_hash": None, "quick_id": f"sha256:{'a' * 64}"}],
+        "entries": entries if entries is not None else [DEFAULT_ENTRY],
         "removed": removed or [],
     }
 
 
-def end(*, manifest_id=MID, manifest_revision=7, page_count, total_entries=1, total_removed=0, digest="sha256:correct", expected_digest="sha256:correct") -> dict:
+def end(*, manifest_id=MID, manifest_revision=7, page_count, total_entries=1, total_removed=0, digest=DEFAULT_ENTRY_DIGEST) -> dict:
     return {
         "kind": "End",
         "manifest_id": manifest_id,
@@ -152,7 +183,6 @@ def end(*, manifest_id=MID, manifest_revision=7, page_count, total_entries=1, to
         "total_entries": total_entries,
         "total_removed": total_removed,
         "digest": digest,
-        "expected_digest": expected_digest,
     }
 
 
@@ -270,7 +300,7 @@ def build() -> list[dict]:
         row(
             "digest-mismatch-at-end-aborts",
             previous_revision=6,
-            events=[begin(), page(page_index=0), end(page_count=1, digest="sha256:wrong", expected_digest="sha256:correct")],
+            events=[begin(), page(page_index=0), end(page_count=1, digest="sha256:" + "0" * 64)],
             expect={"error": "manifest_digest_mismatch", "committed": False, "final_revision": 6},
         )
     )
