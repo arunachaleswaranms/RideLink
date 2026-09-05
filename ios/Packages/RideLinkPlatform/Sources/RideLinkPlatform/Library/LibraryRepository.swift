@@ -82,6 +82,40 @@ public final class LibraryRepository: Sendable {
         .compactMap(LibraryMapping.toDomain)
     }
 
+    /// Phase 4's transfer-serving lookup (brief §9): `content_hash` is **not** unique at the schema
+    /// level (ADR-005 — two rows may legitimately share one, being byte-identical files), so this
+    /// returns the first match by `id`. Any row sharing a `content_hash` is, by definition, an
+    /// equally valid source for those bytes; this repository does not need to try a second one if
+    /// the first fails to open (the caller reports a plain I/O failure rather than searching
+    /// further). Mirrors `com.ridelink.data.database.TrackDao.findByContentHash`.
+    public func findByContentHash(_ contentHash: ContentHash) throws -> LibraryEntry? {
+        try dbQueue.read { db in
+            try TrackRecord
+                .filter(Column("contentHash") == contentHash.value)
+                .filter(Column("decodeStatus") == LibraryMapping.storedValue(for: .indexed))
+                .order(Column("id"))
+                .fetchOne(db)
+        }
+        .flatMap(LibraryMapping.toDomain)
+    }
+
+    /// Phase 4's manifest generator input (brief §5): every row that is both usable (`.indexed`,
+    /// never `.missing`/`.unsupported`/`.corrupt`) and sync-eligible (`contentHash` present —
+    /// ADR-005). A one-shot throwing read, deliberately not `observe`'s `AsyncStream` — manifest
+    /// generation must not depend on a UI collector currently being active. Ordered by `contentHash`
+    /// so two generation passes over an unchanged library produce byte-identical manifest ordering.
+    /// Mirrors `com.ridelink.data.database.TrackDao.findAllSyncEligible`.
+    public func allSyncEligible() throws -> [LibraryEntry] {
+        try dbQueue.read { db in
+            try TrackRecord
+                .filter(Column("contentHash") != nil)
+                .filter(Column("decodeStatus") == LibraryMapping.storedValue(for: .indexed))
+                .order(Column("contentHash"))
+                .fetchAll(db)
+        }
+        .compactMap(LibraryMapping.toDomain)
+    }
+
     /// A location never indexed before — `entry` carries a freshly-generated `LocalEntryId` the
     /// caller must have already assigned. A `localEntryId` or `locationUri` collision on insert would
     /// mean two different rows were assigned the same fresh identity, or that the caller failed to

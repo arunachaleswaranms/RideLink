@@ -91,10 +91,54 @@ public struct TrackRecord: Codable, FetchableRecord, MutablePersistableRecord, S
     }
 }
 
-/// The one music-library database, schema version 1 (mirrors
-/// `com.ridelink.data.database.RideLinkDatabase`'s `@Database(version = 1, exportSchema = true)`
-/// discipline — a real `DatabaseMigrator` registration from day one, even with only one version,
-/// rather than inventing a fake migration just to prove the mechanism exists).
+/// The storage shape of one verified Phase 4 transfer cache entry (ADR-023 §6) — mirrors
+/// `com.ridelink.data.database.TransferCacheEntity` field-for-field. Deliberately its own table,
+/// never merged into `TrackRecord` (brief §16/§18): a peer's manifest disappearing after disconnect,
+/// or a later cache eviction, must never delete or shadow a track the user actually imported.
+/// `contentHash` (the full `"sha256:..."` wire string) is the primary key — never `quickId`, never a
+/// filename (ADR-023 §8, ADR-005 Amendment A1).
+///
+/// `cacheFileName` is a filesystem-safe basename **derived from `contentHash` itself**, never from a
+/// remote-supplied filename (brief §12) — the remote `filename` a manifest entry carries is display
+/// metadata only and never reaches a path. `verified` is set exactly once, at atomic promotion
+/// (ADR-023 §6); the only way to unset it is to delete the row entirely.
+///
+/// Only `FetchableRecord`, not `PersistableRecord`: every write to this table goes through
+/// `TransferCacheRepository`'s explicit `INSERT OR REPLACE`/`UPDATE`/`DELETE` SQL (mirroring Room's
+/// `@Insert(onConflict = REPLACE)` on `TransferCacheDao.upsertVerified` exactly), so there is no
+/// separate ORM insert path that could drift from that conflict behaviour.
+public struct TransferCacheRecord: Codable, FetchableRecord, TableRecord, Sendable, Equatable {
+    public var contentHash: String
+    public var cacheFileName: String
+    public var sizeBytes: Int64
+    public var verified: Bool
+    public var verifiedAtMonoUs: Int64
+    public var lastAccessAtMonoUs: Int64
+
+    public static let databaseTableName = "transfer_cache"
+
+    public init(
+        contentHash: String,
+        cacheFileName: String,
+        sizeBytes: Int64,
+        verified: Bool,
+        verifiedAtMonoUs: Int64,
+        lastAccessAtMonoUs: Int64
+    ) {
+        self.contentHash = contentHash
+        self.cacheFileName = cacheFileName
+        self.sizeBytes = sizeBytes
+        self.verified = verified
+        self.verifiedAtMonoUs = verifiedAtMonoUs
+        self.lastAccessAtMonoUs = lastAccessAtMonoUs
+    }
+}
+
+/// The one music-library database, schema version 2 (Phase 4; mirrors
+/// `com.ridelink.data.database.RideLinkDatabase`'s `@Database(version = 2, exportSchema = true)`
+/// discipline). `v2_createTransferCache` is a genuinely additive migration — the existing `v1`
+/// `track`/`track_fts` tables are untouched, exactly like Android's `MIGRATION_1_2` — so an existing
+/// Phase 3 install's imported library survives a Phase 4 update untouched.
 public enum LibraryDatabase {
     public static func makeMigrator() -> DatabaseMigrator {
         var migrator = DatabaseMigrator()
@@ -135,6 +179,16 @@ public enum LibraryDatabase {
                 t.column("artist")
                 t.column("album")
                 t.column("filename")
+            }
+        }
+        migrator.registerMigration("v2_createTransferCache") { db in
+            try db.create(table: TransferCacheRecord.databaseTableName) { t in
+                t.column("contentHash", .text).notNull().primaryKey()
+                t.column("cacheFileName", .text).notNull()
+                t.column("sizeBytes", .integer).notNull()
+                t.column("verified", .boolean).notNull()
+                t.column("verifiedAtMonoUs", .integer).notNull()
+                t.column("lastAccessAtMonoUs", .integer).notNull()
             }
         }
         return migrator
