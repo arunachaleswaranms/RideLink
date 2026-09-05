@@ -17,6 +17,8 @@
 		8CC1F9EF0519CE5C87A6742D /* NowPlayingCard.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8BD8DEA8F739B64B1756D784 /* NowPlayingCard.swift */; };
 		3D466877B4FE8FDA47C4C531 /* MusicSection.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8E0F2A55F37B2C20357CF56F /* MusicSection.swift */; };
 		3510E58703C74E0689A5E0D4 /* NowPlayingController.swift in Sources */ = {isa = PBXBuildFile; fileRef = CBD68362DD8444AD91A64AB4 /* NowPlayingController.swift */; };
+		9B1C2D3E4F5061728394A5B6 /* SharedLibraryCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7A2B3C4D5E6F70819293A4B5 /* SharedLibraryCoordinator.swift */; };
+		9C2D3E4F50617283940A5B6C /* SharedLibraryView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8B3C4D5E6F708192A3B4C5D6 /* SharedLibraryView.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -32,6 +34,8 @@
 		8BD8DEA8F739B64B1756D784 /* NowPlayingCard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NowPlayingCard.swift; sourceTree = "<group>"; };
 		8E0F2A55F37B2C20357CF56F /* MusicSection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MusicSection.swift; sourceTree = "<group>"; };
 		CBD68362DD8444AD91A64AB4 /* NowPlayingController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NowPlayingController.swift; sourceTree = "<group>"; };
+		7A2B3C4D5E6F70819293A4B5 /* SharedLibraryCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SharedLibraryCoordinator.swift; sourceTree = "<group>"; };
+		8B3C4D5E6F708192A3B4C5D6 /* SharedLibraryView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SharedLibraryView.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -66,6 +70,8 @@
 				8BD8DEA8F739B64B1756D784 /* NowPlayingCard.swift */,
 				8E0F2A55F37B2C20357CF56F /* MusicSection.swift */,
 				CBD68362DD8444AD91A64AB4 /* NowPlayingController.swift */,
+				7A2B3C4D5E6F70819293A4B5 /* SharedLibraryCoordinator.swift */,
+				8B3C4D5E6F708192A3B4C5D6 /* SharedLibraryView.swift */,
 				D98B8F9B15BF0E88C459151B /* Info.plist */,
 			);
 			path = RideLink;
@@ -165,6 +171,8 @@
 				8CC1F9EF0519CE5C87A6742D /* NowPlayingCard.swift in Sources */,
 				3D466877B4FE8FDA47C4C531 /* MusicSection.swift in Sources */,
 				3510E58703C74E0689A5E0D4 /* NowPlayingController.swift in Sources */,
+				9B1C2D3E4F5061728394A5B6 /* SharedLibraryCoordinator.swift in Sources */,
+				9C2D3E4F50617283940A5B6C /* SharedLibraryView.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

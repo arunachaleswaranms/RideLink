@@ -1,4 +1,5 @@
 import Foundation
+import GRDB
 import Observation
 import RideLinkCore
 import RideLinkPlatform
@@ -81,6 +82,8 @@ public final class SessionCoordinator {
     private let trustedPeers: any TrustedPeerStore
     private let controlSessionManager: ControlSessionManager
     private let localIdentity: LocalHandshakeIdentity
+    private let deviceIdentity: DeviceIdentity
+    private let monotonicNowUs: @Sendable () -> Int64
     private let logger: StructuredLogger
 
     private var connectAttempted = false
@@ -139,6 +142,8 @@ public final class SessionCoordinator {
         // certificate validity is the single permitted exception to the monotonic-clocks rule.
         let identity = try DeviceIdentityStore().loadOrCreate(now: UtcTime(Int64(Date().timeIntervalSince1970)))
         localIdentityPrefix = identity.identitySpkiSha256.description
+        deviceIdentity = identity
+        self.monotonicNowUs = monotonicNowUs
 
         let channel = TlsControlChannel(identity: identity)
         SecureTransportPolicy.requireSecure(channel)
@@ -175,6 +180,39 @@ public final class SessionCoordinator {
         let directory = base.appendingPathComponent("RideLink/security", isDirectory: true)
         try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         return directory
+    }
+
+    /// Phase 4's shared-library stack (ADR-023), non-nil once the composition root
+    /// (`RideLinkApp.init`) calls [attachSharedLibrary] — it needs `MusicCoordinator`'s
+    /// `LibraryRepository` to exist first, and construction can fail (a cache-directory create can
+    /// throw), so it is not built inside this class's own `init`.
+    ///
+    /// **Why this coordinator forwards events instead of `SharedLibraryCoordinator` subscribing to
+    /// its own.** `onEvent`/`setOnEvent` on `ControlSessionManager` is a single mutable callback
+    /// slot (unlike Android's multi-collector `SharedFlow`) — a second `setOnEvent` call would
+    /// silently replace this class's own handler. `SessionCoordinator` already owns the one
+    /// subscription, so it forwards the two events `SharedLibraryCoordinator` needs
+    /// (`.connected`/`.linkLost`) explicitly, in [applySideEffects].
+    public private(set) var sharedLibrary: SharedLibraryCoordinator?
+
+    /// Builds and attaches [sharedLibrary]. A no-op if already attached. `SharedLibraryCoordinator`
+    /// gets its own `TlsControlChannel` for the bulk plane — a second, independent listener
+    /// (ADR-015) — but the **same** [deviceIdentity] as the control connection, which is what the
+    /// SPKI pin check on both ends depends on.
+    public func attachSharedLibrary(
+        libraryRepository: LibraryRepository,
+        libraryDatabaseQueue: DatabaseQueue,
+        libraryIndexer: LibraryIndexer
+    ) {
+        guard sharedLibrary == nil else { return }
+        sharedLibrary = SharedLibraryCoordinator(
+            controlSessionManager: controlSessionManager,
+            bulkTransport: TransferManager(tlsChannel: TlsControlChannel(identity: deviceIdentity), monotonicNowUs: monotonicNowUs),
+            libraryRepository: libraryRepository,
+            libraryDatabaseQueue: libraryDatabaseQueue,
+            libraryIndexer: libraryIndexer,
+            monotonicNowUs: monotonicNowUs
+        )
     }
 
     /// The user's answer on the pairing screen. Both peers must answer before any pin is written.
@@ -570,6 +608,7 @@ public final class SessionCoordinator {
             // regardless of whether anything changed: a peer that has just connected has never seen any
             // of our state, so "nothing changed" is not a reason to stay silent.
             publishAudioState(force: true)
+            sharedLibrary?.handleConnected()
         case .linkLost(let reason):
             // PROTOCOL §7.8: media goes, the capture device stays (ARCHITECTURE §6.3/§6.4), and nothing
             // is retried here — §10's control ladder is the app's only reconnect loop.
@@ -577,6 +616,7 @@ public final class SessionCoordinator {
                 Task { await voice.onControlLinkLost() }
             }
             if reason == .bye { releaseVoice() }
+            sharedLibrary?.handleLinkLost()
         case .duplicateConnectionClosed, .reconnectBudgetExhausted:
             break
         }

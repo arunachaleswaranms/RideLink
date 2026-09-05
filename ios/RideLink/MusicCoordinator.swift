@@ -35,6 +35,26 @@ public final class MusicCoordinator {
 
     private let repository: LibraryRepository
     private let indexer: LibraryIndexer
+    private let dbQueue: DatabaseQueue
+
+    /// Phase 4's `SharedLibraryCoordinator` needs the *same* `LibraryRepository` this coordinator
+    /// already owns — a manifest generated from a second, independent repository instance over the
+    /// same database would still be correct, but two repository objects for one Phase 3 database is
+    /// exactly the kind of duplication CLAUDE.md rule 8 exists to prevent. Forwarding this one
+    /// reference is the composition root's job (`RideLinkApp.init`), not a new dependency between
+    /// `MusicCoordinator` and `SharedLibraryCoordinator` themselves — neither holds a reference to
+    /// the other.
+    public var libraryRepositoryForSharedLibrary: LibraryRepository { repository }
+
+    /// The same reasoning as [libraryRepositoryForSharedLibrary]: Phase 4's verified-cache metadata
+    /// lives as a second table in this **same** database (one `library.sqlite`, one migrator, two
+    /// tables) rather than a second file, so `TransferCacheRepository` needs this same queue.
+    public var libraryDatabaseQueueForSharedLibrary: DatabaseQueue { dbQueue }
+
+    /// `LocalContentResolver` resolves a local library hit via the indexer's own app-container
+    /// destination path (`LibraryIndexer.resolvedUrl(for:)`), never `LibraryEntry.location.uri` —
+    /// see that type's doc comment.
+    public var libraryIndexerForSharedLibrary: LibraryIndexer { indexer }
     private let player: any Player
     private let musicAudioSession = MusicAudioSession()
     private var audioSessionActivated = false
@@ -50,6 +70,7 @@ public final class MusicCoordinator {
         let directories = try Self.makeDirectories()
         let dbQueue = try DatabaseQueue(path: directories.database.path)
         try LibraryDatabase.makeMigrator().migrate(dbQueue)
+        self.dbQueue = dbQueue
         let repository = LibraryRepository(dbQueue: dbQueue)
         self.repository = repository
         self.indexer = LibraryIndexer(

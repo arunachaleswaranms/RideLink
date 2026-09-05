@@ -70,6 +70,14 @@ struct MainScreen: View {
                     )
                 }
 
+                // Same gate as `VoiceCard` above (PROTOCOL §7.1 / brief §22): the shared library
+                // exists only once the trust gate has passed, since `MANIFEST_*`/`TRANSFER_*` are
+                // absent from the pre-authentication frame allowlist for exactly this reason.
+                if coordinator.state.status == .connected || coordinator.state.status == .rideActive,
+                   let sharedLibrary = coordinator.sharedLibrary {
+                    SharedLibraryView(coordinator: sharedLibrary, onPlayLocally: playSharedTrackLocally)
+                }
+
                 DiagnosticsCard(
                     diagnostics: coordinator.controlDiagnostics,
                     discoveredPeerCount: coordinator.discoveredPeers.count,
@@ -98,6 +106,15 @@ struct MainScreen: View {
     }
 
     @Environment(\.scenePhase) private var scenePhase
+
+    /// Mirrors Android's `MainActivity.attemptPlaySharedTrackLocally`: finds the Phase 3 library
+    /// row sharing this entry's `content_hash` and plays it through the one existing player/queue
+    /// — never a second player, never synchronized with the peer (brief §19).
+    private func playSharedTrackLocally(_ entry: ManifestEntry) {
+        guard let hash = entry.contentHash, case .success(let musicCoordinator) = music else { return }
+        guard let localEntry = musicCoordinator.libraryEntries.first(where: { $0.track.contentHash == hash }) else { return }
+        musicCoordinator.playNow(localEntry)
+    }
 }
 
 /// Green once the link is TLS 1.3, because the banner's job is to be *accurate*: the Phase 1a

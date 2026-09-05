@@ -23,10 +23,23 @@ struct RideLinkApp: App {
     @State private var nowPlayingController: NowPlayingController?
 
     init() {
-        _session = State(initialValue: Result { try SessionCoordinator() })
+        let sessionResult = Result { try SessionCoordinator() }
+        _session = State(initialValue: sessionResult)
         let musicResult = Result { try MusicCoordinator() }
         _music = State(initialValue: musicResult)
         _nowPlayingController = State(initialValue: (try? musicResult.get()).map { NowPlayingController(musicCoordinator: $0) })
+
+        // Phase 4 (ADR-023): only once both stacks exist, since the shared library needs Phase
+        // 3's own `LibraryRepository`/database queue/indexer (CLAUDE.md rule 8 — one repository,
+        // not a second one). Neither failure disables the other: a broken shared library is not a
+        // reason to refuse local music or the control session, and the reverse.
+        if let coordinator = try? sessionResult.get(), let musicCoordinator = try? musicResult.get() {
+            coordinator.attachSharedLibrary(
+                libraryRepository: musicCoordinator.libraryRepositoryForSharedLibrary,
+                libraryDatabaseQueue: musicCoordinator.libraryDatabaseQueueForSharedLibrary,
+                libraryIndexer: musicCoordinator.libraryIndexerForSharedLibrary
+            )
+        }
     }
 
     var body: some Scene {
