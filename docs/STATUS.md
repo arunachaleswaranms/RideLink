@@ -2547,6 +2547,15 @@ storage or battery measurement, or a transfer over an actual multi-hop or lossy 
 Android emulator run above exercises real instrumented Android test suites on a real AVD — it is
 still not a physical device and does not close TEST_PLAN's hardware-gated items.
 
+**CI green on both platforms on the first fresh run, not re-run to green:** run
+[34126876497](https://github.com/arunachaleswaranms/RideLink/actions/runs/34126876497), head commit
+`f9a031f` (this session's docs commit, immediately following the fix/test commits
+`aceb040`/`13cc96a`). Android (7m19s): `Set up JDK 21`, `Set up Android SDK`,
+`Install Android SDK packages`, `core unit tests`, `all unit tests`, `ktlint`, `detekt`, `lint`,
+`assembleDebug`, `assembleRelease` — all green. iOS (7m56s): `Toolchain versions`,
+`RideLinkCore tests`, `RideLinkPlatform tests`, `Build unsigned Debug simulator target`,
+`Build unsigned Release simulator target` — all green.
+
 ---
 
 ## 3. Tests passed / pending
@@ -3034,8 +3043,9 @@ evidence: §2v's run
 [33976164558](https://github.com/arunachaleswaranms/RideLink/actions/runs/33976164558) (head commit
 `86c5117`); §2w's run
 [34114586073](https://github.com/arunachaleswaranms/RideLink/actions/runs/34114586073) (head commit
-`fdad685`); §2x's run recorded in a follow-up docs commit once observed, green on both platforms on
-the first fresh run. `docs/TEST_PLAN.md` already carries the Phase 4 exit-gate row (§9)
+`fdad685`); §2x's run
+[34126876497](https://github.com/arunachaleswaranms/RideLink/actions/runs/34126876497) (head commit
+`f9a031f`), green on both platforms on the first fresh run. `docs/TEST_PLAN.md` already carries the Phase 4 exit-gate row (§9)
 marked verified-vs-pending against this evidence; `docs/PROTOCOL.md`/`docs/ARCHITECTURE.md` needed
 no further change — none of §2v's, §2w's, or §2x's findings moved a wire shape or the architectural
 contract, only the production code implementing it. **What remains for Phase 4 specifically:
