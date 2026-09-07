@@ -3031,10 +3031,21 @@ recorded here as an observation rather than fixed because this session's brief w
 not widening beyond its three findings, and because closing it would change the requester path
 without a demonstrated failure to justify it.
 
+**CI green on both platforms on the first fresh run, attempt 1, not re-run to green:** run
+[34158149750](https://github.com/arunachaleswaranms/RideLink/actions/runs/34158149750) (run #31,
+head commit `bbb221a`, attempt 1). Android: `Set up JDK 21`, `Set up Android SDK`,
+`Install Android SDK packages`, `core unit tests`, `all unit tests`, `ktlint`, `detekt`, `lint`,
+`assembleDebug`, `assembleRelease` — all green. iOS: `Toolchain versions`, `RideLinkCore tests`,
+`RideLinkPlatform tests`, `Build unsigned Debug simulator target`,
+`Build unsigned Release simulator target` — all green. As in §2y, the functional commit
+(`3534e20`) and the docs commit (`bbb221a`) are in the same push, so there is no
+functional-SHA/CI-SHA distinction to draw.
+
 **Still not done, and unchanged by this session:** nothing here ran on two physical phones over a
 real Wi-Fi/hotspot topology. No mDNS discovery of a real peer's catalogue, no transfer over a real
 (non-loopback) network path, no storage or battery measurement over a realistic personal library.
-This session added no hardware evidence of any kind and closes no TEST_PLAN hardware row.
+This session added no hardware evidence of any kind and closes no TEST_PLAN hardware row —
+the emulator run above is an emulator, and covers Phase 3 code, not Phase 4's.
 
 ---
 
