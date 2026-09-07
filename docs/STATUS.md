@@ -1,32 +1,46 @@
 # RideLink — Status
 
-**Updated:** 7 September 2026 (Phase 4 closure-audit follow-up, twentieth session — see §2w)
+**Updated:** 7 September 2026 (Phase 4 closure-audit follow-up A4, twenty-second session — see §2y)
 **Current milestone:** M1 (Private voice link) is now **software-complete with no known defect** —
 its hardware gate is the only thing left open. M2 (local music) implementation is complete and
 closure-audited (§2q/§2r). Phase 4 (shared catalogue + authenticated peer file transfer) is now
-**closure-audited twice** (§2v, §2w) — implementation-complete on both platforms, laptop-verified,
-with its real-device gate pending exactly like every phase above it.
-**Current phase:** Phase 4 closure-audit follow-up (this session, §2w) — a narrower, independent
-review scoped to exactly two lifecycle/session-ownership questions the §2v audit did not ask found
-two more real gaps (provider-side transfer ownership; inbound `TRANSFER_*` session binding), both
-confirmed and fixed. §2v's own eighteen findings (sixteen confirmed-and-fixed, one
-confirmed-as-designed, one false positive) are unchanged and not re-litigated. Phase 2b closure and
-Phase 3 remain the most recent prior *feature* work, both unchanged this session.
-**Phase 4 status: FINAL SOFTWARE CLOSURE COMPLETE — REAL-DEVICE SHARED-LIBRARY/TRANSFER GATE
-PENDING.** Catalogue paging, `ContentHash`-keyed transfer over a second session-bound TLS
-connection (ADR-023, now Amendment A2), the two-phase verified cache, availability display and a
-minimum usable Shared Library screen are done on both platforms, laptop-verified including real
-loopback TLS multi-chunk transport. **§2v's closure audit found and fixed eighteen real
-integration bugs** the §2u pass's own CI-green result did not catch — a captured bulk-auth
-generation that defeated ADR-023's reconnect-invalidation guarantee, a cancellation that mutated UI
-state without stopping the real transfer, an Android bulk listener that outlived its session, an
-iOS actor-reentrancy claim that was false, unenforced bulk frame ordering, and more. **§2w's
-narrower follow-up found and fixed two more** — a plain, unguarded provider-side ownership var that
-a second concurrent `TRANSFER_REQUEST` could overwrite (misrouting `TRANSFER_CANCEL`, or letting
-one bulk role's cancel close the other role's real socket), and inbound `TRANSFER_*` dispatch
-missing the session-generation guard `MANIFEST_*` already had. See §2v/§2w and ADR-023 Amendments
-A1/A2 for the full, itemised lists. No phone-to-phone transfer, no real Wi-Fi/hotspot topology, and
-no real storage/battery measurement has run — see §2v, §2w and §7.
+**closure-audited four times** (§2v, §2w, §2x, §2y) — implementation-complete on both platforms,
+laptop-verified, with its real-device gate pending exactly like every phase above it.
+**Current phase:** Phase 4 closure-audit follow-up A4 (this session, §2y). Unlike the three passes
+before it, this one began by **re-deriving every earlier finding from the current production code**
+rather than from those passes' own descriptions of themselves — all of them are genuinely fixed —
+and then found four more: a `CRITICAL` provider-framing bug (Finding T), an eviction lock that had
+never once applied on Android (Finding U), a superseded transfer operation that still did real
+storage work (Finding V), and an unbounded bulk `accept()` that stalled every transfer in both
+directions until reconnect (Finding W, found by investigating a 1-in-60 stress flake instead of
+re-running it). One earlier expectation turned out to be a **false positive**
+(`manifest_revision` is a real counter, not a constant), and one of this pass's *own* hypotheses did
+too, which is recorded rather than quietly dropped. §2v/§2w/§2x's findings are unchanged and not
+re-litigated. Phase 2b closure and Phase 3 remain the most recent prior *feature* work, both
+unchanged this session.
+**Phase 4 status: IMPLEMENTATION COMPLETE — REAL-DEVICE SHARED-LIBRARY/TRANSFER GATE PENDING.**
+Catalogue paging, `ContentHash`-keyed transfer over a second session-bound TLS connection (ADR-023,
+now Amendment A4), the two-phase verified cache, availability display, verified-cache-only local
+playback and a minimum usable Shared Library screen are done on both platforms, laptop-verified
+including real loopback TLS multi-chunk transport. Across four audits, **§2v found and fixed
+eighteen** real integration bugs the §2u pass's own CI-green result did not catch (a captured
+bulk-auth generation that defeated ADR-023's reconnect-invalidation guarantee; a cancellation that
+mutated UI state without stopping the real transfer; an Android bulk listener that outlived its
+session; a false iOS actor-reentrancy claim; unenforced bulk frame ordering; and more), **§2w two**
+(an unguarded provider ownership var that misrouted `TRANSFER_CANCEL` across bulk roles; inbound
+`TRANSFER_*` dispatch missing the session-generation guard `MANIFEST_*` already had), **§2x two**
+(no re-validation of provider authorisation across `serveTransferRequest`'s own suspension points;
+iOS transport cancellation that could close a later operation's socket), and **§2y three** (above).
+See §2v/§2w/§2x/§2y and ADR-023 Amendments A1–A4 for the full itemised lists.
+
+**The deliberate wording change this session: Phase 4 is no longer described as "final software
+closure complete."** Four consecutive independent audits each finding real defects in the same code
+is itself a finding. §2y's Finding T in particular would have made every `content://`-sourced
+Android transfer fail deterministically on a real phone, and no laptop test could have surfaced it,
+because no laptop test ever opens a `content://` stream. The remaining Phase 4 risk is concentrated
+exactly where this machine cannot look, so the honest label is "implementation complete, device gate
+open." No phone-to-phone transfer, no real Wi-Fi/hotspot topology, and no real storage/battery
+measurement has run — see §2y and §7.
 **Phase 2b status: FINAL SOFTWARE CLOSURE COMPLETE — REAL-DEVICE INTERCOM GATE PENDING
 (unchanged).** The timeout-ownership defect §2r confirmed and deliberately left unfixed was fixed
 in §2s (ADR-021 Amendment A4); §2t fixed one more gap in that same fix. No other known software
@@ -137,7 +151,8 @@ either pass.
 | **Phase 2a — voice transport foundation** | ✅ **IMPLEMENTATION COMPLETE — REAL-DEVICE AUDIO GATE PENDING** | WebRTC pinned and reviewed on both platforms, PROTOCOL §7 specified in full, the negotiation table shared and vector-pinned, the pre-authentication `VOICE_*` refusal proven over real TLS on both platforms, and **real DTLS-SRTP/Opus media measured on this machine** (§2i, [ADR-020](DECISIONS/ADR-020-webrtc-voice-foundation.md)). No audio captured or played anywhere; the Android media path is untested even locally |
 | **Phase 2b — intercom integration / audio lifecycle** | ✅ **FINAL SOFTWARE CLOSURE COMPLETE — REAL-DEVICE INTERCOM GATE PENDING** | The five modes as one interpreted policy object; transmission gated at the audio track and never at the capture device; `AUDIO_STATE` implemented with no wire change; the platform audio lifecycle as a shared pure reducer; readiness as a shared pure decision; setup-timing instrumentation (§2m, [ADR-021](DECISIONS/ADR-021-intercom-transmission-and-capture-ownership.md)). The Phase 3 closure audit's one confirmed-not-fixed defect (`stopAndAwaitRelease`/`shutdown` timeout ownership) is fixed (§2s, ADR-021 Amendment A4); a second, narrower gap in that same fix (a proven-complete release still reporting its own stale timeout, orphaning the foreground service) is fixed (§2t, ADR-021 Amendment A5) — no other known software defect remains. Nothing ran on a phone; VOX has no level source; no latency figure exists |
 | **Phase 3 — local music player** | ✅ **IMPLEMENTATION COMPLETE — REAL-DEVICE LOCAL-MUSIC GATE PENDING** | Library indexing, two-tier hashing, database/search, ExoPlayer/AVAudioEngine player, local queue, Android `MediaSession` (ADR-022), iOS `MPNowPlayingInfoCenter`/`MPRemoteCommandCenter`, all on both platforms (§2q, and this session's closure-audit hardening pass). Real-emulator instrumented evidence exists for the indexer/database/player (§2q, TEST_PLAN §4.3); nothing has run on a physical phone |
-| Phases 4–8 | ⬜ Not started | The earlier commits named "init phase 2a" and "phase 2a" (`d709c45`, `90cbe12`) were Phase 1b work under a misleading name. Phase 2a proper is the sixth session, §2i |
+| **Phase 4 — shared library + peer file transfer** | ✅ **IMPLEMENTATION COMPLETE — REAL-DEVICE SHARED-LIBRARY/TRANSFER GATE PENDING** | Catalogue paging, `ContentHash`-keyed transfer over a second session-bound TLS connection, the two-phase verified cache, availability display, verified-cache-only local playback and a Shared Library screen on both platforms (§2u, [ADR-023](DECISIONS/ADR-023-bulk-transfer-session-binding.md)). **Closure-audited four times** — §2v (18 findings), §2w (2), §2x (2), §2y (3, one `CRITICAL`) — Amendments A1–A4. Real loopback-TLS multi-chunk transfer, a real emulator smoke check and a real simulator smoke check exist; **no phone-to-phone transfer, no real Wi-Fi/hotspot topology, no storage/battery figure** |
+| Phases 5–8 | ⬜ Not started | The earlier commits named "init phase 2a" and "phase 2a" (`d709c45`, `90cbe12`) were Phase 1b work under a misleading name. Phase 2a proper is the sixth session, §2i |
 
 `protocol/schema/` and `protocol/vectors/` now exist (§2c). `android/` is a real five-module
 Gradle project that builds. `ios/` now has all three pieces ARCHITECTURE §9.2 describes:
@@ -2558,6 +2573,178 @@ still not a physical device and does not close TEST_PLAN's hardware-gated items.
 
 ---
 
+## 2y. Phase 4 closure-audit follow-up A4 — provider framing, an inert eviction lock, and post-supersede storage work (7 September 2026 session, twenty-second)
+
+A fourth independent closure audit of the same Phase 4 code §2v, §2w and §2x already covered. Unlike
+those three, this pass began by **re-deriving every one of their findings from the current
+production code** rather than trusting their own descriptions of themselves — all of them are
+genuinely fixed as written (the negative results are listed below, because "checked, already right"
+is evidence too) — and then found three more. Full detail and reasoning: ADR-023 Amendment A4.
+
+**Classification of all nineteen questions this pass was asked, plus three it raised itself:**
+
+| Finding | Classification |
+|---|---|
+| A — bulk auth generation captured rather than read live | **ALREADY FIXED** (§2v/A1 item 1); re-verified: real lambdas over live state on both platforms |
+| B — Android bulk listener outliving its session | **ALREADY FIXED** (§2v/A1 item 2) |
+| C — user cancel not cancelling active transfer work | **ALREADY FIXED** (§2v/A1 items 3/7) |
+| D — session loss not cancelling active transfer work | **ALREADY FIXED** (§2v/A1 item 4) |
+| E — iOS actor reentrancy assumed to serialise transfers | **ALREADY FIXED** (§2v/A1 item 6): explicit `transferInProgress` gate |
+| F — `QuickId` as SwiftUI row identity | **ALREADY FIXED** (§2v/A1 item 13): `ManifestEntry.rowId` |
+| G — verified cache-only playback not wired | **ALREADY FIXED** (§2v/A1 item 12) |
+| H — Android cache availability inferred from session state | **ALREADY FIXED** (§2v/A1); one cosmetic follow-on fixed here (below) |
+| I — cache eviction could delete the playing file | **fix present but INERT on Android** → Finding U |
+| J — provider source staleness (same-size replacement) | **CONFIRMED, unchanged, re-examined and re-declined** |
+| K — bulk frame order/count validation | **ALREADY FIXED** (§2v/A1 item 10), requester side — but see Finding T for the provider side |
+| L — constant-time token comparison | **ALREADY FIXED** (§2v/A1 item 11) |
+| M — token-table reissue/transfer-id collision | **ALREADY FIXED** (§2v/A1 item 11): `tryIssue` |
+| N — `TRANSFER_RESULT`/`TRANSFER_CANCEL` semantics | **ALREADY FIXED** (§2v/A1 item 7); `RESULT` was always correct |
+| O — `TransferReducer` production integration | **TECH-DEBT ONLY** (deliberate; see below) |
+| P — cache commit failure reporting COMPLETE | **ALREADY FIXED** (§2v/A1 item 8) |
+| Q — sender-side max transfer size | **ALREADY FIXED** (§2v/A1 item 9); `chunk_count` also cannot overflow `Int` |
+| R — `manifest_revision` constant `1` | **FALSE POSITIVE**: it is a real counter, and full-snapshot-only is a correct V1 simplification |
+| S — stale manifest session events | **ALREADY FIXED** (§2v/A1 item 5, §2w Finding B) |
+| **T — the provider could emit more frames than the `chunk_count` it just promised** | **CONFIRMED, CRITICAL on Android**, both platforms |
+| **U — Finding I's cache-eviction lock never applied on Android** | **CONFIRMED, HIGH**, Android only |
+| **V — a superseded transfer operation still did storage work** | **CONFIRMED, HIGH**, both platforms (one sub-case a false positive) |
+| **W — the provider's bulk `accept()` was unbounded, stalling all transfers until reconnect** | **CONFIRMED, HIGH**, both platforms |
+| `TransferError.DISK_FULL` | **RESERVED, not operationally distinguished in V1** — now documented, not silently unreachable |
+
+**Finding T, in one sentence.** `TRANSFER_OFFER` declares `chunk_size` and `chunk_count`, and §2v's
+Finding K made the *requester* enforce both — but nothing made the *provider* honour its own
+numbers: both platforms built one wire frame per single `read` of the source, and neither
+`InputStream.read` nor `FileHandle.read(upToCount:)` is obliged to return a full buffer. On Android
+a Phase 3 library track is opened through `ContentResolver.openInputStream`, which routinely
+short-reads, so a real transfer emitted *more, smaller* frames than the count already on the wire
+and the requester's own correct index check rejected it as `PROTOCOL_ERROR`. The regression test
+measures **103 frames where 10 were declared.** Fixed on both sides of the frame boundary: the
+chunk source fills each frame to exactly `chunk_size` (now a named, testable type on each platform),
+**and** `serve` takes the `expectedChunkCount` its caller already put in the offer and refuses to
+write a frame past it — so a future ill-behaved source fails as this side's own `IO_ERROR` rather
+than as the peer's protocol violation.
+
+**Finding U, in one sentence.** §2v's Finding I threaded the currently-playing cache hash into every
+`TransferCacheRepository.commit`'s `locked` set — but on Android it was published as a
+`stateIn(scope, SharingStarted.WhileSubscribed(), null)` flow whose only consumer reads `.value`,
+and **nothing in the app ever collected it**, so it returned its initial `null` for the whole life
+of the process and every `locked` set was empty. The protection was inert from the day it was
+written. Fixed by removing the flow rather than changing its sharing policy — a synchronous read of
+live state cannot have that failure mode — with the registry extracted to
+`app.music.ExternalCacheSources` so the property is unit-testable without an Android-dependent
+`MusicCoordinator`, and backed by a `ConcurrentHashMap` because writer and reader are genuinely
+different dispatchers. **iOS needed no change:** its equivalent was already a plain computed
+property, the exact shape Android has now adopted.
+
+**Finding V, in one sentence.** `OperationFence` makes a superseded operation's *state writes*
+inert, and that is airtight — but the storage work around them (`deletePart`, `promote`,
+`cacheRepository.commit`, the outbound `TRANSFER_RESULT`) never consulted the fence, and
+`onSessionBoundary()` force-closed the transport — the very thing that lets a parked operation
+resume — **before** superseding the fence, cancelling the operation only in a coroutine it had
+merely launched. An operation whose bytes had all arrived therefore returned `OK` and walked on
+through promote → commit → `TRANSFER_RESULT{ok: true}` for a transfer whose session had already
+ended. Fixed with a fence re-check immediately after `fetch` and before any storage work, plus the
+`onSessionBoundary` reordering on both platforms; Android additionally moved its `.part` stream
+close into a `finally` (a cancelled `Job` previously leaked one file descriptor per cancelled
+transfer).
+
+**Finding V's `.part`-deletion sub-case is a FALSE POSITIVE, and is recorded as one.** The audit's
+stronger hypothesis — that a superseded operation's `deletePart(hash)` could delete a *newer*
+operation's `.part` for the same hash (brief §18) — is not reachable, and the reason is not the
+fence: `cancelDownload` cancels the `Job` **before** force-closing the socket, and every storage
+call afterwards is a cancellable `suspend` function, so the resumed operation unwinds instead of
+continuing. A different mechanism, the same guarantee.
+`SharedLibraryCoordinatorCancellationTest` pins that statement ordering deliberately, since
+reversing those two lines would reintroduce Finding V on the cancellation path.
+
+**Finding W, in one sentence — and it was found by taking a stress flake seriously rather than
+re-running it.** A 1-in-60 failure in `BulkTransportManagerTest` looked like test noise; a
+matched 60-run baseline against the genuine pre-A4 code flaked at exactly the same rate (1/60,
+same 60 s timeout signature), which exonerated this session's changes and pointed at something
+older. It was real: `serve()` calls `accept()` with **no bound**, while holding the single
+one-active-transfer slot and the coordinator's cross-role `BulkOperationGate`. A requester that
+takes a `TRANSFER_OFFER` and never dials — cancelled between offer and fetch, or its `connect`
+failed — parks that accept, and `cancelActive()` cannot help because `activeSocket`/
+`activeTransferId` are assigned only *after* accept returns. Since the gate refuses every
+acquisition while held, the local side's own queued downloads cannot start and no new inbound
+request can be served, so nothing ever generates the connection that would unblock it: **every
+transfer in both directions stalls until the next session boundary.** ADR-023 §2's 30 s
+`bulk_token` TTL exists to bound exactly this, and A1's item 9 even reasoned in those terms, but
+the accept side never enforced it. Fixed by bounding the *bulk* accept — and only the bulk accept —
+by that same 30 s: `acceptWithin`/`accept(timeoutMs:)` are new opt-in entry points, and the control
+plane keeps its correctly-unbounded `accept()`.
+
+**Deliberately not changed, with the reasoning re-examined rather than inherited:**
+
+- **Finding J (source staleness).** No stronger cheap signal is *stored* — Phase 3's `TrackEntity`
+  keeps only `indexedAtMonoUs`, a monotonic value no filesystem timestamp can be compared against —
+  so closing it needs a Phase 3 schema migration on both platforms or a full re-hash before every
+  serve. The cost of the gap is one wasted transfer, never a corrupted cache, because the receiver
+  re-hashes from disk before trusting a byte. New this pass: iOS is effectively immune rather than
+  merely untested, since its library file is an app-container import-copy (ADR-009) nothing outside
+  the app can replace — this is an **Android-only** gap in practice.
+- **Finding O (`TransferReducer`).** Classified TECH-DEBT, not a blocker. The terminal-state
+  invariants the reducer exists to guarantee are enforced by `OperationFence` plus this pass's
+  storage-work check, and are directly tested at coordinator level on Android. Routing state
+  through the reducer *as well* would create a second state machine over the same transitions —
+  which this project's own rules forbid; doing it *instead* is a Phase 4 rewrite no closure audit
+  has a mandate for.
+- **`DISK_FULL`.** Reachable only through `TransferReducer`'s vectors. A full disk surfaces as an
+  `IOException` that `fetch` reduces to `IO_ERROR`, and the whole-file re-hash catches the
+  truncation regardless; distinguishing it would mean parsing errno/`NSError` domains for a category
+  with no distinct recovery behaviour. Now documented as reserved rather than left looking like a
+  capability the code has.
+
+**One cosmetic follow-on to Finding H, fixed.** `cachedFile()` returning `null` can mean
+`TransferCacheRepository.open` just found a verified row whose file has vanished and dropped that
+row (it already failed closed correctly). `cachedHashes` was not refreshed, so the UI would keep
+offering "Play" for content that no longer exists and never offer "Download" to get it back. It now
+refreshes on exactly that transition.
+
+**What was verified, and how:**
+
+- **Android:** `:core:test`, `:network:test`, `:data:test`, `:audio:test`, `:app:test`, full `test`,
+  `ktlintCheck`, `detekt`, `lint`, `assembleDebug`, `assembleRelease` — all green.
+- **iOS:** `swift test` on `RideLinkCore` (244 tests) and `RideLinkPlatform` (276 tests), plus real
+  unsigned **Debug and Release** simulator builds and a `generic/platform=iOS` device-SDK build —
+  all green. `swiftlint`/`swiftformat` are named in `CLAUDE.md`'s command list but are **not
+  installed on this machine and are not steps in `.github/workflows/ci.yml`** — a pre-existing gap
+  in that documented list, unchanged by this session and stated rather than quietly skipped.
+- **New regressions were each verified to FAIL against the pre-fix code before being accepted** —
+  Finding T's at 103 frames against 10 declared, Finding V's on "a superseded transfer must not
+  promote its bytes into the verified cache." That check also corrected one of this pass's own
+  claims: the coordinator test discriminates the **fence check**, not the `onSessionBoundary`
+  reordering, whose window is genuinely multi-threaded and cannot be expressed by a single-threaded
+  test scheduler. The test says so, rather than implying coverage it does not have.
+- **iOS coordinator-level test gap is unchanged and undiminished.** `ios/RideLink.xcodeproj` still
+  has exactly one native target, so there is still no in-process test of the real iOS
+  `SharedLibraryCoordinator` (§2x records why hand-editing `project.pbxproj` was judged the worse
+  risk). Finding V's iOS fix is verified by code inspection against the identical design Android's
+  real coordinator test proves, plus the full existing suite passing.
+- **Stress: 60 consecutive runs of every new suite on both platforms** — Android's
+  coordinator/eviction suites (`SharedLibraryCoordinatorCancellationTest`,
+  `SharedLibraryCoordinatorProviderAuthorizationTest`, `ExternalCacheSourcesTest`), Android's
+  network suites (`InputStreamChunkSourceTest`, `BulkTransportManagerTest` — the real-loopback-TLS
+  ones), and iOS's (`FileChunkSourceTests`, `TransferManagerTests`). **Two failures were
+  investigated rather than re-run, and one of them was a real bug.** (i) A uniform sub-second
+  failure across all 60 early runs was a `--tests` flag on Gradle's `:app:test` *lifecycle* task
+  rather than `:app:testDebugUnitTest` — an invocation error, diagnosed from its message.
+  (ii) A 1-in-60 `BulkTransportManagerTest` failure looked like noise; a matched 60-run baseline
+  against the genuine pre-A4 code (this session's commits reverted for `android/network` and
+  `android/app`) flaked at the **same** 1/60 rate with the same 60 s timeout signature, exonerating
+  this session's changes and exposing **Finding W** above as the underlying cause. All new-suite
+  stress runs after Finding W's fix: 60 runs, zero failures.
+- **Android emulator smoke check re-run on `RideLink_API36` (Android 16, API 36, ARM64):** debug APK
+  installs, `MainActivity` displays in 2.1 s, **zero `FATAL EXCEPTION` in logcat**, process alive
+  afterwards, Local Music and the Phase 1b diagnostics render, and the Shared Library section is
+  correctly absent with no authenticated peer — the same gating §2u and §2v recorded. This is an
+  emulator, not a phone, and closes no TEST_PLAN hardware row.
+
+**Still not done, and unchanged by this session:** nothing here ran on two physical phones over a
+real Wi-Fi/hotspot topology. No mDNS discovery of a real peer's catalogue, no transfer over a real
+(non-loopback) network path, no storage or battery measurement over a realistic personal library.
+
+---
+
 ## 3. Tests passed / pending
 
 **Passed and verified in the Phase 2b session (4 September 2026, tenth), by actually running the
@@ -3033,13 +3220,22 @@ Not blocking Phase 1. Answers needed before Phase 6.
 
 ## 7. Next exact task
 
-**Phase 4 — shared library + local file transfer. FINAL SOFTWARE CLOSURE COMPLETE — REAL-DEVICE
+**Phase 4 — shared library + local file transfer. IMPLEMENTATION COMPLETE — REAL-DEVICE
 SHARED-LIBRARY/TRANSFER GATE PENDING (§2u implementation, §2v first closure audit, §2w second
-closure-audit follow-up, §2x this session's third, narrower follow-up).** Every laptop-runnable gate
-is green on both platforms, including real loopback-TLS multi-chunk transport, a real emulator smoke
-check and a real simulator smoke check (§2u), plus §2v's eighteen, §2w's two, and §2x's two further
-confirmed-and-fixed integration/lifecycle/session-ownership gaps (ADR-023 Amendments A1/A2/A3). CI
-evidence: §2v's run
+follow-up, §2x third, §2y this session's fourth).** Every laptop-runnable gate is green on both
+platforms, including real loopback-TLS multi-chunk transport, a real emulator smoke check and a real
+simulator smoke check (§2u), plus §2v's eighteen, §2w's two, §2x's two and §2y's four further
+confirmed-and-fixed integration/lifecycle/framing gaps (ADR-023 Amendments A1/A2/A3/A4).
+
+**§2y is why the previous "FINAL SOFTWARE CLOSURE COMPLETE" wording is not used here.** That fourth
+audit re-derived all of §2v/§2w/§2x's findings from the current code (all genuinely fixed) and still
+found three more, one of them a `CRITICAL` provider-framing bug that would have made every
+`content://`-sourced Android transfer fail deterministically on a real phone — precisely the class
+of defect a laptop's own loopback tests could not surface, because the laptop tests never opened a
+`content://` stream. Four consecutive audits finding real defects in the same code is itself the
+finding: the remaining risk in Phase 4 is concentrated where this machine cannot look, so the
+honest label is "implementation complete, device gate open," not "software closed." CI evidence:
+§2v's run
 [33976164558](https://github.com/arunachaleswaranms/RideLink/actions/runs/33976164558) (head commit
 `86c5117`); §2w's run
 [34114586073](https://github.com/arunachaleswaranms/RideLink/actions/runs/34114586073) (head commit

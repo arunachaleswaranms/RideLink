@@ -190,11 +190,24 @@ resume are deferred, but the chunk and page framing keep both possible.
 
 ## Current phase
 
-**Phase 2b — intercom integration and audio lifecycle. Implementation complete; the real-device
-intercom gate is open.**
+**Phase 4 — shared library + authenticated peer file transfer. Implementation complete; the
+real-device shared-library/transfer gate is open. Phase 5 has not started.**
 
-Phase 0 (hardware feasibility) is complete; do **not** repeat it. Phases 1a, 1b, 2a and 2b are all
-implementation-complete and green on both platforms. **The overall "2 Intercom" milestone is not
+`docs/STATUS.md` is the authority on this and is kept current; the sections below are the
+architectural summary for phases 1a–2b and remain accurate for *those* phases. Phase 3 (local music
+player, ADR-022) and Phase 4 (shared catalogue + `ContentHash`-keyed transfer on a second
+session-bound TLS connection, ADR-023) both landed after this section was last rewritten and are
+both implementation-complete on both platforms with their real-device gates open — see
+`docs/STATUS.md` §2q–§2y.
+
+**Phase 4 has been closure-audited four times** (ADR-023 Amendments A1–A4), each pass finding real
+integration/lifecycle defects in code that was already CI-green: eighteen, then two, then two, then
+three. Read that as the standing lesson it is — on this codebase, "CI-green" and "correct" are
+different claims, and the gap between them has consistently been in session lifetime, cancellation
+ownership and platform I/O contracts rather than in the wire format or the pure domain layer.
+
+Phase 0 (hardware feasibility) is complete; do **not** repeat it. Phases 1a, 1b, 2a, 2b, 3 and 4 are
+all implementation-complete and green on both platforms. **The overall "2 Intercom" milestone is not
 complete** — its hardware gates (TEST_PLAN A-01, A-02, A-04, A-09 and V-01…V-11) have not run.
 
 **Phase 1b** gave the secure control channel: TLS 1.3 with mutual authentication,
