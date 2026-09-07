@@ -1,27 +1,32 @@
 # RideLink — Status
 
-**Updated:** 5 September 2026 (Phase 4 closure audit, nineteenth session — see §2v)
+**Updated:** 7 September 2026 (Phase 4 closure-audit follow-up, twentieth session — see §2w)
 **Current milestone:** M1 (Private voice link) is now **software-complete with no known defect** —
 its hardware gate is the only thing left open. M2 (local music) implementation is complete and
 closure-audited (§2q/§2r). Phase 4 (shared catalogue + authenticated peer file transfer) is now
-**closure-audited as well** (§2v) — implementation-complete on both platforms, laptop-verified,
+**closure-audited twice** (§2v, §2w) — implementation-complete on both platforms, laptop-verified,
 with its real-device gate pending exactly like every phase above it.
-**Current phase:** Phase 4 closure audit (this session, §2v) — an independent review of the §2u
-implementation found eighteen suspected production integration/lifecycle gaps; sixteen were
-confirmed and fixed, one was confirmed-as-designed (documented, not changed), and one was a false
-positive (already correct). Phase 2b closure and Phase 3 remain the most recent prior *feature*
-work, both unchanged this session.
-**Phase 4 status: IMPLEMENTATION COMPLETE — REAL-DEVICE SHARED-LIBRARY/TRANSFER GATE PENDING.**
-Catalogue paging, `ContentHash`-keyed transfer over a second session-bound TLS connection
-(ADR-023, now Amendment A1), the two-phase verified cache, availability display and a minimum
-usable Shared Library screen are done on both platforms, laptop-verified including real loopback
-TLS multi-chunk transport. **This session's closure audit (§2v) found and fixed real integration
-bugs the §2u pass's own CI-green result did not catch** — a captured bulk-auth generation that
-defeated ADR-023's reconnect-invalidation guarantee, a cancellation that mutated UI state without
-stopping the real transfer, an Android bulk listener that outlived its session, an iOS actor-
-reentrancy claim that was false, unenforced bulk frame ordering, and more — see §2v and ADR-023
-Amendment A1 for the full, itemised list. No phone-to-phone transfer, no real Wi-Fi/hotspot
-topology, and no real storage/battery measurement has run — see §2v and §7.
+**Current phase:** Phase 4 closure-audit follow-up (this session, §2w) — a narrower, independent
+review scoped to exactly two lifecycle/session-ownership questions the §2v audit did not ask found
+two more real gaps (provider-side transfer ownership; inbound `TRANSFER_*` session binding), both
+confirmed and fixed. §2v's own eighteen findings (sixteen confirmed-and-fixed, one
+confirmed-as-designed, one false positive) are unchanged and not re-litigated. Phase 2b closure and
+Phase 3 remain the most recent prior *feature* work, both unchanged this session.
+**Phase 4 status: FINAL SOFTWARE CLOSURE COMPLETE — REAL-DEVICE SHARED-LIBRARY/TRANSFER GATE
+PENDING.** Catalogue paging, `ContentHash`-keyed transfer over a second session-bound TLS
+connection (ADR-023, now Amendment A2), the two-phase verified cache, availability display and a
+minimum usable Shared Library screen are done on both platforms, laptop-verified including real
+loopback TLS multi-chunk transport. **§2v's closure audit found and fixed eighteen real
+integration bugs** the §2u pass's own CI-green result did not catch — a captured bulk-auth
+generation that defeated ADR-023's reconnect-invalidation guarantee, a cancellation that mutated UI
+state without stopping the real transfer, an Android bulk listener that outlived its session, an
+iOS actor-reentrancy claim that was false, unenforced bulk frame ordering, and more. **§2w's
+narrower follow-up found and fixed two more** — a plain, unguarded provider-side ownership var that
+a second concurrent `TRANSFER_REQUEST` could overwrite (misrouting `TRANSFER_CANCEL`, or letting
+one bulk role's cancel close the other role's real socket), and inbound `TRANSFER_*` dispatch
+missing the session-generation guard `MANIFEST_*` already had. See §2v/§2w and ADR-023 Amendments
+A1/A2 for the full, itemised lists. No phone-to-phone transfer, no real Wi-Fi/hotspot topology, and
+no real storage/battery measurement has run — see §2v, §2w and §7.
 **Phase 2b status: FINAL SOFTWARE CLOSURE COMPLETE — REAL-DEVICE INTERCOM GATE PENDING
 (unchanged).** The timeout-ownership defect §2r confirmed and deliberately left unfixed was fixed
 in §2s (ADR-021 Amendment A4); §2t fixed one more gap in that same fix. No other known software
@@ -2290,6 +2295,103 @@ fix/test commits `9525398`/`2336b21`). Android: `core unit tests`, `all unit tes
 
 ---
 
+## 2w. Phase 4 closure-audit follow-up — provider ownership and transfer session binding (7 September 2026 session, twentieth)
+
+A second, deliberately narrow independent review — scoped to exactly two lifecycle/session-
+ownership questions the §2v audit did not ask — of the same production code §2v already closure-
+audited. **§2v's own eighteen findings and its CI-green result are unchanged and not re-litigated
+here.** Full detail and reasoning: ADR-023 Amendment A2.
+
+**Classification:**
+
+| Finding | Classification |
+|---|---|
+| A — provider-side transfer ownership was a plain, unguarded var, racing a second concurrent `TRANSFER_REQUEST` | **CONFIRMED, fixed**, both platforms, including its cross-role counterpart (requester vs. provider both able to call the shared transport's `cancelActive()`) |
+| B — inbound `TRANSFER_*` dispatch had no session-generation guard, unlike `MANIFEST_*` (Finding S, §2v) | **CONFIRMED, fixed**, both platforms |
+
+**Finding A, in one sentence:** `serveTransferRequest` wrote `activeServeTransferId =
+request.transferId` (Android) / a matching Swift var (iOS) *after* minting a token and sending the
+offer, so a second, concurrent `TRANSFER_REQUEST` could overwrite that var before the first
+request's real `serve()` call had actually acquired the transport's own one-active-operation slot
+(`BulkTransportManager`'s `activeTransferMutex` / `TransferManager`'s `transferInProgress`) —
+letting a `TRANSFER_CANCEL` for the first (real, active) transfer be silently ignored, or a
+`TRANSFER_CANCEL` for the second (not yet actually serving) transfer force-close the *first*
+transfer's real socket. The same shape crossed roles too: `activeDownload` (requester) and
+`activeServeTransferId` (provider) were independent, uncoordinated fields even though both roles
+share one real bulk socket underneath.
+
+**Finding A, fixed:** a new pure, mirrored ownership primitive — `core.transfer.BulkOperationGate`
+(Kotlin) / `RideLinkCore.Transfer.BulkOperationGate` (Swift) — replaces both vars. It is the single
+authoritative owner of the one bulk-operation slot a session may have active (`Requester` or
+`Provider`, never both); acquisition is refused outright while the slot is held, so ownership can
+never be silently overwritten; `TRANSFER_CANCEL` routing asks the gate rather than trusting a var
+that may already be stale; release is keyed on `transfer_id` alone (a fresh, unpredictable ULID,
+never reused) and silently no-ops for anyone but the current holder, so a stale/late release can
+never clear a fresher operation. `serveTransferRequest` now acquires the gate before ever sending an
+offer; `pumpQueue` now acquires it as `Requester` before ever sending a local `TRANSFER_REQUEST`,
+leaving a denied download queued (no new second queue) until the provider operation's own cleanup
+releases the slot and calls `pumpQueue()` again. A session boundary's `bulkGate.invalidate()`
+(alongside the existing `bulkTransport.close()` force-close) frees the slot unconditionally.
+
+**Finding B, in one sentence:** A1's Finding S (§2v) gave inbound `MANIFEST_*` dispatch a live
+session-generation guard — captured at message-dispatch time, off the wire, rechecked once the
+scheduled coroutine/Task actually runs — specifically so a session boundary could not let a stale
+message mutate the new session's state. `TRANSFER_*` dispatch never got the same guard: a
+`TRANSFER_REQUEST`/`OFFER`/`PROGRESS`/`RESULT`/`CANCEL` read under session A but not processed until
+after a reconnect had produced session B could still run against session B's current peer
+SPKI/generation.
+
+**Finding B, fixed:** `TransferSink`'s lambda (Android) now captures
+`controlSessionManager.currentAuthGeneration` at dispatch time, exactly like `ManifestSink`'s
+lambda; `TransferSinkAdapter` (iOS) now captures `sessionEpoch.current()` at dispatch time, exactly
+like `ManifestSinkAdapter`. `handleTransferMessage` on both platforms drops the message before
+touching `bulkGate`, `pendingOfferTransferId`, or any provider/requester state if the captured
+value no longer matches the live one — applied once, before the `switch`, so it covers every
+`TRANSFER_*` variant uniformly.
+
+**Bulk concurrency contract:** confirmed, not changed. ADR-023's own Consequences section already
+states "concurrency is separately capped at one active transfer per session" — `BulkTransportManager`/
+`TransferManager` already enforced this **across both roles** at the transport layer (one shared
+mutex/gate guards both `serve` and `fetch`). Finding A's cross-role gap was that the *coordinator*
+layer had no equivalent single owner; `BulkOperationGate` closes that gap without changing the
+contract itself.
+
+**Tests added** (both platforms' full suites re-run clean afterward):
+
+- Android: `core` +9 (`BulkOperationGateTest`) — new module total **343, was 334**. `network`,
+  `data`, `audio`, `app` unchanged (182, 31, 33, 8). **Grand total 597, was 588.**
+- iOS: `RideLinkCore` +9 (`BulkOperationGateTests`) — new total **239, was 230**. `RideLinkPlatform`
+  unchanged (268).
+- **Not added, disclosed rather than silently skipped, for the identical reason §2v already
+  disclosed:** a dedicated `SharedLibraryCoordinator`-level integration test (real two-peer TLS)
+  was not written on either platform. The real-TLS test harness (`TestTlsSupport` on Android,
+  the equivalent on iOS) lives in each platform's `network`/`RideLinkPlatform` **test** source set,
+  not exposed to the `app`/app-target layer's own tests without a `testFixtures`
+  (Android)/separate-test-target (iOS) export — the same bounded Gradle/SwiftPM plumbing gap §2v
+  named, restated rather than silently re-encountered. Findings A and B are therefore verified by:
+  (a) code inspection against the fix, (b) the pure `BulkOperationGate` unit tests proving the
+  ownership primitive itself is correct, and (c) full Debug/Release builds succeeding on both
+  platforms with the complete existing suite re-run clean.
+
+**Full local gates, both platforms, all green:**
+
+- Android: `./gradlew test ktlintCheck detekt lint assembleDebug assembleRelease` — all green (one
+  ktlint/detekt max-line-length fix needed along the way, mechanical, from a line that moved one
+  indent level deeper inside a new `try` block).
+- iOS: `swift test --package-path Packages/RideLinkCore` and `.../RideLinkPlatform` — both green
+  (239/268 tests); `xcodebuild` Debug **and** Release unsigned simulator builds — both
+  `BUILD SUCCEEDED`. `swiftlint`/`swiftformat` remain not installed in this environment — the same
+  pre-existing gap §2v already disclosed, not introduced or newly encountered by this session.
+
+**What this session is not evidence about**, unchanged from §2v: any phone, any real Wi-Fi/hotspot
+network between two physical devices, mDNS discovery of a real peer's catalogue, any storage or
+battery measurement, or a transfer over an actual multi-hop or lossy network path.
+
+**CI:** see the immediately following docs commit for the run recorded against this session's head
+commit.
+
+---
+
 ## 3. Tests passed / pending
 
 **Passed and verified in the Phase 2b session (4 September 2026, tenth), by actually running the
@@ -2765,15 +2867,18 @@ Not blocking Phase 1. Answers needed before Phase 6.
 
 ## 7. Next exact task
 
-**Phase 4 — shared library + local file transfer. IMPLEMENTATION COMPLETE — REAL-DEVICE
-SHARED-LIBRARY/TRANSFER GATE PENDING (this session, §2u).** Every laptop-runnable gate is green on
-both platforms, including real loopback-TLS multi-chunk transport, a real emulator smoke check
-(Stage 8, earlier this session) and a real simulator smoke check (Stage 9, §2u), and CI is green on
-the first fresh run — [33971871405](https://github.com/arunachaleswaranms/RideLink/actions/runs/33971871405),
-head commit `4487d93`, all eleven Android+iOS jobs' steps green, nothing re-run. `docs/TEST_PLAN.md`
-already carries this session's Phase 4 exit-gate row (§9) marked verified-vs-pending against this
-actual evidence; `docs/PROTOCOL.md`/`docs/ARCHITECTURE.md` needed no further change beyond what
-ADR-023 and the existing §8.3 update already record. **What remains for Phase 4 specifically:
+**Phase 4 — shared library + local file transfer. FINAL SOFTWARE CLOSURE COMPLETE — REAL-DEVICE
+SHARED-LIBRARY/TRANSFER GATE PENDING (§2u implementation, §2v first closure audit, §2w this
+session's narrower follow-up).** Every laptop-runnable gate is green on both platforms, including
+real loopback-TLS multi-chunk transport, a real emulator smoke check and a real simulator smoke
+check (§2u), plus §2v's eighteen and §2w's two additional confirmed-and-fixed integration/
+lifecycle/session-ownership gaps (ADR-023 Amendments A1/A2). CI evidence: §2v's run
+[33976164558](https://github.com/arunachaleswaranms/RideLink/actions/runs/33976164558) (head commit
+`86c5117`); §2w's fresh run is recorded in the docs commit immediately following this session's
+fix/test commits. `docs/TEST_PLAN.md` already carries the Phase 4 exit-gate row (§9)
+marked verified-vs-pending against this evidence; `docs/PROTOCOL.md`/`docs/ARCHITECTURE.md` needed
+no further change — neither §2v's nor §2w's findings moved a wire shape or the architectural
+contract, only the production code implementing it. **What remains for Phase 4 specifically:
 everything a real phone-to-phone Wi-Fi/hotspot topology would show** — actual mDNS discovery of a
 peer's live catalogue, a transfer over a real (not loopback) network path, and any storage/battery
 measurement over a realistic personal library. No TEST_PLAN hardware-gate IDs exist yet for Phase 4
