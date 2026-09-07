@@ -27,7 +27,6 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.flatMapLatest
-import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import java.io.File
@@ -101,35 +100,24 @@ class MusicCoordinator(
      *  row already hashed is simply skipped), but avoids redundant concurrent DB reads. */
     private var hashingJob: Job? = null
 
-    /**
-     * Closure-audit Finding G: a verified Phase-4 cache-only track (never imported into the Phase 3
-     * library — see [playExternalVerifiedCachedTrack]) played through the *existing* queue/player.
-     * Never written to [LibraryRepository] — provenance stays distinct (ADR-023 §6 / brief §19:
-     * LOCAL IMPORTED and VERIFIED PEER CACHE are different storage origins), and this map is the
-     * only place that association exists. [LocalEntryId] here is a fresh, opaque token minted at
-     * play time purely so the *existing* [LocalQueue]/[Player] can carry an identity for it — never
-     * looked up against [repository], and never persisted past this process's lifetime.
-     */
-    private data class ExternalCacheSource(
-        val contentHash: ContentHash,
-        val location: LocalTrackLocation,
-        val title: String?,
-        val artist: String?,
-    )
-
-    private val externalCacheSources = mutableMapOf<LocalEntryId, ExternalCacheSource>()
+    /** Closure-audit Finding G: verified Phase-4 cache-only tracks playable through the *existing*
+     *  queue/player, held in [ExternalCacheSources] rather than inline — see that class for why
+     *  Amendment A4 (Finding U) made this a synchronous read rather than a shared flow. */
+    private val externalCacheSources = ExternalCacheSources()
 
     /**
-     * Closure-audit Finding I: the [ContentHash] currently loaded from [externalCacheSources], if
-     * any — so a caller committing a *new* Phase-4 cache entry (`TransferCacheRepository.commit`)
-     * can include it in that call's `locked` set and never evict the file this coordinator's own
-     * player has open. `null` whenever nothing playing right now is a cache-only track (including
-     * "nothing is playing" and "a Phase 3 imported track is playing").
+     * Closure-audit Finding I: the [ContentHash] the player currently has loaded from
+     * [externalCacheSources], if any — so a caller committing a *new* Phase-4 cache entry
+     * (`TransferCacheRepository.commit`) can include it in that call's `locked` set and never evict
+     * the file this coordinator's own player has open. `null` whenever nothing playing right now is
+     * a cache-only track (including "nothing is playing" and "a Phase 3 imported track is playing").
+     *
+     * Amendment A4 Finding U: deliberately a function over live state, **not** a `StateFlow`. As a
+     * `stateIn(…, WhileSubscribed(), null)` flow it had no collector anywhere in the app — its only
+     * consumer reads it directly — so it always reported its initial `null` and left this whole
+     * protection inert. [ExternalCacheSources]' KDoc records that in full.
      */
-    val activeExternalCacheHash: StateFlow<ContentHash?> =
-        _queueState
-            .map { state -> state.currentItem?.localEntryId?.let { externalCacheSources[it]?.contentHash } }
-            .stateIn(scope, SharingStarted.WhileSubscribed(), null)
+    fun activeExternalCacheHash(): ContentHash? = externalCacheSources.activeHash(_queueState.value.currentItem?.localEntryId)
 
     init {
         scope.launch {
@@ -196,7 +184,7 @@ class MusicCoordinator(
     ) {
         _lastMusicStartRefusal.value = null
         val entryId = LocalEntryId(UUID.randomUUID().toString())
-        externalCacheSources[entryId] = ExternalCacheSource(contentHash, LocalTrackLocation(file.toURI().toString()), title, artist)
+        externalCacheSources.register(entryId, ExternalCacheSource(contentHash, LocalTrackLocation(file.toURI().toString()), title, artist))
         val item = LocalQueueItem(id = nextQueueItemId(), localEntryId = entryId, insertedAtMonoUs = monotonicNowUs())
         dispatch(LocalQueueAction.Add(item))
         dispatch(LocalQueueAction.Select(item.id))

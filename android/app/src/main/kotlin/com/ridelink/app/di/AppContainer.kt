@@ -217,7 +217,7 @@ class AppContainer(
             nextTransferId = { TransferId(Ulid.generate()) },
             nextManifestId = { ManifestId(Ulid.generate()) },
             // Finding I: never evict a cache-only file the player currently has open.
-            activeCacheHash = { musicCoordinator.activeExternalCacheHash.value },
+            activeCacheHash = { musicCoordinator.activeExternalCacheHash() },
         )
 
     val sessionCoordinator: SessionCoordinator
