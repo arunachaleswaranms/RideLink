@@ -299,7 +299,12 @@ public final class ControlListener: @unchecked Sendable {
     private let listener: NWListener
     private let queue: DispatchQueue
     private var pendingConnections: [NWConnection] = []
-    private var waitingContinuations: [CheckedContinuation<ControlConnection, Error>] = []
+    /// ADR-023 Amendment A4 Finding W: waiters carry an id so a *bounded* accept can resume its
+    /// own waiter on timeout without disturbing anyone else's. Every mutation of this array happens
+    /// on `queue`, the same serial queue `enqueue`/`close` already use, so the timeout handler and
+    /// an arriving connection can never both resume the same waiter.
+    private var waitingContinuations: [(id: UInt64, continuation: CheckedContinuation<ControlConnection, Error>)] = []
+    private var nextWaiterId: UInt64 = 0
     private var isCancelled = false
     private let onAccepted: @Sendable (ControlConnection) async throws -> Void
 
@@ -360,7 +365,7 @@ public final class ControlListener: @unchecked Sendable {
             guard let self else { return }
             if let waiter = self.waitingContinuations.first {
                 self.waitingContinuations.removeFirst()
-                waiter.resume(returning: ControlConnection.fromAccepted(nwConnection, queue: self.queue))
+                waiter.continuation.resume(returning: ControlConnection.fromAccepted(nwConnection, queue: self.queue))
             } else {
                 self.pendingConnections.append(nwConnection)
             }
@@ -368,7 +373,19 @@ public final class ControlListener: @unchecked Sendable {
     }
 
     public func accept() async throws -> ControlConnection {
-        let connection = try await acceptRaw()
+        try await accept(timeoutMs: nil)
+    }
+
+    /// [accept], but bounded: throws if no peer connects within `timeoutMs`. `nil` waits forever.
+    ///
+    /// ADR-023 Amendment A4 Finding W — the *bulk* plane needs this and the control plane must not
+    /// have it. A control listener legitimately waits indefinitely for its peer to appear; a bulk
+    /// listener is answering a `TRANSFER_OFFER` whose `bulk_token` expires after 30 s (ADR-023 §2),
+    /// so once that TTL has passed there is no connection left it could still authorise, and
+    /// continuing to wait only holds the one-active-transfer gate against every other transfer in
+    /// both directions. Mirrors Android's `ControlListener.acceptWithin`.
+    public func accept(timeoutMs: Int?) async throws -> ControlConnection {
+        let connection = try await acceptRaw(timeoutMs: timeoutMs)
         do {
             try await onAccepted(connection)
         } catch {
@@ -378,7 +395,7 @@ public final class ControlListener: @unchecked Sendable {
         return connection
     }
 
-    private func acceptRaw() async throws -> ControlConnection {
+    private func acceptRaw(timeoutMs: Int?) async throws -> ControlConnection {
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<ControlConnection, Error>) in
             queue.async { [weak self] in
                 guard let self else {
@@ -392,8 +409,18 @@ public final class ControlListener: @unchecked Sendable {
                 if !self.pendingConnections.isEmpty {
                     let nwConnection = self.pendingConnections.removeFirst()
                     continuation.resume(returning: ControlConnection.fromAccepted(nwConnection, queue: self.queue))
-                } else {
-                    self.waitingContinuations.append(continuation)
+                    return
+                }
+                let id = self.nextWaiterId
+                self.nextWaiterId += 1
+                self.waitingContinuations.append((id: id, continuation: continuation))
+                guard let timeoutMs else { return }
+                // Same serial queue as every other mutation, so this either finds its own waiter
+                // still parked (and is the only one to resume it) or finds it already gone.
+                self.queue.asyncAfter(deadline: .now() + .milliseconds(timeoutMs)) { [weak self] in
+                    guard let self, let index = self.waitingContinuations.firstIndex(where: { $0.id == id }) else { return }
+                    let waiter = self.waitingContinuations.remove(at: index)
+                    waiter.continuation.resume(throwing: ControlTransportError.connectFailed("accept timed out"))
                 }
             }
         }
@@ -403,7 +430,7 @@ public final class ControlListener: @unchecked Sendable {
         queue.async { [weak self] in
             guard let self else { return }
             self.isCancelled = true
-            for waiter in self.waitingContinuations {
+            for waiter in self.waitingContinuations.map(\.continuation) {
                 waiter.resume(throwing: ControlTransportError.connectFailed("listener closed"))
             }
             self.waitingContinuations.removeAll()

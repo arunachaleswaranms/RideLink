@@ -140,7 +140,14 @@ public actor TransferManager {
         guard acquireTransferSlot() else { return .ioError } // Finding E: one active transfer at a time
         defer { releaseTransferSlot() }
         guard let listener else { return .ioError }
-        guard let socket = try? await listener.accept() else { return .ioError }
+        // Amendment A4 Finding W: bounded by the bulk token's own 30 s TTL (ADR-023 §2). An
+        // unbounded accept() here parks this call — and with it the single `transferInProgress`
+        // gate, and the coordinator's `BulkOperationGate` above it — for the rest of the session
+        // whenever a requester takes an offer and then never dials (it was cancelled between offer
+        // and fetch, or its connect failed), because `cancelActive(transferId:)` cannot help:
+        // `activeTransferId` is still nil, so its own guard refuses. Nothing else would then be
+        // able to start a transfer in either direction until the next session boundary.
+        guard let socket = try? await listener.accept(timeoutMs: Self.acceptTimeoutMs) else { return .ioError }
         activeSocket = socket
         activeTransferId = transferId
         defer {
@@ -294,5 +301,9 @@ public actor TransferManager {
     }
 
     private static let tokenBytes = 32
+
+    /// ADR-023 §2's `bulk_token` TTL — the same bound `BulkTokenTable` enforces, in ms.
+
+    private static let acceptTimeoutMs = 30_000
     private static let readBufferBytes = 16_384
 }

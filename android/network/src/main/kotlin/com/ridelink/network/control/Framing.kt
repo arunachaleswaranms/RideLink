@@ -173,6 +173,28 @@ class ControlListener internal constructor(
 
     suspend fun accept(): ControlSocket = acceptOne(serverSocket)
 
+    /**
+     * [accept], but bounded: throws [java.net.SocketTimeoutException] (an [java.io.IOException]) if
+     * no peer connects within [timeoutMs].
+     *
+     * ADR-023 Amendment A4 Finding W — the *bulk* plane needs this and the control plane must not
+     * have it. A control listener legitimately waits indefinitely for its peer to appear; a bulk
+     * listener is answering a `TRANSFER_OFFER` whose `bulk_token` expires after 30 s (ADR-023 §2),
+     * so once that TTL has passed there is no longer any connection it could still authorise, and
+     * continuing to wait only holds the one-active-transfer slot against every other transfer in
+     * both directions. Expressed as a socket-level timeout rather than a coroutine one on purpose:
+     * `ServerSocket.accept()` is a blocking call, so `withTimeout` would abandon a still-running
+     * accept on an I/O thread instead of actually ending it.
+     */
+    suspend fun acceptWithin(timeoutMs: Int): ControlSocket {
+        serverSocket.soTimeout = timeoutMs
+        try {
+            return acceptOne(serverSocket)
+        } finally {
+            runCatching { serverSocket.soTimeout = 0 }
+        }
+    }
+
     override fun close() {
         runCatching { serverSocket.close() }
     }

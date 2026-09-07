@@ -131,7 +131,15 @@ class BulkTransportManager(
             val l = listener ?: return BulkServeOutcome.IO_ERROR
             val socket =
                 try {
-                    l.accept()
+                    // Amendment A4 Finding W: bounded by the bulk token's own 30 s TTL (ADR-023
+                    // §2). An unbounded accept() here parks this call — and with it the single
+                    // activeTransferMutex slot, and the coordinator's BulkOperationGate above it —
+                    // for the rest of the session whenever a requester takes an offer and then
+                    // never dials (it was cancelled between offer and fetch, or its connect
+                    // failed), because cancelActive() cannot help: activeSocket is still null, so
+                    // there is nothing for it to close. Nothing else would then be able to start a
+                    // transfer in either direction until the next session boundary.
+                    l.acceptWithin(ACCEPT_TIMEOUT_MS)
                 } catch (io: IOException) {
                     return BulkServeOutcome.IO_ERROR
                 }
@@ -252,6 +260,9 @@ class BulkTransportManager(
     private companion object {
         const val TOKEN_BYTES = 32
         const val READ_BUFFER_BYTES = 16_384
+
+        /** ADR-023 §2's `bulk_token` TTL — see [BulkTokenTable.TTL_US], the same bound in µs. */
+        const val ACCEPT_TIMEOUT_MS = 30_000
     }
 }
 
