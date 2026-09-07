@@ -13,8 +13,9 @@ private struct ManifestSinkAdapter: ManifestSink {
 }
 
 private struct TransferSinkAdapter: TransferSink {
-    let onMessage: @Sendable (TransferMessage) -> Void
-    func submit(_ message: TransferMessage) { onMessage(message) }
+    let onMessage: @Sendable (TransferMessage, Int64) -> Void
+    let epoch: @Sendable () -> Int64
+    func submit(_ message: TransferMessage) { onMessage(message, epoch()) }
 }
 
 /// What the UI shows for one `ContentHash`'s transfer, if any is or ever was in flight this
@@ -71,6 +72,22 @@ private struct PendingOffer {
 /// counter captured at message-dispatch time and re-checked at apply time (Finding S) — a plain
 /// generation read cannot be used there directly since the dispatch closure runs synchronously,
 /// off `@MainActor`, and cannot `await` across into `ControlSessionManager`'s own actor.
+///
+/// **Provider operation ownership (Phase 4 closure-audit follow-up, ADR-023 Amendment A2).**
+/// [bulkGate] replaces the plain `activeServeTransferId` var this pass found insufficient: a
+/// second `TRANSFER_REQUEST` arriving before the first's `TransferManager.serve` call actually
+/// completes used to silently overwrite that var, so a peer `TRANSFER_CANCEL` could be routed to
+/// the wrong transfer or ignored outright (Finding A). `bulkGate` is also the single shared owner
+/// across **both** roles — requester (a local download) and provider (serving a peer's request) —
+/// matching `TransferManager`'s own `transferInProgress` gate, which already serializes
+/// `serve`/`fetch` across both roles onto one real socket at a time (Finding A's cross-role
+/// counterpart, brief §17/§18).
+///
+/// **Inbound `TRANSFER_*` session binding (Finding B).** [handleTransferMessage] is now guarded by
+/// the same live-epoch check [handleManifestMessage] already had — every `TRANSFER_REQUEST`/
+/// `TRANSFER_OFFER`/`TRANSFER_PROGRESS`/`TRANSFER_RESULT`/`TRANSFER_CANCEL` dispatched under a
+/// session that has since been superseded is dropped before it can touch [bulkGate],
+/// `pendingOfferTransferId`, or any provider state.
 @Observable
 @MainActor
 public final class SharedLibraryCoordinator {
@@ -97,9 +114,12 @@ public final class SharedLibraryCoordinator {
     private var pendingOfferTransferId: TransferId?
     private var pendingOfferContinuation: CheckedContinuation<PendingOffer?, Never>?
 
-    /// The transfer_id this coordinator is currently *serving* to a peer (provider role), if any —
-    /// Finding N: a peer's `TRANSFER_CANCEL` is only honoured if it names this exact transfer.
-    private var activeServeTransferId: TransferId?
+    /// Finding A / brief §17-18: the one bulk operation — requester or provider — this session may
+    /// have active at once. Replaces the plain `activeServeTransferId` var this pass found
+    /// insufficient: acquisition is refused outright while another operation holds the slot, so
+    /// ownership can never be silently overwritten, and `TRANSFER_CANCEL` routing
+    /// ([handlePeerCancel]) asks *this* gate rather than trusting a var that may already be stale.
+    private let bulkGate = BulkOperationGate()
 
     /// Finding R: a real, monotonically-increasing catalogue revision — bumped only when the
     /// generated entry set actually differs from what was last served, never a hardcoded constant.
@@ -162,9 +182,12 @@ public final class SharedLibraryCoordinator {
                 Task { @MainActor in self?.handleManifestMessage(message, epoch: capturedEpoch) }
             })
             let transferRelay = await manager.transferRelay()
-            await transferRelay.setSink(TransferSinkAdapter { message in
-                Task { @MainActor in self?.handleTransferMessage(message) }
-            })
+            await transferRelay.setSink(TransferSinkAdapter(
+                onMessage: { message, capturedEpoch in
+                    Task { @MainActor in self?.handleTransferMessage(message, epoch: capturedEpoch) }
+                },
+                epoch: { epoch.current() }
+            ))
         }
         // Brief §12: nothing partial ever survives a process restart as a candidate to resume.
         storage.sweepIncomplete()
@@ -226,13 +249,17 @@ public final class SharedLibraryCoordinator {
         let transport = bulkTransport
         Task { await transport.close() }
 
+        // Finding A: unconditionally frees the provider/requester ownership slot no matter who
+        // holds it — `transport.close()` above already force-closes whatever real socket that
+        // holder's `serve`/`fetch` call was blocked on, so its own eventual cleanup finds nothing
+        // left to (mis)clear.
+        bulkGate.invalidate()
         let hashToClear = activeDownload
         transferFence.supersede()
         pendingOfferContinuation?.resume(returning: nil)
         pendingOfferContinuation = nil
         activeDownloadTask?.cancel()
         activeDownloadTask = nil
-        activeServeTransferId = nil
         downloadQueue = []
         activeDownload = nil
         if let hash = hashToClear {
@@ -279,8 +306,16 @@ public final class SharedLibraryCoordinator {
         pendingOfferContinuation = nil
         activeDownloadTask?.cancel()
         activeDownloadTask = nil
-        let transport = bulkTransport
-        Task { await transport.cancelActive() }
+        // Finding A: only force-close the shared bulk transport if this transfer is still its real
+        // owner — `activeDownload`/`pendingOfferTransferId` alone are coordinator/queue
+        // bookkeeping, not proof this operation ever actually acquired the transport's one active
+        // slot (e.g. cancelling during `.negotiating`, before any bulk socket opened, or while the
+        // shared slot happens to belong to this session's own provider operation).
+        if let transferId, bulkGate.isOwner(transferId) {
+            let transport = bulkTransport
+            Task { await transport.cancelActive() }
+        }
+        if let transferId { bulkGate.releaseIfOwner(transferId) }
         cacheStorage.deletePart(contentHash)
         // Authoritative terminal write: cancellation itself is never subject to the fence check
         // that guards a late completion — this *is* the write that must win.
@@ -372,15 +407,26 @@ public final class SharedLibraryCoordinator {
 
     private func pumpQueue() {
         guard activeDownload == nil, let next = downloadQueue.first else { return }
+        let transferId = TransferId(Ulid.generate())
+        // Finding A cross-role (brief §17/§18): the shared bulk slot may be held right now by this
+        // device's own *provider* operation (serving a peer's request). Leave `next` queued rather
+        // than start a download the transport cannot actually honour yet — the provider
+        // operation's own cleanup calls pumpQueue() again once it releases the slot, so this
+        // retries automatically, no new queue needed.
+        guard bulkGate.tryAcquire(.requester(transferId: transferId, contentHash: next)) else { return }
         downloadQueue.removeFirst()
         activeDownload = next
         let opToken = transferFence.begin()
-        activeDownloadTask = Task { await runDownload(next, opToken: opToken) }
+        activeDownloadTask = Task { await runDownload(next, transferId: transferId, opToken: opToken) }
     }
 
-    private func runDownload(_ hash: ContentHash, opToken: Int64) async {
-        let transferId = TransferId(Ulid.generate())
+    private func runDownload(_ hash: ContentHash, transferId: TransferId, opToken: Int64) async {
         pendingOfferTransferId = transferId
+        defer {
+            // Finding A: released here for every exit path below (idempotent — a no-op if
+            // cancelDownload or a session boundary already released/invalidated the slot first).
+            bulkGate.releaseIfOwner(transferId)
+        }
         setState(hash, DownloadState(status: .negotiating), opToken: opToken)
         _ = await controlSessionManager.transferRelay().send(.request(contentHash: hash, transferId: transferId))
 
@@ -479,7 +525,16 @@ public final class SharedLibraryCoordinator {
 
     // MARK: - transfer: provider side
 
-    private func handleTransferMessage(_ message: TransferMessage) {
+    /// Closure-audit Finding B: `epoch` is `sessionEpoch`'s value as it was the moment this message
+    /// was read off the wire, captured in the `sink` closure at `init` — exactly the guard
+    /// `handleManifestMessage` already had. Every `TRANSFER_REQUEST`/`TRANSFER_OFFER`/
+    /// `TRANSFER_PROGRESS`/`TRANSFER_RESULT`/`TRANSFER_CANCEL` dispatched under a session that has
+    /// since been superseded is dropped here, before it can touch `bulkGate`,
+    /// `pendingOfferTransferId`, or any provider/requester state — a stale `REQUEST` cannot be
+    /// served under the new peer's SPKI/generation, a stale `OFFER` cannot satisfy a new session's
+    /// pending request, and a stale `CANCEL` cannot cancel a new session's transfer.
+    private func handleTransferMessage(_ message: TransferMessage, epoch: Int64) {
+        guard epoch == sessionEpoch.current() else { return }
         switch message {
         case .request(let contentHash, let transferId):
             Task { await serveTransferRequest(contentHash: contentHash, transferId: transferId) }
@@ -499,18 +554,26 @@ public final class SharedLibraryCoordinator {
         }
     }
 
-    /// Closure-audit Finding N: PROTOCOL §8.2 — `TRANSFER_CANCEL` is valid from either side at any
-    /// time and both drop the bulk connection. Only honoured if `transferId` names the transfer this
-    /// coordinator is *currently* serving (provider role) — a cancel for a stale, foreign, or
-    /// already-finished transfer_id is a no-op, never a way to disrupt an unrelated transfer.
+    /// Closure-audit Finding N, hardened by Finding A: PROTOCOL §8.2 — `TRANSFER_CANCEL` is valid
+    /// from either side at any time and both drop the bulk connection. Only honoured if
+    /// `transferId` names the transfer `bulkGate` currently holds — not a plain
+    /// `activeServeTransferId` var that a second, not-yet-actually-serving request could have
+    /// silently overwritten — so a cancel for a stale, foreign, queued, or already-finished
+    /// transfer_id is a no-op, never a way to disrupt an unrelated (possibly requester-role)
+    /// transfer sharing the same underlying bulk socket.
     private func handlePeerCancel(_ transferId: TransferId) {
-        guard activeServeTransferId == transferId else { return }
+        guard bulkGate.isOwner(transferId) else { return }
         let transport = bulkTransport
         Task { await transport.cancelActive() }
     }
 
     private func serveTransferRequest(contentHash: ContentHash, transferId: TransferId) async {
         guard let peerSpki = await controlSessionManager.currentPeerSpki else { return }
+        // Finding A §12: the session generation authorising this operation is snapshotted here, at
+        // creation — the token table's own consumption check (below and inside
+        // `bulkTransport.serve`) still re-reads the *live* generation independently; these are two
+        // different concepts and both are preserved.
+        let sessionGeneration = await controlSessionManager.currentAuthGeneration
         guard let resolution = try? contentResolver.resolve(contentHash: contentHash, nowMonoUs: monotonicNowUs()) else { return }
         guard case .found(let fileURL, let sizeBytes) = resolution else {
             // No wire message exists for "cannot serve this request" (PROTOCOL §8.2 has no
@@ -522,13 +585,27 @@ public final class SharedLibraryCoordinator {
         // reject — check the bound here, on the sender, rather than relying solely on the
         // receiver's `TransferCodec.parseOffer` size check.
         guard sizeBytes <= TransferBounds.maxTransferSizeBytes else { return }
-        guard let port = try? await bulkTransport.ensureListening(), let bulkPort = Int(exactly: port) else { return }
+        // Finding A: acquire the one shared bulk-operation slot — across *both* provider and
+        // requester roles (brief §17/§18) — before ever sending an offer. A second concurrent
+        // TRANSFER_REQUEST, or a local download already in flight, must not overwrite ownership or
+        // receive an offer this coordinator cannot yet honour; the requester's own negotiation
+        // timeout resolves this (brief §19 — no BUSY wire shape).
+        guard bulkGate.tryAcquire(.provider(
+            transferId: transferId, contentHash: contentHash, peerSpki: peerSpki, sessionGeneration: sessionGeneration
+        )) else { return }
+        guard let port = try? await bulkTransport.ensureListening(), let bulkPort = Int(exactly: port) else {
+            bulkGate.releaseIfOwner(transferId)
+            pumpQueue() // cross-role: wake a local download left queued behind this attempt
+            return
+        }
         // Closure-audit Finding A: read the *live* current authenticated generation both at
         // issuance and again, independently, at consumption time — never a value captured once and
         // replayed. A stale closure over a captured `let` would defeat ADR-023 §3's whole
         // "reconnect invalidates every outstanding token" guarantee.
         let generation = await controlSessionManager.currentAuthGeneration
         guard let token = await bulkTransport.tryIssueToken(transferId: transferId, generation: generation) else {
+            bulkGate.releaseIfOwner(transferId)
+            pumpQueue() // cross-role: wake a local download left queued behind this attempt
             return
         }
         let chunkCount = Int((sizeBytes + Int64(Self.chunkSizeBytes) - 1) / Int64(Self.chunkSizeBytes))
@@ -536,9 +613,20 @@ public final class SharedLibraryCoordinator {
             transferId: transferId, sizeBytes: sizeBytes, chunkSize: Self.chunkSizeBytes,
             chunkCount: chunkCount, bulkPort: bulkPort, bulkToken: token
         ))
-        guard let handle = try? FileHandle(forReadingFrom: fileURL) else { return }
-        activeServeTransferId = transferId
-        defer { if activeServeTransferId == transferId { activeServeTransferId = nil } }
+        guard let handle = try? FileHandle(forReadingFrom: fileURL) else {
+            bulkGate.releaseIfOwner(transferId)
+            pumpQueue() // cross-role: wake a local download left queued behind this attempt
+            return
+        }
+        defer {
+            // Finding A: idempotent by construction — a no-op if a session boundary already called
+            // bulkGate.invalidate(), and never clears a fresher operation that has since acquired
+            // the slot under a different transfer_id.
+            bulkGate.releaseIfOwner(transferId)
+            // Cross-role (brief §17/§18): wake a local download that was left queued behind this
+            // provider operation — a harmless no-op if none is queued.
+            pumpQueue()
+        }
         let source = FileChunkSource(handle: handle, chunkSize: Self.chunkSizeBytes)
         let manager = controlSessionManager
         _ = await bulkTransport.serve(
