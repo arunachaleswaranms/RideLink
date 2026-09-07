@@ -27,6 +27,15 @@ enum class TransferError {
     FILE_CHANGED,
     SIZE_MISMATCH,
     HASH_MISMATCH,
+
+    /**
+     * **Reserved; not operationally distinguished in V1** (ADR-023 Amendment A4). No production
+     * path produces this: a full disk surfaces as an `IOException` from the `.part` write, which
+     * `BulkTransportManager.fetch` reduces to [IO_ERROR], and the whole-file re-hash from disk
+     * (ADR-023 §6) catches the resulting truncation regardless. Telling the two apart would mean
+     * parsing platform errno for a category with no distinct recovery behaviour — the user action
+     * is identical. Reachable only through [TransferReducer]'s own vectors, deliberately.
+     */
     DISK_FULL,
     IO_ERROR,
     CONNECTION_LOST,

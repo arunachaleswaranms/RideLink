@@ -27,6 +27,12 @@ public enum TransferError: String, Sendable, Equatable, CaseIterable {
     case fileChanged = "FILE_CHANGED"
     case sizeMismatch = "SIZE_MISMATCH"
     case hashMismatch = "HASH_MISMATCH"
+    /// **Reserved; not operationally distinguished in V1** (ADR-023 Amendment A4). No production
+    /// path produces this: a full disk surfaces as a thrown write, which `TransferManager.fetch`
+    /// reduces to `ioError`, and the whole-file re-hash from disk (ADR-023 §6) catches the
+    /// resulting truncation regardless. Telling the two apart would mean parsing `NSError` domains
+    /// for a category with no distinct recovery behaviour — the user action is identical. Reachable
+    /// only through `TransferReducer`'s own vectors, deliberately.
     case diskFull = "DISK_FULL"
     case ioError = "IO_ERROR"
     case connectionLost = "CONNECTION_LOST"

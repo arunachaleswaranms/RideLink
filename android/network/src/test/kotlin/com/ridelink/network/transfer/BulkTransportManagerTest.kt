@@ -10,6 +10,7 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.Timeout
@@ -508,6 +509,57 @@ class BulkTransportManagerTest {
             } finally {
                 server.close()
                 client.close()
+            }
+        }
+
+    /**
+     * ADR-023 Amendment A4 Finding W: `serve()`'s `accept()` must be bounded by the `bulk_token`'s
+     * own 30 s TTL (ADR-023 §2). Unbounded, a requester that takes a `TRANSFER_OFFER` and then
+     * never dials — cancelled between offer and fetch, or its connect failed — parks `serve()`
+     * inside `accept()` for the rest of the session, holding [BulkTransportManager]'s single
+     * `activeTransferMutex` (and, one layer up, the coordinator's `BulkOperationGate`) against
+     * every other transfer in **both** directions. `cancelActive()` cannot rescue it either:
+     * `activeSocket` is still null at that point, so there is nothing for it to close.
+     *
+     * The bound itself is 30 s, far too long to sit in a unit test, so this proves the two halves
+     * separately: that `cancelActive()` genuinely cannot unblock a not-yet-accepted `serve` (the
+     * reason a timeout is needed at all), and that closing the listener does end it promptly (the
+     * session-boundary escape hatch that limited the blast radius to one session rather than
+     * forever). `ControlListenerAcceptTimeoutTest` covers the timeout firing, with a short bound.
+     */
+    @Test
+    fun `a serve nobody ever dials is not rescued by cancelActive, only by closing the listener`() =
+        runBlocking {
+            val server = manager(alice)
+            try {
+                server.ensureListening()
+                val transferId = TransferId("01J9Z4M3RT8V2W5X7Y9Z1A3B5M")
+                val generation = 1L
+                server.issueToken(transferId, generation)
+
+                coroutineScope {
+                    val serveResult =
+                        async(Dispatchers.IO) {
+                            server.serve(transferId, bob.identity.identitySpkiSha256, { generation }, 1L, chunksOf(ByteArray(10)))
+                        }
+                    // Give the serve call time to actually reach accept() and park there.
+                    withContext(Dispatchers.IO) { Thread.sleep(SETTLE_MS) }
+                    assertTrue(serveResult.isActive, "serve must still be parked in accept() -- nobody has dialled")
+
+                    server.cancelActive()
+                    withContext(Dispatchers.IO) { Thread.sleep(SETTLE_MS) }
+                    assertTrue(
+                        serveResult.isActive,
+                        "cancelActive() cannot unblock an accept() that has not produced a socket yet -- " +
+                            "this is exactly why the accept needs its own bound",
+                    )
+
+                    // Closing the listener makes the parked accept() throw, which serve() reports.
+                    server.close()
+                    assertEquals(BulkServeOutcome.IO_ERROR, withTimeout(TIMEOUT_MS) { serveResult.await() })
+                }
+            } finally {
+                server.close()
             }
         }
 
