@@ -27,7 +27,7 @@ import com.ridelink.network.control.ControlEvent
 import com.ridelink.network.manifest.ManifestSink
 import com.ridelink.network.transfer.BulkFetchOutcome
 import com.ridelink.network.transfer.ChunkSink
-import com.ridelink.network.transfer.ChunkSource
+import com.ridelink.network.transfer.InputStreamChunkSource
 import com.ridelink.network.transfer.TransferSink
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
@@ -192,8 +192,20 @@ class SharedLibraryCoordinator(
     /** True once bytes have arrived, been whole-file verified, **and** committed — never merely queued or transferring. */
     suspend fun isVerifiedCached(contentHash: ContentHash): Boolean = cacheRepository.isVerifiedCached(contentHash)
 
-    /** brief §19: hands a verified cached file's location to the caller, which plays it through the *existing* player. */
-    suspend fun cachedFile(contentHash: ContentHash): File? = cacheRepository.open(contentHash, monotonicNowUs())
+    /**
+     * brief §19: hands a verified cached file's location to the caller, which plays it through the
+     * *existing* player.
+     *
+     * Amendment A4: a `null` here can mean [TransferCacheRepository.open] just found a row claiming
+     * verified but no file behind it (storage cleared under the app) and dropped that row — so
+     * refresh [cachedHashes], or the UI would keep offering "Play" for content that no longer
+     * exists and never offer "Download" to get it back.
+     */
+    suspend fun cachedFile(contentHash: ContentHash): File? {
+        val file = cacheRepository.open(contentHash, monotonicNowUs())
+        if (file == null && contentHash.value in _cachedHashes.value) refreshCachedHashes()
+        return file
+    }
 
     private suspend fun refreshCachedHashes() {
         _cachedHashes.value = cacheRepository.verifiedHashes().map { it.value }.toSet()
@@ -279,6 +291,15 @@ class SharedLibraryCoordinator(
         // reconnect or a different peer — replaced wholesale, never merged with what came before.
         _remoteEntries.value = emptyList()
         syncMachine = null
+        val hashToClear = activeDownload
+        // Amendment A4 Finding V — supersede *before* closing the transport, not after. Closing
+        // force-closes whatever socket the active operation is parked on, which is precisely what
+        // lets that operation resume; if the fence were still current at that instant, the resumed
+        // operation could run all the way through promote/commit/`TRANSFER_RESULT{ok: true}` while
+        // this very function was still executing, and the `activeDownloadJob.cancel()` below — only
+        // *scheduled*, not yet run — would arrive far too late to stop it. Superseding first makes
+        // the ordering a property of the code rather than of the dispatcher.
+        transferFence.supersede()
         // ADR-023 §1: the bulk listener and every outstanding token die with the session that
         // opened them — never sprinkled as ad hoc close() calls elsewhere (brief §2).
         bulkTransport.close()
@@ -287,8 +308,6 @@ class SharedLibraryCoordinator(
         // holder's serve()/fetch() call was blocked on, so its own eventual cleanup finds nothing
         // left to (mis)clear.
         bulkGate.invalidate()
-        val hashToClear = activeDownload
-        transferFence.supersede()
         scope.launch {
             pendingOffer?.cancel()
             pendingOffer = null
@@ -445,17 +464,32 @@ class SharedLibraryCoordinator(
             setState(hash, DownloadState(TransferStatus.TRANSFERRING, totalBytes = offer.sizeBytes), opToken)
             val stream = cacheStorage.openPartForWrite(hash)
             var received = 0L
-            val sink =
-                ChunkSink { _, bytes ->
-                    cacheStorage.appendChunk(stream, bytes)
-                    received += bytes.size
-                    val progress =
-                        DownloadState(TransferStatus.TRANSFERRING, bytesReceived = received, totalBytes = offer.sizeBytes)
-                    setState(hash, progress, opToken)
-                }
             val outcome =
-                bulkTransport.fetch(peerHost, offer.bulkPort, offer.bulkToken, peerSpki, offer.chunkCount.toLong(), sink)
-            stream.close()
+                try {
+                    val sink =
+                        ChunkSink { _, bytes ->
+                            cacheStorage.appendChunk(stream, bytes)
+                            received += bytes.size
+                            val progress =
+                                DownloadState(TransferStatus.TRANSFERRING, bytesReceived = received, totalBytes = offer.sizeBytes)
+                            setState(hash, progress, opToken)
+                        }
+                    bulkTransport.fetch(peerHost, offer.bulkPort, offer.bulkToken, peerSpki, offer.chunkCount.toLong(), sink)
+                } finally {
+                    // Amendment A4 Finding V: `finally`, not a plain call after `fetch` returns —
+                    // a cancelled Job throws CancellationException out of `fetch`'s own suspension
+                    // points, which used to skip this close() entirely and leak the `.part` file
+                    // descriptor once per cancelled transfer.
+                    runCatching { stream.close() }
+                }
+
+            // Amendment A4 Finding V: everything below writes to storage the `content_hash` is the
+            // *only* key for, so a superseded operation must stop here — not merely have its state
+            // writes dropped by the fence. Its own deletePart(hash) would otherwise delete the
+            // `.part` file a *newer* operation for the same hash has already begun writing (the very
+            // race brief §18 names), and its promote/commit would publish a verified cache entry and
+            // a TRANSFER_RESULT for a transfer the user cancelled or a session boundary killed.
+            if (!transferFence.isCurrent(opToken)) return
 
             if (outcome != BulkFetchOutcome.OK) {
                 cacheStorage.deletePart(hash)
@@ -671,17 +705,16 @@ class SharedLibraryCoordinator(
                     var input: java.io.InputStream? = null
                     try {
                         input = resolution.open()
-                        val stream = input
-                        val source =
-                            ChunkSource {
-                                val buffer = ByteArray(CHUNK_SIZE_BYTES.toInt())
-                                val n = stream.read(buffer)
-                                if (n <= 0) null else buffer.copyOf(n)
-                            }
+                        // Closure-audit Amendment A4 Finding T: [InputStreamChunkSource] fills each
+                        // frame to exactly CHUNK_SIZE_BYTES, because the TRANSFER_OFFER sent above
+                        // already declared `chunk_size` and `chunk_count` — see that class's own
+                        // KDoc for why one `read` per frame was a real bug on `content://` sources.
+                        val source = InputStreamChunkSource(input, CHUNK_SIZE_BYTES.toInt())
                         bulkTransport.serve(
                             request.transferId,
                             peerSpki,
                             { controlSessionManager.currentAuthGeneration },
+                            chunkCount,
                             source,
                         )
                     } finally {

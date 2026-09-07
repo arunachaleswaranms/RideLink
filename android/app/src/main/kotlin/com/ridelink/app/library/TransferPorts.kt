@@ -55,6 +55,7 @@ interface BulkTransportPort {
         transferId: TransferId,
         expectedPeerSpki: SpkiHash,
         currentGeneration: () -> Long,
+        expectedChunkCount: Long,
         source: ChunkSource,
     ): BulkServeOutcome
 
@@ -132,8 +133,9 @@ internal class BulkTransportManagerAdapter(
         transferId: TransferId,
         expectedPeerSpki: SpkiHash,
         currentGeneration: () -> Long,
+        expectedChunkCount: Long,
         source: ChunkSource,
-    ): BulkServeOutcome = delegate.serve(transferId, expectedPeerSpki, currentGeneration, source)
+    ): BulkServeOutcome = delegate.serve(transferId, expectedPeerSpki, currentGeneration, expectedChunkCount, source)
 
     override suspend fun fetch(
         host: String,

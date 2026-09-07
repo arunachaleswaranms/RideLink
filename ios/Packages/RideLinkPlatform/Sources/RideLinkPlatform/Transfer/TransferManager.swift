@@ -126,10 +126,15 @@ public actor TransferManager {
     /// Provider side: accept exactly one bulk connection, verify its SPKI and single-use token,
     /// then stream `source`'s chunks to it. SPKI is checked **before** the token is even read
     /// (ADR-023 §4 — two independent checks, neither standing in for the other).
+    ///
+    /// `expectedChunkCount` is the `chunk_count` the caller already promised in its
+    /// `TRANSFER_OFFER` (closure-audit Amendment A4 Finding T) — this method will never write more
+    /// frames than that, mirroring the same bound `fetch` enforces from the receiving side.
     public func serve(
         transferId: TransferId,
         expectedPeerSpki: SpkiHash,
         currentGeneration: @Sendable () async -> Int64,
+        expectedChunkCount: Int64,
         source: any ChunkSource
     ) async -> BulkServeOutcome {
         guard acquireTransferSlot() else { return .ioError } // Finding E: one active transfer at a time
@@ -161,6 +166,14 @@ public actor TransferManager {
 
         var index: Int64 = 0
         while let chunk = await source.nextChunk() {
+            // Closure-audit Amendment A4 Finding T: the provider already declared `chunk_count` in
+            // its TRANSFER_OFFER (PROTOCOL §8.2) — emitting more frames than that is the provider
+            // violating its own offer, and the requester's Finding K index check would (correctly)
+            // reject the whole transfer. Refuse here instead, so a `source` that outruns its
+            // declared count — a short-reading handle, or a local file that grew between the size
+            // check and the open — fails as this side's own `.ioError` rather than as the peer's
+            // `.protocolError`.
+            guard index < expectedChunkCount else { return .ioError }
             do {
                 try await socket.writeRawBytes(BulkFraming.encodeFrame(chunkIndex: UInt32(truncatingIfNeeded: index), payload: chunk))
             } catch {

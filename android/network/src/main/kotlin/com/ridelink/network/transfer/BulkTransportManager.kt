@@ -111,6 +111,10 @@ class BulkTransportManager(
      * stream [source]'s chunks to it. SPKI is checked **before** the token is even read (ADR-023 §4
      * — two independent checks, neither standing in for the other).
      *
+     * [expectedChunkCount] is the `chunk_count` the caller already promised in its `TRANSFER_OFFER`
+     * (closure-audit Amendment A4 Finding T) — this method will never write more frames than that,
+     * mirroring the same bound [fetch] enforces from the receiving side.
+     *
      * The IOException's message never reaches a caller that could act on it differently — every
      * catch site here already reduces to one of the small [BulkServeOutcome] values, exactly like
      * `readFrame`'s `ConnectionClosed` result elsewhere in this module.
@@ -120,6 +124,7 @@ class BulkTransportManager(
         transferId: TransferId,
         expectedPeerSpki: SpkiHash,
         currentGeneration: () -> Long,
+        expectedChunkCount: Long,
         source: ChunkSource,
     ): BulkServeOutcome =
         activeTransferMutex.withLock {
@@ -143,6 +148,14 @@ class BulkTransportManager(
                 var index = 0L
                 while (true) {
                     val chunk = source.nextChunk() ?: break
+                    // Closure-audit Amendment A4 Finding T: the provider already declared
+                    // `chunk_count` in its TRANSFER_OFFER (PROTOCOL §8.2) — emitting more frames
+                    // than that is the provider violating its own offer, and the requester's
+                    // Finding K index check would (correctly) reject the whole transfer. Refuse
+                    // here instead, so a [source] that outruns its declared count — a short-reading
+                    // stream, or a local file that grew between the size check and the open — fails
+                    // as this side's own IO_ERROR rather than as the peer's PROTOCOL_ERROR.
+                    if (index >= expectedChunkCount) return BulkServeOutcome.IO_ERROR
                     socket.writeRawBytes(BulkFraming.encodeFrame(index, chunk))
                     index += 1
                 }

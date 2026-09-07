@@ -272,6 +272,20 @@ public final class SharedLibraryCoordinator {
         remoteEntries = []
         syncState = ManifestSyncState(liveRevision: 0)
         sessionEpoch.bump()
+        let hashToClear = activeDownload
+        // Amendment A4 Finding V — supersede, resume and cancel *before* `await
+        // bulkTransport.close()`, not after. That `await` is a real suspension point on
+        // `@MainActor`, and `close()` force-closes whatever socket the active operation is parked
+        // on — which is precisely what lets that operation resume. Resuming while the fence was
+        // still current let it run all the way through promote/commit/`TRANSFER_RESULT{ok: true}`
+        // and `finishDownload(.complete)` during this very `await`, before the `cancel()` below had
+        // been reached at all. Superseding first makes the ordering a property of the code rather
+        // than of which continuation the runtime happens to schedule next.
+        transferFence.supersede()
+        pendingOfferContinuation?.resume(returning: nil)
+        pendingOfferContinuation = nil
+        activeDownloadTask?.cancel()
+        activeDownloadTask = nil
         await bulkTransport.close()
 
         // Finding A: unconditionally frees the provider/requester ownership slot no matter who
@@ -279,12 +293,6 @@ public final class SharedLibraryCoordinator {
         // that holder's `serve`/`fetch` call was blocked on, so its own eventual cleanup finds
         // nothing left to (mis)clear.
         bulkGate.invalidate()
-        let hashToClear = activeDownload
-        transferFence.supersede()
-        pendingOfferContinuation?.resume(returning: nil)
-        pendingOfferContinuation = nil
-        activeDownloadTask?.cancel()
-        activeDownloadTask = nil
         downloadQueue = []
         activeDownload = nil
         if let hash = hashToClear {
@@ -494,6 +502,14 @@ public final class SharedLibraryCoordinator {
         }
         try? handle.close()
 
+        // Amendment A4 Finding V: everything below writes to storage the `content_hash` is the
+        // *only* key for, so a superseded operation must stop here — not merely have its state
+        // writes dropped by the fence. Its own deletePart(hash) would otherwise delete the `.part`
+        // file a *newer* operation for the same hash has already begun writing (the very race
+        // brief §18 names), and its promote/commit would publish a verified cache entry and a
+        // TRANSFER_RESULT for a transfer the user cancelled or a session boundary killed.
+        guard transferFence.isCurrent(opToken) else { return }
+
         guard outcome == .ok else {
             cacheStorage.deletePart(hash)
             finishDownload(hash, DownloadState(status: .failed, error: outcome.asTransferError), opToken: opToken)
@@ -699,7 +715,8 @@ public final class SharedLibraryCoordinator {
         let manager = controlSessionManager
         _ = await bulkTransport.serve(
             transferId: transferId, expectedPeerSpki: peerSpki,
-            currentGeneration: { await manager.currentAuthGeneration }, source: source
+            currentGeneration: { await manager.currentAuthGeneration },
+            expectedChunkCount: Int64(chunkCount), source: source
         )
         try? handle.close()
     }
@@ -764,16 +781,6 @@ private struct DownloadChunkSink: ChunkSink {
     func onChunk(index: Int64, bytes: [UInt8]) async {
         try? storage.appendChunk(handle, bytes: Data(bytes))
         onProgress(received.add(Int64(bytes.count)))
-    }
-}
-
-private struct FileChunkSource: ChunkSource {
-    let handle: FileHandle
-    let chunkSize: Int
-
-    func nextChunk() async -> [UInt8]? {
-        guard let data = try? handle.read(upToCount: chunkSize), !data.isEmpty else { return nil }
-        return [UInt8](data)
     }
 }
 
