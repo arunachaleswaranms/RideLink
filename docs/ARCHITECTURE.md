@@ -753,19 +753,44 @@ Invariants, all from §11 and the brief's transfer rules:
   or shadow a track the user actually imported. A mismatch deletes the partial and reports failure;
   there is no path by which an unverified byte becomes trusted content.
 - The bulk connection is pinned to the same `identity_spki_sha256` as the control connection, and
-  is further bound to the authenticated control session that authorised the transfer — one bulk
-  listener per session (not per transfer), a single-use token per transfer, both invalidated the
-  moment that session ends or a reconnect starts a new one
-  ([ADR-023](DECISIONS/ADR-023-bulk-transfer-session-binding.md), Amendment A1).
+  is further bound to the authenticated control session that authorised the transfer — at most one
+  **live** bulk listener at a time (not one per transfer), a single-use token per transfer, both
+  invalidated the moment that session ends or a reconnect starts a new one
+  ([ADR-023](DECISIONS/ADR-023-bulk-transfer-session-binding.md), Amendment A1, narrowed by
+  Amendment A5). A listener never outlives its own session and never spans two `session_id`s; a
+  session may open a replacement within its own life if a cancelled pending accept ends the current
+  one, which is why `TRANSFER_OFFER` carries `bulk_port` per offer and a requester may never reuse
+  a port from an earlier one.
+- **The bulk listener's lifetime is explicit, and nothing may publish into a lifetime that has
+  ended** ([ADR-023](DECISIONS/ADR-023-bulk-transfer-session-binding.md) Amendment A5). `bind()`
+  suspends; a session boundary can land inside it — on iOS specifically because an `actor` is
+  *reentrant* across `await`, so actor isolation alone never prevented this. Both transports carry a
+  listener epoch, bumped **before** anything is torn down and re-checked at the publication point:
+  a bind belonging to an ended lifetime closes what it bound and fails rather than resurrecting a
+  listener for a session that is over.
+- **The provider's wait for the requester's bulk connection is a named, cancellable operation phase**
+  ([ADR-023](DECISIONS/ADR-023-bulk-transfer-session-binding.md) Amendment A5). `serve` claims
+  `WaitingForAccept(transfer_id)` *before* parking in `accept()`, so an explicit `TRANSFER_CANCEL`
+  ends that wait promptly (by ending the listener's lifetime — the next transfer binds a fresh one)
+  and also drops the cancelled transfer's `bulk_token`. Amendment A4's 30 s accept bound remains, as
+  defence in depth for the cases where no cancellation ever arrives.
+- **Post-acquisition provider authorisation requires both halves**
+  ([ADR-023](DECISIONS/ADR-023-bulk-transfer-session-binding.md) Amendment A5): after a provider
+  operation acquires `BulkOperationGate`, every later suspension point re-checks gate ownership
+  **and** that the session which authorised it is still live, through the pure, mirrored
+  `BulkOperationGate.stillAuthorises(...)`. Gate ownership alone (Amendment A3) is not equivalent:
+  a session boundary bumps the live generation/epoch before it invalidates the gate, so there is an
+  interval in which the gate still names an operation the session has already left behind.
 - **Operation ownership** ([ADR-023](DECISIONS/ADR-023-bulk-transfer-session-binding.md) Amendment
   A1): `SharedLibraryCoordinator`'s transfer state is fenced by a small pure, mirrored primitive —
   `core.transfer.OperationFence` / `RideLinkCore.Transfer.OperationFence` — rather than by routing
   every step through `TransferReducer` (a deliberate, disclosed simplification, not a second state
   machine). A superseded operation (cancelled by the user, or invalidated by a session boundary)
   can never again mutate transfer state, however late its own coroutine/`Task` cleanup runs;
-  `BulkTransportManager.cancelActive()` / `TransferManager.cancelActive()` force-close the socket an
-  active transfer holds, so cancellation actually stops the I/O rather than merely requesting
-  cooperative cancellation.
+  `BulkTransportManager.cancelActive(transferId)` / `TransferManager.cancelActive(transferId:)`
+  terminate the operation that `transfer_id` owns, so cancellation actually stops the I/O rather
+  than merely requesting cooperative cancellation. Scoping it to a `transfer_id` is what stops a
+  stale cancel closing a newer, unrelated operation (Amendment A3 on iOS, A5 on Android).
 - **Cache-only playback** (brief §19): a verified Phase-4 cache entry that was never imported into
   the Phase 3 library still plays through the *existing* one player/one queue —
   `MusicCoordinator.playExternalVerifiedCachedTrack` (and its Swift mirror) mint a fresh, local-only

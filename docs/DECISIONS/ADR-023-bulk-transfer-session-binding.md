@@ -239,3 +239,255 @@ This is a gap between this ADR's own §2 and the code implementing it: the `bulk
 **Finding W — fixed by bounding the bulk accept, and only the bulk accept, by the token TTL.** `ControlListener.acceptWithin(timeoutMs)` (Kotlin) and `ControlListener.accept(timeoutMs:)` (Swift) are new, **opt-in** entry points; the control plane keeps calling the unbounded `accept()`, which is correct for it — a control listener legitimately waits indefinitely for its peer to appear, while a bulk listener is answering an offer whose authorisation expires. Both `serve` implementations now pass 30 s, the same bound `BulkTokenTable` already enforces on the token itself, and both already treat the resulting failure as `IO_ERROR`, so no new failure path appears anywhere. Two platform-specific notes, because the mechanisms differ: Android sets `ServerSocket.soTimeout` around the `acceptOne` call and restores `0` in a `finally` — a socket-level bound, deliberately, because `ServerSocket.accept()` is blocking and a coroutine `withTimeout` would abandon a still-running accept on an I/O thread rather than actually end it. iOS gives each parked waiter an id so a bounded waiter's timeout resumes *its own* continuation and never another's; every mutation of the waiter queue already happens on `ControlListener`'s serial queue, so a timeout and an arriving connection cannot both resume the same waiter.
 
 **Tests.** Android: `network.transfer.InputStreamChunkSourceTest` (4 cases, pure — measured at 103 frames against 10 declared before the fix), one new real-loopback-TLS case in `BulkTransportManagerTest` for the provider frame cap, `app.music.ExternalCacheSourcesTest` (6 cases, pure), and `app.library.SharedLibraryCoordinatorCancellationTest` (4 cases, a real coordinator-level proof over a real `CacheStorage`, using `StandardTestDispatcher` and a `CompletableDeferred`-gated `fetch`, no sleeps). iOS: `RideLinkPlatformTests.FileChunkSourceTests` (5 cases) and one new real-loopback-TLS case in `TransferManagerTests` for the provider frame cap. Finding W adds `network.transfer.ControlListenerAcceptTimeoutTest` (3 cases) and one `BulkTransportManagerTest` case on Android, and `RideLinkPlatformTests.ControlListenerAcceptTimeoutTests` (2 cases) on iOS — the bound proven with a short timeout rather than the production 30 s one, plus the two properties that make it safe to share this listener class with the control plane: the bound is opt-in, and one waiter's timeout never disturbs another's. **Every new regression was verified to fail against the pre-fix code before being accepted** — including confirming that the fence check, not the `onSessionBoundary` reordering, is the half the coordinator test actually discriminates; the reordering closes a genuinely multi-threaded window that a single-threaded test scheduler cannot express, and that is stated in the test rather than implied to be covered. The iOS coordinator-level gap A3 disclosed is unchanged and undiminished: `ios/RideLink.xcodeproj` still has exactly one native target, so Finding V's iOS fix is verified by code inspection against the identical design Android's real coordinator test proves, plus the full existing suite. `docs/STATUS.md` §2y records this session in full.
+
+## Amendment A5 — 7–8 September 2026 — a fifth, deliberately narrow pass: three lifecycle races A4's own fix documented but did not close
+
+**Status of the ADR: still Accepted.** A4 (above) was CI-green on both platforms. A fifth pass, scoped
+to exactly three lifecycle questions and nothing else, confirmed all three are real and fixed them.
+As with A1–A4, every item below is a production bug against this ADR's already-correct decisions:
+**no wire shape, protocol field or bound moves.** Two of the three were *named* by A4 itself — it
+wrote down that `cancelActive()` could not rescue a pre-accept `serve`, and chose a 30 s timeout as
+the mitigation. This amendment closes the underlying gap and keeps that timeout as defence in depth.
+
+**One decision text is narrowed, and it is called out rather than folded in.** §1's "one bulk
+listener per authenticated session, not one per transfer" becomes "**at most one live at a time**,
+and never one shared across sessions" — see the Finding A discussion below for exactly why and why
+nothing on the wire follows. Every other §1–§8 decision stands unchanged.
+
+**Finding A — an explicit `TRANSFER_CANCEL` could not end a provider parked in `accept()`, HIGH.**
+PROTOCOL §8.2 says `TRANSFER_CANCEL` is valid from either side at any time and both sides drop the
+bulk connection. That was true only once a socket existed. Both platforms assigned their
+cancellation handle — Android's `activeSocket`, iOS's `activeSocket`/`activeTransferId` — *after*
+`accept()` returned, so a cancel arriving in the window between `TRANSFER_OFFER` and the requester's
+dial had nothing to act on: Android closed a null socket, and iOS's `transferId` guard refused
+because `activeTransferId` was still nil. That window is exactly the one a cancel is most likely to
+land in — the requester was cancelled between taking the offer and dialling, or its own `connect`
+failed. A4 recorded this precisely, bounded it with `ACCEPT_TIMEOUT_MS = 30_000`, and left the
+underlying gap open; the observable consequence was that a *correct* cancellation still held the
+one-active-transfer slot, and the coordinator's `BulkOperationGate` above it, for up to 30 s against
+every transfer in both directions.
+
+**Finding A — fixed by naming the owner from the moment the wait begins.** Both transports now track
+an explicit two-phase operation instead of a bare socket: `WaitingForAccept(transfer_id)` set
+synchronously *before* parking in `accept()`, then `Connected(transfer_id, socket)`. `cancelActive`
+is `transfer_id`-scoped on **both** platforms now (Android gains the parameter iOS got in A3) and
+terminates either phase: a connected operation by closing its socket, a pending accept by ending the
+listener's lifetime — which on Android makes the blocking `ServerSocket.accept()` throw and on iOS
+resumes every parked `ControlListener` waiter with an error, both immediately. A cancel naming a
+different `transfer_id` remains a strict no-op in both phases, so it can never close a shared
+listener out from under an unrelated operation. **A4's 30 s bound is unchanged and still required**
+— it is what covers the cases where no cancellation ever arrives at all (the peer crashed, the
+negotiation was abandoned, the `TRANSFER_CANCEL` never reached us). The distinction the tests assert
+is causality, not duration: `serve` must return in a small fraction of 30 s *because the cancel ended
+it*, and a regression that fell back to waiting the bound out fails rather than passing slowly.
+
+**This narrows §1's "one listener per session", and the narrowing is deliberate and stated.** §1
+says the bulk listener is opened lazily, is one per authenticated session rather than one per
+transfer, and never outlives the session that opened it. **The invariant that carries the security
+weight is unchanged**: a listener still never outlives its own session and never spans two
+`session_id`s. What A5 changes is the *count* — a session may now open more than one listener over
+its life, because cancelling a pending accept ends the current one and the next transfer binds a
+replacement. Read §1's "one per session, not one per transfer" as "at most one **live** at a time,
+and never one shared across sessions." No wire change follows: `TRANSFER_OFFER` already carries
+`bulk_port` per offer (PROTOCOL §8.2), so a requester has never been entitled to reuse a port from
+an earlier offer, and nothing in the protocol or either implementation assumed the port was stable
+across transfers.
+
+**Cancelling a pending accept closes the bulk listener, and that is safe.** There is no way to
+interrupt a blocking `ServerSocket.accept()` on the JVM short of closing the socket, and polling with
+a short `soTimeout` was rejected outright. The listener is therefore torn down and cleared, and the
+next transfer's `ensureListening()` binds a fresh one — the port is per-offer (`TRANSFER_OFFER`
+carries `bulk_port`), so nothing depends on it being stable across transfers. The session is not
+wedged: the cancelled `serve` returns, the gate is released by its own `finally`/`defer`, and a fresh
+transfer completes normally over the new listener. That whole sequence is a test on both platforms.
+
+**Finding A's token half.** A cancelled transfer's `bulk_token` used to stay live for the remainder
+of its 30 s TTL. `BulkTokenTable.remove(transferId)` (Kotlin) / `remove(transferId:)` (Swift) is new,
+called by `cancelActive` in both phases: an offer the peer has just cancelled is no longer authorised
+by anything. Narrower than `clear()`, which stays the session boundary's tool.
+
+**One narrower window inside Finding A, closed structurally rather than left to the token.** A cancel
+can land in the instant between `accept()` returning a socket and `serve` claiming the `Connected`
+phase. The removed token already made that socket unservable — `validateAndConsume` would fail it —
+but `serve` now also refuses to promote unless it still owns the pending accept, so a cancelled
+transfer never reaches its authorisation checks at all. Same guard, same reasoning, on both
+platforms.
+
+**Finding B — a suspended `bind()` could publish a listener into a session that had already been
+torn down, HIGH.** `ensureListening()` suspends inside `bind()`. `close()` does not, and on neither
+platform did it participate in the same publication guard:
+
+- Android's `ensureListening` held a coroutine `Mutex` across the bind, but `close()` — an ordinary
+  non-suspending function called from a session boundary — could not take that `Mutex` at all. It
+  read `listener`, found `null` (the bind had not published yet), and returned having "torn the
+  session down". The resumed bind then assigned its brand-new listener to `listener`.
+- iOS's `TransferManager` is an `actor`, and **actor isolation does not help here**: actors are
+  reentrant across `await`, so `close()` could run to completion *inside* the suspended
+  `await channel.bind()` and reach exactly the same state. This is the same class of mistake A1's
+  Finding E corrected for `serve`/`fetch` concurrency, in a place A1 did not look.
+
+Either way an **old** session's listener ended up accepting connections after that session's teardown
+had completed — a direct violation of this ADR's §1 ("the listener never outlives the session that
+opened it").
+
+**Finding B — fixed with a listener lifetime counter, bumped before anything is closed.** Both
+platforms now carry a `listenerEpoch`, incremented by `close()` and by `cancelActive` abandoning a
+pending accept, *before* the old listener is closed. `ensureListening()` captures it before
+suspending and re-checks it at the publication point: a bind belonging to an already-ended lifetime
+closes what it bound and fails, rather than publishing it. The property is stated as
+**invalidate before suspended old work can publish**, and it is what makes the fix independent of
+which continuation the runtime happens to schedule. Android additionally moved `listener` (and the
+new operation state) under a plain monitor rather than the coroutine `Mutex`, because the whole point
+is that `close()`/`cancelActive` must be able to take the same lock; the `Mutex` remains, but only to
+stop two concurrent callers each running a redundant `bind()`. On iOS the guard is the explicit
+epoch comparison after the `await`, which is far easier to prove than reasoning about actor
+scheduling.
+
+`ensureListening()` therefore has a new failure mode on both platforms. iOS already handled it
+(`try? await bulkTransport.ensureListening()`); Android's coordinator did not handle a bind failure
+at all, and now releases `BulkOperationGate` and pumps the queue exactly as iOS does — without that,
+a failed bind would have leaked the cross-role slot and blocked every later transfer in both
+directions until the next session boundary.
+
+**Both transports now take the `ControlChannel` interface rather than the concrete
+`TlsControlChannel`.** This is a constructor signature change in `network`/`RideLinkPlatform` and
+nothing more: production has exactly one implementation and `AppContainer`/`SessionCoordinator`
+remain its only call sites, so CLAUDE.md rule 14 is untouched — there is still no plaintext
+production transport and the plaintext fixture still lives only in a test source set. It is what lets
+Finding B's race be driven by a test double whose `bind()` suspends exactly where the race needs it,
+rather than by hoping a real TLS bind happens to be slow. `ControlSessionManager` already declared
+its channel this way on both platforms; this makes the bulk transport consistent with it.
+
+**Finding C — `BulkOperationGate` ownership was being used as a proxy for "the session is still
+current", and the two are not simultaneous, HIGH.** A3 introduced `ProviderSessionContext` and then,
+after `bulkGate.tryAcquire` succeeded, used `bulkGate.isOwner(transferId)` alone at every later
+suspension point — on the stated reasoning that `onSessionBoundary()` unconditionally invalidates the
+gate on every boundary. It does. But it does not do so at the same instant the live session moves:
+
+- **iOS** — A3's own fix made `onSessionBoundary()` `async`. It bumps `sessionEpoch`, then
+  `await`s `bulkTransport.close()`, and only *afterwards* calls `bulkGate.invalidate()`. Throughout
+  that `await` the epoch has already advanced while the gate still names the old transfer, so
+  `stillAuthorised` answered `true` for an operation that was already stale — and A3's claim that
+  gate ownership is equivalent to "the session is still current" is false for exactly that interval.
+- **Android** — the boundary's three steps run with no suspension between them, but
+  `ControlSessionManager` bumps `currentAuthGeneration` *before* emitting the `Connected` event that
+  runs `onSessionBoundary()`, so the same shape exists between those two moments, reached by a
+  different route.
+
+The reachable consequence is the one A3 set out to prevent, one checkpoint later: a stale request
+minting a `bulk_token` under the **new** session's generation and putting a `TRANSFER_OFFER` on the
+wire — offering old peer A's requested file to whichever peer is connected now.
+
+**Finding C — fixed by joining both halves in one pure, mirrored decision.**
+`BulkOperationGate.stillAuthorises(transferId, authorisation, liveGeneration, livePeerSpki)` is new
+on both platforms: gate ownership **and** `ProviderSessionContext.isStillCurrent`, neither standing
+in for the other. Both coordinators' `stillAuthorised` helpers now thread the
+`ProviderSessionContext` they already build at dispatch time through every post-acquisition
+checkpoint. Putting the decision in `core`/`RideLinkCore` rather than at each call site is
+deliberate: it is what makes the rule unit-testable on **both** platforms, including on iOS, where
+`ios/RideLink.xcodeproj` still has exactly one native target and the coordinator itself cannot be
+tested at all (the gap A3 disclosed, unchanged and undiminished here). One ordering detail matters on
+iOS and is commented in the code: `currentPeerSpki` is read *before* `sessionEpoch.current()`,
+because Swift evaluates arguments left to right and an inline `await` in the second position would
+compare a pre-suspension epoch against a post-suspension peer.
+
+**Session-boundary ordering, stated once.** After this amendment the sequence on both platforms is:
+bump the session generation/epoch → supersede the operation fence → close/cancel the transport (which
+bumps the listener epoch *first*, so no in-flight bind can republish, then closes the listener and
+any live socket and clears every token) → invalidate `BulkOperationGate` → allow new-session
+activity. A5 does not reorder A4's Finding V fix; it makes the *authorisation* check correct
+throughout the interval that ordering necessarily spans.
+
+**Tests.** Android: four new real-loopback-TLS cases in `network.transfer.BulkTransportManagerTest`
+(explicit cancel ends a parked accept promptly; a wrong-`transfer_id` cancel does not; the cancelled
+token no longer validates; a fresh transfer works afterwards), a new
+`network.transfer.BulkListenerLifetimeTest` (2 cases, the bind-versus-`close` and
+bind-versus-`cancelActive` publication races, driven by a `ControlChannel` double whose `bind()`
+suspends on demand), five new pure cases in `core.transfer.BulkOperationGateTest`, and four new
+coordinator-level cases in `app.library.SharedLibraryCoordinatorProviderAuthorizationTest` — the two
+Finding C races (generation moved, peer moved, gate deliberately *not* invalidated), a
+`transfer_id`-routed cancel, and the failed-`ensureListening` slot release. iOS: four new cases in
+`RideLinkPlatformTests.TransferManagerTests` mirroring the Android transport cases plus the
+actor-reentrancy publication race, and five new cases in `RideLinkCoreTests.BulkOperationGateTests`.
+The A4 case that asserted the *old* behaviour (`a serve nobody ever dials is not rescued by
+cancelActive, only by closing the listener`) is rewritten to assert only the half that is still
+true — that a `serve` nobody cancels is ended by the session boundary's `close()`.
+
+**Found while stress-running this session's own work: two `@Test` methods had never executed, on
+any run, in any audit.** `BulkTransportManagerTest` declares 16 `@Test` methods; the JUnit XML said
+14. The cause is a Kotlin/JUnit-5 interaction with no diagnostic at all: these are expression-bodied
+tests (`fun \`x\`() = runBlocking { ... }`), so the return type is inferred from the block's last
+expression, and two of them ended in `serveResult.await()` and therefore returned
+`BulkServeOutcome` rather than `Unit`. **JUnit 5 silently does not discover a `@Test` method whose
+return type is not `void`** — no failure, no skip, no warning through Gradle. The two invisible
+cases were the bulk plane's wrong-SPKI rejection proof and **A1's own Finding C/D/N `cancelActive`
+proof**, both cited in earlier amendments as covering behaviour they were not in fact exercising.
+Both were pre-existing at `10e8339` and predate this session.
+
+Fixed by declaring `(): Unit =` explicitly on both, with the reason recorded in the class KDoc so it
+is not dropped as noise. **Both pass on their first real execution** — they were correct all along,
+merely never run, so nothing else changes. Found by comparing declared `@Test` counts against each
+JUnit XML's `tests=` attribute and confirming with `javap`; the same scan was then run across
+**every** compiled test class in all five Android modules and found no other instance, and the iOS
+side is exact on both packages (249 declared / 249 executed, 282 / 282), so this was isolated to
+these two methods. It is recorded here rather than quietly fixed because "the suite is green" and
+"the suite ran" turned out to be different claims — the same lesson this ADR's amendment history
+keeps producing, in a new place.
+
+**Every new regression was verified to fail against the pre-fix behaviour**, by three targeted
+mutations of the production code on each platform rather than by assertion: making `cancelActive`
+ignore the `WaitingForAccept` phase (Android 4 failures, iOS 3), removing the epoch check at the
+publication point (Android 1, iOS 1 — the iOS run showing the stale listener genuinely published and
+still accepting on its old port), and reducing `stillAuthorises` to `isOwner` alone (Android 3 pure +
+2 coordinator, iOS 3 pure). No pre-existing case failed under any mutation, which is what
+distinguishes these regressions from tests that merely pass.
+
+**A stress flake, investigated rather than re-run — root cause identified, and it is not this
+session's.** The bulk-transport suite failed once in the first 100-run stress against the final tree
+(run 91: `18 tests completed, 1 failed`, **32 s** against a ~4 s norm), then twice more in a
+200-run instrumented re-run that preserved the JUnit XML. Those artifacts, plus a matched baseline,
+settle it:
+
+| Tree | Runs | Failures | Rate |
+|---|---|---|---|
+| HEAD `10e8339`, this session's changes stashed | 200 | 1 | 0.50 % |
+| This session's tree | 420 | 3 | 0.71 % |
+
+**The same root event in every captured case: the requester's loopback TLS connect to the
+provider's bulk port intermittently fails.** The clearest artifact is the *baseline* one, on
+unmodified pre-change code — `happy path transfers every chunk in order` failing
+`expected: <OK> but was: <CONNECTION_LOST>` after 30.058 s: the `fetch` could not connect, so the
+provider's `serve` sat out A4's full 30 s accept bound. The two failures on this session's tree are
+the same event landing in different tests, where it presents as a 60 s class-timeout instead of an
+assertion, because the four raw-frame harness tests wait on an **unbounded** `listener.accept()`
+inside their `coroutineScope` — when the client never arrives, that scope can never complete and
+the real error is masked. Rates of 0.50 % and 0.71 % are indistinguishable, which is what attributes
+this to a pre-existing environmental condition on this machine (rapid ephemeral-socket churn across
+hundreds of consecutive Gradle/JVM runs) rather than to anything changed here — the same
+matched-baseline method A4 used to attribute *its* flake, applied to a different conclusion.
+
+**One test-side timing defect was found and fixed along the way, independently of that.**
+`cancelActive unblocks a fetch genuinely stuck...` — one of the two revived tests above — waited a
+fixed `delay(500)` before cancelling. If the fetch has not connected by then, `cancelActive` is
+*correctly* a no-op, and the test then reports a confusing 10 s timeout. It now waits on a real
+state transition instead: chunk 0 actually delivered to the sink, plus an assertion that the
+transport's connected phase really names this `transfer_id` — the precise precondition its own name
+claims — and it bounds the trailing `serve` await so a parked accept cannot silently add 30 s. That
+is a strict improvement whether or not it was ever the flake. The one `Thread.sleep` left in the
+suite is in the wrong-`transfer_id` case, where the claim is the *absence* of an effect and there is
+by definition no transition to wait on; that is documented in place.
+
+**Not fixed, and recorded as an out-of-scope observation rather than widened into:** the raw-frame
+harness tests' unbounded `listener.accept()`. It does not cause the flake, but it *masks* it,
+turning a one-line assertion failure into a 60 s hang with no indication of the real cause — which
+cost real time this session. The module already has the bounded `ControlListener.acceptWithin` that
+would fix it in one line. Left alone deliberately: this session's brief was scoped to three
+lifecycle findings, and those tests are otherwise untouched by it.
+
+**Out of scope and unchanged.** `TransferReducer` integration remains the tech debt A4 recorded;
+`DISK_FULL` remains reserved; §7's same-size-replacement limitation is unchanged; and the residual
+window in which a `TRANSFER_CANCEL` can arrive before the provider's own `serve` coroutine has
+started — where the cancel is a no-op and A4's 30 s bound is what applies — is recorded here rather
+than closed, because closing it would mean tracking not-yet-started operations in the transport for a
+window a network round trip makes vanishingly unlikely. The cancelled token is removed regardless, so
+even in that window the abandoned offer is no longer authorised.
