@@ -60,7 +60,7 @@ final class TransferManagerTests: XCTestCase {
             transferId: transferId, expectedPeerSpki: bob.identitySpkiSha256,
             currentGeneration: { generation }, source: source)
         let fetchResult = await client.fetch(
-            host: "127.0.0.1", port: port, token: token, expectedPeerSpki: alice.identitySpkiSha256,
+            transferId: transferId, host: "127.0.0.1", port: port, token: token, expectedPeerSpki: alice.identitySpkiSha256,
             expectedChunkCount: 2, sink: sink)
         let serveResult = await serveTask
 
@@ -90,7 +90,7 @@ final class TransferManagerTests: XCTestCase {
         async let serveTask = server.serve(
             transferId: transferId, expectedPeerSpki: bob.identitySpkiSha256, currentGeneration: { 1 }, source: source)
         let fetchResult = await client.fetch(
-            host: "127.0.0.1", port: port, token: token, expectedPeerSpki: alice.identitySpkiSha256,
+            transferId: transferId, host: "127.0.0.1", port: port, token: token, expectedPeerSpki: alice.identitySpkiSha256,
             expectedChunkCount: 1, sink: RecordingChunkSink())
         _ = await serveTask
 
@@ -112,7 +112,7 @@ final class TransferManagerTests: XCTestCase {
         async let serveTask = server.serve(
             transferId: transferId, expectedPeerSpki: bob.identitySpkiSha256, currentGeneration: { 1 }, source: source)
         let fetchResult = await client.fetch(
-            host: "127.0.0.1", port: port, token: wrongToken, expectedPeerSpki: alice.identitySpkiSha256,
+            transferId: transferId, host: "127.0.0.1", port: port, token: wrongToken, expectedPeerSpki: alice.identitySpkiSha256,
             expectedChunkCount: 1, sink: RecordingChunkSink())
         let serveResult = await serveTask
 
@@ -138,7 +138,7 @@ final class TransferManagerTests: XCTestCase {
         async let serveTask = server.serve(
             transferId: transferId, expectedPeerSpki: bob.identitySpkiSha256, currentGeneration: { 2 }, source: source)
         let fetchResult = await client.fetch(
-            host: "127.0.0.1", port: port, token: staleToken, expectedPeerSpki: alice.identitySpkiSha256,
+            transferId: transferId, host: "127.0.0.1", port: port, token: staleToken, expectedPeerSpki: alice.identitySpkiSha256,
             expectedChunkCount: 1, sink: RecordingChunkSink())
         let serveResult = await serveTask
 
@@ -175,7 +175,7 @@ final class TransferManagerTests: XCTestCase {
             transferId: transferId, expectedPeerSpki: bob.identitySpkiSha256,
             currentGeneration: { generation }, source: source)
         let fetchResult = await client.fetch(
-            host: "127.0.0.1", port: port, token: token, expectedPeerSpki: alice.identitySpkiSha256,
+            transferId: transferId, host: "127.0.0.1", port: port, token: token, expectedPeerSpki: alice.identitySpkiSha256,
             expectedChunkCount: Int64(pieces.count), sink: sink)
         let serveResult = await serveTask
 
@@ -221,7 +221,7 @@ final class TransferManagerTests: XCTestCase {
 
         // Let the first one complete normally, proving the gate does not wedge the real operation.
         let fetchResult = await client.fetch(
-            host: "127.0.0.1", port: port, token: token1, expectedPeerSpki: alice.identitySpkiSha256,
+            transferId: transferId1, host: "127.0.0.1", port: port, token: token1, expectedPeerSpki: alice.identitySpkiSha256,
             expectedChunkCount: 1, sink: RecordingChunkSink())
         let firstOutcome = await firstServe
         XCTAssertEqual(.ok, fetchResult)
@@ -250,13 +250,13 @@ final class TransferManagerTests: XCTestCase {
             transferId: transferId, expectedPeerSpki: bob.identitySpkiSha256,
             currentGeneration: { generation }, source: hangingSource)
         async let fetchResult: BulkFetchOutcome = client.fetch(
-            host: "127.0.0.1", port: port, token: token, expectedPeerSpki: alice.identitySpkiSha256,
+            transferId: transferId, host: "127.0.0.1", port: port, token: token, expectedPeerSpki: alice.identitySpkiSha256,
             expectedChunkCount: 5, sink: RecordingChunkSink())
 
         // Give the real loopback connection time to actually deliver the one chunk the server does
         // send, so the client is genuinely parked waiting for more.
         try await Task.sleep(nanoseconds: 300_000_000)
-        await client.cancelActive()
+        await client.cancelActive(transferId: transferId)
 
         let outcome = await fetchResult
         XCTAssertTrue(
@@ -270,8 +270,105 @@ final class TransferManagerTests: XCTestCase {
     func testCancelActiveIsASafeNoOpWhenNothingIsActive() async throws {
         let alice = try TestTlsSupport.freshIdentity()
         let server = manager(alice)
-        await server.cancelActive()
-        await server.cancelActive()
+        let transferId = TransferId("01J9Z4M3RT8V2W5X7Y9Z1A3B5N")
+        await server.cancelActive(transferId: transferId)
+        await server.cancelActive(transferId: transferId)
+    }
+
+    // MARK: - ADR-023 Amendment A3: operation-aware cancellation and awaited teardown ordering
+
+    /// The exact race the closure audit found (spec section 5/18): a coordinator schedules
+    /// `Task { await transport.cancelActive(transferId: A) }` and does *not* await it before moving
+    /// on — here, standing in for that, the cancel for A is issued deliberately late, well after A
+    /// has already finished a completely ordinary transfer and a *second*, genuinely in-flight
+    /// transfer B has taken over the one shared socket. Before this amendment, a manager-wide
+    /// `cancelActive()` would have blindly closed whatever `activeSocket` was current — B's — the
+    /// moment this call finally ran. `cancelActive(transferId:)` must instead see that
+    /// `activeTransferId` no longer names A and do nothing.
+    func testADelayedCancelForAFinishedTransferCannotCloseALaterOnesSocket() async throws {
+        let alice = try TestTlsSupport.freshIdentity()
+        let bob = try TestTlsSupport.freshIdentity()
+        let server = manager(alice)
+        let client = manager(bob)
+
+        let port = try await server.ensureListening()
+        let transferIdA = TransferId("01J9Z4M3RT8V2W5X7Y9Z1A3B5T")
+        let transferIdB = TransferId("01J9Z4M3RT8V2W5X7Y9Z1A3B5W")
+        let generation: Int64 = 1
+        let tokenA = await server.issueToken(transferId: transferIdA, generation: generation)
+
+        // A completes an entirely ordinary transfer — its own cleanup clears activeTransferId/
+        // activeSocket, exactly like a legitimate completion, not a cancellation.
+        async let serveA: BulkServeOutcome = server.serve(
+            transferId: transferIdA, expectedPeerSpki: bob.identitySpkiSha256,
+            currentGeneration: { generation }, source: ArrayChunkSource([[UInt8](repeating: 0, count: 10)]))
+        let fetchA = await client.fetch(
+            transferId: transferIdA, host: "127.0.0.1", port: port, token: tokenA, expectedPeerSpki: alice.identitySpkiSha256,
+            expectedChunkCount: 1, sink: RecordingChunkSink())
+        _ = await serveA
+        XCTAssertEqual(.ok, fetchA)
+
+        // B starts a second, later transfer over the same manager — genuinely mid-flight, its own
+        // socket really open and parked waiting for more chunks.
+        let tokenB = await server.issueToken(transferId: transferIdB, generation: generation)
+        let hangingSource = HangingThenOneMoreChunkSource(
+            firstChunk: [UInt8](repeating: 0, count: 10), secondChunk: [UInt8](repeating: 1, count: 10)
+        )
+        async let serveB: BulkServeOutcome = server.serve(
+            transferId: transferIdB, expectedPeerSpki: bob.identitySpkiSha256,
+            currentGeneration: { generation }, source: hangingSource)
+        async let fetchB: BulkFetchOutcome = client.fetch(
+            transferId: transferIdB, host: "127.0.0.1", port: port, token: tokenB, expectedPeerSpki: alice.identitySpkiSha256,
+            expectedChunkCount: 2, sink: RecordingChunkSink())
+        // Deterministically wait for B's socket to actually be accepted (activeTransferId really
+        // set to B), rather than guessing with a fixed sleep.
+        while await server.activeTransferIdForTesting != transferIdB {
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+
+        // The stale cancellation meant for A — long finished — arrives only now. It must be a
+        // no-op: `activeTransferId` currently names B, not A.
+        await server.cancelActive(transferId: transferIdA)
+
+        await hangingSource.release()
+        let outcomeB = await serveB
+        let fetchOutcomeB = await fetchB
+        XCTAssertEqual(.ok, outcomeB, "B's transfer must complete normally — the stale cancel(A) must not have touched it")
+        XCTAssertEqual(.ok, fetchOutcomeB)
+    }
+
+    /// The precondition `SharedLibraryCoordinator.onSessionBoundary`'s Amendment A3 fix depends on:
+    /// `close()` must have genuinely finished all teardown — old listener gone, old socket gone —
+    /// by the time its `await` returns, not merely have scheduled that work. (The coordinator now
+    /// `await`s this call before invalidating `BulkOperationGate` or letting any new-session activity
+    /// begin, precisely so a delayed old-session teardown can never race a new session's listener.)
+    func testCloseCompletesFullyBeforeReturningSoANewListenerWorksImmediatelyAfter() async throws {
+        let alice = try TestTlsSupport.freshIdentity()
+        let bob = try TestTlsSupport.freshIdentity()
+        let server = manager(alice)
+
+        let oldPort = try await server.ensureListening()
+        let transferId = TransferId("01J9Z4M3RT8V2W5X7Y9Z1A3B5V")
+        let generation: Int64 = 1
+        _ = await server.issueToken(transferId: transferId, generation: generation)
+        let hangingSource = HangingAfterFirstChunkSource(firstChunk: [UInt8](repeating: 0, count: 10))
+        async let serveResult: BulkServeOutcome = server.serve(
+            transferId: transferId, expectedPeerSpki: bob.identitySpkiSha256,
+            currentGeneration: { generation }, source: hangingSource)
+        try await Task.sleep(nanoseconds: 200_000_000) // let the socket genuinely open
+
+        await server.close()
+        await hangingSource.release()
+        _ = await serveResult
+
+        // The old listener must genuinely be gone — connecting to its port must fail outright.
+        let staleConnection = try? await TestTlsSupport.channel(bob).connect(host: "127.0.0.1", port: oldPort)
+        XCTAssertNil(staleConnection, "the old listener must not still be accepting after close() returns")
+
+        // A fresh listener opens cleanly right after — exactly what a new session's own
+        // `ensureListening()` does immediately once the now-`await`ed close() has returned.
+        let newPort = try await server.ensureListening()
+        XCTAssertNotEqual(oldPort, newPort)
     }
 
     // MARK: - Closure-audit Finding K: frame ordering/count validation
@@ -304,7 +401,7 @@ final class TransferManagerTests: XCTestCase {
 
         async let serverTask: Void = try Self.writeRawFrames(listener, [(0, [UInt8](repeating: 0, count: 10)), (0, [UInt8](repeating: 0, count: 10))])
         let fetchResult = await client.fetch(
-            host: "127.0.0.1", port: listener.localPort, token: String(repeating: "0", count: 64),
+            transferId: TransferId("01J9Z4M3RT8V2W5X7Y9Z1A3B5P"), host: "127.0.0.1", port: listener.localPort, token: String(repeating: "0", count: 64),
             expectedPeerSpki: alice.identitySpkiSha256, expectedChunkCount: 2, sink: RecordingChunkSink())
         _ = try await serverTask
 
@@ -321,7 +418,7 @@ final class TransferManagerTests: XCTestCase {
 
         async let serverTask: Void = try Self.writeRawFrames(listener, [(0, [UInt8](repeating: 0, count: 10)), (2, [UInt8](repeating: 0, count: 10))])
         let fetchResult = await client.fetch(
-            host: "127.0.0.1", port: listener.localPort, token: String(repeating: "0", count: 64),
+            transferId: TransferId("01J9Z4M3RT8V2W5X7Y9Z1A3B5Q"), host: "127.0.0.1", port: listener.localPort, token: String(repeating: "0", count: 64),
             expectedPeerSpki: alice.identitySpkiSha256, expectedChunkCount: 3, sink: RecordingChunkSink())
         _ = try await serverTask
 
@@ -338,7 +435,7 @@ final class TransferManagerTests: XCTestCase {
 
         async let serverTask: Void = try Self.writeRawFrames(listener, [(1, [UInt8](repeating: 0, count: 10)), (0, [UInt8](repeating: 0, count: 10))])
         let fetchResult = await client.fetch(
-            host: "127.0.0.1", port: listener.localPort, token: String(repeating: "0", count: 64),
+            transferId: TransferId("01J9Z4M3RT8V2W5X7Y9Z1A3B5R"), host: "127.0.0.1", port: listener.localPort, token: String(repeating: "0", count: 64),
             expectedPeerSpki: alice.identitySpkiSha256, expectedChunkCount: 2, sink: RecordingChunkSink())
         _ = try await serverTask
 
@@ -358,7 +455,7 @@ final class TransferManagerTests: XCTestCase {
         // satisfied by a *different* code path.
         async let serverTask: Void = try Self.writeRawFrames(listener, [(0, [UInt8](repeating: 0, count: 10)), (1, [UInt8](repeating: 0, count: 10))])
         let fetchResult = await client.fetch(
-            host: "127.0.0.1", port: listener.localPort, token: String(repeating: "0", count: 64),
+            transferId: TransferId("01J9Z4M3RT8V2W5X7Y9Z1A3B5S"), host: "127.0.0.1", port: listener.localPort, token: String(repeating: "0", count: 64),
             expectedPeerSpki: alice.identitySpkiSha256, expectedChunkCount: 1, sink: RecordingChunkSink())
         _ = try await serverTask
 
@@ -382,6 +479,42 @@ private actor HangingAfterFirstChunkSource: ChunkSource {
         }
         await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
             self.continuation = continuation
+        }
+        return nil
+    }
+
+    func release() {
+        continuation?.resume()
+        continuation = nil
+    }
+}
+
+/// Like [HangingAfterFirstChunkSource], but resumes with one further real chunk after [release]
+/// instead of ending the stream — so a caller that wants the transfer to genuinely *succeed* once
+/// released (rather than end via the provider closing early) has an outcome-accurate source to
+/// pair with a client `expectedChunkCount` of 2.
+private actor HangingThenOneMoreChunkSource: ChunkSource {
+    private let firstChunk: [UInt8]
+    private let secondChunk: [UInt8]
+    private var served = 0
+    private var continuation: CheckedContinuation<Void, Never>?
+
+    init(firstChunk: [UInt8], secondChunk: [UInt8]) {
+        self.firstChunk = firstChunk
+        self.secondChunk = secondChunk
+    }
+
+    func nextChunk() async -> [UInt8]? {
+        if served == 0 {
+            served = 1
+            return firstChunk
+        }
+        if served == 1 {
+            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                self.continuation = continuation
+            }
+            served = 2
+            return secondChunk
         }
         return nil
     }
