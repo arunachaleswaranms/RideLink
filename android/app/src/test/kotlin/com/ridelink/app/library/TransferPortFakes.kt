@@ -82,6 +82,15 @@ class FakeBulkTransportPort : BulkTransportPort {
     var fetchOutcome = BulkFetchOutcome.OK
     var cancelActiveCallCount = 0
         private set
+
+    /** ADR-023 Amendment A5: every `transfer_id` [cancelActive] was called with, in order — so a
+     *  test can assert a cancel was routed to the transfer it actually named. */
+    val cancelActiveCalls = mutableListOf<TransferId>()
+
+    /** ADR-023 Amendment A5 Finding B: when set, [ensureListening] throws it instead of returning a
+     *  port — the real `BulkTransportManager.ensureListening()` now fails exactly this way when a
+     *  session boundary ends the listener lifetime while its `bind()` is still in flight. */
+    var ensureListeningFailure: java.io.IOException? = null
     var closeCallCount = 0
         private set
 
@@ -94,6 +103,7 @@ class FakeBulkTransportPort : BulkTransportPort {
     override suspend fun ensureListening(): Int {
         ensureListeningCallCount += 1
         ensureListeningGate?.await()
+        ensureListeningFailure?.let { throw it }
         return FAKE_PORT
     }
 
@@ -120,7 +130,7 @@ class FakeBulkTransportPort : BulkTransportPort {
     /** Held open, [fetch] stays genuinely in flight — the requester-role twin of [serveGate], for
      *  landing a user cancellation or a session boundary *during* a real transfer rather than
      *  before or after one. Completed by [cancelActive] too, mirroring how the real
-     *  `BulkTransportManager.cancelActive()` force-closes the socket a blocked `fetch` is parked on. */
+     *  `BulkTransportManager.cancelActive(transferId)` force-closes the socket a blocked `fetch` is parked on. */
     var fetchGate: CompletableDeferred<Unit>? = null
     val fetchCalls = mutableListOf<TransferId>()
 
@@ -130,7 +140,9 @@ class FakeBulkTransportPort : BulkTransportPort {
      *  the hash from the file on disk (ADR-023 §6) and will not be fooled. */
     var fetchPayload: ByteArray? = null
 
+    @Suppress("LongParameterList")
     override suspend fun fetch(
+        transferId: TransferId,
         host: String,
         port: Int,
         token: String,
@@ -138,30 +150,36 @@ class FakeBulkTransportPort : BulkTransportPort {
         expectedChunkCount: Long,
         sink: ChunkSink,
     ): BulkFetchOutcome {
+        fetchCalls.add(transferId)
         fetchPayload?.let { sink.onChunk(0L, it) }
         fetchGate?.await()
         return fetchOutcome
     }
 
     /**
-     * The real `BulkTransportManager.cancelActive()` force-closes the socket the active
+     * The real `BulkTransportManager.cancelActive(transferId)` force-closes the socket the active
      * `serve`/`fetch` call is parked on, which is what makes that call return promptly instead of
      * hanging. Releasing the gates models exactly that, so a test drives the *production* unblock
      * path. The outcome the unblocked call then returns is the test's to choose ([fetchOutcome]) —
      * a force-closed socket normally yields a failure, but a transfer whose bytes had all already
      * arrived returns `OK`, and that is the case Amendment A4's Finding V is about.
      */
-    override fun cancelActive() {
+    override fun cancelActive(transferId: TransferId) {
         cancelActiveCallCount += 1
+        cancelActiveCalls.add(transferId)
         fetchGate?.complete(Unit)
         serveGate?.complete(Unit)
     }
 
-    /** The real `close()` calls `cancelActive()` (ADR-023 §1) — so it unblocks too, and does so
-     *  *synchronously*, which is the ordering Amendment A4's Finding V turns on. */
+    /** The real `close()` force-closes whatever operation is live (ADR-023 §1) — so it unblocks
+     *  too, and does so *synchronously*, which is the ordering Amendment A4's Finding V turns on.
+     *  Unconditional, unlike [cancelActive]: a session boundary tears down whatever is live no
+     *  matter whose it is, so this does not record a [cancelActiveCalls] entry. */
     override fun close() {
         closeCallCount += 1
-        cancelActive()
+        cancelActiveCallCount += 1
+        fetchGate?.complete(Unit)
+        serveGate?.complete(Unit)
     }
 
     private companion object {

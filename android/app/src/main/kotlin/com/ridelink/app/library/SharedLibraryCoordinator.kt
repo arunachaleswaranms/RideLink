@@ -102,8 +102,18 @@ data class DownloadState(
  * generation/peer on, so a stale request could otherwise acquire the freed slot and go on to mint a
  * token and send an offer under the *new* session, potentially serving old peer A's file to
  * whichever peer is connected now. [com.ridelink.core.transfer.ProviderSessionContext] captures the
- * authorising generation/peer once and [stillAuthorised] re-proves it (via [bulkGate] ownership,
- * once acquired) at every one of those suspension points.
+ * authorising generation/peer once and [stillAuthorised] re-proves it at every one of those
+ * suspension points.
+ *
+ * **Post-acquisition authorisation is both halves (ADR-023 Amendment A5).** A3 used
+ * [BulkOperationGate.isOwner] alone after acquisition, on the reasoning that a session boundary
+ * always invalidates the gate. It does — but not at the same instant the live session moves:
+ * [ControlSessionManager.currentAuthGeneration] is bumped before the `Connected` event that runs
+ * [onSessionBoundary] is even dispatched, and on iOS the boundary `await`s the transport close
+ * between bumping its epoch and invalidating the gate. In both windows the gate still names this
+ * transfer while the session that authorised it is already gone. [stillAuthorised] therefore joins
+ * gate ownership *and* [com.ridelink.core.transfer.ProviderSessionContext.isStillCurrent], through
+ * the pure [BulkOperationGate.stillAuthorises].
  *
  * One collaborator per Phase 4 layer (core/network/data) in the constructor below, matching
  * `AppContainer`'s own composition-root style.
@@ -262,7 +272,7 @@ class SharedLibraryCoordinator(
             // active slot (e.g. cancelling during NEGOTIATING, before any bulk socket opened, or
             // while the shared slot happens to belong to this session's own provider operation).
             if (transferId != null && bulkGate.isOwner(transferId)) {
-                bulkTransport.cancelActive()
+                bulkTransport.cancelActive(transferId)
             }
             if (transferId != null) bulkGate.releaseIfOwner(transferId)
             cacheStorage.deletePart(contentHash)
@@ -474,7 +484,15 @@ class SharedLibraryCoordinator(
                                 DownloadState(TransferStatus.TRANSFERRING, bytesReceived = received, totalBytes = offer.sizeBytes)
                             setState(hash, progress, opToken)
                         }
-                    bulkTransport.fetch(peerHost, offer.bulkPort, offer.bulkToken, peerSpki, offer.chunkCount.toLong(), sink)
+                    bulkTransport.fetch(
+                        transferId,
+                        peerHost,
+                        offer.bulkPort,
+                        offer.bulkToken,
+                        peerSpki,
+                        offer.chunkCount.toLong(),
+                        sink,
+                    )
                 } finally {
                     // Amendment A4 Finding V: `finally`, not a plain call after `fetch` returns —
                     // a cancelled Job throws CancellationException out of `fetch`'s own suspension
@@ -609,7 +627,7 @@ class SharedLibraryCoordinator(
      */
     private fun handlePeerCancel(message: TransferMessage.Cancel) {
         if (bulkGate.isOwner(message.transferId)) {
-            bulkTransport.cancelActive()
+            bulkTransport.cancelActive(message.transferId)
         }
     }
 
@@ -655,14 +673,24 @@ class SharedLibraryCoordinator(
                 // requester's own negotiation timeout resolves this (brief §19 — no BUSY wire shape).
                 val owner = BulkOperationOwner.Provider(request.transferId, request.contentHash, peerSpki, authorisingGeneration)
                 if (!bulkGate.tryAcquire(owner)) return
-                val port = bulkTransport.ensureListening()
-                // Amendment A3: every suspension point from here on re-checks bulkGate.isOwner
-                // instead of re-deriving generation/peerSpki — onSessionBoundary() unconditionally
-                // calls bulkGate.invalidate() on *every* boundary, and transfer_id is a fresh ULID
-                // never reused (ADR-023 §2), so "do I still own my own slot" is an equally correct,
-                // strictly simpler proxy for "has a boundary happened since I acquired" than
-                // re-reading generation/peerSpki again at each step.
-                if (!stillAuthorised(request.transferId)) return
+                // Amendment A5 Finding B: ensureListening() now fails rather than publishing a
+                // listener bound under a lifetime a session boundary already ended — an outcome
+                // this path must handle, or the gate would leak and block every later transfer in
+                // both roles. Mirrors iOS's `try? await bulkTransport.ensureListening()`.
+                @Suppress("SwallowedException") // one outcome for every bind failure: give the slot back
+                val port =
+                    try {
+                        bulkTransport.ensureListening()
+                    } catch (io: java.io.IOException) {
+                        bulkGate.releaseIfOwner(request.transferId)
+                        pumpQueue()
+                        return
+                    }
+                // Amendment A3/A5: every suspension point from here on re-checks both halves of the
+                // authorisation — that this operation still owns the slot, and that the session
+                // which authorised it is still live. See [stillAuthorised] for why gate ownership
+                // alone (A3's proxy) is not sufficient.
+                if (!stillAuthorised(request.transferId, authorisation)) return
                 // Closure-audit Finding A: read the *live* current authenticated generation both at
                 // issuance and again, independently, at consumption time — never a value captured
                 // once and replayed. A stale closure over a captured `val` would defeat ADR-023 §3's
@@ -675,7 +703,7 @@ class SharedLibraryCoordinator(
                     pumpQueue() // cross-role: wake a local download left queued behind this attempt
                     return
                 }
-                if (!stillAuthorised(request.transferId)) {
+                if (!stillAuthorised(request.transferId, authorisation)) {
                     bulkGate.releaseIfOwner(request.transferId)
                     pumpQueue()
                     return
@@ -695,7 +723,7 @@ class SharedLibraryCoordinator(
                     // Amendment A3: the launched coroutine itself may not start immediately —
                     // re-check once more, as the very first thing it does, before ever opening the
                     // local file or calling serve().
-                    if (!stillAuthorised(request.transferId)) {
+                    if (!stillAuthorised(request.transferId, authorisation)) {
                         pumpQueue()
                         return@launch
                     }
@@ -737,14 +765,31 @@ class SharedLibraryCoordinator(
     }
 
     /**
-     * ADR-023 Amendment A3: whether [transferId] still holds [bulkGate] — the post-acquisition
-     * proxy for "no session boundary has run since this operation acquired the slot," used at
-     * every suspension point [serveTransferRequest] passes through after [BulkOperationGate.tryAcquire]
-     * succeeds. Valid because [onSessionBoundary] unconditionally calls [BulkOperationGate.invalidate]
-     * on *every* boundary and a `transfer_id` is a fresh ULID never reused (ADR-023 §2), so no other
-     * operation can ever be mistaken for this one.
+     * ADR-023 Amendment A5: the post-acquisition authorisation check, now **both** halves — the
+     * slot is still [transferId]'s *and* the session that authorised the request is still the live
+     * one. The decision itself is [BulkOperationGate.stillAuthorises], pure and mirrored, so it is
+     * unit-testable on both platforms rather than only on the one whose coordinator has a test
+     * target.
+     *
+     * A3 used [BulkOperationGate.isOwner] alone here, reasoning that [onSessionBoundary]
+     * unconditionally invalidates the gate on every boundary. A5 found that the two are not
+     * simultaneous: [ControlSessionManager.currentAuthGeneration] is bumped by the session layer
+     * *before* the `Connected` event that triggers [onSessionBoundary] is dispatched, so between
+     * those two moments the gate still names this transfer while the live session has already moved
+     * to the next peer — and gate ownership alone answers "yes, still authorised" for an operation
+     * that is already stale. Re-checking [authorisation] closes that window; the gate check stays,
+     * because it is what stops an operation acting after it has *lost the slot* to a fresher one.
      */
-    private fun stillAuthorised(transferId: TransferId): Boolean = bulkGate.isOwner(transferId)
+    private fun stillAuthorised(
+        transferId: TransferId,
+        authorisation: ProviderSessionContext,
+    ): Boolean =
+        bulkGate.stillAuthorises(
+            transferId,
+            authorisation,
+            controlSessionManager.currentAuthGeneration,
+            controlSessionManager.currentPeerSpki,
+        )
 
     private companion object {
         const val NEGOTIATION_TIMEOUT_MS = 10_000L

@@ -11,7 +11,7 @@ import XCTest
 final class TransferManagerTests: XCTestCase {
     private func manager(_ identity: DeviceIdentity) -> TransferManager {
         TransferManager(
-            tlsChannel: TestTlsSupport.channel(identity),
+            channel: TestTlsSupport.channel(identity),
             monotonicNowUs: { Int64(DispatchTime.now().uptimeNanoseconds / 1000) }
         )
     }
@@ -319,6 +319,232 @@ final class TransferManagerTests: XCTestCase {
         await server.cancelActive(transferId: transferId)
     }
 
+    // MARK: - ADR-023 Amendment A5 Finding A: explicit cancellation while parked in accept()
+
+    /// Waits until `manager` reports `transferId` as the transfer parked in `accept()`.
+    /// Deterministic on a real state hook rather than a guessed sleep — the same shape
+    /// `testADelayedCancelForAFinishedTransferCannotCloseALaterOnesSocket` already uses for the
+    /// connected phase. Bounded so a regression fails the test instead of hanging it.
+    private func awaitPendingAccept(_ manager: TransferManager, _ transferId: TransferId) async throws {
+        for _ in 0..<Self.pollAttempts {
+            if await manager.pendingAcceptTransferIdForTesting == transferId { return }
+            try await Task.sleep(nanoseconds: Self.pollIntervalNs)
+        }
+        XCTFail("serve never reached its pending-accept phase")
+    }
+
+    /// **The A5 Finding A regression.** PROTOCOL §8.2 allows `TRANSFER_CANCEL` from either side at
+    /// any time. Before A5, a cancel arriving while the provider was still parked in `accept()` —
+    /// the requester was cancelled between taking the offer and dialling, or its connect failed —
+    /// had nothing to act on: `activeTransferId` was still nil, so `cancelActive`'s own guard
+    /// refused. The call then sat there holding the one-active-transfer gate (and the coordinator's
+    /// `BulkOperationGate` above it) until A4's 30 s bound expired.
+    ///
+    /// This asserts the causality directly, not the bound: the production accept timeout is
+    /// unchanged at 30 s, and `serve` must return in a small fraction of that because the *cancel*
+    /// ended it. The Kotlin mirror is `BulkTransportManagerTest`'s
+    /// `an explicit cancel ends a serve parked in accept, without waiting out the 30 s bound`.
+    func testAnExplicitCancelEndsAServeParkedInAcceptWithoutWaitingOutThe30sBound() async throws {
+        let alice = try TestTlsSupport.freshIdentity()
+        let bob = try TestTlsSupport.freshIdentity()
+        let server = manager(alice)
+
+        _ = try await server.ensureListening()
+        let transferId = TransferId("01J9Z4M3RT8V2W5X7Y9Z1A3B5P")
+        let generation: Int64 = 1
+        let token = await server.issueToken(transferId: transferId, generation: generation)
+
+        async let serveResult: BulkServeOutcome = server.serve(
+            transferId: transferId, expectedPeerSpki: bob.identitySpkiSha256,
+            currentGeneration: { generation }, expectedChunkCount: 1,
+            source: ArrayChunkSource([[UInt8](repeating: 0, count: 10)]))
+        try await awaitPendingAccept(server, transferId)
+
+        let startedAt = DispatchTime.now().uptimeNanoseconds
+        await server.cancelActive(transferId: transferId)
+        let outcome = await serveResult
+        let elapsedMs = (DispatchTime.now().uptimeNanoseconds - startedAt) / 1_000_000
+
+        XCTAssertEqual(.ioError, outcome)
+        XCTAssertLessThan(
+            elapsedMs, Self.promptMs,
+            "the cancel itself must have ended the accept (\(elapsedMs) ms) — not A4's 30 s bound")
+
+        let pending = await server.pendingAcceptTransferIdForTesting
+        XCTAssertNil(pending, "the cancelled transfer must no longer own the accept")
+        let published = await server.listenerPortForTesting
+        XCTAssertNil(published, "the listener the accept was parked on must be gone")
+        // Section 5: the offer's token dies with the transfer it authorised, rather than staying
+        // live for the rest of its 30 s TTL.
+        let stillValid = await server.tokenTable.validateAndConsume(
+            transferId: transferId, presentedToken: token, currentGeneration: generation)
+        XCTAssertFalse(stillValid, "a cancelled pre-accept transfer's token must no longer authorise anything")
+
+        await server.close()
+    }
+
+    /// The other half of A5 Finding A's invariant (brief §2/§18): cancellation is `transfer_id`-
+    /// scoped in **both** phases, so a cancel naming some other transfer must leave the pending
+    /// accept exactly where it is. Only the cancel that actually names it may end it.
+    func testACancelNamingADifferentTransferLeavesAPendingAcceptUntouched() async throws {
+        let alice = try TestTlsSupport.freshIdentity()
+        let bob = try TestTlsSupport.freshIdentity()
+        let server = manager(alice)
+
+        let port = try await server.ensureListening()
+        let transferA = TransferId("01J9Z4M3RT8V2W5X7Y9Z1A3B5Q")
+        let transferB = TransferId("01J9Z4M3RT8V2W5X7Y9Z1A3B5R")
+        let generation: Int64 = 1
+        _ = await server.issueToken(transferId: transferA, generation: generation)
+
+        async let serveResult: BulkServeOutcome = server.serve(
+            transferId: transferA, expectedPeerSpki: bob.identitySpkiSha256,
+            currentGeneration: { generation }, expectedChunkCount: 1,
+            source: ArrayChunkSource([[UInt8](repeating: 0, count: 10)]))
+        try await awaitPendingAccept(server, transferA)
+
+        await server.cancelActive(transferId: transferB)
+        try await Task.sleep(nanoseconds: 300_000_000)
+        let stillPending = await server.pendingAcceptTransferIdForTesting
+        XCTAssertEqual(transferA, stillPending, "a cancel for B must not end A's accept")
+        let stillPublished = await server.listenerPortForTesting
+        XCTAssertEqual(port, stillPublished, "a wrong-transfer cancel must not close the shared listener")
+
+        // Bounded the same way the primary case is: the *correct* cancel must be what ends this,
+        // so a regression that fell back to A4's 30 s bound fails here rather than passing slowly.
+        let startedAt = DispatchTime.now().uptimeNanoseconds
+        await server.cancelActive(transferId: transferA)
+        let outcome = await serveResult
+        let elapsedMs = (DispatchTime.now().uptimeNanoseconds - startedAt) / 1_000_000
+        XCTAssertEqual(.ioError, outcome)
+        XCTAssertLessThan(elapsedMs, Self.promptMs, "the cancel naming A must have ended it (\(elapsedMs) ms)")
+
+        await server.close()
+    }
+
+    /// Brief §6/§20: cancelling a pending accept closes the listener it was parked on, which is only
+    /// acceptable if the session is not left wedged. The next transfer must bind a fresh listener,
+    /// mint a fresh token, and complete normally — and the cancelled transfer's old offer must be
+    /// unreachable.
+    func testAFreshTransferWorksNormallyAfterAPendingAcceptIsCancelled() async throws {
+        let alice = try TestTlsSupport.freshIdentity()
+        let bob = try TestTlsSupport.freshIdentity()
+        let server = manager(alice)
+        let client = manager(bob)
+
+        let cancelledPort = try await server.ensureListening()
+        let transferA = TransferId("01J9Z4M3RT8V2W5X7Y9Z1A3B5S")
+        let generation: Int64 = 1
+        let staleToken = await server.issueToken(transferId: transferA, generation: generation)
+
+        async let serveA: BulkServeOutcome = server.serve(
+            transferId: transferA, expectedPeerSpki: bob.identitySpkiSha256,
+            currentGeneration: { generation }, expectedChunkCount: 1,
+            source: ArrayChunkSource([[UInt8](repeating: 0, count: 10)]))
+        try await awaitPendingAccept(server, transferA)
+        await server.cancelActive(transferId: transferA)
+        let outcomeA = await serveA
+        XCTAssertEqual(.ioError, outcomeA)
+
+        // The abandoned offer's port is genuinely gone: presenting the stale token there cannot
+        // reach anything.
+        let staleFetch = await client.fetch(
+            transferId: transferA, host: "127.0.0.1", port: cancelledPort, token: staleToken,
+            expectedPeerSpki: alice.identitySpkiSha256, expectedChunkCount: 1, sink: RecordingChunkSink())
+        XCTAssertEqual(.connectionLost, staleFetch)
+
+        let freshPort = try await server.ensureListening()
+        let transferB = TransferId("01J9Z4M3RT8V2W5X7Y9Z1A3B5V")
+        let freshToken = await server.issueToken(transferId: transferB, generation: generation)
+        let payload = [UInt8](repeating: 7, count: 64)
+        let sink = RecordingChunkSink()
+
+        async let serveB: BulkServeOutcome = server.serve(
+            transferId: transferB, expectedPeerSpki: bob.identitySpkiSha256,
+            currentGeneration: { generation }, expectedChunkCount: 1, source: ArrayChunkSource([payload]))
+        let fetchB = await client.fetch(
+            transferId: transferB, host: "127.0.0.1", port: freshPort, token: freshToken,
+            expectedPeerSpki: alice.identitySpkiSha256, expectedChunkCount: 1, sink: sink)
+        XCTAssertEqual(.ok, fetchB)
+        let outcomeB = await serveB
+        XCTAssertEqual(.ok, outcomeB)
+        let received = await sink.received
+        XCTAssertEqual(1, received.count)
+        XCTAssertEqual(payload, received.first?.1)
+
+        await server.close()
+        await client.close()
+    }
+
+    /// Generously above any real cancellation cost, and far below A4's 30 s accept bound — the gap
+    /// between them is what makes the assertion about causality rather than about timing.
+    private static let promptMs: UInt64 = 3000
+    private static let pollAttempts = 1000
+    private static let pollIntervalNs: UInt64 = 10_000_000
+
+    // MARK: - ADR-023 Amendment A5 Finding B: a bind may never publish into an ended lifetime
+
+    /// **The A5 Finding B regression, and the reason it exists on an `actor` at all.** Swift actors
+    /// are *reentrant* across `await`, so `close()` can run to completion inside a suspended
+    /// `ensureListening()`:
+    ///
+    /// ```
+    /// ensureListening() -> enters bind() -> suspends           (listener still nil)
+    /// close()           -> sees listener == nil -> returns     ("session torn down")
+    /// bind() resumes    -> listener = <the new listener>       (old session republishes)
+    /// ```
+    ///
+    /// That left an *old* session's listener accepting connections after that session's teardown had
+    /// already completed — a direct violation of ADR-023 §1. Actor isolation alone never prevented
+    /// it; `listenerEpoch`, bumped **before** anything is closed and re-checked at the publication
+    /// point, does. Driven by a `ControlChannel` test double whose `bind()` suspends exactly where
+    /// the race needs it, rather than by hoping a real TLS bind is slow — the reason `TransferManager`
+    /// takes the protocol. The Kotlin mirror is `network.transfer.BulkListenerLifetimeTest`.
+    func testABindThatCompletesAfterCloseNeverPublishesItsListener() async throws {
+        let channel = GatedBindChannel()
+        let manager = TransferManager(channel: channel, monotonicNowUs: { 0 })
+
+        let listening = Task { try await manager.ensureListening() }
+        await channel.awaitBindEntered()
+        let beforePublish = await manager.listenerPortForTesting
+        XCTAssertNil(beforePublish, "nothing is published while bind is still in flight")
+
+        // The session boundary lands inside the suspended bind — the actor-reentrancy window.
+        await manager.close()
+        await channel.releaseBind()
+
+        do {
+            _ = try await listening.value
+            XCTFail("the resumed bind must fail, not return a port")
+        } catch {
+            XCTAssertEqual(BulkTransportError.listenerLifetimeEnded, error as? BulkTransportError)
+        }
+
+        let abandoned = await channel.boundListeners
+        XCTAssertEqual(1, abandoned.count)
+        // A closed ControlListener resumes every accept() waiter immediately with "listener closed",
+        // which is a mechanical proof it was closed rather than leaked — not a timing measurement.
+        do {
+            _ = try await abandoned[0].accept(timeoutMs: 2000)
+            XCTFail("the listener the abandoned bind produced must have been closed")
+        } catch let error as ControlTransportError {
+            guard case .connectFailed(let reason) = error else { return XCTFail("unexpected error \(error)") }
+            XCTAssertEqual("listener closed", reason)
+        }
+        let published = await manager.listenerPortForTesting
+        XCTAssertNil(published, "the stale listener must never have been published")
+
+        // No permanent wedge: the next lifetime binds and publishes normally.
+        let freshPort = try await manager.ensureListening()
+        let freshPublished = await manager.listenerPortForTesting
+        XCTAssertEqual(freshPort, freshPublished)
+        let all = await channel.boundListeners
+        XCTAssertEqual(2, all.count)
+        XCTAssertNotEqual(all[0].localPort, freshPort, "the new lifetime must get a genuinely new listener")
+
+        await manager.close()
+    }
+
     // MARK: - ADR-023 Amendment A3: operation-aware cancellation and awaited teardown ordering
 
     /// The exact race the closure audit found (spec section 5/18): a coordinator schedules
@@ -530,6 +756,49 @@ private actor HangingAfterFirstChunkSource: ChunkSource {
     func release() {
         continuation?.resume()
         continuation = nil
+    }
+}
+
+/// ADR-023 Amendment A5 Finding B — a `ControlChannel` whose `bind()` announces that it has started,
+/// waits to be released, and only then binds a real (plain-TCP, no TLS) `ControlListener`. Holding
+/// those listeners lets a test assert mechanically that `TransferManager` *closed* the one it
+/// refused to publish, rather than leaking it. Not a transport: `connect` is unreachable and it
+/// never carries a byte — it exists only to make `bind()` suspend on demand.
+private actor GatedBindChannel: ControlChannel {
+    nonisolated var transportLabel: String { "test-gated-bind" }
+    nonisolated var isSecure: Bool { true }
+
+    private var bindEntered = false
+    private var released = false
+    private var bindEnteredWaiters: [CheckedContinuation<Void, Never>] = []
+    private var releaseWaiters: [CheckedContinuation<Void, Never>] = []
+    private(set) var boundListeners: [ControlListener] = []
+
+    func awaitBindEntered() async {
+        if bindEntered { return }
+        await withCheckedContinuation { bindEnteredWaiters.append($0) }
+    }
+
+    func releaseBind() {
+        released = true
+        releaseWaiters.forEach { $0.resume() }
+        releaseWaiters = []
+    }
+
+    func bind() async throws -> ControlListener {
+        bindEntered = true
+        bindEnteredWaiters.forEach { $0.resume() }
+        bindEnteredWaiters = []
+        if !released {
+            await withCheckedContinuation { releaseWaiters.append($0) }
+        }
+        let listener = try await ControlListener.bind(parameters: .tcp)
+        boundListeners.append(listener)
+        return listener
+    }
+
+    func connect(host: String, port: UInt16) async throws -> ControlConnection {
+        throw ControlTransportError.notReady
     }
 }
 

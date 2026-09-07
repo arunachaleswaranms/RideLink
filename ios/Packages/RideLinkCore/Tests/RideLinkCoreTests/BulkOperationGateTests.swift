@@ -94,4 +94,60 @@ final class BulkOperationGateTests: XCTestCase {
         XCTAssertFalse(gate.tryAcquire(requester), "a local download must not start while this device is actively serving a peer")
         XCTAssertTrue(gate.isOwner(transferA), "the provider operation must remain correct and undisturbed")
     }
+
+    // MARK: - ADR-023 Amendment A5: gate ownership is only half of "still authorised"
+
+    private func heldGate() -> BulkOperationGate {
+        let gate = BulkOperationGate()
+        gate.tryAcquire(.provider(transferId: transferA, contentHash: hashA, peerSpki: spki, sessionGeneration: 7))
+        return gate
+    }
+
+    private var authorisationA: ProviderSessionContext {
+        ProviderSessionContext(authorisingGeneration: 7, authorisedPeerSpki: spki)
+    }
+
+    func testStillAuthorisedWhileTheSlotIsHeldAndTheAuthorisingSessionIsStillLive() {
+        XCTAssertTrue(heldGate().stillAuthorises(
+            transferId: transferA, authorisation: authorisationA, liveGeneration: 7, livePeerSpki: spki))
+    }
+
+    /// **The A5 Finding C property.** This is the exact state `SharedLibraryCoordinator`'s
+    /// `onSessionBoundary()` is in while it `await`s `TransferManager.close()`: `sessionEpoch` has
+    /// already been bumped, and `bulkGate.invalidate()` has not run yet — so gate ownership alone
+    /// still says "yes". It must not, because the operation is authorised by a session that no
+    /// longer exists.
+    func testGateOwnershipAloneIsNotAuthorisationOnceTheLiveGenerationHasMovedOn() {
+        let gate = heldGate()
+        XCTAssertTrue(gate.isOwner(transferA), "the precondition: the gate has NOT been invalidated yet")
+        XCTAssertFalse(gate.stillAuthorises(
+            transferId: transferA, authorisation: authorisationA, liveGeneration: 8, livePeerSpki: spki))
+    }
+
+    /// The same, for the peer half of the context — defence in depth per `ProviderSessionContext`.
+    func testGateOwnershipAloneIsNotAuthorisationOnceTheLivePeerHasChanged() {
+        let gate = heldGate()
+        let otherPeer = SpkiHash("sha256:" + String(repeating: "ef", count: 32))
+        XCTAssertTrue(gate.isOwner(transferA))
+        XCTAssertFalse(gate.stillAuthorises(
+            transferId: transferA, authorisation: authorisationA, liveGeneration: 7, livePeerSpki: otherPeer))
+    }
+
+    /// A disconnected session has no live peer at all; that is not "still current" either.
+    func testANilLivePeerIsNeverStillCurrent() {
+        XCTAssertFalse(heldGate().stillAuthorises(
+            transferId: transferA, authorisation: authorisationA, liveGeneration: 7, livePeerSpki: nil))
+    }
+
+    /// The gate half is not dropped: a live session does not authorise an operation that has since
+    /// lost the slot to a fresher one, which is precisely what A3's check was protecting.
+    func testALiveSessionDoesNotAuthoriseAnOperationThatNoLongerOwnsTheSlot() {
+        let gate = heldGate()
+        gate.invalidate()
+        XCTAssertFalse(gate.stillAuthorises(
+            transferId: transferA, authorisation: authorisationA, liveGeneration: 7, livePeerSpki: spki))
+        gate.tryAcquire(.requester(transferId: transferB, contentHash: hashB))
+        XCTAssertFalse(gate.stillAuthorises(
+            transferId: transferA, authorisation: authorisationA, liveGeneration: 7, livePeerSpki: spki))
+    }
 }

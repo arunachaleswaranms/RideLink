@@ -28,3 +28,12 @@ public enum BulkFetchOutcome: Sendable, Equatable {
     case ioError
     case protocolError
 }
+
+/// ADR-023 Amendment A5 — the one failure `TransferManager` raises itself, rather than passing a
+/// transport error through. `listenerLifetimeEnded` means a `bind()` completed into a listener
+/// lifetime that had already been torn down (`close()`, or a cancelled pending accept), so its
+/// result was closed rather than published: the caller must treat the transfer as unservable, not
+/// retry into a dead session.
+public enum BulkTransportError: Error, Sendable, Equatable {
+    case listenerLifetimeEnded
+}

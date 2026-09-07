@@ -97,11 +97,22 @@ private struct PendingOffer {
 /// could otherwise acquire the freed slot and go on to mint a token and send an offer under the
 /// *new* session, potentially serving old peer A's file to whichever peer is connected now.
 /// `RideLinkCore.Transfer.ProviderSessionContext` captures the authorising epoch/peer once and
-/// [stillAuthorised] re-proves it (via [bulkGate] ownership, once acquired) at every one of those
-/// suspension points. The same amendment also makes `TransferManager.cancelActive` operation-aware
-/// (`transferId`-scoped, closing a delayed-cancel race that could otherwise close a *different*,
-/// newer operation's socket) and makes [onSessionBoundary] `async`, so the old session's transport
-/// teardown fully finishes before [bulkGate] is invalidated and a new session's activity can start.
+/// [stillAuthorised] re-proves it at every one of those suspension points.
+///
+/// **Post-acquisition authorisation is both halves (ADR-023 Amendment A5).** A3 used
+/// `bulkGate.isOwner` alone after acquisition, on the reasoning that a session boundary always
+/// invalidates the gate. It does — but not at the same instant the live session moves:
+/// [onSessionBoundary] bumps `sessionEpoch`, `await`s `bulkTransport.close()`, and only then
+/// invalidates the gate, so throughout that `await` the gate still names the old transfer while the
+/// epoch has already advanced. [stillAuthorised] therefore joins gate ownership *and*
+/// `ProviderSessionContext.isStillCurrent`, through the pure `BulkOperationGate.stillAuthorises`.
+///
+/// A3 also made `TransferManager.cancelActive` operation-aware (`transferId`-scoped, closing a
+/// delayed-cancel race that could otherwise close a *different*, newer operation's socket) and made
+/// [onSessionBoundary] `async`, so the old session's transport teardown fully finishes before
+/// [bulkGate] is invalidated and a new session's activity can start. A5 widens that cancellation to
+/// the provider's pre-accept phase: a `TRANSFER_CANCEL` naming the transfer parked in `accept()`
+/// now ends that wait promptly, instead of leaving it to A4's 30 s bound.
 @Observable
 @MainActor
 public final class SharedLibraryCoordinator {
@@ -644,7 +655,12 @@ public final class SharedLibraryCoordinator {
         // request from an old peer could then acquire the slot and go on to mint a token and send an
         // offer under the *new* live session, serving old peer A's requested file to whichever peer
         // is connected now.
-        guard authorisation.isStillCurrent(liveGeneration: sessionEpoch.current(), livePeerSpki: await controlSessionManager.currentPeerSpki) else {
+        // A5: the peer read is hoisted above the epoch read deliberately — Swift evaluates
+        // arguments left to right, so an inline `await` in the second position would compare the
+        // *pre-*suspension epoch against the *post-*suspension peer and miss a boundary landing in
+        // between.
+        let livePeerSpki = await controlSessionManager.currentPeerSpki
+        guard authorisation.isStillCurrent(liveGeneration: sessionEpoch.current(), livePeerSpki: livePeerSpki) else {
             return
         }
         // Closure-audit Finding Q: never construct/send an offer the peer's own codec would have to
@@ -664,12 +680,11 @@ public final class SharedLibraryCoordinator {
             pumpQueue() // cross-role: wake a local download left queued behind this attempt
             return
         }
-        // Amendment A3: every suspension point from here on re-checks stillAuthorised(transferId)
-        // instead of re-deriving epoch/peerSpki — onSessionBoundary() unconditionally invalidates
-        // bulkGate on *every* boundary, and transfer_id is a fresh ULID never reused (ADR-023 §2),
-        // so "do I still own my own slot" is an equally correct, strictly simpler proxy for "has a
-        // boundary happened since I acquired" than re-reading epoch/peerSpki again at each step.
-        guard stillAuthorised(transferId) else { return }
+        // Amendment A3/A5: every suspension point from here on re-checks both halves of the
+        // authorisation — that this operation still owns the slot, and that the session which
+        // authorised it is still live. See stillAuthorised(_:_:) for why gate ownership alone
+        // (A3's proxy) is not sufficient while onSessionBoundary is awaiting the transport close.
+        guard await stillAuthorised(transferId, authorisation) else { return }
         // Closure-audit Finding A: read the *live* current authenticated generation both at
         // issuance and again, independently, at consumption time — never a value captured once and
         // replayed. A stale closure over a captured `let` would defeat ADR-023 §3's whole
@@ -682,7 +697,7 @@ public final class SharedLibraryCoordinator {
             pumpQueue() // cross-role: wake a local download left queued behind this attempt
             return
         }
-        guard stillAuthorised(transferId) else {
+        guard await stillAuthorised(transferId, authorisation) else {
             bulkGate.releaseIfOwner(transferId)
             pumpQueue()
             return
@@ -692,7 +707,7 @@ public final class SharedLibraryCoordinator {
             transferId: transferId, sizeBytes: sizeBytes, chunkSize: Self.chunkSizeBytes,
             chunkCount: chunkCount, bulkPort: bulkPort, bulkToken: token
         ))
-        guard stillAuthorised(transferId) else {
+        guard await stillAuthorised(transferId, authorisation) else {
             bulkGate.releaseIfOwner(transferId)
             pumpQueue()
             return
@@ -721,14 +736,34 @@ public final class SharedLibraryCoordinator {
         try? handle.close()
     }
 
-    /// ADR-023 Amendment A3: whether `transferId` still holds `bulkGate` — the post-acquisition
-    /// proxy for "no session boundary has run since this operation acquired the slot," used at
-    /// every suspension point [serveTransferRequest] passes through after `bulkGate.tryAcquire`
-    /// succeeds. Valid because [onSessionBoundary] unconditionally invalidates `bulkGate` on *every*
-    /// boundary and a `transfer_id` is a fresh ULID never reused (ADR-023 §2), so no other operation
-    /// can ever be mistaken for this one.
-    private func stillAuthorised(_ transferId: TransferId) -> Bool {
-        bulkGate.isOwner(transferId)
+    /// ADR-023 Amendment A5: the post-acquisition authorisation check, now **both** halves — the
+    /// slot is still `transferId`'s *and* the session that authorised the request is still the live
+    /// one. The decision itself is `BulkOperationGate.stillAuthorises`, pure and mirrored with
+    /// Android, so it is unit-testable in `RideLinkCoreTests` even though this coordinator has no
+    /// test target of its own (`ios/RideLink.xcodeproj` has exactly one native target — the gap
+    /// Amendment A3 disclosed and this amendment inherits).
+    ///
+    /// A3 used `bulkGate.isOwner` alone here, reasoning that [onSessionBoundary] unconditionally
+    /// invalidates the gate on every boundary. It does — but not at the same instant the live
+    /// session moves. [onSessionBoundary] bumps `sessionEpoch`, then `await`s
+    /// `bulkTransport.close()`, and only *then* calls `bulkGate.invalidate()`; throughout that
+    /// `await` the gate still names this transfer while the epoch has already moved on, so gate
+    /// ownership alone answers "yes, still authorised" for an operation that is already stale.
+    /// Re-checking `authorisation` closes that window; the gate check stays, because it is what
+    /// stops an operation acting after it has *lost the slot* to a fresher one.
+    ///
+    /// `livePeerSpki` is read **before** `sessionEpoch.current()` on purpose: reading the epoch
+    /// first would let a boundary land inside the actor hop below and still compare against the
+    /// pre-boundary epoch. The epoch read is synchronous and this type is `@MainActor`, so nothing
+    /// can interleave between it and the caller acting on the answer.
+    private func stillAuthorised(_ transferId: TransferId, _ authorisation: ProviderSessionContext) async -> Bool {
+        let livePeerSpki = await controlSessionManager.currentPeerSpki
+        return bulkGate.stillAuthorises(
+            transferId: transferId,
+            authorisation: authorisation,
+            liveGeneration: sessionEpoch.current(),
+            livePeerSpki: livePeerSpki
+        )
     }
 }
 

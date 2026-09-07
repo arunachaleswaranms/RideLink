@@ -208,7 +208,7 @@ public final class SessionCoordinator {
         guard sharedLibrary == nil else { return }
         sharedLibrary = SharedLibraryCoordinator(
             controlSessionManager: controlSessionManager,
-            bulkTransport: TransferManager(tlsChannel: TlsControlChannel(identity: deviceIdentity), monotonicNowUs: monotonicNowUs),
+            bulkTransport: TransferManager(channel: TlsControlChannel(identity: deviceIdentity), monotonicNowUs: monotonicNowUs),
             libraryRepository: libraryRepository,
             libraryDatabaseQueue: libraryDatabaseQueue,
             libraryIndexer: libraryIndexer,

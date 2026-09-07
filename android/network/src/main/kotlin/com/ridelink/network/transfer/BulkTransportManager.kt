@@ -3,9 +3,9 @@ package com.ridelink.network.transfer
 import com.ridelink.core.model.SpkiHash
 import com.ridelink.core.model.TransferId
 import com.ridelink.core.transfer.BulkFraming
+import com.ridelink.network.control.ControlChannel
 import com.ridelink.network.control.ControlListener
 import com.ridelink.network.control.ControlSocket
-import com.ridelink.network.security.TlsControlChannel
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.sync.Mutex
@@ -31,42 +31,139 @@ enum class BulkServeOutcome { OK, NOT_AUTHORIZED, CONNECTION_LOST, IO_ERROR }
 enum class BulkFetchOutcome { OK, NOT_AUTHORIZED, CONNECTION_LOST, IO_ERROR, PROTOCOL_ERROR }
 
 /**
- * ADR-023 — one bulk TLS listener per authenticated **session** (not per transfer), the same
- * identity as the control connection, SPKI-pinned, single-use-token-authorised per transfer, and
- * bounded to one active transfer at a time (brief §20).
+ * ADR-023 — at most one **live** bulk TLS listener per authenticated session (never one per
+ * transfer), the same identity as the control connection, SPKI-pinned, single-use-token-authorised
+ * per transfer, and bounded to one active transfer at a time (brief §20). A listener never outlives
+ * its own session; Amendment A5 lets a session open a *replacement* within its own life, when
+ * cancelling a pending accept ends the current one — see [cancelActive].
  *
- * Reuses [TlsControlChannel] wholesale for the bulk connection's TLS setup rather than
- * duplicating it — same mutual TLS 1.3, same accept-then-pin-one-layer-up shape (ADR-007,
- * ADR-012, ADR-017) — and [ControlSocket]'s raw byte I/O (`writeRawBytes`/`readRawBytes`) instead
- * of its JSON envelope framing, which the bulk plane never uses.
+ * Reuses [com.ridelink.network.security.TlsControlChannel] wholesale for the bulk connection's TLS
+ * setup rather than duplicating it — same mutual TLS 1.3, same accept-then-pin-one-layer-up shape
+ * (ADR-007, ADR-012, ADR-017) — and [ControlSocket]'s raw byte I/O (`writeRawBytes`/`readRawBytes`)
+ * instead of its JSON envelope framing, which the bulk plane never uses.
  */
 class BulkTransportManager(
-    private val tlsChannel: TlsControlChannel,
+    /**
+     * Production always wires [com.ridelink.network.security.TlsControlChannel] here — PROTOCOL §1
+     * and CLAUDE.md rule 14 admit no plaintext production transport, and `AppContainer` is the one
+     * call site. Declared as the [ControlChannel] interface — exactly as
+     * [com.ridelink.network.control.ControlSessionManager] already declares its own — so ADR-023
+     * Amendment A5's bind-versus-close publication race can be driven by a test double whose
+     * `bind()` suspends on demand, rather than by hoping a real TLS bind happens to be slow.
+     */
+    private val channel: ControlChannel,
     monotonicNowUs: () -> Long,
     private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
 ) : AutoCloseable {
     val tokenTable = BulkTokenTable(monotonicNowUs)
 
+    /**
+     * ADR-023 Amendment A5 — which transfer owns this transport right now, and how far along it is.
+     * A4 tracked only the socket, which exists only *after* `accept()`/`connect()` returns, so a
+     * `TRANSFER_CANCEL` arriving while [serve] was still parked in `accept()` had nothing to act on
+     * (that amendment's Finding W recorded the gap and bounded it with a 30 s timeout rather than
+     * closing it). Naming the owner from the moment the wait begins is what makes an explicit
+     * cancellation able to end that wait, and what makes a cancellation naming a *different*
+     * transfer a no-op instead of a way to disturb this one.
+     */
+    private sealed class Operation {
+        abstract val transferId: TransferId
+
+        /** [serve] is parked in `accept()`; no socket exists yet, and the listener is what a cancel must break. */
+        class WaitingForAccept(
+            override val transferId: TransferId,
+        ) : Operation()
+
+        /** A real socket is open — the A4 state, now carrying the `transfer_id` it belongs to on both platforms. */
+        class Connected(
+            override val transferId: TransferId,
+            val socket: ControlSocket,
+        ) : Operation()
+    }
+
+    /**
+     * Guards [listener], [listenerEpoch] and [operation]. A plain monitor, not [listenerMutex]:
+     * [close] and [cancelActive] are ordinary non-suspending functions called from a session
+     * boundary and from `TRANSFER_CANCEL` routing, so they cannot take a coroutine [Mutex] at all —
+     * which is precisely how A5's Finding B arose (a suspended `bind()` could publish its listener
+     * after a `close()` that had already run and found nothing to close).
+     */
+    private val lifecycleLock = Any()
+
+    /** Guarded by [lifecycleLock]. */
     private var listener: ControlListener? = null
-    private val listenerMutex = Mutex()
+
+    /**
+     * ADR-023 Amendment A5 Finding B — the bulk listener's lifetime, bumped whenever a listener is
+     * torn down ([close], or [cancelActive] abandoning a pending accept). [ensureListening] reads
+     * it before suspending in `bind()` and re-reads it before publishing: a bind belonging to an
+     * already-ended lifetime closes what it bound and fails, instead of resurrecting a listener for
+     * a session that is over. Guarded by [lifecycleLock].
+     */
+    private var listenerEpoch = 0L
+
+    /** Guarded by [lifecycleLock]. */
+    private var operation: Operation? = null
 
     /** Brief §20: one active transfer per session — additional requests queue above this manager. */
     private val activeTransferMutex = Mutex()
 
-    /**
-     * Closure-audit Finding C/D: the socket a [serve]/[fetch] call currently holds, so an external
-     * caller ([cancelActive]) can force it closed — unblocking whatever blocking read/accept the
-     * active operation is parked in — rather than merely requesting coroutine cancellation, which
-     * a blocking socket call does not observe until it next unblocks on its own.
-     */
-    @Volatile
-    private var activeSocket: ControlSocket? = null
+    /** Serialises concurrent [ensureListening] callers so only one `bind()` is ever in flight. Publication
+     *  safety is [listenerEpoch]'s job, not this lock's — see [lifecycleLock]. */
+    private val listenerMutex = Mutex()
 
-    /** Opens the listener on first need; a later call just returns the already-bound port. */
+    /** Test-only: the port currently published, or `null` if no listener is published at all. */
+    internal val listenerPortForTesting: Int? get() = synchronized(lifecycleLock) { listener?.localPort }
+
+    /** Test-only: the transfer parked in `accept()`, if any — the deterministic signal a cancel-before-accept
+     *  test waits on instead of guessing with a sleep. */
+    internal val pendingAcceptTransferIdForTesting: TransferId?
+        get() = synchronized(lifecycleLock) { (operation as? Operation.WaitingForAccept)?.transferId }
+
+    /** Test-only: the transfer holding a real open socket, if any. */
+    internal val connectedTransferIdForTesting: TransferId?
+        get() = synchronized(lifecycleLock) { (operation as? Operation.Connected)?.transferId }
+
+    /**
+     * Opens the listener on first need; a later call just returns the already-bound port.
+     *
+     * Amendment A5 Finding B: `bind()` suspends, and [close] can run inside that suspension. The
+     * epoch captured before the bind and re-checked at publication is what stops the resumed call
+     * publishing a listener into a session that has already been torn down.
+     *
+     * @throws IOException if the bind itself fails, or if the transport's listener lifetime ended
+     *   while this call was binding.
+     */
     suspend fun ensureListening(): Int =
         listenerMutex.withLock {
-            listener?.localPort ?: tlsChannel.bind().also { listener = it }.localPort
+            val started = synchronized(lifecycleLock) { Lifetime(listener, listenerEpoch) }
+            started.listener?.let { return@withLock it.localPort }
+            val bound = channel.bind()
+            val outcome =
+                synchronized(lifecycleLock) {
+                    when {
+                        listenerEpoch != started.epoch -> BindOutcome(port = null, publishedBound = false)
+                        // A concurrent caller in the same lifetime already published one; take theirs.
+                        listener != null -> BindOutcome(port = listener?.localPort, publishedBound = false)
+                        else -> {
+                            listener = bound
+                            BindOutcome(port = bound.localPort, publishedBound = true)
+                        }
+                    }
+                }
+            if (!outcome.publishedBound) runCatching { bound.close() }
+            outcome.port ?: throw IOException("the bulk listener lifetime ended while it was binding")
         }
+
+    private class Lifetime(
+        val listener: ControlListener?,
+        val epoch: Long,
+    )
+
+    private class BindOutcome(
+        val port: Int?,
+        val publishedBound: Boolean,
+    )
 
     fun issueToken(
         transferId: TransferId,
@@ -85,25 +182,69 @@ class BulkTransportManager(
         tokenTable.sweepBelow(generation)
     }
 
-    /** ADR-023 §1: the listener never outlives the session that opened it. */
+    /**
+     * ADR-023 §1: the listener never outlives the session that opened it.
+     *
+     * Amendment A5 Finding B: the epoch bump comes **first**, before anything is closed, so an
+     * [ensureListening] call already suspended inside `bind()` can never publish its result into
+     * this now-dead lifetime — no matter when it resumes.
+     */
     override fun close() {
-        runCatching { listener?.close() }
-        listener = null
+        synchronized(lifecycleLock) {
+            // A WaitingForAccept operation needs no separate action: the listener this just closed
+            // is exactly what its parked accept() is blocked on.
+            endListenerLifetime()
+            (operation as? Operation.Connected)?.let { runCatching { it.socket.close() } }
+            operation = null
+        }
         tokenTable.clear()
-        cancelActive()
     }
 
     /**
-     * Closure-audit Finding C/D/N: forcibly unblocks and terminates whatever [serve]/[fetch] call is
-     * currently in flight, if any — a user cancellation, a session/link loss, or a peer's
-     * `TRANSFER_CANCEL` for the transfer this manager is actively serving/fetching. Closing the
-     * socket, not merely requesting coroutine cancellation, is what actually unblocks a blocking
-     * `accept()`/read/write: [serve]/[fetch]'s own `finally` block sees the resulting IOException and
-     * returns a non-OK outcome promptly instead of hanging until some other event unblocks it.
-     * Idempotent and safe to call when nothing is active.
+     * Closure-audit Finding C/D/N, made phase-aware by ADR-023 Amendment A5: forcibly terminates
+     * the in-flight [serve]/[fetch] call **if and only if** it is the one [transferId] owns — a user
+     * cancellation, or a peer's `TRANSFER_CANCEL` for the transfer this manager is actively serving
+     * or fetching. A cancel naming a stale, foreign or already-finished transfer is a no-op, never a
+     * way to disturb an unrelated operation (the manager-wide `cancelActive()` this replaces on
+     * Android could not tell the difference; iOS gained the same guard in A3).
+     *
+     * Both phases terminate, which is the whole of A5's Finding A:
+     * - **Connected** — close the socket. Closing it, rather than merely requesting coroutine
+     *   cancellation, is what actually unblocks a blocking read/write.
+     * - **WaitingForAccept** — there is no socket yet, so the *listener* is what the parked
+     *   `accept()` is blocked on: end its lifetime and close it. `ensureListening()` binds a fresh
+     *   one for the next transfer, and the bumped epoch stops any bind suspended right now from
+     *   resurrecting the old one.
+     *
+     * Either way [transferId]'s bulk token is dropped: an offer the peer has just cancelled must not
+     * stay authorised for the remainder of its 30 s TTL (ADR-023 §2).
+     *
+     * Idempotent and safe to call when nothing matching is active.
      */
-    fun cancelActive() {
-        runCatching { activeSocket?.close() }
+    fun cancelActive(transferId: TransferId) {
+        val terminated =
+            synchronized(lifecycleLock) {
+                val current = operation
+                if (current == null || current.transferId != transferId) {
+                    false
+                } else {
+                    when (current) {
+                        is Operation.Connected -> runCatching { current.socket.close() }
+                        is Operation.WaitingForAccept -> endListenerLifetime()
+                    }
+                    operation = null
+                    true
+                }
+            }
+        if (terminated) tokenTable.remove(transferId)
+    }
+
+    /** Ends the current listener's lifetime: nothing bound under the old epoch may be published afterwards.
+     *  Must be called while holding [lifecycleLock]. */
+    private fun endListenerLifetime() {
+        listenerEpoch += 1
+        runCatching { listener?.close() }
+        listener = null
     }
 
     /**
@@ -128,22 +269,50 @@ class BulkTransportManager(
         source: ChunkSource,
     ): BulkServeOutcome =
         activeTransferMutex.withLock {
-            val l = listener ?: return BulkServeOutcome.IO_ERROR
+            val l =
+                synchronized(lifecycleLock) {
+                    val bound = listener ?: return BulkServeOutcome.IO_ERROR
+                    // Amendment A5 Finding A: claim the pending accept *before* parking in it, so a
+                    // TRANSFER_CANCEL naming this transfer has something to act on. Set under the
+                    // same lock that cancelActive/close read, with no suspension between the claim
+                    // and the accept below.
+                    operation = Operation.WaitingForAccept(transferId)
+                    bound
+                }
             val socket =
                 try {
                     // Amendment A4 Finding W: bounded by the bulk token's own 30 s TTL (ADR-023
-                    // §2). An unbounded accept() here parks this call — and with it the single
-                    // activeTransferMutex slot, and the coordinator's BulkOperationGate above it —
-                    // for the rest of the session whenever a requester takes an offer and then
-                    // never dials (it was cancelled between offer and fetch, or its connect
-                    // failed), because cancelActive() cannot help: activeSocket is still null, so
-                    // there is nothing for it to close. Nothing else would then be able to start a
-                    // transfer in either direction until the next session boundary.
+                    // §2). This bound stays, as defence in depth for the cases no cancellation ever
+                    // arrives for — the peer crashed, the negotiation was simply abandoned, or the
+                    // TRANSFER_CANCEL never reached us. An explicit cancel no longer waits it out:
+                    // Amendment A5 ends this accept promptly by closing the listener it is parked
+                    // on. Without the bound, an abandoned negotiation would hold the single
+                    // activeTransferMutex slot — and the coordinator's BulkOperationGate above it —
+                    // against every transfer in both directions until the next session boundary.
                     l.acceptWithin(ACCEPT_TIMEOUT_MS)
                 } catch (io: IOException) {
+                    clearOperation(transferId)
                     return BulkServeOutcome.IO_ERROR
                 }
-            activeSocket = socket
+            // Amendment A5: a cancel can land in the instant between accept() returning a socket
+            // and this claim. Promote only if this call still owns the pending accept — otherwise
+            // the operation was cancelled (or the session closed) and this socket must not be
+            // served. Belt-and-braces with the token removal cancelActive already did, which would
+            // fail the authorisation below anyway; this makes it structural rather than incidental.
+            val promoted =
+                synchronized(lifecycleLock) {
+                    val current = operation
+                    if (current is Operation.WaitingForAccept && current.transferId == transferId) {
+                        operation = Operation.Connected(transferId, socket)
+                        true
+                    } else {
+                        false
+                    }
+                }
+            if (!promoted) {
+                socket.close()
+                return BulkServeOutcome.NOT_AUTHORIZED
+            }
             try {
                 val peerSpki = socket.security?.peerIdentitySpkiSha256
                 if (peerSpki == null || peerSpki != expectedPeerSpki) return BulkServeOutcome.NOT_AUTHORIZED
@@ -172,13 +341,20 @@ class BulkTransportManager(
                 BulkServeOutcome.IO_ERROR
             } finally {
                 socket.close()
-                if (activeSocket === socket) activeSocket = null
+                clearOperation(transferId)
             }
         }
 
-    /** Requester side: dial the provider's bulk port, present the token, stream chunks into [sink]. */
-    @Suppress("ReturnCount", "SwallowedException")
+    /**
+     * Requester side: dial the provider's bulk port, present the token, stream chunks into [sink].
+     *
+     * [transferId] is ADR-023 Amendment A5's addition on Android — it is what makes
+     * [cancelActive] operation-aware for the requester role exactly as it already is for [serve]'s
+     * provider role (iOS gained the same parameter in A3).
+     */
+    @Suppress("ReturnCount", "SwallowedException", "LongParameterList")
     suspend fun fetch(
+        transferId: TransferId,
         host: String,
         port: Int,
         token: String,
@@ -189,11 +365,11 @@ class BulkTransportManager(
         activeTransferMutex.withLock {
             val socket =
                 try {
-                    tlsChannel.connect(host, port)
+                    channel.connect(host, port)
                 } catch (io: IOException) {
                     return BulkFetchOutcome.CONNECTION_LOST
                 }
-            activeSocket = socket
+            synchronized(lifecycleLock) { operation = Operation.Connected(transferId, socket) }
             try {
                 val peerSpki = socket.security?.peerIdentitySpkiSha256
                 if (peerSpki == null || peerSpki != expectedPeerSpki) return BulkFetchOutcome.NOT_AUTHORIZED
@@ -240,9 +416,17 @@ class BulkTransportManager(
                 BulkFetchOutcome.IO_ERROR
             } finally {
                 socket.close()
-                if (activeSocket === socket) activeSocket = null
+                clearOperation(transferId)
             }
         }
+
+    /** Clears the operation slot only if [transferId] still owns it — a late cleanup from an
+     *  operation a [cancelActive]/[close] already ended never clears a fresher one. */
+    private fun clearOperation(transferId: TransferId) {
+        synchronized(lifecycleLock) {
+            if (operation?.transferId == transferId) operation = null
+        }
+    }
 
     private suspend fun readExactly(
         socket: ControlSocket,

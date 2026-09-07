@@ -59,7 +59,9 @@ interface BulkTransportPort {
         source: ChunkSource,
     ): BulkServeOutcome
 
+    @Suppress("LongParameterList")
     suspend fun fetch(
+        transferId: TransferId,
         host: String,
         port: Int,
         token: String,
@@ -68,7 +70,8 @@ interface BulkTransportPort {
         sink: ChunkSink,
     ): BulkFetchOutcome
 
-    fun cancelActive()
+    /** ADR-023 Amendment A5: `transfer_id`-scoped on Android too, mirroring iOS's A3 signature. */
+    fun cancelActive(transferId: TransferId)
 
     fun close()
 }
@@ -137,16 +140,18 @@ internal class BulkTransportManagerAdapter(
         source: ChunkSource,
     ): BulkServeOutcome = delegate.serve(transferId, expectedPeerSpki, currentGeneration, expectedChunkCount, source)
 
+    @Suppress("LongParameterList")
     override suspend fun fetch(
+        transferId: TransferId,
         host: String,
         port: Int,
         token: String,
         expectedPeerSpki: SpkiHash,
         expectedChunkCount: Long,
         sink: ChunkSink,
-    ): BulkFetchOutcome = delegate.fetch(host, port, token, expectedPeerSpki, expectedChunkCount, sink)
+    ): BulkFetchOutcome = delegate.fetch(transferId, host, port, token, expectedPeerSpki, expectedChunkCount, sink)
 
-    override fun cancelActive() = delegate.cancelActive()
+    override fun cancelActive(transferId: TransferId) = delegate.cancelActive(transferId)
 
     override fun close() = delegate.close()
 }

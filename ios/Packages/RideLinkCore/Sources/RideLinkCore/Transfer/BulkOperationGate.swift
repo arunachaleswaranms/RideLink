@@ -71,6 +71,33 @@ public final class BulkOperationGate {
         owner?.transferId == transferId
     }
 
+    /// ADR-023 Amendment A5 — the **whole** post-acquisition authorisation decision for a provider
+    /// operation, in one pure place: the slot is still `transferId`'s **and** the session that
+    /// authorised it is still the live one.
+    ///
+    /// A3 used `isOwner` alone as a proxy for the second half, on the reasoning that a session
+    /// boundary always calls `invalidate()`. A5 found that reasoning holds only where the boundary
+    /// is *atomic*. It is not on iOS: `onSessionBoundary()` bumps its session epoch, then `await`s
+    /// `TransferManager.close()`, and only then calls `invalidate()` — so throughout that `await`
+    /// the gate still names the old transfer while the live session has already moved on, and
+    /// `isOwner` alone answers `true` for an operation that is already stale. Android's boundary
+    /// runs the same three steps with no suspension between them, but the live generation is
+    /// bumped by `ControlSessionManager` *before* the `Connected` event that triggers the boundary
+    /// is even dispatched, so the same window exists there too — narrower, and reached by a
+    /// different route, but the same shape.
+    ///
+    /// Joining both halves here rather than at each call site is what makes the rule testable as a
+    /// unit on both platforms, including on iOS where the coordinator that calls it has no test
+    /// target at all (ADR-023 Amendment A3).
+    public func stillAuthorises(
+        transferId: TransferId,
+        authorisation: ProviderSessionContext,
+        liveGeneration: Int64,
+        livePeerSpki: SpkiHash?
+    ) -> Bool {
+        isOwner(transferId) && authorisation.isStillCurrent(liveGeneration: liveGeneration, livePeerSpki: livePeerSpki)
+    }
+
     /// Session boundary (brief §11/§13): unconditionally frees the slot no matter who holds it —
     /// paired with `TransferManager.close()` force-closing whatever socket that holder's
     /// `serve`/`fetch` call was blocked on, so the old holder's own eventual cleanup call finds

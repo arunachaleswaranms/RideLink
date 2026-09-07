@@ -24,6 +24,15 @@ import kotlin.test.assertTrue
  * The bulk transport (ADR-023), end to end over **real loopback TCP with a real TLS 1.3
  * handshake** — same discipline as `TlsControlChannelTest`: what a bulk connection actually does
  * is what a laptop test must prove, not what the design doc says it should do.
+ *
+ * **Every `@Test` here is written `(): Unit =` on purpose (ADR-023 Amendment A5).** These are
+ * expression-bodied functions, so Kotlin infers the return type from `runBlocking`'s last
+ * expression — and JUnit 5 silently *does not discover* a `@Test` method whose return type is not
+ * `void`. Two cases in this file (the wrong-SPKI rejection, and A1's own `cancelActive` proof)
+ * ended in `serveResult.await()`, inferred `BulkServeOutcome`, and had therefore never executed
+ * once — a whole audit's worth of green runs reported them as passing while JUnit had skipped them
+ * without a word. Found by comparing declared `@Test` counts against the JUnit XML's `tests=`
+ * attribute, then confirming with `javap`. Do not drop the explicit `: Unit`.
  */
 @Timeout(value = 60, unit = TimeUnit.SECONDS, threadMode = Timeout.ThreadMode.SEPARATE_THREAD)
 class BulkTransportManagerTest {
@@ -33,7 +42,7 @@ class BulkTransportManagerTest {
 
     private fun manager(identity: TestTlsSupport.TestIdentity) =
         BulkTransportManager(
-            tlsChannel =
+            channel =
                 TlsControlChannel(
                     identity = identity.identity,
                     ioDispatcher = Dispatchers.IO,
@@ -76,7 +85,7 @@ class BulkTransportManagerTest {
                         }
                     val fetchResult =
                         withTimeout(TIMEOUT_MS) {
-                            client.fetch("127.0.0.1", port, token, alice.identity.identitySpkiSha256, 2, sink)
+                            client.fetch(transferId, "127.0.0.1", port, token, alice.identity.identitySpkiSha256, 2, sink)
                         }
                     assertEquals(BulkFetchOutcome.OK, fetchResult)
                     assertEquals(BulkServeOutcome.OK, serveResult.await())
@@ -93,8 +102,10 @@ class BulkTransportManagerTest {
             }
         }
 
+    // The explicit `: Unit` on every test below is load-bearing, not decoration — see the class
+    // KDoc's ADR-023 Amendment A5 note on why an inferred non-Unit return hides a test from JUnit 5.
     @Test
-    fun `client rejects a provider presenting the wrong SPKI`() =
+    fun `client rejects a provider presenting the wrong SPKI`(): Unit =
         runBlocking {
             val server = manager(mallory) // not the peer bob expects
             val client = manager(bob)
@@ -109,7 +120,7 @@ class BulkTransportManagerTest {
                         async(Dispatchers.IO) { server.serve(transferId, bob.identity.identitySpkiSha256, { 1L }, 1L, source) }
                     val fetchResult =
                         withTimeout(TIMEOUT_MS) {
-                            client.fetch("127.0.0.1", port, token, alice.identity.identitySpkiSha256, 1, ChunkSink { _, _ -> })
+                            client.fetch(transferId, "127.0.0.1", port, token, alice.identity.identitySpkiSha256, 1, ChunkSink { _, _ -> })
                         }
                     assertEquals(BulkFetchOutcome.NOT_AUTHORIZED, fetchResult)
                     serveResult.await()
@@ -137,7 +148,15 @@ class BulkTransportManagerTest {
                         async(Dispatchers.IO) { server.serve(transferId, bob.identity.identitySpkiSha256, { 1L }, 1L, source) }
                     val fetchResult =
                         withTimeout(TIMEOUT_MS) {
-                            client.fetch("127.0.0.1", port, wrongToken, alice.identity.identitySpkiSha256, 1, ChunkSink { _, _ -> })
+                            client.fetch(
+                                transferId,
+                                "127.0.0.1",
+                                port,
+                                wrongToken,
+                                alice.identity.identitySpkiSha256,
+                                1,
+                                ChunkSink { _, _ -> },
+                            )
                         }
                     // The client's connection succeeds at the TLS/SPKI layer and it dutifully sends the
                     // wrong token; the server closes without ever streaming a chunk, so the client's read
@@ -168,7 +187,15 @@ class BulkTransportManagerTest {
                         async(Dispatchers.IO) { server.serve(transferId, bob.identity.identitySpkiSha256, { 2L }, 1L, source) }
                     val fetchResult =
                         withTimeout(TIMEOUT_MS) {
-                            client.fetch("127.0.0.1", port, staleToken, alice.identity.identitySpkiSha256, 1, ChunkSink { _, _ -> })
+                            client.fetch(
+                                transferId,
+                                "127.0.0.1",
+                                port,
+                                staleToken,
+                                alice.identity.identitySpkiSha256,
+                                1,
+                                ChunkSink { _, _ -> },
+                            )
                         }
                     assertEquals(BulkFetchOutcome.CONNECTION_LOST, fetchResult)
                     assertEquals(BulkServeOutcome.NOT_AUTHORIZED, serveResult.await())
@@ -207,6 +234,7 @@ class BulkTransportManagerTest {
                     val fetchResult =
                         withTimeout(TIMEOUT_MS) {
                             client.fetch(
+                                transferId,
                                 "127.0.0.1",
                                 port,
                                 token,
@@ -263,6 +291,7 @@ class BulkTransportManagerTest {
                     val fetchResult =
                         withTimeout(TIMEOUT_MS) {
                             client.fetch(
+                                RAW_FRAME_TRANSFER_ID,
                                 "127.0.0.1",
                                 listener.localPort,
                                 "00".repeat(32),
@@ -299,6 +328,7 @@ class BulkTransportManagerTest {
                     val fetchResult =
                         withTimeout(TIMEOUT_MS) {
                             client.fetch(
+                                RAW_FRAME_TRANSFER_ID,
                                 "127.0.0.1",
                                 listener.localPort,
                                 "00".repeat(32),
@@ -335,6 +365,7 @@ class BulkTransportManagerTest {
                     val fetchResult =
                         withTimeout(TIMEOUT_MS) {
                             client.fetch(
+                                RAW_FRAME_TRANSFER_ID,
                                 "127.0.0.1",
                                 listener.localPort,
                                 "00".repeat(32),
@@ -374,6 +405,7 @@ class BulkTransportManagerTest {
                     val fetchResult =
                         withTimeout(TIMEOUT_MS) {
                             client.fetch(
+                                RAW_FRAME_TRANSFER_ID,
                                 "127.0.0.1",
                                 listener.localPort,
                                 "00".repeat(32),
@@ -404,7 +436,7 @@ class BulkTransportManagerTest {
     // --- Closure-audit Findings C/D/N: cancelActive force-closes a stuck in-flight operation ------
 
     @Test
-    fun `cancelActive unblocks a fetch genuinely stuck waiting for chunks that will never arrive`() =
+    fun `cancelActive unblocks a fetch genuinely stuck waiting for chunks that will never arrive`(): Unit =
         runBlocking {
             val server = manager(alice)
             val client = manager(bob)
@@ -430,17 +462,39 @@ class BulkTransportManagerTest {
                         }
                     }
 
+                // ADR-023 Amendment A5: this waits on a real state transition, not on a fixed
+                // sleep. The sleep it replaces was the one piece of timing guesswork left in this
+                // suite, and it mattered here more than anywhere else: if the cancel fires before
+                // the fetch has actually connected, `cancelActive` is *correctly* a no-op (there is
+                // nothing to cancel yet), the fetch then parks for the full 10 s bound below, and
+                // the server's `serve` — blocked in a real, non-cancellable `accept()`/read — holds
+                // this `coroutineScope` open for its own 30 s bound. That produces exactly the
+                // "one failure, ~32 s run" signature observed once in 220 stress runs of this
+                // suite. Chunk 0 arriving is the precise precondition the test name claims:
+                // connected, authorised, and genuinely parked waiting for more.
+                val firstChunkArrived = CompletableDeferred<Unit>()
                 coroutineScope {
                     val serveResult =
                         async(Dispatchers.IO) { server.serve(transferId, bob.identity.identitySpkiSha256, { generation }, 5L, source) }
                     val fetchResult =
                         async(Dispatchers.IO) {
-                            client.fetch("127.0.0.1", port, token, alice.identity.identitySpkiSha256, 5, ChunkSink { _, _ -> })
+                            client.fetch(
+                                transferId,
+                                "127.0.0.1",
+                                port,
+                                token,
+                                alice.identity.identitySpkiSha256,
+                                5,
+                                ChunkSink { _, _ -> firstChunkArrived.complete(Unit) },
+                            )
                         }
-                    // Give the real loopback connection time to actually deliver the one chunk the
-                    // server does send, so the client is genuinely parked waiting for more.
-                    delay(SETTLE_MS)
-                    client.cancelActive()
+                    withTimeout(TIMEOUT_MS) { firstChunkArrived.await() }
+                    assertEquals(
+                        transferId,
+                        client.connectedTransferIdForTesting,
+                        "the fetch must really own the transport's connected phase before the cancel is meaningful",
+                    )
+                    client.cancelActive(transferId)
 
                     withTimeout(TIMEOUT_MS) {
                         assertTrue(
@@ -449,7 +503,7 @@ class BulkTransportManagerTest {
                         )
                     }
                     neverSendsSecondChunk.complete(Unit)
-                    serveResult.await()
+                    withTimeout(TIMEOUT_MS) { serveResult.await() }
                 }
             } finally {
                 server.close()
@@ -487,6 +541,7 @@ class BulkTransportManagerTest {
                     val fetchResult =
                         withTimeout(TIMEOUT_MS) {
                             client.fetch(
+                                transferId,
                                 "127.0.0.1",
                                 port,
                                 token,
@@ -513,22 +568,14 @@ class BulkTransportManagerTest {
         }
 
     /**
-     * ADR-023 Amendment A4 Finding W: `serve()`'s `accept()` must be bounded by the `bulk_token`'s
-     * own 30 s TTL (ADR-023 §2). Unbounded, a requester that takes a `TRANSFER_OFFER` and then
-     * never dials — cancelled between offer and fetch, or its connect failed — parks `serve()`
-     * inside `accept()` for the rest of the session, holding [BulkTransportManager]'s single
-     * `activeTransferMutex` (and, one layer up, the coordinator's `BulkOperationGate`) against
-     * every other transfer in **both** directions. `cancelActive()` cannot rescue it either:
-     * `activeSocket` is still null at that point, so there is nothing for it to close.
-     *
-     * The bound itself is 30 s, far too long to sit in a unit test, so this proves the two halves
-     * separately: that `cancelActive()` genuinely cannot unblock a not-yet-accepted `serve` (the
-     * reason a timeout is needed at all), and that closing the listener does end it promptly (the
-     * session-boundary escape hatch that limited the blast radius to one session rather than
-     * forever). `ControlListenerAcceptTimeoutTest` covers the timeout firing, with a short bound.
+     * ADR-023 Amendment A4 Finding W's other half, still true and still needed: a `serve` nobody
+     * ever dials and nobody ever cancels is ended by the session boundary's `close()`. A5 does not
+     * change this — it adds the *explicit-cancel* path below, and leaves the 30 s bound
+     * (`ControlListenerAcceptTimeoutTest` covers it firing, with a short bound) in place for the
+     * cases where no cancel ever arrives at all.
      */
     @Test
-    fun `a serve nobody ever dials is not rescued by cancelActive, only by closing the listener`() =
+    fun `a serve nobody ever dials is ended by closing the transport`() =
         runBlocking {
             val server = manager(alice)
             try {
@@ -542,17 +589,8 @@ class BulkTransportManagerTest {
                         async(Dispatchers.IO) {
                             server.serve(transferId, bob.identity.identitySpkiSha256, { generation }, 1L, chunksOf(ByteArray(10)))
                         }
-                    // Give the serve call time to actually reach accept() and park there.
-                    withContext(Dispatchers.IO) { Thread.sleep(SETTLE_MS) }
+                    awaitPendingAccept(server, transferId)
                     assertTrue(serveResult.isActive, "serve must still be parked in accept() -- nobody has dialled")
-
-                    server.cancelActive()
-                    withContext(Dispatchers.IO) { Thread.sleep(SETTLE_MS) }
-                    assertTrue(
-                        serveResult.isActive,
-                        "cancelActive() cannot unblock an accept() that has not produced a socket yet -- " +
-                            "this is exactly why the accept needs its own bound",
-                    )
 
                     // Closing the listener makes the parked accept() throw, which serve() reports.
                     server.close()
@@ -567,16 +605,218 @@ class BulkTransportManagerTest {
     fun `cancelActive is a safe no-op when nothing is active`() =
         runBlocking {
             val manager = manager(alice)
+            val transferId = TransferId("01J9Z4M3RT8V2W5X7Y9Z1A3B5N")
             try {
-                manager.cancelActive()
-                manager.cancelActive()
+                manager.cancelActive(transferId)
+                manager.cancelActive(transferId)
             } finally {
                 manager.close()
+            }
+        }
+
+    // --- ADR-023 Amendment A5 Finding A: explicit cancellation while parked in accept() ----------
+
+    /**
+     * Spins until [manager] reports [transferId] as the transfer parked in `accept()`. Deterministic
+     * on a real state hook rather than a guessed sleep: the `serve` coroutine is genuinely blocked
+     * on a real `ServerSocket.accept()` on another thread, so there is no scheduler to advance —
+     * only a real transition to observe. Bounded so a regression fails the test instead of hanging
+     * it.
+     */
+    private suspend fun awaitPendingAccept(
+        manager: BulkTransportManager,
+        transferId: TransferId,
+    ) {
+        withTimeout(TIMEOUT_MS) {
+            while (manager.pendingAcceptTransferIdForTesting != transferId) delay(POLL_MS)
+        }
+    }
+
+    /**
+     * **The A5 Finding A regression.** PROTOCOL §8.2 allows `TRANSFER_CANCEL` from either side at
+     * any time. Before A5, a cancel arriving while the provider was still parked in `accept()` —
+     * the requester was cancelled between taking the offer and dialling, or its connect failed —
+     * had nothing to act on, because the socket a cancel closes does not exist until `accept()`
+     * *returns*. The call then sat there holding the one-active-transfer slot (and the
+     * coordinator's `BulkOperationGate` above it) until A4's 30 s bound expired.
+     *
+     * This asserts the causality directly, not the bound: the production accept timeout is
+     * unchanged at 30 s, and `serve` must return in a small fraction of that because the *cancel*
+     * ended it. A regression that reverted to waiting the bound out would blow [TIMEOUT_MS] (10 s)
+     * and fail here, rather than passing slowly.
+     */
+    @Test
+    fun `an explicit cancel ends a serve parked in accept, without waiting out the 30 s bound`() =
+        runBlocking {
+            val server = manager(alice)
+            try {
+                server.ensureListening()
+                val transferId = TransferId("01J9Z4M3RT8V2W5X7Y9Z1A3B5P")
+                val generation = 1L
+                val token = server.issueToken(transferId, generation)
+
+                coroutineScope {
+                    val serveResult =
+                        async(Dispatchers.IO) {
+                            server.serve(transferId, bob.identity.identitySpkiSha256, { generation }, 1L, chunksOf(ByteArray(10)))
+                        }
+                    awaitPendingAccept(server, transferId)
+
+                    val startedAtNs = System.nanoTime()
+                    server.cancelActive(transferId)
+                    assertEquals(BulkServeOutcome.IO_ERROR, withTimeout(TIMEOUT_MS) { serveResult.await() })
+                    val elapsedMs = (System.nanoTime() - startedAtNs) / 1_000_000
+                    assertTrue(
+                        elapsedMs < PROMPT_MS,
+                        "the cancel itself must have ended the accept ($elapsedMs ms) -- not A4's 30 s bound",
+                    )
+                }
+
+                assertEquals(null, server.pendingAcceptTransferIdForTesting, "the cancelled transfer must no longer own the accept")
+                assertEquals(null, server.listenerPortForTesting, "the listener the accept was parked on must be gone")
+                // Section 5: the offer's token dies with the transfer it authorised, rather than
+                // staying live for the rest of its 30 s TTL.
+                assertTrue(
+                    !server.tokenTable.validateAndConsume(transferId, token, generation),
+                    "a cancelled pre-accept transfer's token must no longer authorise anything",
+                )
+            } finally {
+                server.close()
+            }
+        }
+
+    /**
+     * The other half of A5 Finding A's invariant (brief §2/§18): cancellation is `transfer_id`-
+     * scoped in **both** phases, so a cancel naming some other transfer — a stale one, a queued
+     * one, a peer's mistake — must leave the pending accept exactly where it is. Only the cancel
+     * that actually names it may end it.
+     */
+    @Test
+    fun `a cancel naming a different transfer leaves a pending accept untouched`() =
+        runBlocking {
+            val server = manager(alice)
+            try {
+                val port = server.ensureListening()
+                val transferA = TransferId("01J9Z4M3RT8V2W5X7Y9Z1A3B5Q")
+                val transferB = TransferId("01J9Z4M3RT8V2W5X7Y9Z1A3B5R")
+                val generation = 1L
+                server.issueToken(transferA, generation)
+
+                coroutineScope {
+                    val serveResult =
+                        async(Dispatchers.IO) {
+                            server.serve(transferA, bob.identity.identitySpkiSha256, { generation }, 1L, chunksOf(ByteArray(10)))
+                        }
+                    awaitPendingAccept(server, transferA)
+
+                    server.cancelActive(transferB)
+                    // A real sleep is correct here and nowhere else in this suite: this asserts the
+                    // *absence* of an effect, and there is no state transition to wait on when the
+                    // whole claim is that nothing transitions. Bounded, and the accept it is
+                    // proving still-parked is ended by the cancel below rather than by any timeout.
+                    withContext(Dispatchers.IO) { Thread.sleep(SETTLE_MS) }
+                    assertTrue(serveResult.isActive, "a cancel for B must not end A's accept")
+                    assertEquals(transferA, server.pendingAcceptTransferIdForTesting)
+                    assertEquals(port, server.listenerPortForTesting, "a wrong-transfer cancel must not close the shared listener")
+
+                    server.cancelActive(transferA)
+                    assertEquals(BulkServeOutcome.IO_ERROR, withTimeout(TIMEOUT_MS) { serveResult.await() })
+                }
+            } finally {
+                server.close()
+            }
+        }
+
+    /**
+     * Brief §6/§20: cancelling a pending accept closes the listener it was parked on, which is only
+     * acceptable if the session is not left wedged. The next transfer must bind a fresh listener,
+     * mint a fresh token, and complete normally — and the cancelled transfer's old token must not
+     * work against that new listener.
+     */
+    @Test
+    fun `a fresh transfer works normally after a pending accept is cancelled`() =
+        runBlocking {
+            val server = manager(alice)
+            val client = manager(bob)
+            try {
+                val cancelledPort = server.ensureListening()
+                val transferA = TransferId("01J9Z4M3RT8V2W5X7Y9Z1A3B5S")
+                val generation = 1L
+                val staleToken = server.issueToken(transferA, generation)
+
+                coroutineScope {
+                    val serveA =
+                        async(Dispatchers.IO) {
+                            server.serve(transferA, bob.identity.identitySpkiSha256, { generation }, 1L, chunksOf(ByteArray(10)))
+                        }
+                    awaitPendingAccept(server, transferA)
+                    server.cancelActive(transferA)
+                    assertEquals(BulkServeOutcome.IO_ERROR, withTimeout(TIMEOUT_MS) { serveA.await() })
+                }
+
+                // The abandoned offer's port is genuinely gone: presenting the stale token there
+                // cannot reach anything (the connect itself fails -- there is nothing listening).
+                assertEquals(
+                    BulkFetchOutcome.CONNECTION_LOST,
+                    withTimeout(TIMEOUT_MS) {
+                        client.fetch(
+                            transferA,
+                            "127.0.0.1",
+                            cancelledPort,
+                            staleToken,
+                            alice.identity.identitySpkiSha256,
+                            1,
+                            ChunkSink { _, _ -> },
+                        )
+                    },
+                )
+
+                val freshPort = server.ensureListening()
+                val transferB = TransferId("01J9Z4M3RT8V2W5X7Y9Z1A3B5V")
+                val freshToken = server.issueToken(transferB, generation)
+                val payload = ByteArray(64) { it.toByte() }
+                val received = mutableListOf<ByteArray>()
+
+                coroutineScope {
+                    val serveB =
+                        async(Dispatchers.IO) {
+                            server.serve(transferB, bob.identity.identitySpkiSha256, { generation }, 1L, chunksOf(payload))
+                        }
+                    val fetchB =
+                        withTimeout(TIMEOUT_MS) {
+                            client.fetch(
+                                transferB,
+                                "127.0.0.1",
+                                freshPort,
+                                freshToken,
+                                alice.identity.identitySpkiSha256,
+                                1,
+                                ChunkSink { _, bytes -> received.add(bytes) },
+                            )
+                        }
+                    assertEquals(BulkFetchOutcome.OK, fetchB)
+                    assertEquals(BulkServeOutcome.OK, serveB.await())
+                }
+                assertEquals(1, received.size)
+                assertTrue(payload.contentEquals(received[0]))
+            } finally {
+                server.close()
+                client.close()
             }
         }
 
     private companion object {
         const val TIMEOUT_MS = 10_000L
         const val SETTLE_MS = 500L
+        const val POLL_MS = 5L
+
+        /** Generously above any real cancellation cost, and far below A4's 30 s accept bound — the
+         *  gap between them is what makes the assertion about causality rather than about timing. */
+        const val PROMPT_MS = 3_000L
+
+        /** The requester-side `transfer_id` for the raw-frame harnesses below, which drive `fetch`
+         *  against a hand-written provider that never issues a token — the id is only what makes
+         *  `fetch`'s own cancellation scoping work, and no test here cancels them. */
+        val RAW_FRAME_TRANSFER_ID = TransferId("01J9Z4M3RT8V2W5X7Y9Z1A3B60")
     }
 }

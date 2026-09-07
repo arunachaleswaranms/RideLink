@@ -89,6 +89,18 @@ class BulkTokenTable(
         return entries.replace(transferId, entry, entry.copy(consumed = true))
     }
 
+    /**
+     * ADR-023 Amendment A5 — drops [transferId]'s entry outright, so a token that was minted and
+     * put on the wire in a `TRANSFER_OFFER` but never consumed cannot authorise anything after the
+     * transfer it belonged to has been explicitly cancelled. Without this, an offer the peer just
+     * cancelled stayed authorised for the remainder of its 30 s TTL (ADR-023 §2), and a connection
+     * presenting that token to a subsequently re-opened listener would still have been served.
+     * Narrower than [clear], which is the session boundary's tool.
+     */
+    fun remove(transferId: TransferId) {
+        entries.remove(transferId)
+    }
+
     /** Called on every reconnect/re-authentication — the new generation makes old entries dead weight. */
     fun sweepBelow(currentGeneration: Long) {
         entries.entries.removeIf { it.value.generation < currentGeneration }

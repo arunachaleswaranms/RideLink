@@ -1,9 +1,11 @@
 import Foundation
 import RideLinkCore
 
-/// ADR-023 — one bulk TLS listener per authenticated **session** (not per transfer), the same
-/// identity as the control connection, SPKI-pinned, single-use-token-authorised per transfer, and
-/// bounded to one active transfer at a time (brief §20).
+/// ADR-023 — at most one **live** bulk TLS listener per authenticated session (never one per
+/// transfer), the same identity as the control connection, SPKI-pinned, single-use-token-authorised
+/// per transfer, and bounded to one active transfer at a time (brief §20). A listener never
+/// outlives its own session; Amendment A5 lets a session open a *replacement* within its own life,
+/// when cancelling a pending accept ends the current one — see `cancelActive(transferId:)`.
 ///
 /// Reuses `TlsControlChannel` wholesale for the bulk connection's TLS setup rather than
 /// duplicating it — same mutual TLS 1.3, same accept-then-pin-one-layer-up shape (ADR-007,
@@ -25,41 +27,87 @@ import RideLinkCore
 public actor TransferManager {
     public let tokenTable: BulkTokenTable
 
-    private let tlsChannel: TlsControlChannel
+    /// Production always wires `TlsControlChannel` here — PROTOCOL §1 and CLAUDE.md rule 14 admit no
+    /// plaintext production transport, and `SessionCoordinator` is the one call site. Declared as
+    /// the `ControlChannel` protocol (exactly as `ControlSessionManager` already declares its own)
+    /// so ADR-023 Amendment A5's bind-versus-close publication race can be driven by a test double
+    /// whose `bind()` suspends on demand, rather than by hoping a real TLS bind happens to be slow.
+    private let channel: any ControlChannel
     private var listener: ControlListener?
+
+    /// ADR-023 Amendment A5 Finding B — the bulk listener's lifetime, bumped whenever a listener is
+    /// torn down (`close()`, or `cancelActive` abandoning a pending accept). `ensureListening()`
+    /// reads it before suspending in `bind()` and re-reads it before publishing.
+    ///
+    /// An actor is **reentrant** across `await`, which is exactly the hole this closes: `close()`
+    /// could run entirely inside a suspended `ensureListening()`'s `await channel.bind()`, find
+    /// `listener` still nil, return having "torn everything down" — and then the resumed bind would
+    /// assign its brand-new listener to `listener`, resurrecting a listener for a session that had
+    /// already ended. Actor isolation alone never prevented that; bumping this counter *before*
+    /// anything is closed, and re-checking it at the publication point, does.
+    private var listenerEpoch: Int64 = 0
 
     /// Finding E's gate — see the type doc comment above. `true` while a `serve`/`fetch` call owns
     /// the one active-transfer slot; a second concurrent call is rejected outright rather than
     /// queued, matching this pass's brief-sanctioned "reject, don't busy-wait" design.
     private var transferInProgress = false
 
-    /// Finding C/D/N: the socket a `serve`/`fetch` call currently holds, so [cancelActive] can force
-    /// it closed — unblocking whatever blocking read/accept the active operation is parked in —
-    /// rather than merely requesting `Task` cancellation, which a suspended socket call does not
-    /// observe until it next unblocks on its own.
-    private var activeSocket: ControlConnection?
+    /// ADR-023 Amendment A5 — which transfer owns this transport right now, and how far along it is.
+    /// A3 tracked the socket and its `transfer_id`, both of which exist only *after*
+    /// `accept()`/`connect()` returns, so a `TRANSFER_CANCEL` arriving while `serve` was still
+    /// parked in `accept()` had nothing to act on and `cancelActive`'s own guard refused (A4's
+    /// Finding W recorded the gap and bounded it with a 30 s timeout rather than closing it).
+    /// Naming the owner from the moment the wait begins is what makes an explicit cancellation able
+    /// to end that wait, and what keeps a cancellation naming a *different* transfer a no-op.
+    private enum Operation {
+        /// `serve` is parked in `accept()`; no socket exists yet, and the listener is what a cancel
+        /// must break.
+        case waitingForAccept(transferId: TransferId)
+        /// A real connection is open — the A3 state, unchanged in meaning.
+        case connected(transferId: TransferId, socket: ControlConnection)
 
-    /// ADR-023 Amendment A3 — the `transfer_id` [activeSocket] currently belongs to, set together
-    /// with it wherever `serve`/`fetch` assigns [activeSocket] and cleared together with it in the
-    /// same `defer`. This is what makes [cancelActive(transferId:)] operation-aware rather than
-    /// manager-wide: the closure-audit found that a caller scheduling `Task { await
-    /// transport.cancelActive() }` and then immediately, synchronously, releasing `BulkOperationGate`
-    /// (so a second operation could acquire the slot and start a *new* `serve`/`fetch` call, setting
-    /// [activeSocket] to its own socket) let that stale, merely-*scheduled* cancellation — once it
-    /// finally ran on this actor — blindly close whatever [activeSocket] was current by then, which
-    /// could by that point belong to the second, unrelated operation. Binding the check to the
-    /// `transfer_id` the caller actually meant to cancel closes that race structurally: a cancel for
-    /// an operation that has already finished (and been superseded by a different `transfer_id`) is
-    /// now a no-op instead of closing the wrong socket.
-    private var activeTransferId: TransferId?
+        var transferId: TransferId {
+            switch self {
+            case .waitingForAccept(let transferId): return transferId
+            case .connected(let transferId, _): return transferId
+            }
+        }
+    }
 
-    /// Test-only visibility into [activeTransferId], so a deterministic test can wait for a real
-    /// `serve`/`fetch` call to actually reach its socket-accepted point rather than guessing with a
-    /// fixed sleep. `internal`, reachable only via `@testable import`.
-    var activeTransferIdForTesting: TransferId? { activeTransferId }
+    /// Finding C/D/N, made phase-aware by A5: the operation a `serve`/`fetch` call currently owns,
+    /// so `cancelActive(transferId:)` can force it to end — closing the socket it is parked on, or
+    /// the listener it is waiting to accept from — rather than merely requesting `Task`
+    /// cancellation, which a suspended socket call does not observe until it next unblocks.
+    private var operation: Operation?
 
-    public init(tlsChannel: TlsControlChannel, monotonicNowUs: @escaping @Sendable () -> Int64) {
-        self.tlsChannel = tlsChannel
+    /// ADR-023 Amendment A3 established that cancellation must name the `transfer_id` it means: the
+    /// closure-audit found that a caller scheduling `Task { await transport.cancelActive() }` and
+    /// then immediately, synchronously, releasing `BulkOperationGate` (so a second operation could
+    /// acquire the slot and start a *new* `serve`/`fetch` call) let that stale, merely-*scheduled*
+    /// cancellation — once it finally ran on this actor — blindly close whatever socket was current
+    /// by then, which could belong to the second, unrelated operation. A5 keeps that guarantee and
+    /// widens it to the accept phase, where no socket exists yet: see [Operation].
+    ///
+    /// Test-only visibility, so a deterministic test can wait for a real `serve`/`fetch` call to
+    /// actually reach its socket-accepted point rather than guessing with a fixed sleep.
+    /// `internal`, reachable only via `@testable import`.
+    var activeTransferIdForTesting: TransferId? {
+        guard case .connected(let transferId, _) = operation else { return nil }
+        return transferId
+    }
+
+    /// Test-only: the transfer parked in `accept()`, if any — the deterministic signal an A5
+    /// cancel-before-accept test waits on instead of guessing with a sleep.
+    var pendingAcceptTransferIdForTesting: TransferId? {
+        guard case .waitingForAccept(let transferId) = operation else { return nil }
+        return transferId
+    }
+
+    /// Test-only: the port currently published, or `nil` if no listener is published at all.
+    var listenerPortForTesting: UInt16? { listener?.localPort }
+
+    public init(channel: any ControlChannel, monotonicNowUs: @escaping @Sendable () -> Int64) {
+        self.channel = channel
         self.tokenTable = BulkTokenTable(monotonicNowUs: monotonicNowUs)
     }
 
@@ -73,27 +121,63 @@ public actor TransferManager {
         transferInProgress = false
     }
 
-    /// ADR-023 Amendment A3: operation-aware cancellation — closes the active socket only if it is
-    /// still the one [transferId] actually owns. A cancel for an operation that has already
-    /// finished and been superseded by a different `transfer_id` is a no-op, never a way to close a
-    /// newer, unrelated operation's socket (the manager-wide `cancelActive()` this replaces could not
-    /// tell the difference). Idempotent and safe to call when nothing matching is active.
-    public func cancelActive(transferId: TransferId) {
-        guard activeTransferId == transferId else { return }
-        forceCloseActiveSocket()
+    /// ADR-023 Amendment A3, widened by A5: operation-aware cancellation — terminates the in-flight
+    /// operation only if it is still the one `transferId` actually owns. A cancel for an operation
+    /// that has already finished and been superseded by a different `transfer_id` is a no-op, never
+    /// a way to disturb a newer, unrelated operation.
+    ///
+    /// Both phases terminate, which is the whole of A5's Finding A:
+    /// - **connected** — close the connection. Closing it, rather than merely cancelling a `Task`,
+    ///   is what actually unblocks a suspended read/write.
+    /// - **waitingForAccept** — there is no connection yet, so the *listener* is what the parked
+    ///   `accept()` is waiting on: end its lifetime and close it, which resumes every parked waiter
+    ///   with an error immediately. `ensureListening()` binds a fresh listener for the next
+    ///   transfer, and the bumped `listenerEpoch` stops any bind suspended right now from
+    ///   resurrecting the old one.
+    ///
+    /// Either way `transferId`'s bulk token is dropped: an offer the peer has just cancelled must
+    /// not stay authorised for the remainder of its 30 s TTL (ADR-023 §2).
+    ///
+    /// Idempotent and safe to call when nothing matching is active.
+    public func cancelActive(transferId: TransferId) async {
+        guard let operation, operation.transferId == transferId else { return }
+        switch operation {
+        case .connected(_, let socket): socket.close()
+        case .waitingForAccept: endListenerLifetime()
+        }
+        self.operation = nil
+        await tokenTable.remove(transferId: transferId)
     }
 
-    /// Unconditional close, regardless of which `transfer_id` currently owns [activeSocket] — used
-    /// only by [close] (a session boundary legitimately tears down anything live, no matter whose it
-    /// is) and, via the guard above, by the operation-aware [cancelActive(transferId:)].
-    private func forceCloseActiveSocket() {
-        activeSocket?.close()
+    /// Ends the current listener's lifetime: nothing bound under the old epoch may be published
+    /// afterwards. `ControlListener.close()` resumes every parked `accept()` waiter with an error,
+    /// which is what makes a cancelled pending accept return promptly rather than waiting out
+    /// A4's 30 s bound.
+    private func endListenerLifetime() {
+        listenerEpoch += 1
+        listener?.close()
+        listener = nil
     }
 
     /// Opens the listener on first need; a later call just returns the already-bound port.
+    ///
+    /// Amendment A5 Finding B: `bind()` suspends, and this actor is **reentrant** across that
+    /// suspension — `close()` can run to completion inside it. The epoch captured before the bind
+    /// and re-checked at publication is what stops the resumed call publishing a listener into a
+    /// session that has already been torn down.
     public func ensureListening() async throws -> UInt16 {
         if let listener { return listener.localPort }
-        let bound = try await tlsChannel.bind()
+        let epochAtStart = listenerEpoch
+        let bound = try await channel.bind()
+        guard epochAtStart == listenerEpoch else {
+            bound.close()
+            throw BulkTransportError.listenerLifetimeEnded
+        }
+        // A reentrant caller in the same lifetime may already have published one; take theirs.
+        if let listener {
+            bound.close()
+            return listener.localPort
+        }
         listener = bound
         return bound.localPort
     }
@@ -115,11 +199,17 @@ public actor TransferManager {
 
     /// ADR-023 §1: the listener never outlives the session that opened it. Unconditional — a
     /// session boundary closes whatever is active regardless of which `transfer_id` owns it, unlike
-    /// [cancelActive(transferId:)].
+    /// `cancelActive(transferId:)`.
+    ///
+    /// Amendment A5 Finding B: the epoch bump comes **first**, before anything is closed, so an
+    /// `ensureListening()` call already suspended inside `bind()` can never publish its result into
+    /// this now-dead lifetime — no matter when it resumes.
     public func close() async {
-        listener?.close()
-        listener = nil
-        forceCloseActiveSocket()
+        // A `.waitingForAccept` operation needs no separate action: the listener this just closed
+        // is exactly what its parked accept() is waiting on.
+        endListenerLifetime()
+        if case .connected(_, let socket) = operation { socket.close() }
+        operation = nil
         await tokenTable.clear()
     }
 
@@ -140,22 +230,34 @@ public actor TransferManager {
         guard acquireTransferSlot() else { return .ioError } // Finding E: one active transfer at a time
         defer { releaseTransferSlot() }
         guard let listener else { return .ioError }
-        // Amendment A4 Finding W: bounded by the bulk token's own 30 s TTL (ADR-023 §2). An
-        // unbounded accept() here parks this call — and with it the single `transferInProgress`
-        // gate, and the coordinator's `BulkOperationGate` above it — for the rest of the session
-        // whenever a requester takes an offer and then never dials (it was cancelled between offer
-        // and fetch, or its connect failed), because `cancelActive(transferId:)` cannot help:
-        // `activeTransferId` is still nil, so its own guard refuses. Nothing else would then be
-        // able to start a transfer in either direction until the next session boundary.
-        guard let socket = try? await listener.accept(timeoutMs: Self.acceptTimeoutMs) else { return .ioError }
-        activeSocket = socket
-        activeTransferId = transferId
+        // Amendment A4 Finding W: bounded by the bulk token's own 30 s TTL (ADR-023 §2). This bound
+        // stays, as defence in depth for the cases no cancellation ever arrives for — the peer
+        // crashed, the negotiation was simply abandoned, or the TRANSFER_CANCEL never reached us.
+        // An explicit cancel no longer waits it out: Amendment A5 ends this accept promptly by
+        // closing the listener it is parked on. Without the bound, an abandoned negotiation would
+        // hold the single `transferInProgress` gate — and the coordinator's `BulkOperationGate`
+        // above it — against every transfer in both directions until the next session boundary.
+        // Amendment A5 Finding A: claim the pending accept *before* parking in it, so a
+        // TRANSFER_CANCEL naming this transfer has something to act on. Set synchronously, with no
+        // `await` between the claim and the accept below.
+        operation = .waitingForAccept(transferId: transferId)
+        guard let socket = try? await listener.accept(timeoutMs: Self.acceptTimeoutMs) else {
+            clearOperation(transferId)
+            return .ioError
+        }
+        // Amendment A5: a cancel can land in the instant between accept() returning a connection
+        // and this claim. Promote only if this call still owns the pending accept — otherwise the
+        // operation was cancelled (or the session closed) and this connection must not be served.
+        // Belt-and-braces with the token removal `cancelActive` already did, which would fail the
+        // authorisation below anyway; this makes it structural rather than incidental.
+        guard case .waitingForAccept(let pending) = operation, pending == transferId else {
+            socket.close()
+            return .notAuthorized
+        }
+        operation = .connected(transferId: transferId, socket: socket)
         defer {
             socket.close()
-            if activeSocket === socket {
-                activeSocket = nil
-                activeTransferId = nil
-            }
+            clearOperation(transferId)
         }
 
         guard let peerSpki = socket.security?.peerIdentitySpkiSha256, peerSpki == expectedPeerSpki else {
@@ -206,17 +308,13 @@ public actor TransferManager {
     ) async -> BulkFetchOutcome {
         guard acquireTransferSlot() else { return .connectionLost } // Finding E: one active transfer at a time
         defer { releaseTransferSlot() }
-        guard let socket = try? await tlsChannel.connect(host: host, port: port) else {
+        guard let socket = try? await channel.connect(host: host, port: port) else {
             return .connectionLost
         }
-        activeSocket = socket
-        activeTransferId = transferId
+        operation = .connected(transferId: transferId, socket: socket)
         defer {
             socket.close()
-            if activeSocket === socket {
-                activeSocket = nil
-                activeTransferId = nil
-            }
+            clearOperation(transferId)
         }
 
         guard let peerSpki = socket.security?.peerIdentitySpkiSha256, peerSpki == expectedPeerSpki else {
@@ -270,6 +368,12 @@ public actor TransferManager {
             return .protocolError
         }
         return .ok
+    }
+
+    /// Clears the operation slot only if `transferId` still owns it — a late cleanup from an
+    /// operation a `cancelActive`/`close` already ended never clears a fresher one.
+    private func clearOperation(_ transferId: TransferId) {
+        if operation?.transferId == transferId { operation = nil }
     }
 
     private func readExactly(_ socket: ControlConnection, count: Int) async -> [UInt8]? {

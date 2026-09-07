@@ -76,6 +76,16 @@ public actor BulkTokenTable {
         return true
     }
 
+    /// ADR-023 Amendment A5 — drops `transferId`'s entry outright, so a token that was minted and
+    /// put on the wire in a `TRANSFER_OFFER` but never consumed cannot authorise anything after the
+    /// transfer it belonged to has been explicitly cancelled. Without this, an offer the peer just
+    /// cancelled stayed authorised for the remainder of its 30 s TTL (ADR-023 §2), and a connection
+    /// presenting that token to a subsequently re-opened listener would still have been served.
+    /// Narrower than `clear()`, which is the session boundary's tool.
+    public func remove(transferId: TransferId) {
+        entries.removeValue(forKey: transferId)
+    }
+
     /// Called on every reconnect/re-authentication — the new generation makes old entries dead
     /// weight.
     public func sweepBelow(_ currentGeneration: Int64) {

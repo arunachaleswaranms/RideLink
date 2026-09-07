@@ -55,7 +55,7 @@ class BulkOperationGateTest {
         val gate = BulkOperationGate()
         gate.tryAcquire(BulkOperationOwner.Provider(transferA, hashA, spki, sessionGeneration = 1L))
         // CANCEL B arrives while A is active: isOwner(B) must be false, so a caller wired correctly
-        // never calls cancelActive() for it.
+        // never calls cancelActive(transferId) for it.
         assertFalse(gate.isOwner(transferB))
         assertTrue(gate.isOwner(transferA), "CANCEL B must never disturb A's ownership")
     }
@@ -115,5 +115,56 @@ class BulkOperationGateTest {
         val requester = BulkOperationOwner.Requester(transferB, hashB)
         assertFalse(gate.tryAcquire(requester), "a local download must not start while this device is actively serving a peer")
         assertTrue(gate.isOwner(transferA), "the provider operation must remain correct and undisturbed")
+    }
+
+    // --- ADR-023 Amendment A5: gate ownership is only half of "still authorised" -----------------
+
+    private fun heldGate(): BulkOperationGate =
+        BulkOperationGate().also { it.tryAcquire(BulkOperationOwner.Provider(transferA, hashA, spki, sessionGeneration = 7L)) }
+
+    private val authorisationA = ProviderSessionContext(authorisingGeneration = 7L, authorisedPeerSpki = spki)
+
+    @Test
+    fun `still authorised while the slot is held and the authorising session is still live`() {
+        assertTrue(heldGate().stillAuthorises(transferA, authorisationA, liveGeneration = 7L, livePeerSpki = spki))
+    }
+
+    /**
+     * **The A5 Finding C property.** This is the exact state iOS's `onSessionBoundary()` is in
+     * while it `await`s `TransferManager.close()`: the session epoch has already been bumped, and
+     * `bulkGate.invalidate()` has not run yet — so gate ownership alone still says "yes". It must
+     * not, because the operation is already authorised by a session that no longer exists.
+     */
+    @Test
+    fun `gate ownership alone is not authorisation once the live generation has moved on`() {
+        val gate = heldGate()
+        assertTrue(gate.isOwner(transferA), "the precondition: the gate has NOT been invalidated yet")
+        assertFalse(gate.stillAuthorises(transferA, authorisationA, liveGeneration = 8L, livePeerSpki = spki))
+    }
+
+    /** The same, for the peer half of the context — defence in depth per [ProviderSessionContext]. */
+    @Test
+    fun `gate ownership alone is not authorisation once the live peer has changed`() {
+        val gate = heldGate()
+        val otherPeer = SpkiHash("sha256:" + "ef".repeat(32))
+        assertTrue(gate.isOwner(transferA))
+        assertFalse(gate.stillAuthorises(transferA, authorisationA, liveGeneration = 7L, livePeerSpki = otherPeer))
+    }
+
+    /** A disconnected session has no live peer at all; that is not "still current" either. */
+    @Test
+    fun `a null live peer is never still current`() {
+        assertFalse(heldGate().stillAuthorises(transferA, authorisationA, liveGeneration = 7L, livePeerSpki = null))
+    }
+
+    /** The gate half is not dropped: a live session does not authorise an operation that has since
+     *  lost the slot to a fresher one, which is precisely what A3's check was protecting. */
+    @Test
+    fun `a live session does not authorise an operation that no longer owns the slot`() {
+        val gate = heldGate()
+        gate.invalidate()
+        assertFalse(gate.stillAuthorises(transferA, authorisationA, liveGeneration = 7L, livePeerSpki = spki))
+        gate.tryAcquire(BulkOperationOwner.Requester(transferB, hashB))
+        assertFalse(gate.stillAuthorises(transferA, authorisationA, liveGeneration = 7L, livePeerSpki = spki))
     }
 }
