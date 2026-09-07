@@ -71,7 +71,7 @@ class BulkTransportManagerTest {
                 coroutineScope {
                     val serveResult =
                         async(Dispatchers.IO) {
-                            server.serve(transferId, bob.identity.identitySpkiSha256, { generation }, source)
+                            server.serve(transferId, bob.identity.identitySpkiSha256, { generation }, 2L, source)
                         }
                     val fetchResult =
                         withTimeout(TIMEOUT_MS) {
@@ -104,7 +104,8 @@ class BulkTransportManagerTest {
                 val source = chunksOf(ByteArray(10))
 
                 coroutineScope {
-                    val serveResult = async(Dispatchers.IO) { server.serve(transferId, bob.identity.identitySpkiSha256, { 1L }, source) }
+                    val serveResult =
+                        async(Dispatchers.IO) { server.serve(transferId, bob.identity.identitySpkiSha256, { 1L }, 1L, source) }
                     val fetchResult =
                         withTimeout(TIMEOUT_MS) {
                             client.fetch("127.0.0.1", port, token, alice.identity.identitySpkiSha256, 1, ChunkSink { _, _ -> })
@@ -131,7 +132,8 @@ class BulkTransportManagerTest {
                 val source = chunksOf(ByteArray(10))
 
                 coroutineScope {
-                    val serveResult = async(Dispatchers.IO) { server.serve(transferId, bob.identity.identitySpkiSha256, { 1L }, source) }
+                    val serveResult =
+                        async(Dispatchers.IO) { server.serve(transferId, bob.identity.identitySpkiSha256, { 1L }, 1L, source) }
                     val fetchResult =
                         withTimeout(TIMEOUT_MS) {
                             client.fetch("127.0.0.1", port, wrongToken, alice.identity.identitySpkiSha256, 1, ChunkSink { _, _ -> })
@@ -161,7 +163,8 @@ class BulkTransportManagerTest {
                 val source = chunksOf(ByteArray(10))
 
                 coroutineScope {
-                    val serveResult = async(Dispatchers.IO) { server.serve(transferId, bob.identity.identitySpkiSha256, { 2L }, source) }
+                    val serveResult =
+                        async(Dispatchers.IO) { server.serve(transferId, bob.identity.identitySpkiSha256, { 2L }, 1L, source) }
                     val fetchResult =
                         withTimeout(TIMEOUT_MS) {
                             client.fetch("127.0.0.1", port, staleToken, alice.identity.identitySpkiSha256, 1, ChunkSink { _, _ -> })
@@ -197,7 +200,9 @@ class BulkTransportManagerTest {
 
                 coroutineScope {
                     val serveResult =
-                        async(Dispatchers.IO) { server.serve(transferId, bob.identity.identitySpkiSha256, { generation }, source) }
+                        async(Dispatchers.IO) {
+                            server.serve(transferId, bob.identity.identitySpkiSha256, { generation }, pieces.size.toLong(), source)
+                        }
                     val fetchResult =
                         withTimeout(TIMEOUT_MS) {
                             client.fetch(
@@ -426,7 +431,7 @@ class BulkTransportManagerTest {
 
                 coroutineScope {
                     val serveResult =
-                        async(Dispatchers.IO) { server.serve(transferId, bob.identity.identitySpkiSha256, { generation }, source) }
+                        async(Dispatchers.IO) { server.serve(transferId, bob.identity.identitySpkiSha256, { generation }, 5L, source) }
                     val fetchResult =
                         async(Dispatchers.IO) {
                             client.fetch("127.0.0.1", port, token, alice.identity.identitySpkiSha256, 5, ChunkSink { _, _ -> })
@@ -444,6 +449,61 @@ class BulkTransportManagerTest {
                     }
                     neverSendsSecondChunk.complete(Unit)
                     serveResult.await()
+                }
+            } finally {
+                server.close()
+                client.close()
+            }
+        }
+
+    /**
+     * ADR-023 Amendment A4 Finding T: `chunk_count` in a `TRANSFER_OFFER` is a promise (PROTOCOL
+     * §8.2), and the requester enforces it — a frame past the declared count is a `PROTOCOL_ERROR`.
+     * The provider must therefore refuse to emit one at all, so a [ChunkSource] that outruns its
+     * own declared count (a short-reading stream before Amendment A4's [InputStreamChunkSource], or
+     * a local file that grew between the size check and the open) fails as this side's own
+     * `IO_ERROR` rather than as the peer's protocol violation.
+     */
+    @Test
+    fun `provider refuses to write more frames than the chunk_count it declared`() =
+        runBlocking {
+            val server = manager(alice)
+            val client = manager(bob)
+            try {
+                val port = server.ensureListening()
+                val transferId = TransferId("01J9Z4M3RT8V2W5X7Y9Z1A3B5K")
+                val generation = 1L
+                val token = server.issueToken(transferId, generation)
+                // Four frames available, but the offer promised two.
+                val source = chunksOf(ByteArray(10), ByteArray(10), ByteArray(10), ByteArray(10))
+                val received = mutableListOf<Long>()
+
+                coroutineScope {
+                    val serveResult =
+                        async(Dispatchers.IO) {
+                            server.serve(transferId, bob.identity.identitySpkiSha256, { generation }, 2L, source)
+                        }
+                    val fetchResult =
+                        withTimeout(TIMEOUT_MS) {
+                            client.fetch(
+                                "127.0.0.1",
+                                port,
+                                token,
+                                alice.identity.identitySpkiSha256,
+                                2,
+                                ChunkSink { i, _ -> received.add(i) },
+                            )
+                        }
+                    assertEquals(
+                        BulkServeOutcome.IO_ERROR,
+                        serveResult.await(),
+                        "the provider must stop itself, not be stopped by the peer",
+                    )
+                    // The requester got exactly the two frames it was promised. It then expects a
+                    // clean provider close; the cap above makes `serve` return (closing the socket)
+                    // rather than write a third frame, so this is a clean EOF, not a trailing byte.
+                    assertEquals(listOf(0L, 1L), received)
+                    assertEquals(BulkFetchOutcome.OK, fetchResult)
                 }
             } finally {
                 server.close()

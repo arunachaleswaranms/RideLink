@@ -109,12 +109,26 @@ class FakeBulkTransportPort : BulkTransportPort {
         transferId: TransferId,
         expectedPeerSpki: SpkiHash,
         currentGeneration: () -> Long,
+        expectedChunkCount: Long,
         source: ChunkSource,
     ): BulkServeOutcome {
         serveCalls.add(transferId)
         serveGate?.await()
         return serveOutcome
     }
+
+    /** Held open, [fetch] stays genuinely in flight — the requester-role twin of [serveGate], for
+     *  landing a user cancellation or a session boundary *during* a real transfer rather than
+     *  before or after one. Completed by [cancelActive] too, mirroring how the real
+     *  `BulkTransportManager.cancelActive()` force-closes the socket a blocked `fetch` is parked on. */
+    var fetchGate: CompletableDeferred<Unit>? = null
+    val fetchCalls = mutableListOf<TransferId>()
+
+    /** Bytes to deliver through the [ChunkSink] as chunk 0 before returning [fetchOutcome] —
+     *  `null` delivers nothing. A test that needs `promote()` to actually succeed must set this to
+     *  a payload whose SHA-256 really is the requested `content_hash`; the promote path recomputes
+     *  the hash from the file on disk (ADR-023 §6) and will not be fooled. */
+    var fetchPayload: ByteArray? = null
 
     override suspend fun fetch(
         host: String,
@@ -123,14 +137,31 @@ class FakeBulkTransportPort : BulkTransportPort {
         expectedPeerSpki: SpkiHash,
         expectedChunkCount: Long,
         sink: ChunkSink,
-    ): BulkFetchOutcome = fetchOutcome
-
-    override fun cancelActive() {
-        cancelActiveCallCount += 1
+    ): BulkFetchOutcome {
+        fetchPayload?.let { sink.onChunk(0L, it) }
+        fetchGate?.await()
+        return fetchOutcome
     }
 
+    /**
+     * The real `BulkTransportManager.cancelActive()` force-closes the socket the active
+     * `serve`/`fetch` call is parked on, which is what makes that call return promptly instead of
+     * hanging. Releasing the gates models exactly that, so a test drives the *production* unblock
+     * path. The outcome the unblocked call then returns is the test's to choose ([fetchOutcome]) —
+     * a force-closed socket normally yields a failure, but a transfer whose bytes had all already
+     * arrived returns `OK`, and that is the case Amendment A4's Finding V is about.
+     */
+    override fun cancelActive() {
+        cancelActiveCallCount += 1
+        fetchGate?.complete(Unit)
+        serveGate?.complete(Unit)
+    }
+
+    /** The real `close()` calls `cancelActive()` (ADR-023 §1) — so it unblocks too, and does so
+     *  *synchronously*, which is the ordering Amendment A4's Finding V turns on. */
     override fun close() {
         closeCallCount += 1
+        cancelActive()
     }
 
     private companion object {
@@ -244,6 +275,44 @@ class UnusedTrackDao : TrackDao {
     override suspend fun count(): Int = error("not used by this test")
 
     override suspend fun deleteAll(): Unit = error("not used by this test")
+}
+
+/**
+ * A real, working in-memory [TransferCacheDao] — needed by any scenario that lets a transfer run
+ * all the way to `TransferCacheRepository.commit`, because [EmptyTransferCacheDao] below throws on
+ * `upsertVerified` and would turn a genuine "this committed when it must not have" bug into an
+ * indistinguishable commit *failure*. Eviction is never exercised by these suites, so
+ * [evictionCandidates] returns nothing rather than implementing an LRU no test reads.
+ */
+class InMemoryTransferCacheDao : TransferCacheDao {
+    private val rows = linkedMapOf<String, TransferCacheEntity>()
+
+    override suspend fun findVerified(contentHash: String): TransferCacheEntity? = rows[contentHash]?.takeIf { it.verified }
+
+    override suspend fun upsertVerified(entity: TransferCacheEntity) {
+        rows[entity.contentHash] = entity
+    }
+
+    override suspend fun touchAccess(
+        contentHash: String,
+        atMonoUs: Long,
+    ) {
+        rows[contentHash]?.let { rows[contentHash] = it.copy(lastAccessAtMonoUs = atMonoUs) }
+    }
+
+    override suspend fun delete(contentHash: String) {
+        rows.remove(contentHash)
+    }
+
+    override suspend fun evictionCandidates(locked: List<String>): List<TransferCacheEntity> = emptyList()
+
+    override suspend fun totalBytes(): Long = rows.values.sumOf { it.sizeBytes }
+
+    override suspend fun all(): List<TransferCacheEntity> = rows.values.toList()
+
+    override suspend fun deleteAll() {
+        rows.clear()
+    }
 }
 
 /**

@@ -58,7 +58,7 @@ final class TransferManagerTests: XCTestCase {
 
         async let serveTask = server.serve(
             transferId: transferId, expectedPeerSpki: bob.identitySpkiSha256,
-            currentGeneration: { generation }, source: source)
+            currentGeneration: { generation }, expectedChunkCount: 2, source: source)
         let fetchResult = await client.fetch(
             transferId: transferId, host: "127.0.0.1", port: port, token: token, expectedPeerSpki: alice.identitySpkiSha256,
             expectedChunkCount: 2, sink: sink)
@@ -88,7 +88,7 @@ final class TransferManagerTests: XCTestCase {
         let source = ArrayChunkSource([[UInt8](repeating: 0, count: 10)])
 
         async let serveTask = server.serve(
-            transferId: transferId, expectedPeerSpki: bob.identitySpkiSha256, currentGeneration: { 1 }, source: source)
+            transferId: transferId, expectedPeerSpki: bob.identitySpkiSha256, currentGeneration: { 1 }, expectedChunkCount: 1, source: source)
         let fetchResult = await client.fetch(
             transferId: transferId, host: "127.0.0.1", port: port, token: token, expectedPeerSpki: alice.identitySpkiSha256,
             expectedChunkCount: 1, sink: RecordingChunkSink())
@@ -110,7 +110,7 @@ final class TransferManagerTests: XCTestCase {
         let source = ArrayChunkSource([[UInt8](repeating: 0, count: 10)])
 
         async let serveTask = server.serve(
-            transferId: transferId, expectedPeerSpki: bob.identitySpkiSha256, currentGeneration: { 1 }, source: source)
+            transferId: transferId, expectedPeerSpki: bob.identitySpkiSha256, currentGeneration: { 1 }, expectedChunkCount: 1, source: source)
         let fetchResult = await client.fetch(
             transferId: transferId, host: "127.0.0.1", port: port, token: wrongToken, expectedPeerSpki: alice.identitySpkiSha256,
             expectedChunkCount: 1, sink: RecordingChunkSink())
@@ -136,7 +136,7 @@ final class TransferManagerTests: XCTestCase {
         let source = ArrayChunkSource([[UInt8](repeating: 0, count: 10)])
 
         async let serveTask = server.serve(
-            transferId: transferId, expectedPeerSpki: bob.identitySpkiSha256, currentGeneration: { 2 }, source: source)
+            transferId: transferId, expectedPeerSpki: bob.identitySpkiSha256, currentGeneration: { 2 }, expectedChunkCount: 1, source: source)
         let fetchResult = await client.fetch(
             transferId: transferId, host: "127.0.0.1", port: port, token: staleToken, expectedPeerSpki: alice.identitySpkiSha256,
             expectedChunkCount: 1, sink: RecordingChunkSink())
@@ -168,15 +168,18 @@ final class TransferManagerTests: XCTestCase {
             pieces.append(Array(big[offset..<end]))
             offset = end
         }
+        // Read out before `pieces` is sent into the actor below — referencing it again afterwards
+        // is what Swift 6's region isolation (correctly) rejects.
+        let chunkCount = Int64(pieces.count)
         let source = ArrayChunkSource(pieces)
         let sink = RecordingChunkSink()
 
         async let serveTask = server.serve(
             transferId: transferId, expectedPeerSpki: bob.identitySpkiSha256,
-            currentGeneration: { generation }, source: source)
+            currentGeneration: { generation }, expectedChunkCount: chunkCount, source: source)
         let fetchResult = await client.fetch(
             transferId: transferId, host: "127.0.0.1", port: port, token: token, expectedPeerSpki: alice.identitySpkiSha256,
-            expectedChunkCount: Int64(pieces.count), sink: sink)
+            expectedChunkCount: chunkCount, sink: sink)
         let serveResult = await serveTask
 
         XCTAssertEqual(.ok, fetchResult)
@@ -209,14 +212,14 @@ final class TransferManagerTests: XCTestCase {
         // overlapping call, which is false across a suspension point.
         async let firstServe: BulkServeOutcome = server.serve(
             transferId: transferId1, expectedPeerSpki: bob.identitySpkiSha256,
-            currentGeneration: { generation }, source: ArrayChunkSource([[UInt8](repeating: 0, count: 10)]))
+            currentGeneration: { generation }, expectedChunkCount: 1, source: ArrayChunkSource([[UInt8](repeating: 0, count: 10)]))
 
         // Give the first call a moment to actually reach its `accept()` suspension point.
         try await Task.sleep(nanoseconds: 200_000_000)
 
         let secondOutcome = await server.serve(
             transferId: transferId2, expectedPeerSpki: bob.identitySpkiSha256,
-            currentGeneration: { generation }, source: ArrayChunkSource([[UInt8](repeating: 0, count: 10)]))
+            currentGeneration: { generation }, expectedChunkCount: 1, source: ArrayChunkSource([[UInt8](repeating: 0, count: 10)]))
         XCTAssertEqual(.ioError, secondOutcome, "a second concurrent serve() must be rejected, not queued behind the first")
 
         // Let the first one complete normally, proving the gate does not wedge the real operation.
@@ -248,7 +251,7 @@ final class TransferManagerTests: XCTestCase {
 
         async let serveResult: BulkServeOutcome = server.serve(
             transferId: transferId, expectedPeerSpki: bob.identitySpkiSha256,
-            currentGeneration: { generation }, source: hangingSource)
+            currentGeneration: { generation }, expectedChunkCount: 5, source: hangingSource)
         async let fetchResult: BulkFetchOutcome = client.fetch(
             transferId: transferId, host: "127.0.0.1", port: port, token: token, expectedPeerSpki: alice.identitySpkiSha256,
             expectedChunkCount: 5, sink: RecordingChunkSink())
@@ -265,6 +268,47 @@ final class TransferManagerTests: XCTestCase {
         )
         await hangingSource.release()
         _ = await serveResult
+    }
+
+    /// ADR-023 Amendment A4 Finding T: `chunk_count` in a `TRANSFER_OFFER` is a promise (PROTOCOL
+    /// §8.2), and the requester enforces it — a frame past the declared count is a
+    /// `.protocolError`. The provider must therefore refuse to emit one at all, so a `ChunkSource`
+    /// that outruns its own declared count (a short-reading handle, or a local file that grew
+    /// between the size check and the open) fails as this side's own `.ioError` rather than as the
+    /// peer's protocol violation. The Kotlin mirror is
+    /// `BulkTransportManagerTest.provider refuses to write more frames than the chunk_count it declared`.
+    func testProviderRefusesToWriteMoreFramesThanTheChunkCountItDeclared() async throws {
+        let alice = try TestTlsSupport.freshIdentity()
+        let bob = try TestTlsSupport.freshIdentity()
+        let server = manager(alice)
+        let client = manager(bob)
+
+        let port = try await server.ensureListening()
+        let transferId = TransferId("01J9Z4M3RT8V2W5X7Y9Z1A3B5K")
+        let generation: Int64 = 1
+        let token = await server.issueToken(transferId: transferId, generation: generation)
+        // Four frames available, but the offer promised two.
+        let source = ArrayChunkSource(Array(repeating: [UInt8](repeating: 0, count: 10), count: 4))
+        let sink = RecordingChunkSink()
+
+        async let serveResult: BulkServeOutcome = server.serve(
+            transferId: transferId, expectedPeerSpki: bob.identitySpkiSha256,
+            currentGeneration: { generation }, expectedChunkCount: 2, source: source)
+        let fetchResult = await client.fetch(
+            transferId: transferId, host: "127.0.0.1", port: port, token: token,
+            expectedPeerSpki: alice.identitySpkiSha256, expectedChunkCount: 2, sink: sink)
+
+        let serveOutcome = await serveResult
+        let receivedIndices = await sink.received.map(\.0)
+        XCTAssertEqual(.ioError, serveOutcome, "the provider must stop itself, not be stopped by the peer")
+        // The requester got exactly the two frames it was promised. It then expects a clean
+        // provider close; the cap above makes `serve` return (closing the socket) rather than write
+        // a third frame, so this is a clean EOF, not a trailing byte.
+        XCTAssertEqual([0, 1], receivedIndices)
+        XCTAssertEqual(.ok, fetchResult)
+
+        await server.close()
+        await client.close()
     }
 
     func testCancelActiveIsASafeNoOpWhenNothingIsActive() async throws {
@@ -301,7 +345,7 @@ final class TransferManagerTests: XCTestCase {
         // activeSocket, exactly like a legitimate completion, not a cancellation.
         async let serveA: BulkServeOutcome = server.serve(
             transferId: transferIdA, expectedPeerSpki: bob.identitySpkiSha256,
-            currentGeneration: { generation }, source: ArrayChunkSource([[UInt8](repeating: 0, count: 10)]))
+            currentGeneration: { generation }, expectedChunkCount: 1, source: ArrayChunkSource([[UInt8](repeating: 0, count: 10)]))
         let fetchA = await client.fetch(
             transferId: transferIdA, host: "127.0.0.1", port: port, token: tokenA, expectedPeerSpki: alice.identitySpkiSha256,
             expectedChunkCount: 1, sink: RecordingChunkSink())
@@ -316,7 +360,7 @@ final class TransferManagerTests: XCTestCase {
         )
         async let serveB: BulkServeOutcome = server.serve(
             transferId: transferIdB, expectedPeerSpki: bob.identitySpkiSha256,
-            currentGeneration: { generation }, source: hangingSource)
+            currentGeneration: { generation }, expectedChunkCount: 5, source: hangingSource)
         async let fetchB: BulkFetchOutcome = client.fetch(
             transferId: transferIdB, host: "127.0.0.1", port: port, token: tokenB, expectedPeerSpki: alice.identitySpkiSha256,
             expectedChunkCount: 2, sink: RecordingChunkSink())
@@ -354,7 +398,7 @@ final class TransferManagerTests: XCTestCase {
         let hangingSource = HangingAfterFirstChunkSource(firstChunk: [UInt8](repeating: 0, count: 10))
         async let serveResult: BulkServeOutcome = server.serve(
             transferId: transferId, expectedPeerSpki: bob.identitySpkiSha256,
-            currentGeneration: { generation }, source: hangingSource)
+            currentGeneration: { generation }, expectedChunkCount: 5, source: hangingSource)
         try await Task.sleep(nanoseconds: 200_000_000) // let the socket genuinely open
 
         await server.close()
