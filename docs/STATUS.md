@@ -2387,8 +2387,14 @@ contract itself.
 network between two physical devices, mDNS discovery of a real peer's catalogue, any storage or
 battery measurement, or a transfer over an actual multi-hop or lossy network path.
 
-**CI:** see the immediately following docs commit for the run recorded against this session's head
-commit.
+**CI green on both platforms on the first fresh run, not re-run to green:** run
+[34114586073](https://github.com/arunachaleswaranms/RideLink/actions/runs/34114586073) (run
+number 28), head commit `fdad685` (this session's docs commit, immediately following the two
+fix/test commits `53638ac`/`ad7e02b`). Android (7m43s): `Set up JDK 21`, `Set up Android SDK`,
+`Install Android SDK packages`, `core unit tests`, `all unit tests`, `ktlint`, `detekt`, `lint`,
+`assembleDebug`, `assembleRelease` — all green. iOS (7m23s): `Toolchain versions`,
+`RideLinkCore tests`, `RideLinkPlatform tests`, `Build unsigned Debug simulator target`,
+`Build unsigned Release simulator target` — all green.
 
 ---
 
@@ -2874,8 +2880,9 @@ real loopback-TLS multi-chunk transport, a real emulator smoke check and a real 
 check (§2u), plus §2v's eighteen and §2w's two additional confirmed-and-fixed integration/
 lifecycle/session-ownership gaps (ADR-023 Amendments A1/A2). CI evidence: §2v's run
 [33976164558](https://github.com/arunachaleswaranms/RideLink/actions/runs/33976164558) (head commit
-`86c5117`); §2w's fresh run is recorded in the docs commit immediately following this session's
-fix/test commits. `docs/TEST_PLAN.md` already carries the Phase 4 exit-gate row (§9)
+`86c5117`); §2w's run
+[34114586073](https://github.com/arunachaleswaranms/RideLink/actions/runs/34114586073) (head commit
+`fdad685`), green on both platforms on the first fresh run. `docs/TEST_PLAN.md` already carries the Phase 4 exit-gate row (§9)
 marked verified-vs-pending against this evidence; `docs/PROTOCOL.md`/`docs/ARCHITECTURE.md` needed
 no further change — neither §2v's nor §2w's findings moved a wire shape or the architectural
 contract, only the production code implementing it. **What remains for Phase 4 specifically:
