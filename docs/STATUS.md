@@ -2398,6 +2398,157 @@ fix/test commits `53638ac`/`ad7e02b`). Android (7m43s): `Set up JDK 21`, `Set up
 
 ---
 
+## 2x. Phase 4 closure-audit follow-up A3 — async continuation after dispatch and transport cancellation ordering (7 September 2026 session, twenty-first)
+
+A third, narrower independent review of the same Phase 4 code §2v and §2w already closure-audited
+— scoped to exactly two questions neither of those passes asked: does §2w's Finding B dispatch-time
+generation/epoch guard survive everything `serveTransferRequest` does *after* dispatch, and can
+iOS's manager-wide transport cancellation close a socket that no longer belongs to the operation it
+was meant to cancel. **§2v's eighteen findings and §2w's Findings A/B are unchanged and not
+re-litigated here.** Full detail and reasoning: ADR-023 Amendment A3.
+
+**Classification:**
+
+| Finding | Classification |
+|---|---|
+| A — the dispatch-entry generation/epoch check does not protect the suspension points *inside* `serveTransferRequest` itself | **CONFIRMED**, both platforms |
+| B — iOS's manager-wide `TransferManager.cancelActive()`, scheduled as an unstructured `Task` and never awaited before `BulkOperationGate` is released, can end up closing a *different*, later operation's socket | **CONFIRMED, CRITICAL**, iOS only |
+
+**Finding A, in one sentence:** §2w's Finding B fix captures the live generation/epoch once, at the
+moment a `TRANSFER_REQUEST` is read off the wire, and checks it once, at the top of
+`handleTransferMessage` — but `serveTransferRequest` itself then suspends repeatedly
+(`contentResolver.resolve()`, the several actor hops iOS needs just to read
+`currentPeerSpki`/`currentAuthGeneration`, `bulkTransport.ensureListening()`,
+`controlSessionManager.transfer.send()`), and a session boundary landing inside any one of those was
+never re-checked. Since `onSessionBoundary()` frees `BulkOperationGate` and moves the live
+generation/peer on, a stale request from old peer A could acquire the freed slot mid-flight and go
+on to mint a token and send a `TRANSFER_OFFER` under the *new* session — potentially serving old
+peer A's requested file to whichever peer is connected now. This is an authorisation-bypass shape,
+not merely a state-consistency one.
+
+**Finding A, fixed:** a new pure, mirrored primitive — `core.transfer.ProviderSessionContext`
+(Kotlin) / `RideLinkCore.Transfer.ProviderSessionContext` (Swift) — captures the generation/epoch
+*and* peer SPKI that authorised the operation, and `isStillCurrent(liveGeneration, livePeerSpki)` is
+checked once, immediately after `contentResolver.resolve()` returns (the primary gap). Every
+suspension point *after* `BulkOperationGate.tryAcquire()` succeeds (`ensureListening()`, immediately
+before minting the token, immediately before sending `TRANSFER_OFFER`, and as the first line of the
+launched coroutine/Task that calls `serve()`) instead checks `bulkGate.isOwner(transferId)` — a
+strictly simpler, equally correct proxy, because `onSessionBoundary()` unconditionally invalidates
+the gate on *every* boundary and a `transfer_id` is a fresh ULID never reused (ADR-023 §2), so no
+other operation can ever be mistaken for a stale one still holding a reference to it. The live-token
+double-read at issuance and consumption (ADR-023 §3, §2v/§2w) is untouched — this is a new, outer
+guard layered on top of it, never a replacement.
+
+**Finding B, in one sentence:** `SharedLibraryCoordinator.cancelDownload`/`handlePeerCancel`
+scheduled `Task { await transport.cancelActive() }` and then immediately, synchronously, released
+`BulkOperationGate` — so a second operation (B) could acquire the freed slot and start its own
+`serve`/`fetch` call, setting `TransferManager.activeSocket` to its own socket, all before the
+merely-*scheduled* cancellation for the first operation (A) had actually run on the actor. When it
+finally did run, the old, manager-wide `cancelActive()` blindly closed whatever `activeSocket` was
+current by then — B's, not A's. The identical shape existed in `onSessionBoundary`'s
+`Task { await transport.close() }` immediately followed by `bulkGate.invalidate()`: a new session's
+`ensureListening()`/`serve()` could start before the old session's `close()` had actually finished,
+and `close()`'s own unconditional teardown could then tear down the *new* listener/socket instead of
+the old one.
+
+**Finding B, fixed — two changes:**
+
+1. **`TransferManager` gained `activeTransferId`**, set together with `activeSocket` wherever
+   `serve`/`fetch` assigns it and cleared together with it in the same `defer`. The manager-wide
+   `cancelActive()` is replaced by `cancelActive(transferId:)`, which only closes the socket if
+   `activeTransferId` still names the transfer the caller meant to cancel — a late-running,
+   `transferId`-aware cancel for an operation that has already finished (and been superseded by a
+   different `transfer_id`) is now structurally a no-op, whatever order it actually runs in. `close()`
+   keeps its own unconditional internal teardown (`forceCloseActiveSocket()`) — a session boundary
+   legitimately tears down anything live, no matter whose it is. `fetch()` also gained a `transferId`
+   parameter (it previously had none), so the requester role gets the identical protection the
+   provider role does.
+2. **`SharedLibraryCoordinator.onSessionBoundary` is now `async`, and its transport `close()` call is
+   `await`ed before `bulkGate.invalidate()` runs and before `requestCatalogue()`/any new-session
+   activity can start.** Threaded through `handleConnected()`/`handleLinkLost()` (both now `async`)
+   and up into `SessionCoordinator.applySideEffects`/`handleControlEvent` (both now `async`) at their
+   one call site inside the ordered control-event consumer loop. The old session's transport teardown
+   now provably finishes before a newer session's transport activity can begin — no `sleep`, a real
+   awaited ordering fix. Android's equivalent call (`bulkTransport.close()` inside `onSessionBoundary()`)
+   was already a plain synchronous, non-suspending call made directly (not via `scope.launch`) —
+   confirmed already safe, left unchanged.
+
+**Peer SPKI cannot change without a generation bump — the invariant `ProviderSessionContext` relies
+on for its second, redundant check.** Both platforms' `activateAuthenticatedSession` strictly
+increases the generation counter on *every* activation, including a reconnect that re-authenticates
+the *same* peer, so within one generation the live peer identity is fixed. `isStillCurrent` compares
+both anyway — the comparison is free and the closure audit asked for it explicitly — but this class
+never needs the invariant to hold to be correct; it is simply never able to observe it fail.
+
+**Tests added** (both platforms' full suites re-run clean afterward):
+
+- Android: `core` +5 (`ProviderSessionContextTest`) — new module total **348, was 343**. `app` +5
+  (`SharedLibraryCoordinatorProviderAuthorizationTest`, a real coordinator-level test — see below) —
+  new module total **13, was 8**. `network`/`data`/`audio` unchanged (182/31/33). **Grand total 607,
+  was 597.**
+- iOS: `RideLinkCore` +5 (`ProviderSessionContextTests`) — new total **244, was 239**.
+  `RideLinkPlatform` +2 (`testADelayedCancelForAFinishedTransferCannotCloseALaterOnesSocket`,
+  `testCloseCompletesFullyBeforeReturningSoANewListenerWorksImmediatelyAfter`, both real-loopback-TLS
+  against the actual `TransferManager` fix) — new total **270, was 268**.
+- **A real Android coordinator-level test now exists — the gap §2v/§2w disclosed for Android is
+  closed.** `android/app/src/main/kotlin/com/ridelink/app/library/TransferPorts.kt` introduces three
+  narrow interfaces (`ContentResolverPort`, `BulkTransportPort`, `TransferSessionPort`, plus the two
+  small relay-channel ports `TransferSessionPort.manifest`/`.transfer` need) that are exactly
+  `SharedLibraryCoordinator`'s own call surface on `LocalContentResolver`/`BulkTransportManager`/
+  `ControlSessionManager` — nothing more. Zero-behaviour-change adapter classes wrap the three real
+  production classes at `AppContainer`'s one construction call site; production wiring is otherwise
+  unchanged. `SharedLibraryCoordinatorProviderAuthorizationTest` uses fakes implementing these
+  interfaces, a `CompletableDeferred`-gated `contentResolver.resolve()`/`ensureListening()`, and
+  `kotlinx-coroutines-test`'s `StandardTestDispatcher` to land a real session boundary — a bumped
+  generation, a changed peer, and a real `ControlEvent` through the fake's own event flow, driving
+  the coordinator's own `onSessionBoundary()` — deterministically inside each of `serveTransferRequest`'s
+  suspension points, and asserts no token/offer/serve ever escapes to the new session. No sleeps; the
+  test dispatcher's virtual scheduler provides every ordering guarantee.
+- **iOS still has no equivalent coordinator-level test, for a stronger reason than a plumbing gap:**
+  `ios/RideLink.xcodeproj` has exactly one native target (`RideLink`, the app itself) — there is no
+  XCTest target wired to `ios/RideLink/*.swift` sources at all, so no test can construct a real
+  `SharedLibraryCoordinator` in-process on this platform without first adding a new Xcode test target
+  by hand-editing `project.pbxproj`. That edit was judged disproportionately risky for this pass — a
+  malformed native-target/build-configuration insertion can silently break the *entire* iOS build,
+  which is a far worse outcome than a disclosed test gap — and out of scope for a closure-audit
+  amendment whose brief explicitly asks not to damage module architecture. Finding A's fix on iOS is
+  therefore verified by: (a) code inspection against the identical design already proven correct by
+  Android's coordinator test, (b) the pure `ProviderSessionContext` unit tests proving the
+  authorisation-decision primitive itself is correct on both platforms, and (c) the full existing
+  build/test suite passing clean, including real Debug/Release simulator builds. Finding B's fix,
+  unlike Finding A's, *is* fully covered by a real, deterministic, real-loopback-TLS test directly
+  against `TransferManager` (no coordinator needed, since the fix lives entirely in the transport
+  layer) — see the two new `RideLinkPlatform` tests above.
+
+**Stress validation, no rerun-until-green:**
+
+| Suite set | Runs | Passed | Failed |
+|---|---|---|---|
+| Android `SharedLibraryCoordinatorProviderAuthorizationTest` + `ProviderSessionContextTest` + `BulkOperationGateTest`, each run with `--rerun` | 60 | **60** | 0 |
+| iOS `RideLinkPlatform` `TransferManagerTests` (all 14, including the two new delayed-cancel/close-ordering tests) | 60 | **60** | 0 |
+| iOS `RideLinkCore` `ProviderSessionContextTests` | 60 | **60** | 0 |
+
+**Full local gates, both platforms, all green, from a genuinely clean state:**
+
+- Android: `./gradlew clean` then `test ktlintCheck detekt lint assembleDebug assembleRelease` — all
+  green. `connectedDebugAndroidTest` also run and green on a real `RideLink_API36` (API 36, ARM64)
+  emulator — network 4, app 34, data 7, and audio's suite, all passed.
+- iOS: both packages' `.build` directories deleted and rebuilt from nothing —
+  `swift build`/`swift test --package-path Packages/RideLinkCore` (244/244) and
+  `.../RideLinkPlatform` (270/270) both green. `~/Library/Developer/Xcode/DerivedData/RideLink-*`
+  deleted and `xcodebuild -scheme RideLink -destination 'platform=iOS Simulator,name=iPhone 17 Pro Max'`
+  run `clean build` for both **Debug** and **Release** — both `BUILD SUCCEEDED`. `swiftlint`/
+  `swiftformat` remain not installed in this environment — the same pre-existing gap §2v/§2w already
+  disclosed, not introduced or newly encountered by this session.
+
+**What this session is not evidence about**, unchanged from §2v/§2w: any phone, any real
+Wi-Fi/hotspot network between two physical devices, mDNS discovery of a real peer's catalogue, any
+storage or battery measurement, or a transfer over an actual multi-hop or lossy network path. The
+Android emulator run above exercises real instrumented Android test suites on a real AVD — it is
+still not a physical device and does not close TEST_PLAN's hardware-gated items.
+
+---
+
 ## 3. Tests passed / pending
 
 **Passed and verified in the Phase 2b session (4 September 2026, tenth), by actually running the
@@ -2874,17 +3025,19 @@ Not blocking Phase 1. Answers needed before Phase 6.
 ## 7. Next exact task
 
 **Phase 4 — shared library + local file transfer. FINAL SOFTWARE CLOSURE COMPLETE — REAL-DEVICE
-SHARED-LIBRARY/TRANSFER GATE PENDING (§2u implementation, §2v first closure audit, §2w this
-session's narrower follow-up).** Every laptop-runnable gate is green on both platforms, including
-real loopback-TLS multi-chunk transport, a real emulator smoke check and a real simulator smoke
-check (§2u), plus §2v's eighteen and §2w's two additional confirmed-and-fixed integration/
-lifecycle/session-ownership gaps (ADR-023 Amendments A1/A2). CI evidence: §2v's run
+SHARED-LIBRARY/TRANSFER GATE PENDING (§2u implementation, §2v first closure audit, §2w second
+closure-audit follow-up, §2x this session's third, narrower follow-up).** Every laptop-runnable gate
+is green on both platforms, including real loopback-TLS multi-chunk transport, a real emulator smoke
+check and a real simulator smoke check (§2u), plus §2v's eighteen, §2w's two, and §2x's two further
+confirmed-and-fixed integration/lifecycle/session-ownership gaps (ADR-023 Amendments A1/A2/A3). CI
+evidence: §2v's run
 [33976164558](https://github.com/arunachaleswaranms/RideLink/actions/runs/33976164558) (head commit
 `86c5117`); §2w's run
 [34114586073](https://github.com/arunachaleswaranms/RideLink/actions/runs/34114586073) (head commit
-`fdad685`), green on both platforms on the first fresh run. `docs/TEST_PLAN.md` already carries the Phase 4 exit-gate row (§9)
+`fdad685`); §2x's run recorded in a follow-up docs commit once observed, green on both platforms on
+the first fresh run. `docs/TEST_PLAN.md` already carries the Phase 4 exit-gate row (§9)
 marked verified-vs-pending against this evidence; `docs/PROTOCOL.md`/`docs/ARCHITECTURE.md` needed
-no further change — neither §2v's nor §2w's findings moved a wire shape or the architectural
+no further change — none of §2v's, §2w's, or §2x's findings moved a wire shape or the architectural
 contract, only the production code implementing it. **What remains for Phase 4 specifically:
 everything a real phone-to-phone Wi-Fi/hotspot topology would show** — actual mDNS discovery of a
 peer's live catalogue, a transfer over a real (not loopback) network path, and any storage/battery
