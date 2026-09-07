@@ -15,19 +15,17 @@ import com.ridelink.core.protocol.TransferMessage
 import com.ridelink.core.transfer.BulkOperationGate
 import com.ridelink.core.transfer.BulkOperationOwner
 import com.ridelink.core.transfer.OperationFence
+import com.ridelink.core.transfer.ProviderSessionContext
 import com.ridelink.core.transfer.TransferError
 import com.ridelink.core.transfer.TransferStatus
 import com.ridelink.data.transfer.CacheStorage
 import com.ridelink.data.transfer.ContentResolution
-import com.ridelink.data.transfer.LocalContentResolver
 import com.ridelink.data.transfer.ManifestGenerator
 import com.ridelink.data.transfer.PromoteResult
 import com.ridelink.data.transfer.TransferCacheRepository
 import com.ridelink.network.control.ControlEvent
-import com.ridelink.network.control.ControlSessionManager
 import com.ridelink.network.manifest.ManifestSink
 import com.ridelink.network.transfer.BulkFetchOutcome
-import com.ridelink.network.transfer.BulkTransportManager
 import com.ridelink.network.transfer.ChunkSink
 import com.ridelink.network.transfer.ChunkSource
 import com.ridelink.network.transfer.TransferSink
@@ -96,6 +94,17 @@ data class DownloadState(
  * session that has since been superseded is dropped before it can touch [bulkGate],
  * [pendingOfferTransferId], or any provider state.
  *
+ * **Suspension-point re-authorisation (ADR-023 Amendment A3).** The dispatch-entry check above
+ * only proves the request was current the instant it was read off the wire — [serveTransferRequest]
+ * itself suspends repeatedly afterward (`contentResolver.resolve`, `bulkTransport.ensureListening`,
+ * `controlSessionManager.transfer.send`), and a session boundary landing inside any of those used
+ * to go completely unnoticed: [onSessionBoundary] frees [bulkGate] and moves the live
+ * generation/peer on, so a stale request could otherwise acquire the freed slot and go on to mint a
+ * token and send an offer under the *new* session, potentially serving old peer A's file to
+ * whichever peer is connected now. [com.ridelink.core.transfer.ProviderSessionContext] captures the
+ * authorising generation/peer once and [stillAuthorised] re-proves it (via [bulkGate] ownership,
+ * once acquired) at every one of those suspension points.
+ *
  * One collaborator per Phase 4 layer (core/network/data) in the constructor below, matching
  * `AppContainer`'s own composition-root style.
  */
@@ -106,9 +115,9 @@ class SharedLibraryCoordinator(
     private val manifestGenerator: ManifestGenerator,
     private val cacheRepository: TransferCacheRepository,
     private val cacheStorage: CacheStorage,
-    private val contentResolver: LocalContentResolver,
-    private val bulkTransport: BulkTransportManager,
-    private val controlSessionManager: ControlSessionManager,
+    private val contentResolver: ContentResolverPort,
+    private val bulkTransport: BulkTransportPort,
+    private val controlSessionManager: TransferSessionPort,
     private val nextTransferId: () -> TransferId,
     private val nextManifestId: () -> ManifestId,
     /** Finding I: the hash of whatever cache-only track [com.ridelink.app.music.MusicCoordinator]'s
@@ -548,7 +557,7 @@ class SharedLibraryCoordinator(
     ) {
         if (generation != controlSessionManager.currentAuthGeneration) return
         when (message) {
-            is TransferMessage.Request -> serveTransferRequest(message)
+            is TransferMessage.Request -> serveTransferRequest(message, generation)
             is TransferMessage.Offer -> onOfferReceived(message)
             is TransferMessage.Progress -> Unit // brief §28: peer-reported progress is never trusted or displayed
             is TransferMessage.Result -> Unit // the requester already knows its own outcome from its own verification
@@ -570,16 +579,37 @@ class SharedLibraryCoordinator(
         }
     }
 
-    @Suppress("ReturnCount") // one early-out per guard (peer identity, size bound, ownership, token collision), in that order
-    private suspend fun serveTransferRequest(request: TransferMessage.Request) {
+    /**
+     * ADR-023 Amendment A3: [authorisingGeneration] is the same value [handleTransferMessage]
+     * already checked against [ControlSessionManager.currentAuthGeneration] at dispatch time — not
+     * re-read here — because this whole function is riddled with suspension points
+     * (`contentResolver.resolve`, `bulkTransport.ensureListening`, `controlSessionManager.transfer.send`)
+     * a session boundary can land inside. Amendment A2's dispatch-entry check alone proves nothing
+     * about what the session looks like by the time any of *those* run: [stillAuthorised] and
+     * [ProviderSessionContext.isStillCurrent] are the re-checks that close that gap.
+     */
+    @Suppress("ReturnCount") // one early-out per guard, in the order each condition can first fail
+    private suspend fun serveTransferRequest(
+        request: TransferMessage.Request,
+        authorisingGeneration: Long,
+    ) {
         val peerSpki = controlSessionManager.currentPeerSpki ?: return
-        // Finding A §12: the session generation authorising this operation is snapshotted here, at
-        // creation — the token table's own consumption check (below and inside bulkTransport.serve)
-        // still re-reads the *live* generation independently; these are two different concepts and
-        // both are preserved.
-        val sessionGeneration = controlSessionManager.currentAuthGeneration
+        // Finding A §12 / Amendment A3: the session that authorises this operation for its whole
+        // lifetime, not merely a value read once and forgotten — bulkGate.tryAcquire below records
+        // it into BulkOperationOwner.Provider, and isStillCurrent is what every suspension point
+        // after that re-proves against.
+        val authorisation = ProviderSessionContext(authorisingGeneration, peerSpki)
         when (val resolution = contentResolver.resolve(request.contentHash, monotonicNowUs())) {
             is ContentResolution.Found -> {
+                // Amendment A3 — the primary gap this amendment closes: contentResolver.resolve()
+                // above is a real suspension point. A session boundary landing inside it frees
+                // bulkGate (onSessionBoundary's invalidate()) and moves the live generation/peer
+                // on — without this check, a stale request from an old peer could then acquire the
+                // slot and go on to mint a token and send an offer under the *new* live session,
+                // serving old peer A's requested file to whichever peer is connected now.
+                if (!authorisation.isStillCurrent(controlSessionManager.currentAuthGeneration, controlSessionManager.currentPeerSpki)) {
+                    return
+                }
                 // Closure-audit Finding Q: never construct/send an offer the peer's own codec would
                 // have to reject — check the bound here, on the sender, rather than relying solely
                 // on the receiver's TransferCodec.parseOffer size check.
@@ -589,17 +619,31 @@ class SharedLibraryCoordinator(
                 // concurrent TRANSFER_REQUEST, or a local download already in flight, must not
                 // overwrite ownership or receive an offer this coordinator cannot yet honour; the
                 // requester's own negotiation timeout resolves this (brief §19 — no BUSY wire shape).
-                val owner = BulkOperationOwner.Provider(request.transferId, request.contentHash, peerSpki, sessionGeneration)
+                val owner = BulkOperationOwner.Provider(request.transferId, request.contentHash, peerSpki, authorisingGeneration)
                 if (!bulkGate.tryAcquire(owner)) return
                 val port = bulkTransport.ensureListening()
+                // Amendment A3: every suspension point from here on re-checks bulkGate.isOwner
+                // instead of re-deriving generation/peerSpki — onSessionBoundary() unconditionally
+                // calls bulkGate.invalidate() on *every* boundary, and transfer_id is a fresh ULID
+                // never reused (ADR-023 §2), so "do I still own my own slot" is an equally correct,
+                // strictly simpler proxy for "has a boundary happened since I acquired" than
+                // re-reading generation/peerSpki again at each step.
+                if (!stillAuthorised(request.transferId)) return
                 // Closure-audit Finding A: read the *live* current authenticated generation both at
                 // issuance and again, independently, at consumption time — never a value captured
                 // once and replayed. A stale closure over a captured `val` would defeat ADR-023 §3's
-                // whole "reconnect invalidates every outstanding token" guarantee.
+                // whole "reconnect invalidates every outstanding token" guarantee. Amendment A3 does
+                // not touch this: the outer authorisation check above is a different, additional
+                // guard, layered on top of — never a replacement for — this live re-read.
                 val token = bulkTransport.tryIssueToken(request.transferId, controlSessionManager.currentAuthGeneration)
                 if (token == null) {
                     bulkGate.releaseIfOwner(request.transferId)
                     pumpQueue() // cross-role: wake a local download left queued behind this attempt
+                    return
+                }
+                if (!stillAuthorised(request.transferId)) {
+                    bulkGate.releaseIfOwner(request.transferId)
+                    pumpQueue()
                     return
                 }
                 val chunkCount = (resolution.sizeBytes + CHUNK_SIZE_BYTES - 1) / CHUNK_SIZE_BYTES
@@ -614,6 +658,13 @@ class SharedLibraryCoordinator(
                     ),
                 )
                 scope.launch {
+                    // Amendment A3: the launched coroutine itself may not start immediately —
+                    // re-check once more, as the very first thing it does, before ever opening the
+                    // local file or calling serve().
+                    if (!stillAuthorised(request.transferId)) {
+                        pumpQueue()
+                        return@launch
+                    }
                     // Finding A: resolution.open() lives inside this try/finally too — a failure to
                     // open the local file must not leak the gate (which would otherwise block every
                     // future transfer, both roles, until the next session boundary).
@@ -651,6 +702,16 @@ class SharedLibraryCoordinator(
             ContentResolution.NotFound, ContentResolution.FileChanged, ContentResolution.IoError -> Unit
         }
     }
+
+    /**
+     * ADR-023 Amendment A3: whether [transferId] still holds [bulkGate] — the post-acquisition
+     * proxy for "no session boundary has run since this operation acquired the slot," used at
+     * every suspension point [serveTransferRequest] passes through after [BulkOperationGate.tryAcquire]
+     * succeeds. Valid because [onSessionBoundary] unconditionally calls [BulkOperationGate.invalidate]
+     * on *every* boundary and a `transfer_id` is a fresh ULID never reused (ADR-023 §2), so no other
+     * operation can ever be mistaken for this one.
+     */
+    private fun stillAuthorised(transferId: TransferId): Boolean = bulkGate.isOwner(transferId)
 
     private companion object {
         const val NEGOTIATION_TIMEOUT_MS = 10_000L

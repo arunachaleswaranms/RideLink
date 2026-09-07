@@ -4,6 +4,9 @@ import android.content.Context
 import android.os.Build
 import android.os.SystemClock
 import androidx.room.Room
+import com.ridelink.app.library.BulkTransportManagerAdapter
+import com.ridelink.app.library.ControlSessionManagerAdapter
+import com.ridelink.app.library.LocalContentResolverAdapter
 import com.ridelink.app.library.SharedLibraryCoordinator
 import com.ridelink.app.music.MusicCoordinator
 import com.ridelink.app.service.RideCommand
@@ -208,9 +211,9 @@ class AppContainer(
             manifestGenerator = manifestGenerator,
             cacheRepository = transferCacheRepository,
             cacheStorage = cacheStorage,
-            contentResolver = localContentResolver,
-            bulkTransport = bulkTransport,
-            controlSessionManager = controlSessionManager,
+            contentResolver = LocalContentResolverAdapter(localContentResolver),
+            bulkTransport = BulkTransportManagerAdapter(bulkTransport),
+            controlSessionManager = ControlSessionManagerAdapter(controlSessionManager),
             nextTransferId = { TransferId(Ulid.generate()) },
             nextManifestId = { ManifestId(Ulid.generate()) },
             // Finding I: never evict a cache-only file the player currently has open.

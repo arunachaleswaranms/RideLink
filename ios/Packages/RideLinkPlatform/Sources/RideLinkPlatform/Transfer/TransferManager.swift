@@ -39,6 +39,25 @@ public actor TransferManager {
     /// observe until it next unblocks on its own.
     private var activeSocket: ControlConnection?
 
+    /// ADR-023 Amendment A3 — the `transfer_id` [activeSocket] currently belongs to, set together
+    /// with it wherever `serve`/`fetch` assigns [activeSocket] and cleared together with it in the
+    /// same `defer`. This is what makes [cancelActive(transferId:)] operation-aware rather than
+    /// manager-wide: the closure-audit found that a caller scheduling `Task { await
+    /// transport.cancelActive() }` and then immediately, synchronously, releasing `BulkOperationGate`
+    /// (so a second operation could acquire the slot and start a *new* `serve`/`fetch` call, setting
+    /// [activeSocket] to its own socket) let that stale, merely-*scheduled* cancellation — once it
+    /// finally ran on this actor — blindly close whatever [activeSocket] was current by then, which
+    /// could by that point belong to the second, unrelated operation. Binding the check to the
+    /// `transfer_id` the caller actually meant to cancel closes that race structurally: a cancel for
+    /// an operation that has already finished (and been superseded by a different `transfer_id`) is
+    /// now a no-op instead of closing the wrong socket.
+    private var activeTransferId: TransferId?
+
+    /// Test-only visibility into [activeTransferId], so a deterministic test can wait for a real
+    /// `serve`/`fetch` call to actually reach its socket-accepted point rather than guessing with a
+    /// fixed sleep. `internal`, reachable only via `@testable import`.
+    var activeTransferIdForTesting: TransferId? { activeTransferId }
+
     public init(tlsChannel: TlsControlChannel, monotonicNowUs: @escaping @Sendable () -> Int64) {
         self.tlsChannel = tlsChannel
         self.tokenTable = BulkTokenTable(monotonicNowUs: monotonicNowUs)
@@ -54,12 +73,20 @@ public actor TransferManager {
         transferInProgress = false
     }
 
-    /// Closure-audit Finding C/D/N: forcibly unblocks and terminates whatever `serve`/`fetch` call
-    /// is currently in flight, if any — a user cancellation, a session/link loss, or a peer's
-    /// `TRANSFER_CANCEL` for the transfer this manager is actively serving/fetching. Closing the
-    /// socket, not merely requesting `Task` cancellation, is what actually unblocks a blocking
-    /// `accept()`/read/write. Idempotent and safe to call when nothing is active.
-    public func cancelActive() {
+    /// ADR-023 Amendment A3: operation-aware cancellation — closes the active socket only if it is
+    /// still the one [transferId] actually owns. A cancel for an operation that has already
+    /// finished and been superseded by a different `transfer_id` is a no-op, never a way to close a
+    /// newer, unrelated operation's socket (the manager-wide `cancelActive()` this replaces could not
+    /// tell the difference). Idempotent and safe to call when nothing matching is active.
+    public func cancelActive(transferId: TransferId) {
+        guard activeTransferId == transferId else { return }
+        forceCloseActiveSocket()
+    }
+
+    /// Unconditional close, regardless of which `transfer_id` currently owns [activeSocket] — used
+    /// only by [close] (a session boundary legitimately tears down anything live, no matter whose it
+    /// is) and, via the guard above, by the operation-aware [cancelActive(transferId:)].
+    private func forceCloseActiveSocket() {
         activeSocket?.close()
     }
 
@@ -86,11 +113,13 @@ public actor TransferManager {
         await tokenTable.sweepBelow(generation)
     }
 
-    /// ADR-023 §1: the listener never outlives the session that opened it.
+    /// ADR-023 §1: the listener never outlives the session that opened it. Unconditional — a
+    /// session boundary closes whatever is active regardless of which `transfer_id` owns it, unlike
+    /// [cancelActive(transferId:)].
     public func close() async {
         listener?.close()
         listener = nil
-        cancelActive()
+        forceCloseActiveSocket()
         await tokenTable.clear()
     }
 
@@ -108,9 +137,13 @@ public actor TransferManager {
         guard let listener else { return .ioError }
         guard let socket = try? await listener.accept() else { return .ioError }
         activeSocket = socket
+        activeTransferId = transferId
         defer {
             socket.close()
-            if activeSocket === socket { activeSocket = nil }
+            if activeSocket === socket {
+                activeSocket = nil
+                activeTransferId = nil
+            }
         }
 
         guard let peerSpki = socket.security?.peerIdentitySpkiSha256, peerSpki == expectedPeerSpki else {
@@ -139,7 +172,11 @@ public actor TransferManager {
     }
 
     /// Requester side: dial the provider's bulk port, present the token, stream chunks into `sink`.
+    /// [transferId] is ADR-023 Amendment A3's addition — it is what makes
+    /// [cancelActive(transferId:)] operation-aware for the requester role exactly as it already is
+    /// for [serve]'s provider role.
     public func fetch(
+        transferId: TransferId,
         host: String,
         port: UInt16,
         token: String,
@@ -153,9 +190,13 @@ public actor TransferManager {
             return .connectionLost
         }
         activeSocket = socket
+        activeTransferId = transferId
         defer {
             socket.close()
-            if activeSocket === socket { activeSocket = nil }
+            if activeSocket === socket {
+                activeSocket = nil
+                activeTransferId = nil
+            }
         }
 
         guard let peerSpki = socket.security?.peerIdentitySpkiSha256, peerSpki == expectedPeerSpki else {

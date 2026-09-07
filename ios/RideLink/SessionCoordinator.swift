@@ -257,7 +257,7 @@ public final class SessionCoordinator {
         controlEventTask?.cancel()
         controlEventTask = Task { @MainActor [weak self] in
             for await event in events.stream {
-                self?.handleControlEvent(event)
+                await self?.handleControlEvent(event)
             }
         }
 
@@ -574,8 +574,8 @@ public final class SessionCoordinator {
     }
 
     /// Side effects first, then the one transition `SessionGate` says this event implies.
-    private func handleControlEvent(_ event: ControlEvent) {
-        applySideEffects(event)
+    private func handleControlEvent(_ event: ControlEvent) async {
+        await applySideEffects(event)
         if let sessionEvent = SessionGate.sessionEvent(for: event, status: state.status) {
             _ = applyEvent(sessionEvent)
         }
@@ -584,7 +584,12 @@ public final class SessionCoordinator {
         if case .linkLost(.network) = event { beginReconnectIfPossible() }
     }
 
-    private func applySideEffects(_ event: ControlEvent) {
+    /// `async` (ADR-023 Amendment A3) purely to `await` the two `sharedLibrary` calls below to
+    /// completion before this returns — see `SharedLibraryCoordinator.onSessionBoundary`'s doc
+    /// comment for why the old session's transport teardown must fully finish before a new session's
+    /// `Connected`/`LinkLost` side effects (or the FSM transition [handleControlEvent] applies right
+    /// after this call returns) can proceed.
+    private func applySideEffects(_ event: ControlEvent) async {
         switch event {
         case .peerTrusted(let remotePeerId):
             // ARCHITECTURE §4.3's silent connect: the stored pin matched, so no code and no prompt
@@ -610,7 +615,7 @@ public final class SessionCoordinator {
             // regardless of whether anything changed: a peer that has just connected has never seen any
             // of our state, so "nothing changed" is not a reason to stay silent.
             publishAudioState(force: true)
-            sharedLibrary?.handleConnected()
+            await sharedLibrary?.handleConnected()
         case .linkLost(let reason):
             // PROTOCOL §7.8: media goes, the capture device stays (ARCHITECTURE §6.3/§6.4), and nothing
             // is retried here — §10's control ladder is the app's only reconnect loop.
@@ -618,7 +623,7 @@ public final class SessionCoordinator {
                 Task { await voice.onControlLinkLost() }
             }
             if reason == .bye { releaseVoice() }
-            sharedLibrary?.handleLinkLost()
+            await sharedLibrary?.handleLinkLost()
         case .duplicateConnectionClosed, .reconnectBudgetExhausted:
             break
         }
