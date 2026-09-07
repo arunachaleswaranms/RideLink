@@ -2739,6 +2739,17 @@ refreshes on exactly that transition.
   correctly absent with no authenticated peer — the same gating §2u and §2v recorded. This is an
   emulator, not a phone, and closes no TEST_PLAN hardware row.
 
+**CI green on both platforms on the first fresh run, attempt 1, not re-run to green:** run
+[34143181631](https://github.com/arunachaleswaranms/RideLink/actions/runs/34143181631) (run #30,
+head commit `1fcde45`, attempt 1). Android (4m51s): `Set up JDK 21`, `Set up Android SDK`,
+`Install Android SDK packages`, `core unit tests`, `all unit tests`, `ktlint`, `detekt`, `lint`,
+`assembleDebug`, `assembleRelease` — all green. iOS (6m57s): `Toolchain versions`,
+`RideLinkCore tests`, `RideLinkPlatform tests`, `Build unsigned Debug simulator target`,
+`Build unsigned Release simulator target` — all green. Unlike §2v–§2x, the functional commits and
+the docs commit are **all** in this one run: `1fcde45` is simultaneously the docs HEAD and the CI
+SHA, and the functional work (`8ba9100`, `433842e`, `7deae1b`, `fac80a5`, `4092f06`) is contained in
+the same push, so there is no functional-SHA/CI-SHA distinction to draw this session.
+
 **Still not done, and unchanged by this session:** nothing here ran on two physical phones over a
 real Wi-Fi/hotspot topology. No mDNS discovery of a real peer's catalogue, no transfer over a real
 (non-loopback) network path, no storage or battery measurement over a realistic personal library.
