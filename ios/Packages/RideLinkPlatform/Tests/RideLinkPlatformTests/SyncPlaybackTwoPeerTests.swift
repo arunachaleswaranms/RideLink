@@ -107,6 +107,138 @@ final class SyncPlaybackTwoPeerTests: XCTestCase {
         }
     }
 
+    // MARK: - ADR-024 Amendment A1 (the closure audit), over real TLS
+
+    /// Amendment A1 Finding A over a **real authenticated TLS connection**: the pillion presses Play
+    /// once, on a track that is not yet in the shared queue, and it becomes exactly one authoritative
+    /// `PLAY` — with neither peer refusing anything for a stale revision.
+    ///
+    /// Before the amendment the follower sent `QUEUE_ADD` (revision 0) and `PLAY` (revision 0) back to
+    /// back on this very connection; the leader accepted the add, moved to revision 1, and refused the
+    /// `PLAY`. The press did nothing and the rider had to press again.
+    func testAFollowersFirstPlayOnAnUnqueuedTrackConvergesOverRealTls() async throws {
+        try await twoPairedPhones { leader, follower in
+            // Both phones hold the track; only the queue is behind.
+            await leader.content.addLocal(SyncTestValues.hash(1))
+            await leader.content.addPeer(SyncTestValues.hash(1))
+            await follower.content.addLocal(SyncTestValues.hash(1))
+            await follower.content.addPeer(SyncTestValues.hash(1))
+
+            // One press. Nothing else.
+            await follower.coordinator.playSynchronized(SyncTestValues.hash(1))
+
+            try await Self.expect("both peers started from one press") {
+                let leaderStarted = await leader.player.calls.contains(.start)
+                let followerStarted = await follower.player.calls.contains(.start)
+                return leaderStarted && followerStarted
+            }
+
+            let leaderDiagnostics = await leader.coordinator.diagnostics
+            let followerDiagnostics = await follower.coordinator.diagnostics
+            XCTAssertEqual(leaderDiagnostics.lastAppliedCommandSeq, 1, "exactly one authoritative PLAY")
+            XCTAssertEqual(followerDiagnostics.lastAppliedCommandSeq, 1)
+            XCTAssertEqual(
+                leaderDiagnostics.staleRevisionCount, 0,
+                "the leader refused nothing — no second press was needed"
+            )
+            XCTAssertEqual(followerDiagnostics.staleRevisionCount, 0)
+            XCTAssertEqual(followerDiagnostics.resumedPendingPlayCount, 1, "one press, one retained Play, one issue")
+
+            let leaderItems = await leader.coordinator.queueState.items.map(\.queueItemId)
+            let followerItems = await follower.coordinator.queueState.items.map(\.queueItemId)
+            XCTAssertEqual(leaderItems, followerItems, "and the queue converged to one identical state")
+            XCTAssertEqual(leaderItems.count, 1, "one press added exactly one item")
+
+            guard let leaderStart = await leader.startedAtSessionUs,
+                  let followerStart = await follower.startedAtSessionUs
+            else { return XCTFail("one peer never recorded a start") }
+            XCTAssertLessThan(
+                abs(leaderStart - followerStart), Self.softwareToleranceUs,
+                "software scheduling only, never an audio claim"
+            )
+        }
+    }
+
+    /// Amendment A1 Finding B over real TLS: a queue mutation and a playback command decided in one
+    /// leader order cannot be observed by the peer in an order that makes the command invalid. The
+    /// peer's own `staleRevisionCount` is the assertion — it is the exact counter the defect
+    /// incremented, and here it is measured across real framing, encryption and a real socket.
+    func testAQueueMutationRacingAPlaybackCommandIsNeverObservedInAnInvalidCrossOrderOverRealTls() async throws {
+        try await twoPairedPhones { leader, follower in
+            for seed in 1 ... 3 {
+                await leader.content.addLocal(SyncTestValues.hash(seed))
+                await leader.content.addPeer(SyncTestValues.hash(seed))
+                await follower.content.addLocal(SyncTestValues.hash(seed))
+                await follower.content.addPeer(SyncTestValues.hash(seed))
+            }
+            await leader.coordinator.enqueue(SyncTestValues.hash(1))
+            await leader.coordinator.enqueue(SyncTestValues.hash(2))
+            try await Self.expect("both peers hold two items") {
+                await follower.coordinator.queueState.revision == 2
+            }
+
+            // Both users act at once, from both ends. Genuinely concurrent — unstructured tasks
+            // racing into the two actors and out onto one real socket.
+            let doomed = await leader.coordinator.queueState.items[0].queueItemId
+            let leaderCoordinator = leader.coordinator
+            let followerCoordinator = follower.coordinator
+            async let removal: Void = leaderCoordinator.removeFromQueue(doomed)
+            async let step: Void = followerCoordinator.next()
+            async let seek: Void = leaderCoordinator.seek(positionMs: 12_000)
+            async let addition: Void = leaderCoordinator.enqueue(SyncTestValues.hash(3))
+            _ = await (removal, step, seek, addition)
+
+            try await Self.expect("both peers converge") {
+                let leaderRevision = await leader.coordinator.queueState.revision
+                let followerRevision = await follower.coordinator.queueState.revision
+                let leaderSeq = await leader.coordinator.diagnostics.lastAppliedCommandSeq
+                let followerSeq = await follower.coordinator.diagnostics.lastAppliedCommandSeq
+                return leaderRevision == followerRevision && leaderSeq == followerSeq && leaderSeq != nil
+            }
+
+            let followerDiagnostics = await follower.coordinator.diagnostics
+            XCTAssertEqual(
+                followerDiagnostics.staleRevisionCount, 0,
+                "the follower refused an authoritative command for a revision the leader had already "
+                    + "moved past — the exact Finding B defect, on the real wire"
+            )
+            XCTAssertEqual(followerDiagnostics.inboundOverflowCount, 0, "and nothing was lost in the handoff")
+            let leaderItems = await leader.coordinator.queueState.items.map(\.queueItemId)
+            let followerItems = await follower.coordinator.queueState.items.map(\.queueItemId)
+            XCTAssertEqual(leaderItems, followerItems, "and both converged to one identical queue")
+        }
+    }
+
+    /// Amendment A1 Finding E over real TLS: the pillion presses Play on a track only the rider holds,
+    /// the existing Phase 4 machinery is asked once, and the synchronised `PLAY` happens by itself
+    /// when the verified cache reports it — with no second press.
+    func testAPlayForContentOnlyThePeerHoldsBecomesASynchronizedPlayOverRealTls() async throws {
+        try await twoPairedPhones { leader, follower in
+            // The rider has it; the pillion does not, but knows the rider does.
+            await leader.content.addLocal(SyncTestValues.hash(1))
+            await follower.content.addPeer(SyncTestValues.hash(1))
+
+            await follower.coordinator.playSynchronized(SyncTestValues.hash(1))
+            try await Self.expect("Phase 4 was asked") {
+                await follower.content.transferRequests == [SyncTestValues.hash(1)]
+            }
+            let started = await follower.player.calls.contains(.start)
+            XCTAssertFalse(started, "nothing may play while one phone cannot")
+
+            // Phase 4 commits on the pillion, and the rider learns of it the way ADR-024 §7 says.
+            await follower.content.completeTransfer(SyncTestValues.hash(1))
+            await leader.content.peerVerified(SyncTestValues.hash(1))
+
+            try await Self.expect("both peers started, with no second press") {
+                let leaderStarted = await leader.player.calls.contains(.start)
+                let followerStarted = await follower.player.calls.contains(.start)
+                return leaderStarted && followerStarted
+            }
+            let requests = await follower.content.transferRequests
+            XCTAssertEqual(requests, [SyncTestValues.hash(1)], "and Phase 4 was still only asked once")
+        }
+    }
+
     // MARK: - Harness
 
     /// A generous software bound — see the call site's comment. Not an audio figure.

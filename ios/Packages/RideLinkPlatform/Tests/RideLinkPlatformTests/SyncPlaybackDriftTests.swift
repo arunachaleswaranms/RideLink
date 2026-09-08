@@ -98,6 +98,10 @@ final class SyncPlaybackDriftTests: XCTestCase {
     /// the first attempt, and fixed here in the harness rather than by re-running: the production
     /// behaviour was correct throughout, and the counter it now publishes is a real FR-023 figure.
     private func tick(driftMs: Int64, playing: Bool = true) async {
+        // The cadence loop re-arms its next sleep *after* a tick completes, so a second tick driven
+        // straight after the first can arrive before the deadline exists. Waited for, not assumed —
+        // this is the loop's own observable state, not a yield count.
+        await awaitTickArmed()
         guard let nextTickUs = clock.pendingDeadlines().max() else { return XCTFail("no tick is armed") }
         let before = await coordinator.diagnostics.correctionTickCount
         let elapsedMs = (nextTickUs - anchorUs) / 1_000
@@ -105,7 +109,14 @@ final class SyncPlaybackDriftTests: XCTestCase {
         clock.advance(to: nextTickUs)
         let deadline = Date().addingTimeInterval(5)
         while Date() < deadline {
-            if await coordinator.diagnostics.correctionTickCount > before { return }
+            if await coordinator.diagnostics.correctionTickCount > before {
+                // ADR-024 Amendment A1 Finding B made the outbound send asynchronous relative to the
+                // step that produced the frame — which is exactly what makes the leader's order
+                // provable — so "the tick completed" and "its POSITION_REPORT reached the wire" are
+                // two facts. A 3-in-100 stress failure was reading the wire before the second one.
+                await awaitOutboundQuiescent()
+                return
+            }
             await Task.yield()
         }
         XCTFail("the cadence tick never completed")
@@ -234,4 +245,26 @@ final class SyncPlaybackDriftTests: XCTestCase {
         diagnostics = await coordinator.diagnostics
         XCTAssertEqual(diagnostics.peerDriftMs, -960, "the peer is 960 ms behind the timeline")
     }
+
+    private func awaitTickArmed() async {
+        let deadline = Date().addingTimeInterval(5)
+        while Date() < deadline {
+            if !clock.pendingDeadlines().isEmpty { return }
+            await Task.yield()
+        }
+    }
+
+    /// Waits until every frame the coordinator has enqueued on its **one ordered outbound path** has
+    /// actually been handed to the transport. The signal is the coordinator's own counters, never a
+    /// yield count.
+    private func awaitOutboundQuiescent() async {
+        let deadline = Date().addingTimeInterval(5)
+        while Date() < deadline {
+            let diagnostics = await coordinator.diagnostics
+            if diagnostics.outboundSentCount == diagnostics.outboundEnqueuedCount { return }
+            await Task.yield()
+        }
+        XCTFail("the ordered outbound path never drained")
+    }
+
 }

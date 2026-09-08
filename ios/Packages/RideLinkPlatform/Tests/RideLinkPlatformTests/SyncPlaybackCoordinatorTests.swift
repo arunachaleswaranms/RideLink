@@ -54,6 +54,7 @@ final class SyncPlaybackCoordinatorTests: XCTestCase {
         await session.setClock(SessionClockEstimate(offsetToLeaderUs: 0, rttP95Us: 8_000, ready: clockReady))
         await coordinator.handleConnected(isLocalLeader: asLeader)
         await settle()
+        await awaitOutboundQuiescent()
         // Establishing a session legitimately restores the rate to exactly 1.0 (brief §38) — real
         // behaviour, asserted on its own in the link-loss test below. Cleared here so the scheduling
         // tests can assert the *exact* call sequence a command produces.
@@ -82,10 +83,29 @@ final class SyncPlaybackCoordinatorTests: XCTestCase {
     private func awaitProcessed(beyond before: Int) async {
         let deadline = Date().addingTimeInterval(5)
         while Date() < deadline {
-            if await coordinator.diagnostics.inboundProcessedCount > before { return }
+            if await coordinator.diagnostics.inboundProcessedCount > before {
+                // Amendment A1 Finding B: the frame's *effect* on the wire leaves by the one ordered
+                // outbound path, so "considered" and "sent" are two facts and both are waited for.
+                await awaitOutboundQuiescent()
+                return
+            }
             await Task.yield()
         }
         XCTFail("the coordinator never finished considering the frame")
+    }
+
+    /// Waits until every frame the coordinator has enqueued on its **one ordered outbound path**
+    /// has actually been handed to the transport (ADR-024 Amendment A1 Finding B made the send
+    /// asynchronous relative to the step that stamped the frame, which is exactly what makes the
+    /// order provable). The signal is the coordinator's own counters, never a yield count.
+    private func awaitOutboundQuiescent() async {
+        let deadline = Date().addingTimeInterval(5)
+        while Date() < deadline {
+            let diagnostics = await coordinator.diagnostics
+            if diagnostics.outboundSentCount == diagnostics.outboundEnqueuedCount { return }
+            await Task.yield()
+        }
+        XCTFail("the ordered outbound path never drained")
     }
 
     /// Waits for a condition rather than for a fixed number of yields, for the same reason.
@@ -375,6 +395,13 @@ final class SyncPlaybackCoordinatorTests: XCTestCase {
         await connect(asLeader: false)
         await content.addLocal(SyncTestValues.hash(1))
         await deliverAndAwait(playCommand(seq: 1, effectiveAt: clock.now()))
+        // The already-past deadline applies immediately, in an unstructured task, so "the frame was
+        // considered" is not "the start has happened". Waiting for the start before clearing is what
+        // makes the assertion below about the link loss rather than about which of two authorised
+        // player calls won a race — a 1-in-100 stress failure found exactly that. The start itself is
+        // correct: ADR-004 keeps local playback going across a link loss, and an epoch superseded
+        // *after* a scheduled action was authorised cannot un-authorise it.
+        await expect("the scheduled start landed") { await self.player.calls.contains(.start) }
         await player.clearCalls()
 
         await coordinator.handleLinkLost()

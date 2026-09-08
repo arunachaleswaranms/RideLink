@@ -120,20 +120,50 @@ actor FakeSyncPlayer: SyncPlayerPort {
 
     func clearCalls() { calls.removeAll() }
 
-    func prepare(content: SyncPlayableContent, positionMs: Int64) async { calls.append(.prepare(content.contentHash, positionMs)) }
+    func prepare(content: SyncPlayableContent, positionMs: Int64) async {
+        await record(.prepare(content.contentHash, positionMs))
+    }
 
     func start() async {
         if firstStartAtMonoUs == nil { firstStartAtMonoUs = monotonicNowUs?() }
-        calls.append(.start)
+        await record(.start)
     }
 
-    func pause() async { calls.append(.pause) }
+    func pause() async { await record(.pause) }
 
-    func seek(positionMs: Int64) async { calls.append(.seek(positionMs)) }
+    func seek(positionMs: Int64) async { await record(.seek(positionMs)) }
 
-    func setRate(_ rate: Double) async { calls.append(.setRate(rate)) }
+    func setRate(_ rate: Double) async { await record(.setRate(rate)) }
 
-    func stop() async { calls.append(.stop) }
+    func stop() async { await record(.stop) }
+
+    // MARK: - The gate (ADR-024 Amendment A1 Finding F)
+
+    private var gateContinuation: CheckedContinuation<Void, Never>?
+    private var gateMatches: (@Sendable (Call) -> Bool)?
+
+    /// Parks the **first** matching player call, *after* it has been recorded, so a test can land a
+    /// supersession strictly inside it. Finding F is exactly about what happens after such a call
+    /// returns, and a gate is the only way to assert it deterministically.
+    func gateCalls(matching predicate: @escaping @Sendable (Call) -> Bool) { gateMatches = predicate }
+
+    func releaseGate() {
+        let parked = gateContinuation
+        gateContinuation = nil
+        gateMatches = nil
+        parked?.resume()
+    }
+
+    var isGateParked: Bool { gateContinuation != nil }
+
+    private func record(_ call: Call) async {
+        calls.append(call)
+        guard gateMatches?(call) == true else { return }
+        gateMatches = nil
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            gateContinuation = continuation
+        }
+    }
 }
 
 /// Scripted local/peer availability, and a record of every transfer Phase 5 asked Phase 4 for.
@@ -160,6 +190,30 @@ actor FakeSyncContent: SyncContentPort {
     func peerHasContent(_ contentHash: ContentHash) async -> Bool { peerHashes.contains(contentHash.value) }
 
     func requestTransfer(_ contentHash: ContentHash) async { transferRequests.append(contentHash) }
+
+    private var availabilityObserver: (@Sendable () -> Void)?
+
+    func observeAvailability(_ onAvailabilityChanged: @escaping @Sendable () -> Void) async {
+        availabilityObserver = onAvailabilityChanged
+    }
+
+    /// The Phase 4 seam a test drives: mark content verified-locally and fire the same notification
+    /// `SharedLibraryCoordinator` fires after a successful `TransferCacheRepository.commit`.
+    func completeTransfer(_ contentHash: ContentHash) {
+        localHashes.insert(contentHash.value)
+        availabilityObserver?()
+    }
+
+    /// The peer half: it reported verifying a transfer we served (ADR-024 §7).
+    func peerVerified(_ contentHash: ContentHash) {
+        peerHashes.insert(contentHash.value)
+        availabilityObserver?()
+    }
+
+    /// A transfer that failed leaves availability exactly as it was, and still notifies.
+    func failTransfer() {
+        availabilityObserver?()
+    }
 }
 
 /// A virtual monotonic clock plus the sleeper that waits on it. Time only ever moves because a test

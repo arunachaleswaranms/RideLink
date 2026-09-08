@@ -162,9 +162,18 @@ class FakeSyncPlayer : SyncPlayerPort {
         record(Call.Stop)
     }
 
-    private fun record(call: Call) {
+    /**
+     * Suspends a matching player call *after* it has been recorded, so a test can land a
+     * supersession strictly **inside** it. ADR-024 Amendment A1 Finding F is exactly about what
+     * happens after such a call returns, and a gate is the only way to assert it deterministically.
+     */
+    var gate: kotlinx.coroutines.CompletableDeferred<Unit>? = null
+    var gateOn: ((Call) -> Boolean)? = null
+
+    private suspend fun record(call: Call) {
         calls.add(call)
         onCall?.invoke(call)
+        if (gateOn?.invoke(call) == true) gate?.await()
     }
 }
 
@@ -188,6 +197,32 @@ class FakeSyncContent : SyncContentPort {
 
     override fun requestTransfer(contentHash: ContentHash) {
         transferRequests.add(contentHash)
+    }
+
+    private var availabilityObserver: (() -> Unit)? = null
+
+    override fun observeAvailability(onAvailabilityChanged: () -> Unit) {
+        availabilityObserver = onAvailabilityChanged
+    }
+
+    /**
+     * The Phase 4 seam a test drives: mark content verified-locally and fire the same notification
+     * `SharedLibraryCoordinator` fires after a successful `TransferCacheRepository.commit`.
+     */
+    fun completeTransfer(contentHash: ContentHash) {
+        localHashes.add(contentHash.value)
+        availabilityObserver?.invoke()
+    }
+
+    /** The peer half: it reported verifying a transfer we served (ADR-024 §7). */
+    fun peerVerified(contentHash: ContentHash) {
+        peerHashes.add(contentHash.value)
+        availabilityObserver?.invoke()
+    }
+
+    /** A transfer that failed leaves availability exactly as it was, and still notifies. */
+    fun failTransfer() {
+        availabilityObserver?.invoke()
     }
 }
 

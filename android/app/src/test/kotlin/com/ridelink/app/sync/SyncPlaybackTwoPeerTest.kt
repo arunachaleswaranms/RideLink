@@ -232,6 +232,188 @@ class SyncPlaybackTwoPeerTest {
             )
         }
 
+    // --- ADR-024 Amendment A1 (the closure audit), end to end -----------------------------------
+
+    /**
+     * Amendment A1 Finding A, as two real coordinators. **One press of Play by the pillion, on a
+     * track that is not yet in the shared queue, becomes exactly one authoritative `PLAY`** — and
+     * neither peer ever refuses anything for a stale revision.
+     *
+     * Before the amendment the follower sent `QUEUE_ADD` (revision 0) and `PLAY` (revision 0) back to
+     * back; the leader accepted the add, moved to revision 1, and then refused the `PLAY`. The press
+     * did nothing and the rider had to press again.
+     */
+    @Test
+    fun `a follower's first Play on an unqueued track converges and becomes one authoritative PLAY`() =
+        runTest(StandardTestDispatcher()) {
+            val pair = Pair(this)
+            pair.connect()
+            // Both phones hold the track; only the queue is behind.
+            pair.leader.content.localHashes
+                .add(SyncTestValues.hash(1).value)
+            pair.leader.content.peerHashes
+                .add(SyncTestValues.hash(1).value)
+            pair.follower.content.localHashes
+                .add(SyncTestValues.hash(1).value)
+            pair.follower.content.peerHashes
+                .add(SyncTestValues.hash(1).value)
+
+            // One press. Nothing else.
+            pair.follower.coordinator.playSynchronized(SyncTestValues.hash(1))
+            runCurrent()
+
+            val play =
+                pair.leader.session
+                    .sentOfType<PlaybackMessage.Play>()
+                    .single()
+            assertEquals(1, play.header.commandSeq, "exactly one authoritative PLAY, from the leader")
+            assertEquals(SyncTestValues.hash(1), play.trackHash)
+            assertEquals(
+                pair.leader.coordinator.queueState.value.revision,
+                play.header.queueRevision,
+                "stamped against the revision both peers hold",
+            )
+            assertEquals(
+                0,
+                pair.leader.coordinator.diagnostics.value.staleRevisionCount,
+                "the leader refused nothing — no second press was needed",
+            )
+            assertEquals(0, pair.follower.coordinator.diagnostics.value.staleRevisionCount)
+            assertEquals(
+                pair.leader.coordinator.queueState.value.items
+                    .map { it.queueItemId },
+                pair.follower.coordinator.queueState.value.items
+                    .map { it.queueItemId },
+                "and the queue converged to one identical state",
+            )
+
+            // Both phones then schedule the same session instant, and start at it.
+            val effectiveAt = play.header.effectiveAtSessionUs
+            pair.advanceSessionTo(effectiveAt)
+            runCurrent()
+            assertEquals(effectiveAt, pair.leaderStartSessionUs, "the leader started at the instant it chose")
+            assertEquals(effectiveAt, pair.followerStartSessionUs, "and so did the follower, through its own offset")
+        }
+
+    /**
+     * Amendment A1 Finding B, as two real coordinators: a queue mutation and a playback command
+     * decided in one leader order **cannot** be observed by the peer in an order that makes the
+     * command invalid. The peer's own stale-revision counter is the assertion — it is the exact
+     * counter the defect incremented.
+     */
+    @Test
+    fun `a queue mutation racing a playback command is never observed in an invalid cross-order`() =
+        runTest(StandardTestDispatcher()) {
+            for (repetition in 0 until 8) {
+                val pair = Pair(this)
+                pair.connect()
+                for (seed in 1..3) {
+                    pair.leader.content.localHashes
+                        .add(SyncTestValues.hash(seed).value)
+                    pair.leader.content.peerHashes
+                        .add(SyncTestValues.hash(seed).value)
+                    pair.follower.content.localHashes
+                        .add(SyncTestValues.hash(seed).value)
+                    pair.follower.content.peerHashes
+                        .add(SyncTestValues.hash(seed).value)
+                }
+                pair.leader.coordinator.enqueue(SyncTestValues.hash(1))
+                pair.leader.coordinator.enqueue(SyncTestValues.hash(2))
+                runCurrent()
+
+                // The two users act at once, from both ends, in both directions.
+                val doomed =
+                    pair.leader.coordinator.queueState.value.items
+                        .first()
+                        .queueItemId
+                if (repetition % 2 == 0) {
+                    pair.leader.coordinator.removeFromQueue(doomed)
+                    pair.follower.coordinator.next()
+                    pair.leader.coordinator.enqueue(SyncTestValues.hash(3))
+                    pair.leader.coordinator.seek(12_000)
+                } else {
+                    pair.follower.coordinator.next()
+                    pair.leader.coordinator.removeFromQueue(doomed)
+                    pair.leader.coordinator.seek(12_000)
+                    pair.leader.coordinator.enqueue(SyncTestValues.hash(3))
+                }
+                runCurrent()
+
+                assertEquals(
+                    0,
+                    pair.follower.coordinator.diagnostics.value.staleRevisionCount,
+                    "repetition $repetition: the follower refused an authoritative command for a revision " +
+                        "the leader had already moved past — the exact Finding B defect",
+                )
+                assertEquals(
+                    pair.leader.coordinator.queueState.value.revision,
+                    pair.follower.coordinator.queueState.value.revision,
+                    "repetition $repetition: both peers converged to one revision",
+                )
+                assertEquals(
+                    pair.leader.coordinator.queueState.value.items
+                        .map { it.queueItemId },
+                    pair.follower.coordinator.queueState.value.items
+                        .map { it.queueItemId },
+                    "repetition $repetition: and to one identical queue",
+                )
+                assertEquals(
+                    pair.leader.coordinator.diagnostics.value.lastAppliedCommandSeq,
+                    pair.follower.coordinator.diagnostics.value.lastAppliedCommandSeq,
+                    "repetition $repetition: and applied the same commands",
+                )
+            }
+        }
+
+    /**
+     * Amendment A1 Finding E across the pair: the pillion presses Play on a track only the rider
+     * holds, the existing Phase 4 machinery is asked once, and when the verified cache reports it the
+     * synchronised `PLAY` happens **by itself**.
+     */
+    @Test
+    fun `a Play for content only the peer holds becomes a synchronized PLAY once the transfer verifies`() =
+        runTest(StandardTestDispatcher()) {
+            val pair = Pair(this)
+            pair.connect()
+            // The rider has it; the pillion does not, and the rider knows the pillion will once served.
+            pair.leader.content.localHashes
+                .add(SyncTestValues.hash(1).value)
+            pair.follower.content.peerHashes
+                .add(SyncTestValues.hash(1).value)
+
+            pair.follower.coordinator.playSynchronized(SyncTestValues.hash(1))
+            runCurrent()
+
+            assertEquals(
+                listOf(SyncTestValues.hash(1)),
+                pair.follower.content.transferRequests,
+                "PROTOCOL §5 rule 4, through the existing Phase 4 queue, asked once",
+            )
+            assertTrue(
+                pair.leader.session
+                    .sentOfType<PlaybackMessage.Play>()
+                    .isEmpty(),
+                "nothing may play while one phone cannot",
+            )
+            assertEquals(SyncState.WAITING_FOR_CONTENT, pair.follower.coordinator.diagnostics.value.syncState)
+
+            // Phase 4 commits, and the rider learns of it the way ADR-024 §7 says.
+            pair.follower.content.completeTransfer(SyncTestValues.hash(1))
+            pair.leader.content.peerVerified(SyncTestValues.hash(1))
+            runCurrent()
+
+            val play =
+                pair.leader.session
+                    .sentOfType<PlaybackMessage.Play>()
+                    .single()
+            assertEquals(SyncTestValues.hash(1), play.trackHash)
+            assertTrue(play.header.commandSeq >= 1, "one authoritative PLAY, with no second press")
+            pair.advanceSessionTo(play.header.effectiveAtSessionUs)
+            runCurrent()
+            assertEquals(play.header.effectiveAtSessionUs, pair.leaderStartSessionUs)
+            assertEquals(play.header.effectiveAtSessionUs, pair.followerStartSessionUs)
+        }
+
     // --- the harness ------------------------------------------------------------------------------
 
     /**
