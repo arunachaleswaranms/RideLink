@@ -49,6 +49,16 @@ public protocol SyncContentPort: Sendable {
     /// the transfer — through the **existing** Phase 4 machinery. Phase 5 owns no transfer logic and
     /// no third cache (brief §20).
     func requestTransfer(_ contentHash: ContentHash) async
+
+    /// Installs the one observer notified whenever **verified** availability changes — locally (a
+    /// Phase 4 transfer committed) or on the peer (it reported verifying a transfer we served,
+    /// ADR-024 §7). Amendment A1 Finding E: this is the seam that lets one press of Play survive a
+    /// transfer, and it is deliberately a notification rather than a poll.
+    ///
+    /// It carries **no** payload: the coordinator holds at most one pending Play and re-asks
+    /// `resolve`/`peerHasContent` for exactly that hash, so a hash argument would be a second
+    /// source of truth about availability with nothing to gain. A later call replaces the observer.
+    func observeAvailability(_ onAvailabilityChanged: @escaping @Sendable () -> Void) async
 }
 
 /// The one player/queue Phase 5 drives. Every method lands on the **existing** app-target

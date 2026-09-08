@@ -23,8 +23,24 @@ enum class SyncState {
     /**
      * REQUIREMENTS §9.4: the selected track is not yet playable on both phones. The existing Phase 4
      * transfer machinery is what closes this (brief §20); Phase 5 only waits.
+     *
+     * ADR-024 Amendment A1 Finding E: **the wait now ends by itself.** The one Play the user
+     * pressed is retained, fenced to its session and operation token, and issued automatically once
+     * the verified cache reports the content — never by asking the user to press Play again.
      */
     WAITING_FOR_CONTENT,
+
+    /**
+     * ADR-024 Amendment A1 Finding A: a synchronised Play was pressed for a track that was not yet
+     * in the **authoritative** shared queue, so the request is waiting for the leader's
+     * `QUEUE_SNAPSHOT` to name it.
+     *
+     * This state is what replaced the defect: a follower used to send `QUEUE_ADD` and `PLAY` back to
+     * back, so the `PLAY` carried the revision it held *before* the add was accepted and the leader
+     * refused its own valid first `PLAY` for a stale revision. The revision rule did not move; the
+     * Play waits for the revision it needs.
+     */
+    WAITING_FOR_QUEUE,
 
     /** An authoritative command is scheduled and its deadline has not arrived. */
     SCHEDULED,
@@ -37,6 +53,19 @@ enum class SyncState {
      * stopped, the playback rate is back to exactly 1.0, and **local music keeps playing** (FR-025).
      */
     SYNC_FAILED,
+
+    /**
+     * ADR-024 Amendment A1 Finding C/D: the bounded post-TCP ingress overflowed, or more
+     * authoritative commands are waiting for a trustworthy clock than may be held. **Incremental
+     * Phase 5 state is no longer trusted** — no further command is applied — until authoritative
+     * full state arrives (PROTOCOL §5's `PLAYBACK_STATE`, §9's `QUEUE_SNAPSHOT`) or the session
+     * ends.
+     *
+     * It is deliberately distinct from [SYNC_FAILED]: that one means correction gave up on a
+     * timeline both phones agree about, this one means we may no longer know what the timeline *is*.
+     * Local music keeps playing either way (ADR-004, FR-025).
+     */
+    DESYNCHRONIZED,
 }
 
 /** What the ladder last decided, for the FR-023 diagnostics surface. */
@@ -93,6 +122,63 @@ data class SyncPlaybackDiagnostics(
      * signal a test needs instead of guessing how many scheduler turns a frame takes.
      */
     val inboundProcessedCount: Int = 0,
-    /** Frames dropped because the bounded inbound channel was full. Nonzero means a pathological peer. */
-    val droppedInboundCount: Int = 0,
+    /**
+     * How many inbound Phase 5 frames the bounded handoff refused because it was full of frames
+     * that cannot be superseded (ADR-024 Amendment A1 Finding C).
+     *
+     * **This counter could not previously increment at all.** Phase 5 shipped with
+     * `BufferOverflow.DROP_OLDEST`, and `trySend` on such a channel returns *success* — so every
+     * eviction was silent and this figure was structurally always zero. Nothing is evicted now; a
+     * refusal is returned to the caller, counted here, and latches [ingressDesynchronized].
+     */
+    val inboundOverflowCount: Int = 0,
+    /**
+     * How many latest-wins frames (`POSITION_REPORT`, `PLAYBACK_STATE`, `QUEUE_SNAPSHOT`) were
+     * coalesced onto a newer sibling because the handoff was full. Lossless by construction —
+     * applying only the newest of such a run reaches the same state — and the reason
+     * [inboundOverflowCount] stays at zero under a peer's ordinary 5 s report cadence.
+     */
+    val inboundCoalescedCount: Int = 0,
+    /**
+     * True while incremental Phase 5 state is not trusted: the ingress overflowed, or the deferred
+     * command buffer did. Cleared only by authoritative full state or a session boundary — never by
+     * time passing, and never by guessing.
+     */
+    val ingressDesynchronized: Boolean = false,
+    /**
+     * The highest `command_seq` this device has taken *responsibility* for — applied, or accepted
+     * and still held pending a trustworthy clock. Distinct from [lastAppliedCommandSeq], and the
+     * distinction is ADR-024 Amendment A1 Finding D: recording an accepted command as *applied*
+     * before the clock was known to be trustworthy spent its sequence number, so the leader's
+     * replay of it became a duplicate and nothing ever applied it.
+     */
+    val lastReceivedCommandSeq: Long? = null,
+    /** How many authoritative commands are held, in order, waiting for a trustworthy clock. */
+    val deferredCommandCount: Int = 0,
+    /** How many held commands were applied once the clock became trustworthy again. */
+    val recoveredCommandCount: Int = 0,
+    /**
+     * How many outbound Phase 5 frames this device could not hand to the transport because its own
+     * ordered outbound queue was full (ADR-024 Amendment A1 Finding B). Locally produced, so a
+     * nonzero value means the control socket is wedged, never a pathological peer.
+     */
+    val outboundOverflowCount: Int = 0,
+    /** How many frames have been accepted onto the one ordered outbound path. */
+    val outboundEnqueuedCount: Int = 0,
+    /**
+     * How many of those have actually been handed to the transport, in enqueue order.
+     *
+     * The gap between this and [outboundEnqueuedCount] is a real FR-023 figure — a persistent one
+     * means the control socket is not draining — and it is also the precise signal a test needs to
+     * know the wire has caught up, instead of guessing how many scheduler turns a send takes.
+     */
+    val outboundSentCount: Int = 0,
+    /**
+     * How many retained one-press synchronised Plays were issued automatically once their queue
+     * revision or their content arrived (ADR-024 Amendment A1 Findings A and E) — the figure that
+     * distinguishes "the user pressed Play once and it worked" from "the user pressed Play twice".
+     */
+    val resumedPendingPlayCount: Int = 0,
+    /** How many retained Plays were dropped by supersession, a session boundary or leaving sync mode. */
+    val cancelledPendingPlayCount: Int = 0,
 )

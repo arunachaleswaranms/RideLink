@@ -169,6 +169,22 @@ class SharedLibraryCoordinator(
     private val _peerVerifiedHashes = MutableStateFlow<Set<String>>(emptySet())
     val peerVerifiedHashes: StateFlow<Set<String>> = _peerVerifiedHashes.asStateFlow()
 
+    /**
+     * Phase 5 (ADR-024 Amendment A1 Finding E): the one observer notified whenever **verified**
+     * availability changes — locally, when a transfer's `TransferCacheRepository.commit` succeeds,
+     * or on the peer, when it reports having verified a transfer we served it.
+     *
+     * A notification, not a third source of truth: the two facts it announces are still
+     * [cachedHashes] and [peerVerifiedHashes], and a listener re-asks rather than being handed a
+     * hash. It exists so one press of synchronised Play can survive a Phase 4 transfer instead of
+     * silently costing the user a second press, and so that waiting does not become polling.
+     *
+     * Set by `AppContainer` (via `SharedLibraryContentPort`) and by nothing else. Deliberately not a
+     * `StateFlow`: Amendment A4 Finding U is the recorded reason this codebase distrusts a flow
+     * whose only consumer reads `.value`.
+     */
+    var onAvailabilityChanged: (() -> Unit)? = null
+
     /** `transfer_id -> content_hash` for transfers **we** are serving, so a peer's `TRANSFER_RESULT`
      *  is matched against what we actually sent rather than against whatever hash it names. */
     private val servedHashes = java.util.concurrent.ConcurrentHashMap<String, ContentHash>()
@@ -253,7 +269,12 @@ class SharedLibraryCoordinator(
     }
 
     private suspend fun refreshCachedHashes() {
-        _cachedHashes.value = cacheRepository.verifiedHashes().map { it.value }.toSet()
+        val refreshed = cacheRepository.verifiedHashes().map { it.value }.toSet()
+        val changed = refreshed != _cachedHashes.value
+        _cachedHashes.value = refreshed
+        // Only on a real change: a re-query that found the same set is not news, and Phase 5's
+        // listener re-resolves content when it hears this.
+        if (changed) onAvailabilityChanged?.invoke()
     }
 
     /** Requests the peer's full catalogue — called once per session, on [ControlEvent.Connected]. */
@@ -605,7 +626,11 @@ class SharedLibraryCoordinator(
         if (!message.ok) return
         // Both must agree: what we sent, and what the peer says it verified.
         if (message.sha256 != served) return
+        val known = served.value in _peerVerifiedHashes.value
         _peerVerifiedHashes.update { it + served.value }
+        // Phase 5 (Amendment A1 Finding E): the peer half of the availability gate just became
+        // true, which may be the last precondition a retained synchronised Play was waiting on.
+        if (!known) onAvailabilityChanged?.invoke()
     }
 
     private fun onOfferReceived(message: TransferMessage.Offer) {

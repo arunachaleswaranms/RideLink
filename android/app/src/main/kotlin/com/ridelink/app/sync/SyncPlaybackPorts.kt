@@ -66,6 +66,18 @@ interface SyncContentPort {
      * cache (brief §20).
      */
     fun requestTransfer(contentHash: ContentHash)
+
+    /**
+     * Installs the one observer notified whenever **verified** availability changes — locally (a
+     * Phase 4 transfer committed) or on the peer (it reported verifying a transfer we served,
+     * ADR-024 §7). ADR-024 Amendment A1 Finding E: this is the seam that lets one press of Play
+     * survive a transfer, and it is deliberately a notification rather than a poll.
+     *
+     * It carries **no** payload: the coordinator holds at most one pending Play and re-asks
+     * [resolve]/[peerHasContent] for exactly that hash, so a hash argument would be a second source
+     * of truth about availability with nothing to gain. A later call replaces the observer.
+     */
+    fun observeAvailability(onAvailabilityChanged: () -> Unit)
 }
 
 /**

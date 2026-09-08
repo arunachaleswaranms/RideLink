@@ -151,10 +151,12 @@ private fun syncStateLabel(state: SyncState): String =
     when (state) {
         SyncState.INACTIVE -> "LOCAL — not synchronized"
         SyncState.CLOCK_UNREADY -> "CLOCK NOT READY — no command will be scheduled against it"
-        SyncState.WAITING_FOR_CONTENT -> "WAITING FOR CONTENT — both phones must hold the track"
+        SyncState.WAITING_FOR_CONTENT -> "WAITING FOR CONTENT — transferring; play starts by itself"
+        SyncState.WAITING_FOR_QUEUE -> "WAITING FOR QUEUE — the leader has not confirmed the track yet"
         SyncState.SCHEDULED -> "SCHEDULED — waiting for the effective instant"
         SyncState.SYNCED -> "SYNCHRONIZED"
         SyncState.SYNC_FAILED -> "SYNC FAILED — local playback continues, correction stopped"
+        SyncState.DESYNCHRONIZED -> "RESYNCHRONIZING — waiting for authoritative state; local playback continues"
     }
 
 private const val HASH_PREFIX_CHARS = 8

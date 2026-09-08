@@ -135,6 +135,18 @@ public final class SharedLibraryCoordinator {
     /// this session.
     private var peerVerifiedHashes: Set<String> = []
 
+    /// Phase 5 (ADR-024 Amendment A1 Finding E): the one observer notified whenever **verified**
+    /// availability changes — locally, when a transfer's `TransferCacheRepository.commit` succeeds,
+    /// or on the peer, when it reports having verified a transfer we served it.
+    ///
+    /// A notification, not a third source of truth: what it announces is still `isVerifiedCached`
+    /// and `peerHasContent`, and a listener re-asks rather than being handed a hash. It exists so one
+    /// press of synchronised Play can survive a Phase 4 transfer instead of silently costing the user
+    /// a second press, and so that waiting does not become polling.
+    ///
+    /// Set by `RideLinkApp` (via `SharedLibraryContentPort`) and by nothing else.
+    public var onAvailabilityChanged: (@MainActor () -> Void)?
+
     /// `transfer_id -> content_hash` for transfers **we** are serving, so a peer's `TRANSFER_RESULT`
     /// is matched against what we actually sent rather than against whatever hash it names.
     private var servedHashes: [String: ContentHash] = [:]
@@ -566,6 +578,9 @@ public final class SharedLibraryCoordinator {
             // commit failure and still send `TRANSFER_RESULT(ok: true)`/mark `.complete`.
             do {
                 try cacheRepository.commit(hash, sizeBytes: offer.sizeBytes, nowMonoUs: monotonicNowUs(), locked: Set([activeCacheHash(), hash].compactMap { $0 }))
+                // Phase 5 (Amendment A1 Finding E): the verified cache just gained this hash, which
+                // may be the last precondition a retained synchronised Play was waiting on.
+                onAvailabilityChanged?()
                 _ = await controlSessionManager.transferRelay().send(.result(transferId: transferId, ok: true, sha256: hash))
                 finishDownload(hash, DownloadState(status: .complete, totalBytes: offer.sizeBytes), opToken: opToken)
             } catch {
@@ -661,7 +676,11 @@ public final class SharedLibraryCoordinator {
         guard let served = servedHashes.removeValue(forKey: transferId.value), ok else { return }
         // Both must agree: what we sent, and what the peer says it verified.
         guard sha256 == served else { return }
+        let known = peerVerifiedHashes.contains(served.value)
         peerVerifiedHashes.insert(served.value)
+        // Phase 5 (Amendment A1 Finding E): the peer half of the availability gate just became
+        // true, which may be the last precondition a retained synchronised Play was waiting on.
+        if !known { onAvailabilityChanged?() }
     }
 
     private func handlePeerCancel(_ transferId: TransferId) {

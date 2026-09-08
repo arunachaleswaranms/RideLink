@@ -80,6 +80,18 @@ internal class SharedLibraryContentPort(
         val entry = sharedLibrary.remoteEntries.value.firstOrNull { it.contentHash == contentHash } ?: return
         sharedLibrary.requestDownload(entry)
     }
+
+    /**
+     * ADR-024 Amendment A1 Finding E: forwards Phase 4's own verified-availability notification.
+     *
+     * `SharedLibraryCoordinator` already owned the two facts that matter — `cachedHashes`, refreshed
+     * only after `TransferCacheRepository.commit` succeeds, and `peerVerifiedHashes`, written only
+     * on a `TRANSFER_RESULT { ok: true }` for a hash we ourselves served — so this adds a
+     * notification, not a third source of truth, and certainly not a poll.
+     */
+    override fun observeAvailability(onAvailabilityChanged: () -> Unit) {
+        sharedLibrary.onAvailabilityChanged = { scope.launch { onAvailabilityChanged() } }
+    }
 }
 
 /**

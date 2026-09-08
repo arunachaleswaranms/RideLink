@@ -136,10 +136,12 @@ struct SyncPlaybackView: View {
         switch presenter.diagnostics.syncState {
         case .inactive: return "LOCAL — not synchronized"
         case .clockUnready: return "CLOCK NOT READY — no command will be scheduled against it"
-        case .waitingForContent: return "WAITING FOR CONTENT — both phones must hold the track"
+        case .waitingForContent: return "WAITING FOR CONTENT — transferring; play starts by itself"
+        case .waitingForQueue: return "WAITING FOR QUEUE — the leader has not confirmed the track yet"
         case .scheduled: return "SCHEDULED — waiting for the effective instant"
         case .synced: return "SYNCHRONIZED"
         case .syncFailed: return "SYNC FAILED — local playback continues, correction stopped"
+        case .desynchronized: return "RESYNCHRONIZING — waiting for authoritative state; local playback continues"
         }
     }
 }

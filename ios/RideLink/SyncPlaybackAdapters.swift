@@ -69,6 +69,16 @@ final class SharedLibraryContentPort: SyncContentPort {
         await MainActor.run { requestTransferOnMain(contentHash) }
     }
 
+    /// ADR-024 Amendment A1 Finding E: forwards Phase 4's own verified-availability notification.
+    ///
+    /// `SharedLibraryCoordinator` already owned the two facts that matter — the verified cache, which
+    /// only changes after `TransferCacheRepository.commit` succeeds, and `peerVerifiedHashes`, which
+    /// is written only on a `TRANSFER_RESULT { ok: true }` for a hash we ourselves served — so this
+    /// adds a notification, not a third source of truth, and certainly not a poll.
+    nonisolated func observeAvailability(_ onAvailabilityChanged: @escaping @Sendable () -> Void) async {
+        await MainActor.run { sharedLibrary.onAvailabilityChanged = { onAvailabilityChanged() } }
+    }
+
     private func resolveOnMain(_ contentHash: ContentHash) -> SyncPlayableContent? {
         if let file = sharedLibrary.cachedFile(contentHash) {
             let entryId = cacheEntryIds[contentHash.value] ?? LocalEntryId(UUID().uuidString.lowercased())

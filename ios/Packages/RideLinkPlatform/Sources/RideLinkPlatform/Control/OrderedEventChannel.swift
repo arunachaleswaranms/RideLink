@@ -28,18 +28,14 @@ public final class OrderedEventChannel<Element: Sendable>: Sendable {
         self.continuation = continuation
     }
 
-    /// A **bounded** channel that keeps the newest `limit` elements and drops the oldest when full.
-    ///
-    /// Every queue this project adds is bounded by construction (ADR-021 §5's rule), and an inbound
-    /// wire-frame pipe is exactly the kind that a pathological peer could otherwise grow without
-    /// limit. Dropping the oldest is the right policy for Phase 5 specifically: the command that
-    /// matters is the newest, `CommandOrderGate` already drops anything stale, and PROTOCOL §5's
-    /// `PLAYBACK_STATE` is the reconciliation anchor for whatever a drop cost.
-    public init(bufferingNewest limit: Int) {
-        var continuation: AsyncStream<Element>.Continuation!
-        stream = AsyncStream(bufferingPolicy: .bufferingNewest(limit)) { continuation = $0 }
-        self.continuation = continuation
-    }
+    // **There is deliberately no bounded, drop-oldest initialiser here.** There was one
+    // (`init(bufferingNewest:)`), Phase 5's inbound frame pipe was its only caller, and ADR-024
+    // Amendment A1 Finding C is the record of why that was a defect: an element-dropping queue behind
+    // reliable, ordered, authenticated TCP can lose an authoritative command that the transport
+    // already delivered, and `.bufferingNewest` reported it only through a `yield` result the caller
+    // discarded. A frame pipe that must not lose anything is `Phase5FrameQueue`, which refuses
+    // explicitly instead of evicting silently. This type stays what its name says: an ordered event
+    // pipe, for events whose producer is this process and whose volume it therefore bounds itself.
 
     /// Enqueues `element` for the consumer. Safe to call from any isolation context, including
     /// concurrently. A call after `finish()` is a silent no-op (the standard `AsyncStream`

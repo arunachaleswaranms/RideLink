@@ -12,7 +12,16 @@ public enum SyncState: String, Sendable, Equatable {
     /// (ARCHITECTURE §7.1 rule 5). **No synchronised command is issued against a dubious clock.**
     case clockUnready = "CLOCK_UNREADY"
     /// REQUIREMENTS §9.4: the selected track is not yet playable on both phones.
+    ///
+    /// ADR-024 Amendment A1 Finding E: **the wait now ends by itself.** The one Play the user
+    /// pressed is retained, fenced to its session and operation token, and issued automatically once
+    /// the verified cache reports the content — never by asking the user to press Play again.
     case waitingForContent = "WAITING_FOR_CONTENT"
+    /// ADR-024 Amendment A1 Finding A: a synchronised Play was pressed for a track that was not yet
+    /// in the **authoritative** shared queue, so the request is waiting for the leader's
+    /// `QUEUE_SNAPSHOT` to name it. The revision rule did not move; the Play waits for the revision
+    /// it needs, instead of being refused and silently costing the user a second press.
+    case waitingForQueue = "WAITING_FOR_QUEUE"
     /// An authoritative command is scheduled and its deadline has not arrived.
     case scheduled = "SCHEDULED"
     /// Both phones are tracking the same authoritative timeline.
@@ -20,6 +29,16 @@ public enum SyncState: String, Sendable, Equatable {
     /// ARCHITECTURE §7.3's fourth tier: >2 s of drift, or three hard seeks in 60 s. Correction has
     /// stopped, the playback rate is back to exactly 1.0, and **local music keeps playing** (FR-025).
     case syncFailed = "SYNC_FAILED"
+    /// ADR-024 Amendment A1 Finding C/D: the bounded post-TCP ingress overflowed, or more
+    /// authoritative commands are waiting for a trustworthy clock than may be held. **Incremental
+    /// Phase 5 state is no longer trusted** — no further command is applied — until authoritative
+    /// full state arrives (PROTOCOL §5's `PLAYBACK_STATE`, §9's `QUEUE_SNAPSHOT`) or the session
+    /// ends.
+    ///
+    /// Deliberately distinct from `syncFailed`: that one means correction gave up on a timeline both
+    /// phones agree about, this one means we may no longer know what the timeline *is*. Local music
+    /// keeps playing either way (ADR-004, FR-025).
+    case desynchronized = "DESYNCHRONIZED"
 }
 
 /// What the ladder last decided, for the FR-023 diagnostics surface.
@@ -77,6 +96,45 @@ public struct SyncPlaybackDiagnostics: Sendable, Equatable {
     /// deliberately refused as duplicate/stale/role-violating. A real FR-023 figure, and the precise
     /// signal a test needs instead of guessing how many scheduler turns a frame takes.
     public var inboundProcessedCount = 0
+    /// How many inbound Phase 5 frames the bounded handoff refused because it was full of frames
+    /// that cannot be superseded (ADR-024 Amendment A1 Finding C). Nothing is evicted now; a
+    /// refusal is returned to the caller, counted here, and latches `ingressDesynchronized`.
+    public var inboundOverflowCount = 0
+    /// How many latest-wins frames (`POSITION_REPORT`, `PLAYBACK_STATE`, `QUEUE_SNAPSHOT`) were
+    /// coalesced onto a newer sibling because the handoff was full. Lossless by construction, and
+    /// the reason `inboundOverflowCount` stays at zero under a peer's ordinary 5 s report cadence.
+    public var inboundCoalescedCount = 0
+    /// True while incremental Phase 5 state is not trusted. Cleared only by authoritative full state
+    /// or a session boundary — never by time passing, and never by guessing.
+    public var ingressDesynchronized = false
+    /// The highest `command_seq` this device has taken *responsibility* for — applied, or accepted
+    /// and still held pending a trustworthy clock. Distinct from `lastAppliedCommandSeq`, and the
+    /// distinction is ADR-024 Amendment A1 Finding D: recording an accepted command as *applied*
+    /// before the clock was known to be trustworthy spent its sequence number, so the leader's
+    /// replay of it became a duplicate and nothing ever applied it.
+    public var lastReceivedCommandSeq: Int64?
+    /// How many authoritative commands are held, in order, waiting for a trustworthy clock.
+    public var deferredCommandCount = 0
+    /// How many held commands were applied once the clock became trustworthy again.
+    public var recoveredCommandCount = 0
+    /// How many outbound Phase 5 frames this device could not hand to the transport because its own
+    /// ordered outbound queue was full (Amendment A1 Finding B). Locally produced, so a nonzero
+    /// value means the control socket is wedged, never a pathological peer.
+    public var outboundOverflowCount = 0
+    /// How many frames have been accepted onto the one ordered outbound path.
+    public var outboundEnqueuedCount = 0
+    /// How many of those have actually been handed to the transport, in enqueue order.
+    ///
+    /// The gap between this and `outboundEnqueuedCount` is a real FR-023 figure — a persistent one
+    /// means the control socket is not draining — and it is also the precise signal a test needs to
+    /// know the wire has caught up, instead of guessing how many scheduler turns a send takes.
+    public var outboundSentCount = 0
+    /// How many retained one-press synchronised Plays were issued automatically once their queue
+    /// revision or their content arrived (Amendment A1 Findings A and E) — the figure that
+    /// distinguishes "the user pressed Play once and it worked" from "the user pressed Play twice".
+    public var resumedPendingPlayCount = 0
+    /// How many retained Plays were dropped by supersession, a session boundary or leaving sync mode.
+    public var cancelledPendingPlayCount = 0
 
     public init() {}
 }
