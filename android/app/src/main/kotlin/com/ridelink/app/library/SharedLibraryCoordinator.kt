@@ -146,6 +146,33 @@ class SharedLibraryCoordinator(
     private val _cachedHashes = MutableStateFlow<Set<String>>(emptySet())
     val cachedHashes: StateFlow<Set<String>> = _cachedHashes.asStateFlow()
 
+    /**
+     * Phase 5 (ADR-024 §7): content this session's peer is known to hold **because it told us so** —
+     * a `TRANSFER_RESULT { ok: true }` for a transfer *we* served, whose recorded `content_hash`
+     * matches the one the peer reports having verified.
+     *
+     * This exists because a peer's manifest is generated from its Phase 3 *library* only
+     * ([ManifestGenerator]), so a track it received by transfer and holds in its verified Phase 4
+     * cache appears in no manifest and would otherwise be invisible to the availability gate — the
+     * exact case UJ-05 describes. No wire change was needed: the requester already sends this
+     * message and the provider already receives it; Phase 4 simply ignored it.
+     *
+     * Session-scoped and cleared on every boundary, exactly like [remoteEntries]: it describes one
+     * peer under one authenticated session and must never leak into the next.
+     *
+     * Trusting it is safe because of what it is used for. It gates whether a *synchronised* `PLAY`
+     * may be scheduled — nothing else. A peer that lied about having a file simply does not play;
+     * no local storage, no local state and no security decision depends on it. The stronger half of
+     * the claim is ours anyway: we only record a hash we ourselves served over the bulk plane in
+     * this session.
+     */
+    private val _peerVerifiedHashes = MutableStateFlow<Set<String>>(emptySet())
+    val peerVerifiedHashes: StateFlow<Set<String>> = _peerVerifiedHashes.asStateFlow()
+
+    /** `transfer_id -> content_hash` for transfers **we** are serving, so a peer's `TRANSFER_RESULT`
+     *  is matched against what we actually sent rather than against whatever hash it names. */
+    private val servedHashes = java.util.concurrent.ConcurrentHashMap<String, ContentHash>()
+
     private var syncMachine: ManifestSyncStateMachine? = null
     private val transferMutex = Mutex()
     private val downloadQueue = ArrayDeque<ContentHash>()
@@ -201,6 +228,14 @@ class SharedLibraryCoordinator(
 
     /** True once bytes have arrived, been whole-file verified, **and** committed — never merely queued or transferring. */
     suspend fun isVerifiedCached(contentHash: ContentHash): Boolean = cacheRepository.isVerifiedCached(contentHash)
+
+    /**
+     * Phase 5's peer half of the brief §19 availability gate (ADR-024 §7): the peer holds this
+     * content if its synced manifest advertises it, **or** if it verified a transfer we served it in
+     * this session. Session-scoped both ways — [onSessionBoundary] clears both sources.
+     */
+    fun peerHasContent(contentHash: ContentHash): Boolean =
+        _remoteEntries.value.any { it.contentHash == contentHash } || contentHash.value in _peerVerifiedHashes.value
 
     /**
      * brief §19: hands a verified cached file's location to the caller, which plays it through the
@@ -300,6 +335,10 @@ class SharedLibraryCoordinator(
         // brief §6/§22: a peer's catalogue is session/peer-scoped and must never leak across a
         // reconnect or a different peer — replaced wholesale, never merged with what came before.
         _remoteEntries.value = emptyList()
+        // ADR-024 §7: what the peer verified belongs to the session it verified it under, exactly
+        // like the catalogue above. A reconnect re-earns it.
+        _peerVerifiedHashes.value = emptySet()
+        servedHashes.clear()
         syncMachine = null
         val hashToClear = activeDownload
         // Amendment A4 Finding V — supersede *before* closing the transport, not after. Closing
@@ -560,6 +599,15 @@ class SharedLibraryCoordinator(
         }
     }
 
+    @Suppress("ReturnCount") // one early-out per condition the claim must satisfy before it is believed
+    private fun onPeerTransferResult(message: TransferMessage.Result) {
+        val served = servedHashes.remove(message.transferId.value) ?: return
+        if (!message.ok) return
+        // Both must agree: what we sent, and what the peer says it verified.
+        if (message.sha256 != served) return
+        _peerVerifiedHashes.update { it + served.value }
+    }
+
     private fun onOfferReceived(message: TransferMessage.Offer) {
         if (pendingOfferTransferId == message.transferId) pendingOffer?.complete(message)
     }
@@ -612,7 +660,12 @@ class SharedLibraryCoordinator(
             is TransferMessage.Request -> serveTransferRequest(message, generation)
             is TransferMessage.Offer -> onOfferReceived(message)
             is TransferMessage.Progress -> Unit // brief §28: peer-reported progress is never trusted or displayed
-            is TransferMessage.Result -> Unit // the requester already knows its own outcome from its own verification
+            // The *requester* already knows its own outcome from its own verification, so this is
+            // never read as a download result. What it does carry, for the **provider**, is the one
+            // signal Phase 4 had no consumer for: the peer has verified and committed the file we
+            // just served it (ADR-024 §7). That is what makes Phase 5's availability gate able to
+            // see a track the peer holds only in its verified cache, which appears in no manifest.
+            is TransferMessage.Result -> onPeerTransferResult(message)
             is TransferMessage.Cancel -> handlePeerCancel(message)
         }
     }
@@ -673,6 +726,10 @@ class SharedLibraryCoordinator(
                 // requester's own negotiation timeout resolves this (brief §19 — no BUSY wire shape).
                 val owner = BulkOperationOwner.Provider(request.transferId, request.contentHash, peerSpki, authorisingGeneration)
                 if (!bulkGate.tryAcquire(owner)) return
+                // ADR-024 §7: remember what this transfer_id actually carries, so a later
+                // TRANSFER_RESULT is matched against what we served rather than against a hash the
+                // peer chose to name.
+                servedHashes[request.transferId.value] = request.contentHash
                 // Amendment A5 Finding B: ensureListening() now fails rather than publishing a
                 // listener bound under a lifetime a session boundary already ended — an outcome
                 // this path must handle, or the gate would leak and block every later transfer in

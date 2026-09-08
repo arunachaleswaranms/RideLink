@@ -95,6 +95,19 @@ class MusicCoordinator(
         combine(_playerState, _queueState) { player, queue -> player.playing || (queue.currentItem != null && player.localEntryId != null) }
             .stateIn(scope, SharingStarted.WhileSubscribed(), false)
 
+    /**
+     * Non-null once a Phase 5 synchronised session exists. Set once by the composition root
+     * (`AppContainer`), never by a screen. While it reports ownership of an action, this coordinator
+     * does not touch the player — the leader-ordered command that comes back over the control plane
+     * does, through the `sync*` methods below.
+     *
+     * The cycle between the two coordinators is deliberate and one-directional per call:
+     * `MusicCoordinator` asks the gate, the gate never calls back into these gated methods (it uses
+     * `syncPrepare`/`syncStart`/... which bypass it), so there is no re-entrancy.
+     */
+    @Volatile
+    var syncGate: SyncPlaybackGate? = null
+
     /** Guards [completeContentHashingInBackground] against launching a second concurrent pass while
      *  one is already running — not correctness-critical (each pass re-reads the repository and a
      *  row already hashed is simply skipped), but avoids redundant concurrent DB reads. */
@@ -133,7 +146,10 @@ class MusicCoordinator(
                 // own "nothing selected" semantics restart the first item — an infinite play/restart
                 // loop. See TrackEndEdge's KDoc for the full account.
                 if (TrackEndEdge.advancedNow(previous, state)) {
-                    dispatch(LocalQueueAction.Next)
+                    // In a synchronised session only the ADR-010 leader decides what plays next, and
+                    // it does so with an authoritative NEXT both phones schedule. Advancing the local
+                    // queue here as well would put this phone a track ahead of the other.
+                    if (syncGate?.interceptTrackEnded() != true) dispatch(LocalQueueAction.Next)
                 }
             }
         }
@@ -199,20 +215,86 @@ class MusicCoordinator(
 
     fun clearQueue() = dispatch(LocalQueueAction.Clear)
 
-    fun next() = dispatch(LocalQueueAction.Next)
+    fun next() {
+        if (syncGate?.interceptNext() == true) return
+        dispatch(LocalQueueAction.Next)
+    }
 
-    fun previous() = dispatch(LocalQueueAction.Previous)
+    fun previous() {
+        if (syncGate?.interceptPrevious() == true) return
+        dispatch(LocalQueueAction.Previous)
+    }
 
     fun selectQueueItem(id: String) = dispatch(LocalQueueAction.Select(id))
 
     fun play() {
         _lastMusicStartRefusal.value = null
+        if (syncGate?.interceptPlay() == true) return
         scope.launch { player.execute(PlaybackCommand.Play) }
     }
 
-    fun pause() = scope.launch { player.execute(PlaybackCommand.Pause) }
+    fun pause() {
+        if (syncGate?.interceptPause() == true) return
+        scope.launch { player.execute(PlaybackCommand.Pause) }
+    }
 
-    fun seek(positionMs: Long) = scope.launch { player.execute(PlaybackCommand.Seek(positionMs)) }
+    fun seek(positionMs: Long) {
+        if (syncGate?.interceptSeek(positionMs) == true) return
+        scope.launch { player.execute(PlaybackCommand.Seek(positionMs)) }
+    }
+
+    // --- Phase 5's own entry points ---------------------------------------------------------
+    //
+    // These bypass [syncGate] by construction: they are what the gate's owner calls once the ADR-010
+    // leader's authoritative command is due, so routing them back through the gate would be an
+    // immediate loop. They drive the same one player and the same one queue as everything above —
+    // there is no second player, no second queue and no second MediaSession in Phase 5 (brief §21).
+
+    /**
+     * ARCHITECTURE §7.2's pre-roll: load [location] and seek to [positionMs] **without** starting.
+     * Also makes this the local queue's one selected entry, so `NowPlaying`/`MediaSession` metadata
+     * and the Phase 3 UI describe what is actually loaded (brief §26). The shared queue itself is
+     * displayed from `SyncPlaybackCoordinator.queueState`; it is deliberately not copied wholesale
+     * into `LocalQueue`, because two queues that could disagree about an index is exactly the bug
+     * that would produce.
+     */
+    suspend fun syncPrepare(
+        contentHash: ContentHash,
+        localEntryId: LocalEntryId,
+        location: LocalTrackLocation,
+        title: String?,
+        artist: String?,
+        positionMs: Long,
+    ) {
+        _lastMusicStartRefusal.value = null
+        externalCacheSources.register(localEntryId, ExternalCacheSource(contentHash, location, title, artist))
+        val item = LocalQueueItem(id = nextQueueItemId(), localEntryId = localEntryId, insertedAtMonoUs = monotonicNowUs())
+        _queueState.value = LocalQueueState(items = listOf(item), currentId = item.id)
+        player.execute(PlaybackCommand.Load(localEntryId, location, title, artist))
+        player.execute(PlaybackCommand.Seek(positionMs))
+    }
+
+    suspend fun syncStart() {
+        player.execute(PlaybackCommand.Play)
+    }
+
+    suspend fun syncPause() {
+        player.execute(PlaybackCommand.Pause)
+    }
+
+    suspend fun syncSeek(positionMs: Long) {
+        player.execute(PlaybackCommand.Seek(positionMs))
+    }
+
+    /** ADR-004's rate-nudge tier. Always exactly 1.0 when correction ends (brief §38). */
+    suspend fun syncSetRate(rate: Double) {
+        player.execute(PlaybackCommand.SetRate(rate))
+    }
+
+    suspend fun syncStop() {
+        player.execute(PlaybackCommand.Stop)
+        _queueState.value = LocalQueueState()
+    }
 
     fun importTree(treeUri: PlatformUri) =
         scope.launch {

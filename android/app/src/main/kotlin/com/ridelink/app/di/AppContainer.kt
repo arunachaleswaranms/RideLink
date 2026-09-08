@@ -16,9 +16,16 @@ import com.ridelink.app.service.RideMediaSessionSource
 import com.ridelink.app.session.ForegroundServiceController
 import com.ridelink.app.session.SessionCoordinator
 import com.ridelink.app.session.SessionEnvironment
+import com.ridelink.app.sync.MonotonicDeadlineSleeper
+import com.ridelink.app.sync.MusicCoordinatorPlayerPort
+import com.ridelink.app.sync.SharedLibraryContentPort
+import com.ridelink.app.sync.SyncPlaybackCoordinator
+import com.ridelink.app.sync.SyncPlaybackGateAdapter
+import com.ridelink.app.sync.SyncSessionManagerAdapter
 import com.ridelink.audio.player.ExoPlayerMusicPlayer
 import com.ridelink.audio.route.AndroidVoiceAudioSession
 import com.ridelink.audio.route.AudioEndpointPreference
+import com.ridelink.core.audiopolicy.RouteState
 import com.ridelink.core.logging.InMemoryLogSink
 import com.ridelink.core.model.ManifestId
 import com.ridelink.core.model.TransferId
@@ -220,10 +227,41 @@ class AppContainer(
             activeCacheHash = { musicCoordinator.activeExternalCacheHash() },
         )
 
+    /**
+     * Phase 5's synchronisation plane (ADR-004, ADR-024). It owns no player and no queue: every
+     * audible effect goes through the **one** [musicCoordinator] above, and every content lookup
+     * through Phase 3's library and Phase 4's verified cache. The three adapters below are the only
+     * thing standing between the real collaborators and the narrow ports the coordinator declares.
+     */
+    val syncPlaybackCoordinator: SyncPlaybackCoordinator =
+        SyncPlaybackCoordinator(
+            scope = appScope,
+            monotonicNowUs = monotonicNowUs,
+            localPeerId = localPeerId,
+            session = SyncSessionManagerAdapter(controlSessionManager),
+            player = MusicCoordinatorPlayerPort(musicCoordinator),
+            content = SharedLibraryContentPort(appScope, libraryRepository, sharedLibraryCoordinator),
+            sleeper = MonotonicDeadlineSleeper(monotonicNowUs),
+            // ARCHITECTURE §7.3: the drift ladder is suspended while **either** peer's route is
+            // transitioning. The local half comes from the voice diagnostics' route snapshot, the
+            // peer half from its last AUDIO_STATE. This is a Phase 5 correction guard reading Phase
+            // 2b state — it changes no Bluetooth behaviour and decides no audio policy, which is
+            // Phase 6's job and is deliberately untouched here.
+            routeTransitioning = {
+                sessionCoordinator.voiceDiagnostics.value.route.routeState == RouteState.TRANSITIONING ||
+                    sessionCoordinator.peerAudioState.value?.routeState == RouteState.TRANSITIONING
+            },
+            nextQueueItemId = { Ulid.generate() },
+        )
+
     val sessionCoordinator: SessionCoordinator
 
     init {
         requireSecureControlChannel(controlChannel.isSecure, controlChannel.transportLabel)
+        // brief §39: the in-app controls and the ADR-022 MediaSession already funnel into
+        // musicCoordinator, so attaching the gate here gives synchronised playback one command path
+        // rather than a second one beside it.
+        musicCoordinator.syncGate = SyncPlaybackGateAdapter(appScope, syncPlaybackCoordinator)
         sessionCoordinator =
             SessionCoordinator(
                 discovery = NsdDiscoveryController(context),

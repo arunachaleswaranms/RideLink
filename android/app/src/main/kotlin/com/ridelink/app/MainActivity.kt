@@ -89,6 +89,7 @@ class MainActivity : ComponentActivity() {
                             coordinator = appContainer.sessionCoordinator,
                             musicCoordinator = appContainer.musicCoordinator,
                             sharedLibraryCoordinator = appContainer.sharedLibraryCoordinator,
+                            syncPlaybackCoordinator = appContainer.syncPlaybackCoordinator,
                             deviceDescription = deviceDescription,
                             onStartIntercom = {
                                 attemptIntercomStart(appContainer.sessionCoordinator, requestPermissionsIfMissing = true)

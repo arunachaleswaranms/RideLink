@@ -27,6 +27,7 @@ import androidx.compose.ui.unit.dp
 import com.ridelink.app.library.SharedLibraryCoordinator
 import com.ridelink.app.music.MusicCoordinator
 import com.ridelink.app.session.SessionCoordinator
+import com.ridelink.app.sync.SyncPlaybackCoordinator
 import com.ridelink.core.library.LibraryEntry
 import com.ridelink.core.manifest.ManifestEntry
 import com.ridelink.core.sessionfsm.SessionStatus
@@ -53,6 +54,7 @@ fun MainScreen(
     coordinator: SessionCoordinator,
     musicCoordinator: MusicCoordinator,
     sharedLibraryCoordinator: SharedLibraryCoordinator,
+    syncPlaybackCoordinator: SyncPlaybackCoordinator,
     deviceDescription: String,
     /**
      * Routed through the Activity on purpose. ARCHITECTURE §6.4 steps 4–6: the microphone foreground
@@ -136,16 +138,17 @@ fun MainScreen(
                     onSelectPolicy = coordinator::selectIntercomPolicy,
                 )
 
-                // PROTOCOL §8's catalogue plane, gated the same way voice is: brief §22, an
-                // unpaired peer must never receive or exchange the shared library.
-                SharedLibraryScreen(
+                // PROTOCOL §8's catalogue plane and PROTOCOL §5/§9's synchronisation plane, both
+                // gated the same way voice is: brief §22 and ADR-024 §8 — an unpaired peer must
+                // never receive the shared library and can never move this phone's music.
+                SharedLibraryAndSyncSections(
+                    sharedLibraryCoordinator = sharedLibraryCoordinator,
+                    syncPlaybackCoordinator = syncPlaybackCoordinator,
                     remoteEntries = remoteEntries,
                     localEntries = localEntries,
                     downloadStates = downloadStates,
                     cachedHashes = cachedHashes,
-                    onDownload = sharedLibraryCoordinator::requestDownload,
-                    onCancel = { entry -> entry.contentHash?.let(sharedLibraryCoordinator::cancelDownload) },
-                    onPlayLocally = onPlaySharedTrackLocally,
+                    onPlaySharedTrackLocally = onPlaySharedTrackLocally,
                 )
             }
 
