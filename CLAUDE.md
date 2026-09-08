@@ -199,7 +199,7 @@ resume are deferred, but the chunk and page framing keep both possible.
 
 ## Current phase
 
-**Phase 5 — synchronized playback. Implementation complete; the real-device
+**Phase 5 — synchronized playback. Software closure A1 complete; the real-device
 synchronized-playback gate is open. Phase 6 and Phase 7 have not started.**
 
 `docs/STATUS.md` is the authority on this and is kept current; the sections below are the
@@ -207,28 +207,31 @@ architectural summary for phases 1a–2b and remain accurate for *those* phases.
 player, ADR-022), Phase 4 (shared catalogue + `ContentHash`-keyed transfer on a second session-bound
 TLS connection, ADR-023) and Phase 5 (clock-scheduled playback, drift correction and a replicated
 queue, ADR-004 + ADR-024) all landed after this section was last rewritten and are implementation-
-complete on both platforms with their real-device gates open — see `docs/STATUS.md` §2q–§2aa.
+complete on both platforms with their real-device gates open — see `docs/STATUS.md` §2q–§2ab.
 
 **Phase 4 has been closure-audited five times** (ADR-023 Amendments A1–A5), each pass finding real
 integration/lifecycle defects in code that was already CI-green: eighteen, then two, then two, then
-four, then three. Read that as the standing lesson it is — on this codebase, "CI-green" and "correct"
-are different claims, and the gap between them has consistently been in session lifetime,
-cancellation ownership and platform I/O contracts rather than in the wire format or the pure domain
-layer. **Phase 5 has not been closure-audited at all yet**, and should be read accordingly.
+four, then three. **Phase 5 has now been closure-audited once** (ADR-024 Amendment A1): six findings
+given, all six confirmed, plus a seventh found by stress-running one of the new regressions. Read all
+of that as the standing lesson it is — on this codebase, "CI-green" and "correct" are different
+claims, and the gap between them has consistently been in session lifetime, cancellation ownership,
+ordering across suspensions and platform I/O contracts rather than in the wire format or the pure
+domain layer. Nothing here is "final"; assume another audit would find something.
 
 Phase 0 (hardware feasibility) is complete; do **not** repeat it. Phases 1a, 1b, 2a, 2b, 3, 4 and 5
 are all implementation-complete and green on both platforms. **The overall "2 Intercom" milestone is
 not complete** — its hardware gates (TEST_PLAN A-01, A-02, A-04, A-09 and V-01…V-11) have not run.
 
-**Phase 5** (ADR-004, ADR-024, `docs/STATUS.md` §2aa) turned the Phase 1a clock layer and the Phase 3
-player into synchronised playback:
+**Phase 5** (ADR-004, ADR-024, `docs/STATUS.md` §2aa and the audit in §2ab) turned the Phase 1a clock
+layer and the Phase 3 player into synchronised playback:
 
 - **Every distributed decision is a pure, mirrored, vector-pinned table** — `CommandOrderGate`, `ScheduledCommand`, `PlaybackTimeline`, `DriftController`, `SharedQueue`, `SessionClock`. The coordinators are wiring and lifetime, never policy. That is ADR-019's direct lesson (rule 18 above).
 - **One clock estimator, extended not duplicated.** `ClockSync` gained `rtt_p95` and a bounded window; `SessionClockTracker` owns offset, RTT history and readiness per session. Readiness is *not* "we have a number": an unconfirmed 30 ms step means no new command is scheduled, while playback already in flight keeps its last accepted offset.
 - **The follower→leader intent is `command_seq: 0`** — the same message type, no new type (ADR-024 §3). An authoritative `command_seq` arriving at the leader is a role violation, which is what makes "a follower cannot fabricate one" checked rather than assumed.
 - **Five specification gaps were found and resolved in ADR-024, not silently in code**: `RESUME` and `PLAYBACK_STATE` had no payload; the intent hop had no message; §9's 2 000-item queue cap does not fit the 256 KiB frame cap (**the cap moved to 1 000; the frame limit did not**); and §9 put `status` on the wire in the same paragraph that called it untrusted (**removed**).
-- **Six new shared vector sets**, each an independent third transcription: `session-clock/`, `ordering/`, `drift/`, `queue/`, `playback-messages/`, `queue-messages/`.
+- **Seven shared vector sets**, each an independent third transcription: `session-clock/`, `ordering/`, `drift/`, `queue/`, `playback-messages/`, `queue-messages/`, and the audit's `phase5-gates/`.
 - **The Android scheduled-start path runs on the real emulator** — pre-roll, a start at a monotonic deadline, and ADR-004's nudge reaching the real `setPlaybackParameters` and returning to exactly 1.0 (measured sleeper wake error 1.4–3.1 ms). **The iOS half has not run on a simulator**, and `AVAudioUnitVarispeed` has never changed a real rate.
+- **Closure audit A1 (ADR-024 Amendment A1) added four invariants worth knowing before touching this phase.** (1) **One ordered path per direction**: allocating a `command_seq`/`queue_revision` and handing the frame to the transport happen in *one* critical section — with **no `await` between them** on iOS, because an `await` there is an actor re-entrancy point — and one consumer drains each direction. A transport write lock orders bytes, not decisions. (2) **The post-transport handoff is lossless**: `Phase5FrameQueue` never evicts; only `POSITION_REPORT`/`PLAYBACK_STATE`/`QUEUE_SNAPSHOT` may supersede their *own* older sibling, and anything else is refused, counted and halts incremental application until authoritative state arrives. (3) **Received is not applied**: `lastReceivedSeq` feeds `CommandOrderGate`, `lastAppliedSeq` moves only when a command takes effect, and a command accepted against an untrusted clock is held in order rather than losing its sequence number. (4) **Ownership is re-proved after every suspension that precedes an externally visible effect** — a superseded correction has *zero* effects, not merely no player call. `Phase5Ingress`, `PendingCommandGate` and `PendingPlayGate` are the pure tables for the first three, pinned by `protocol/vectors/phase5-gates/`.
 - **Nothing ran on a phone, and no audio reached a speaker or a Bluetooth endpoint.** The local two-peer integration measures 47 µs of *mapped session start error* in one process over loopback. **No alignment figure exists**, and the <100 ms product target and <50 ms stretch target must not be described as approached. TEST_PLAN §5.2's S-01…S-12 are what will change that.
 
 **Phase 1b** gave the secure control channel: TLS 1.3 with mutual authentication,

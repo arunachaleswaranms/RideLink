@@ -606,8 +606,10 @@ Rules:
 1. `command_seq` ≤ last applied ⇒ **drop**. Late duplicates cannot rewind playback.
 2. `effective_at_session_us` already passed ⇒ apply immediately and record the lateness in `METRICS`. Never skip the command; never schedule into the past.
 3. `queue_revision` older than local ⇒ reply `ERROR/stale_revision`; the issuer refreshes via `STATE_REQUEST`. This is what stops two people pressing *next* from double-skipping.
-4. `PLAY` for a `track_hash` not locally present ⇒ do **not** start. Enter `TRANSFER_PENDING`, request transfer (§8.2), and let the leader reschedule. A remote-only track cannot begin synchronised playback (REQUIREMENTS §9.4).
+4. `PLAY` for a `track_hash` not locally present ⇒ do **not** start. Enter `TRANSFER_PENDING`, request transfer (§8.2), and let the leader reschedule. A remote-only track cannot begin synchronised playback (REQUIREMENTS §9.4). **One press of Play is one request**, retained across that wait and issued as a *new* authoritative command with a *fresh* `effective_at_session_us` once the content is verified on both phones — never by asking the user to press again ([ADR-024 Amendment A1](DECISIONS/ADR-024-synchronized-playback-integration.md)). The same applies to a Play whose `queue_item_id` is not yet in the authoritative queue: it waits for the revision it needs rather than being stamped against one the leader has already moved past.
 5. Scheduling lead: `LEAD = max(120 ms, 4 × rtt_p95)`.
+6. **A frame accepted from the transport may not be lost after it** ([ADR-024 Amendment A1](DECISIONS/ADR-024-synchronized-playback-integration.md)). The handoff between the control read loop and the Phase 5 consumer is bounded and **lossless**: within the bound, arrival order is preserved exactly; when it is full, only a frame whose newest instance subsumes its older ones (`POSITION_REPORT`, `PLAYBACK_STATE`, `QUEUE_SNAPSHOT`) may supersede its own older sibling. Anything else is **refused explicitly and counted**, never evicted. A refusal on a follower halts the application of incremental commands — without spending their `command_seq` — until authoritative full state arrives (`PLAYBACK_STATE`, `QUEUE_SNAPSHOT`) or the session ends. On the leader it does not halt: the only incremental frames a leader accepts are intents, which it stamps rather than applies, so it re-broadcasts authoritative state and continues. Local playback is unaffected throughout (ADR-004).
+7. **An accepted command is not an applied command.** A receiver tracks the highest `command_seq` it has accepted *separately* from the highest it has applied. A command accepted while the session clock is not trustworthy (§2's unconfirmed step) is **held in authoritative order** and applied when the estimator recovers; its sequence number is not spent by the acceptance, so a leader's replay of it is not mistaken for a duplicate of work that never happened. Nothing is ever scheduled against an untrusted clock, and offset 0 is never substituted for one ([ADR-024 Amendment A1](DECISIONS/ADR-024-synchronized-playback-integration.md)).
 
 `POSITION_REPORT` (every 5 s, both directions) drives drift detection:
 
@@ -630,6 +632,17 @@ reconnect — the reconciliation anchor, not an incremental update. Its shape is
 authoritative state. A follower adopts the `command_seq` so ordering continues from the authoritative
 value, and re-anchors its timeline when the snapshot describes the track it is already playing; it
 deliberately starts nothing, because a change of track is a `PLAY`.
+
+**The one exception, and the only place a receiver acts on this frame as more than an anchor**
+([ADR-024 Amendment A1](DECISIONS/ADR-024-synchronized-playback-integration.md)): **while a receiver
+is desynchronised, a `PLAYBACK_STATE` restores playback** — it loads and schedules the track it names
+at the position and instant it carries. A receiver becomes desynchronised only by an explicit,
+counted refusal in its own bounded post-transport handoff (see rule 6 below); it then applies no
+incremental command at all, so "re-anchor only" would leave it coherent about *ordering* and wrong
+about *what is playing*, which is not reconciliation. **No field changed for this**: the snapshot
+already carries every value needed, and the instant it names is in the past, so rule 2's "apply
+immediately and record the lateness" is what happens — an expired deadline is never reused as though
+it were still ahead.
 
 **Binding a `POSITION_REPORT` to a playback epoch.** `track_hash` alone is not enough — the same
 track can legitimately be played again — so a receiver additionally requires
@@ -1169,6 +1182,8 @@ bulk connection and the requester deletes its `.part`.
 - `position` ∈ `end | next`; an unrecognised value degrades to `end` (§2 rule 2's posture, applied to a value).
 - **The three mutation types are the follower→leader intent channel; `QUEUE_SNAPSHOT` is the only way the queue reaches a follower** ([ADR-024 §5](DECISIONS/ADR-024-synchronized-playback-integration.md)). The leader applies, bumps the revision and broadcasts a snapshot; a follower adopts it wholesale, revision included, and never increments a revision itself. **The snapshot always wins** — there is no merge algorithm to get subtly wrong, and no CRDT.
 - A follower mutation that loses a race is refused with `ERROR/stale_revision` **and answered with a fresh `QUEUE_SNAPSHOT`** — the leader re-broadcasts authoritative state rather than waiting for a `STATE_REQUEST`.
+- **A queue mutation and a playback command decided in one leader order cross the wire in that order** ([ADR-024 Amendment A1](DECISIONS/ADR-024-synchronized-playback-integration.md)). The leader allocates a `command_seq` or bumps a `queue_revision` and hands the resulting frame to the transport in **one** indivisible step, and one writer drains that order onto the connection. A `PLAY` stamped for revision *n* therefore cannot reach the peer ahead of the `QUEUE_SNAPSHOT` that created revision *n*, and a mutation cannot overtake a command stamped for the revision before it. Serialising bytes is not enough: a transport write lock orders *bytes*, not the decisions that produced them.
+- **`QUEUE_SNAPSHOT` is also the queue half of a desynchronised receiver's reconciliation** — adopting authoritative queue state is what makes a desynchronised queue coherent again (§5 rule 6).
 - `QUEUE_SNAPSHOT` is subject to the frame cap. **V1 caps the queue at 1 000 items**, enforced at `QUEUE_ADD` with `ERROR/capability_missing`. *(Corrected from 2 000 by [ADR-024 §6](DECISIONS/ADR-024-synchronized-playback-integration.md): at ~190 encoded bytes per item, 2 000 items is ~378 KB against a 262 144-byte cap, so the earlier claim that it "cannot happen" was arithmetically wrong. The **cap moved, the frame limit did not** — §1's rule stands.)* The sender still checks its encoded size, mirroring §8.1 rule 6.
 - **`status` is not on the wire.** An earlier draft of this section listed `status ∈ ready | remote_only | transferring | unavailable` on a snapshot item while stating in the same paragraph that it is "derived locally from presence, never trusted from the peer". A field that must never be trusted has no reason to be sent, and sending it hands a peer a channel to influence what the local UI claims about local storage. It is removed (ADR-024 §6); availability is `core.transfer.Availability`, as it always was. A peer that still sends it is tolerated as an unknown field and the value is ignored.
 

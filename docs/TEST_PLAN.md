@@ -194,6 +194,30 @@ holds content from its synced manifest or from a transfer this device served it 
 (ADR-024 §7). A track the peer imports locally mid-session is invisible until the next manifest
 synchronisation, which V1 performs on `Connected` only.
 
+**Added by the closure audit (ADR-024 Amendment A1).** Six confirmed integration-layer findings —
+plus a seventh the audit's own stress run found — now have deterministic regressions on both
+platforms, each of which fails on the code as Phase 5 shipped:
+
+| Finding | What the regression proves | Where |
+|---|---|---|
+| A — first Play vs. its own queue add | One press on an unqueued track sends **no** `PLAY` until the authoritative `QUEUE_SNAPSHOT` names it, then sends exactly one carrying the authoritative revision, with `stale_revision` at zero. Plus: a snapshot naming someone else's add keeps it waiting; a session boundary makes it inert forever | `SyncPlaybackClosureAuditTest[s]`, and two-peer on both platforms |
+| B — leader order vs. wire order | The leader's own outbound stream, **replayed through the follower's stale-revision rule**, never rejects anything — across `NEXT`/`QUEUE_REMOVE`, `PLAY`/`QUEUE_ADD`, `SEEK`/`QUEUE_MOVE` and `PAUSE`/`QUEUE_REMOVE`, in both start orders. iOS repeats it 60× because the interleaving there is a genuine race | `SyncPlaybackClosureAuditTest[s]`, two-peer (real TLS on iOS) |
+| C — post-transport frame loss | With room, two commands behind a stalled consumer both apply **in order**; at the bound, the refusal is counted, latches `DESYNCHRONIZED`, and the `PAUSE` behind it is **not** applied; authoritative full state then reconciles *and restores playback*; latest-wins frames coalesce instead of pushing a command out. The capacity is **injected** (1 or 2), never raced | `SyncPlaybackClosureAuditTest[s]`, `Phase5FrameQueueTest[s]` |
+| D — accepted vs. applied | A command accepted while the clock is untrusted is held, not lost: `lastApplied` stays null while `lastReceived` moves, a replay is a duplicate, and it applies **exactly once** on recovery. `PLAY(n)`+`PAUSE(n+1)` recover in authoritative order. A session boundary makes held commands inert. Overflowing the held buffer halts rather than dropping | `SyncPlaybackClosureAuditTest[s]` |
+| E — Play across a Phase 4 transfer | One press → Phase 4 asked **once** → nothing plays → verification arrives → **one** authoritative `PLAY` with a fresh instant, no second press. Plus all four negatives: supersession, session boundary, leaving sync mode, failed transfer | `SyncPlaybackClosureAuditTest[s]`, two-peer (real TLS on iOS) |
+| F — superseded correction | A correction superseded **inside** its own player call has zero effects: no seek-budget spend, no `lastCorrection`, no `PLAYBACK_STATE` on the wire. And one refused before the call touches the player at all | `SyncPlaybackClosureAuditTest[s]` |
+| G — apply-path ordering (**found by stress-running the C regression**) | `PAUSE(n)` and `RESUME(n+1)`, both already due, take effect in authoritative order all the way to the player — asserted with the `PAUSE`'s player call **parked** while the `RESUME` is delivered and fully processed. And a superseded link does not stall the ones behind it | `SyncPlaybackClosureAuditTest[s]` |
+
+`protocol/vectors/phase5-gates/` (228 rows) pins the three tables those regressions drive, and **all
+twelve pre-existing Phase 5 vector sets regenerate byte-for-byte identically** — the wire did not
+move.
+
+**Still not proven by any of it.** Every figure the amendment adds is a *software* figure. Nothing ran
+on a phone; no audio reached a speaker or a Bluetooth endpoint; and no alignment figure exists. The
+recovery latency after a desynchronisation is deliberately **unbounded** — `STATE_REQUEST` remains
+unimplemented, so a halted follower waits for the leader's next authoritative snapshot or for the next
+session boundary. S-01…S-12 remain the gate.
+
 ### 3.1a Phase 2a voice — what is proven on a laptop, and what is not
 
 **Proven, and it is real media rather than a mock.** `VoiceEngineLoopbackTests` (iOS package, runs
