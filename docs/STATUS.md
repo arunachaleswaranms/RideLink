@@ -3227,6 +3227,24 @@ decode of `test-media/synthetic/normal.m4a`:
 **Those numbers are software scheduling on one emulator and nothing else.** No second device, no
 Bluetooth, no speaker, no recorder. They bound a scheduler; they are not alignment.
 
+### CI
+
+One fresh run, observed once, **green on both platforms on the first attempt** — no rerun-until-green.
+
+| | |
+|---|---|
+| Run | [34248542704](https://github.com/arunachaleswaranms/RideLink/actions/runs/34248542704), run number 32, attempt 1 |
+| Head commit | `6cfa2ef` (`test: run the Phase 5 scheduled-start path on the real Android emulator`) |
+| Functional SHAs | `6834faa` (domain + protocol), `6186816` (Android integration), `bea0a5c` (iOS integration), `c7172fe` (inbound ordering fix + docs) |
+| Android job | **success** — core unit tests, all unit tests, ktlint, detekt, lint, assembleDebug, assembleRelease |
+| iOS job | **success** — `RideLinkCore` tests, `RideLinkPlatform` tests, Debug simulator build, Release simulator build |
+
+The two annotations on the run are GitHub's own Node 20 / `setup-java@v4` deprecation notices, not
+project failures, and are unchanged from the Phase 4 runs.
+
+`connectedDebugAndroidTest` is deliberately **not** in CI — there is no emulator on the runner. The
+Phase 5 instrumented cases above ran locally on `RideLink_API36`.
+
 ### What is explicitly not done
 
 - **Nothing ran on a phone**, and no audio was played through a speaker or a Bluetooth endpoint anywhere in this phase.
