@@ -19,6 +19,10 @@
 		3510E58703C74E0689A5E0D4 /* NowPlayingController.swift in Sources */ = {isa = PBXBuildFile; fileRef = CBD68362DD8444AD91A64AB4 /* NowPlayingController.swift */; };
 		9B1C2D3E4F5061728394A5B6 /* SharedLibraryCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7A2B3C4D5E6F70819293A4B5 /* SharedLibraryCoordinator.swift */; };
 		9C2D3E4F50617283940A5B6C /* SharedLibraryView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8B3C4D5E6F708192A3B4C5D6 /* SharedLibraryView.swift */; };
+		6A1B2C3D4E5F60718293A4B8 /* SyncPlaybackView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7A1B2C3D4E5F60718293A4B8 /* SyncPlaybackView.swift */; };
+		6A1B2C3D4E5F60718293A4B7 /* SyncPlaybackPresenter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7A1B2C3D4E5F60718293A4B7 /* SyncPlaybackPresenter.swift */; };
+		6A1B2C3D4E5F60718293A4B6 /* SyncPlaybackAdapters.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7A1B2C3D4E5F60718293A4B6 /* SyncPlaybackAdapters.swift */; };
+		6A1B2C3D4E5F60718293A4B5 /* SyncPlaybackGate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7A1B2C3D4E5F60718293A4B5 /* SyncPlaybackGate.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -36,6 +40,10 @@
 		CBD68362DD8444AD91A64AB4 /* NowPlayingController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NowPlayingController.swift; sourceTree = "<group>"; };
 		7A2B3C4D5E6F70819293A4B5 /* SharedLibraryCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SharedLibraryCoordinator.swift; sourceTree = "<group>"; };
 		8B3C4D5E6F708192A3B4C5D6 /* SharedLibraryView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SharedLibraryView.swift; sourceTree = "<group>"; };
+		7A1B2C3D4E5F60718293A4B8 /* SyncPlaybackView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SyncPlaybackView.swift; sourceTree = "<group>"; };
+		7A1B2C3D4E5F60718293A4B7 /* SyncPlaybackPresenter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SyncPlaybackPresenter.swift; sourceTree = "<group>"; };
+		7A1B2C3D4E5F60718293A4B6 /* SyncPlaybackAdapters.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SyncPlaybackAdapters.swift; sourceTree = "<group>"; };
+		7A1B2C3D4E5F60718293A4B5 /* SyncPlaybackGate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SyncPlaybackGate.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -72,6 +80,10 @@
 				CBD68362DD8444AD91A64AB4 /* NowPlayingController.swift */,
 				7A2B3C4D5E6F70819293A4B5 /* SharedLibraryCoordinator.swift */,
 				8B3C4D5E6F708192A3B4C5D6 /* SharedLibraryView.swift */,
+				7A1B2C3D4E5F60718293A4B8 /* SyncPlaybackView.swift */,
+				7A1B2C3D4E5F60718293A4B7 /* SyncPlaybackPresenter.swift */,
+				7A1B2C3D4E5F60718293A4B6 /* SyncPlaybackAdapters.swift */,
+				7A1B2C3D4E5F60718293A4B5 /* SyncPlaybackGate.swift */,
 				D98B8F9B15BF0E88C459151B /* Info.plist */,
 			);
 			path = RideLink;
@@ -173,6 +185,10 @@
 				3510E58703C74E0689A5E0D4 /* NowPlayingController.swift in Sources */,
 				9B1C2D3E4F5061728394A5B6 /* SharedLibraryCoordinator.swift in Sources */,
 				9C2D3E4F50617283940A5B6C /* SharedLibraryView.swift in Sources */,
+				6A1B2C3D4E5F60718293A4B8 /* SyncPlaybackView.swift in Sources */,
+				6A1B2C3D4E5F60718293A4B7 /* SyncPlaybackPresenter.swift in Sources */,
+				6A1B2C3D4E5F60718293A4B6 /* SyncPlaybackAdapters.swift in Sources */,
+				6A1B2C3D4E5F60718293A4B5 /* SyncPlaybackGate.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

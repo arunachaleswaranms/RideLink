@@ -264,6 +264,10 @@ public actor ControlSessionManager {
     /// estimator has an unconfirmed step — see `SessionClockTracker`.
     public func sessionClockEstimate() -> SessionClockEstimate? { clockTracker.estimate }
 
+    /// The bounded RTT window's p95, available before the first offset estimate exists — the value
+    /// ARCHITECTURE §7.2's scheduling lead is computed from.
+    public func sessionClockRttP95Us() -> Int64? { clockTracker.rttP95Us }
+
     private func currentSessionId() -> SessionId { activeSessionId }
 
     /// Non-nil only while the surviving connection has passed the trust gate. Returning a closure rather

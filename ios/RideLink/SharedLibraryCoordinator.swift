@@ -117,6 +117,27 @@ private struct PendingOffer {
 @MainActor
 public final class SharedLibraryCoordinator {
     public private(set) var remoteEntries: [ManifestEntry] = []
+
+    /// Phase 5 (ADR-024 §7): content this session's peer is known to hold **because it told us so** —
+    /// a `TRANSFER_RESULT { ok: true }` for a transfer *we* served, whose recorded `content_hash`
+    /// matches the one the peer reports having verified.
+    ///
+    /// This exists because a peer's manifest is generated from its Phase 3 *library* only
+    /// (`ManifestGenerator`), so a track it received by transfer and holds in its verified Phase 4
+    /// cache appears in no manifest and would otherwise be invisible to the availability gate — the
+    /// exact case UJ-05 describes. No wire change was needed: the requester already sends this
+    /// message and the provider already receives it; Phase 4 simply ignored it.
+    ///
+    /// Trusting it is safe because of what it is used for. It gates whether a *synchronised* `PLAY`
+    /// may be scheduled — nothing else. A peer that lied about having a file simply does not play;
+    /// no local storage, no local state and no security decision depends on it. The stronger half of
+    /// the claim is ours anyway: we only record a hash we ourselves served over the bulk plane in
+    /// this session.
+    private var peerVerifiedHashes: Set<String> = []
+
+    /// `transfer_id -> content_hash` for transfers **we** are serving, so a peer's `TRANSFER_RESULT`
+    /// is matched against what we actually sent rather than against whatever hash it names.
+    private var servedHashes: [String: ContentHash] = [:]
     public private(set) var downloadStates: [String: DownloadState] = [:]
 
     private let controlSessionManager: ControlSessionManager
@@ -236,6 +257,13 @@ public final class SharedLibraryCoordinator {
         return Availability(hasLocal: hasLocal, hasCached: hasCached, hasRemote: hasRemote)
     }
 
+    /// Phase 5's peer half of the brief §19 availability gate (ADR-024 §7): the peer holds this
+    /// content if its synced manifest advertises it, **or** if it verified a transfer we served it in
+    /// this session. Session-scoped both ways — `onSessionBoundary` clears both sources.
+    public func peerHasContent(_ contentHash: ContentHash) -> Bool {
+        remoteEntries.contains { $0.contentHash == contentHash } || peerVerifiedHashes.contains(contentHash.value)
+    }
+
     /// True once bytes have arrived, been whole-file verified, **and** committed — never merely queued or transferring.
     public func isVerifiedCached(_ contentHash: ContentHash) -> Bool {
         (try? cacheRepository.isVerifiedCached(contentHash)) ?? false
@@ -281,6 +309,10 @@ public final class SharedLibraryCoordinator {
         // brief §6/§22: a peer's catalogue is session/peer-scoped and must never leak across a
         // reconnect or a different peer — replaced wholesale, never merged with what came before.
         remoteEntries = []
+        // ADR-024 §7: what the peer verified belongs to the session it verified it under, exactly
+        // like the catalogue above. A reconnect re-earns it.
+        peerVerifiedHashes = []
+        servedHashes = [:]
         syncState = ManifestSyncState(liveRevision: 0)
         sessionEpoch.bump()
         let hashToClear = activeDownload
@@ -604,10 +636,15 @@ public final class SharedLibraryCoordinator {
                 ))
                 pendingOfferContinuation = nil
             }
-        case .progress, .result:
-            // brief §28: peer-reported progress is never trusted or displayed; the requester
-            // already knows its own outcome from its own verification.
+        case .progress:
+            // brief §28: peer-reported progress is never trusted or displayed.
             break
+        case .result(let transferId, let ok, let sha256):
+            // The *requester* already knows its own outcome from its own verification, so this is
+            // never read as a download result. What it does carry, for the **provider**, is the one
+            // signal Phase 4 had no consumer for: the peer has verified and committed the file we
+            // just served it (ADR-024 §7).
+            onPeerTransferResult(transferId: transferId, ok: ok, sha256: sha256)
         case .cancel(let transferId, _):
             handlePeerCancel(transferId)
         }
@@ -620,6 +657,13 @@ public final class SharedLibraryCoordinator {
     /// silently overwritten — so a cancel for a stale, foreign, queued, or already-finished
     /// transfer_id is a no-op, never a way to disrupt an unrelated (possibly requester-role)
     /// transfer sharing the same underlying bulk socket.
+    private func onPeerTransferResult(transferId: TransferId, ok: Bool, sha256: ContentHash?) {
+        guard let served = servedHashes.removeValue(forKey: transferId.value), ok else { return }
+        // Both must agree: what we sent, and what the peer says it verified.
+        guard sha256 == served else { return }
+        peerVerifiedHashes.insert(served.value)
+    }
+
     private func handlePeerCancel(_ transferId: TransferId) {
         guard bulkGate.isOwner(transferId) else { return }
         let transport = bulkTransport
@@ -675,6 +719,9 @@ public final class SharedLibraryCoordinator {
         guard bulkGate.tryAcquire(.provider(
             transferId: transferId, contentHash: contentHash, peerSpki: peerSpki, sessionGeneration: authorisingEpoch
         )) else { return }
+        // ADR-024 §7: remember what this transfer_id actually carries, so a later TRANSFER_RESULT is
+        // matched against what we served rather than against a hash the peer chose to name.
+        servedHashes[transferId.value] = contentHash
         guard let port = try? await bulkTransport.ensureListening(), let bulkPort = Int(exactly: port) else {
             bulkGate.releaseIfOwner(transferId)
             pumpQueue() // cross-role: wake a local download left queued behind this attempt

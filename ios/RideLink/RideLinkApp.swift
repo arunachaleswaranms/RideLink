@@ -1,3 +1,5 @@
+import RideLinkCore
+import RideLinkPlatform
 import SwiftUI
 
 @main
@@ -22,6 +24,11 @@ struct RideLinkApp: App {
     /// the moment `init` returns.
     @State private var nowPlayingController: NowPlayingController?
 
+    /// Phase 5's synchronisation plane, as SwiftUI sees it (ADR-004, ADR-024). `nil` when either
+    /// stack failed to construct — the coordinator drives the *one* `MusicCoordinator` and needs the
+    /// *one* `SessionCoordinator`, and neither failure is a reason to disable the other.
+    @State private var syncPlayback: SyncPlaybackPresenter?
+
     init() {
         let sessionResult = Result { try SessionCoordinator() }
         _session = State(initialValue: sessionResult)
@@ -42,13 +49,39 @@ struct RideLinkApp: App {
                 activeCacheHash: { [weak musicCoordinator] in musicCoordinator?.activeExternalCacheHash }
             )
         }
+
+        // Phase 5 (ADR-004, ADR-024): after Phase 4, since the availability gate reads the shared
+        // library's catalogue and verified cache. It owns no player — `MusicCoordinatorPlayerPort`
+        // is the one `MusicCoordinator` above, and `syncGate` routes the in-app and lock-screen
+        // controls into the leader-ordered path rather than adding a second one (brief §39).
+        if let coordinator = try? sessionResult.get(),
+           let musicCoordinator = try? musicResult.get(),
+           let sharedLibrary = coordinator.sharedLibrary,
+           let sync = coordinator.attachSyncPlayback(
+               player: MusicCoordinatorPlayerPort(music: musicCoordinator),
+               content: SharedLibraryContentPort(music: musicCoordinator, sharedLibrary: sharedLibrary),
+               nextQueueItemId: { Ulid.generate() }
+           ) {
+            let presenter = SyncPlaybackPresenter(coordinator: sync)
+            _syncPlayback = State(initialValue: presenter)
+            musicCoordinator.syncGate = SyncPlaybackGateAdapter(
+                sync: sync,
+                isActive: { [weak presenter] in presenter?.isSynchronizedModeActive ?? false },
+                role: { [weak presenter] in presenter?.role }
+            )
+        }
     }
 
     var body: some Scene {
         WindowGroup {
             switch session {
             case .success(let coordinator):
-                MainScreen(coordinator: coordinator, music: music, deviceDescription: UIDevice.current.name)
+                MainScreen(
+                    coordinator: coordinator,
+                    music: music,
+                    syncPlayback: syncPlayback,
+                    deviceDescription: UIDevice.current.name
+                )
             case .failure(let error):
                 SecureTransportUnavailableView(reason: String(describing: error))
             }

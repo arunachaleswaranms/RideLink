@@ -55,6 +55,16 @@ public final class MusicCoordinator {
     /// destination path (`LibraryIndexer.resolvedUrl(for:)`), never `LibraryEntry.location.uri` —
     /// see that type's doc comment.
     public var libraryIndexerForSharedLibrary: LibraryIndexer { indexer }
+    /// Non-nil once a Phase 5 synchronised session exists. Set once by the composition root
+    /// (`RideLinkApp`), never by a view. While it reports ownership of an action, this coordinator
+    /// does not touch the player — the leader-ordered command that comes back over the control plane
+    /// does, through the `sync*` methods below.
+    ///
+    /// The cycle between the two coordinators is deliberate and one-directional per call:
+    /// `MusicCoordinator` asks the gate, the gate never calls back into these gated methods (it uses
+    /// `syncPrepare`/`syncStart`/… which bypass it), so there is no re-entrancy.
+    public var syncGate: (any SyncPlaybackGate)?
+
     private let player: any Player
     private let musicAudioSession = MusicAudioSession()
     private var audioSessionActivated = false
@@ -215,21 +225,74 @@ public final class MusicCoordinator {
     public func removeFromQueue(id: String) { dispatch(.remove(id: id)) }
     public func moveInQueue(id: String, toIndex: Int) { dispatch(.move(id: id, toIndex: toIndex)) }
     public func clearQueue() { dispatch(.clear) }
-    public func next() { dispatch(.next) }
-    public func previous() { dispatch(.previous) }
+
+    public func next() {
+        if syncGate?.interceptNext() == true { return }
+        dispatch(.next)
+    }
+
+    public func previous() {
+        if syncGate?.interceptPrevious() == true { return }
+        dispatch(.previous)
+    }
+
     public func selectQueueItem(id: String) { dispatch(.select(id: id)) }
 
     public func play() {
         activateAudioSessionIfNeeded()
+        if syncGate?.interceptPlay() == true { return }
         Task { await player.execute(.play) }
     }
 
     public func pause() {
+        if syncGate?.interceptPause() == true { return }
         Task { await player.execute(.pause) }
     }
 
     public func seek(positionMs: Int64) {
+        if syncGate?.interceptSeek(positionMs) == true { return }
         Task { await player.execute(.seek(positionMs: positionMs)) }
+    }
+
+    // MARK: - Phase 5's own entry points
+    //
+    // These bypass `syncGate` by construction: they are what the gate's owner calls once the ADR-010
+    // leader's authoritative command is due, so routing them back through the gate would be an
+    // immediate loop. They drive the same one player and the same one queue as everything above —
+    // there is no second player, no second queue and no second Now Playing integration (brief §21).
+
+    /// ARCHITECTURE §7.2's pre-roll: load `location` and seek to `positionMs` **without** starting.
+    /// Also makes this the local queue's one selected entry, so Now Playing metadata and the Phase 3
+    /// UI describe what is actually loaded (brief §26). The shared queue itself is displayed from
+    /// `SyncPlaybackCoordinator.queueState`; it is deliberately not copied wholesale into
+    /// `LocalQueue`, because two queues that could disagree about an index is exactly the bug that
+    /// would produce.
+    public func syncPrepare(
+        contentHash: ContentHash,
+        localEntryId: LocalEntryId,
+        location: LocalTrackLocation,
+        positionMs: Int64
+    ) async {
+        activateAudioSessionIfNeeded()
+        externalCacheSources[localEntryId] = ExternalCacheSource(contentHash: contentHash, location: location)
+        let item = LocalQueueItem(id: UUID().uuidString, localEntryId: localEntryId, insertedAtMonoUs: monotonicNowUs())
+        queueState = LocalQueueState(items: [item], currentId: item.id)
+        await player.execute(.load(localEntryId: localEntryId, location: location))
+        await player.execute(.seek(positionMs: positionMs))
+    }
+
+    public func syncStart() async { await player.execute(.play) }
+
+    public func syncPause() async { await player.execute(.pause) }
+
+    public func syncSeek(positionMs: Int64) async { await player.execute(.seek(positionMs: positionMs)) }
+
+    /// ADR-004's rate-nudge tier. Always exactly 1.0 when correction ends (brief §38).
+    public func syncSetRate(_ rate: Double) async { await player.execute(.setRate(rate: rate)) }
+
+    public func syncStop() async {
+        await player.execute(.stop)
+        queueState = LocalQueueState()
     }
 
     /// Activated once, lazily, on the first real play — matching `MainActivity.attemptMusicPlay`'s
@@ -283,7 +346,10 @@ public final class MusicCoordinator {
         let previous = playerState
         playerState = state
         if TrackEndEdge.advancedNow(previous: previous, current: state) {
-            dispatch(.next)
+            // In a synchronised session only the ADR-010 leader decides what plays next, and it does
+            // so with an authoritative NEXT both phones schedule. Advancing the local queue here as
+            // well would put this phone a track ahead of the other.
+            if syncGate?.interceptTrackEnded() != true { dispatch(.next) }
         }
     }
 }

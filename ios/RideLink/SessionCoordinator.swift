@@ -82,6 +82,9 @@ public final class SessionCoordinator {
     private let trustedPeers: any TrustedPeerStore
     private let controlSessionManager: ControlSessionManager
     private let localIdentity: LocalHandshakeIdentity
+    /// This device's durable `peer_id` — ADR-010's election input, and the `issued_by` on every
+    /// Phase 5 command this device stamps.
+    private let localPeerId: PeerId
     private let deviceIdentity: DeviceIdentity
     private let monotonicNowUs: @Sendable () -> Int64
     private let logger: StructuredLogger
@@ -150,6 +153,7 @@ public final class SessionCoordinator {
 
         trustedPeers = FileTrustedPeerStore(url: directory.appendingPathComponent("trusted_peers.json"))
         let localPeerId = LocalPeerIdStore(url: directory.appendingPathComponent("peer_id")).loadOrCreate()
+        self.localPeerId = localPeerId
 
         controlSessionManager = ControlSessionManager(
             localPeerId: localPeerId,
@@ -195,6 +199,11 @@ public final class SessionCoordinator {
     /// (`.connected`/`.linkLost`) explicitly, in [applySideEffects].
     public private(set) var sharedLibrary: SharedLibraryCoordinator?
 
+    /// Phase 5's synchronisation plane (ADR-004, ADR-024), forwarded the same two events as
+    /// [sharedLibrary] and for the same reason this file's comment above already gives:
+    /// `onEvent` is a single mutable callback slot, and this class owns the one subscription.
+    public private(set) var syncPlayback: SyncPlaybackCoordinator?
+
     /// Builds and attaches [sharedLibrary]. A no-op if already attached. `SharedLibraryCoordinator`
     /// gets its own `TlsControlChannel` for the bulk plane — a second, independent listener
     /// (ADR-015) — but the **same** [deviceIdentity] as the control connection, which is what the
@@ -215,6 +224,30 @@ public final class SessionCoordinator {
             monotonicNowUs: monotonicNowUs,
             activeCacheHash: activeCacheHash
         )
+    }
+
+    /// Builds and attaches [syncPlayback]. A no-op if already attached. It owns no player and no
+    /// queue: every audible effect goes through the **one** `MusicCoordinator` the caller supplies as
+    /// `player`, and every content lookup through Phase 3's library and Phase 4's verified cache.
+    public func attachSyncPlayback(
+        player: any SyncPlayerPort,
+        content: any SyncContentPort,
+        nextQueueItemId: @escaping @Sendable () -> String
+    ) -> SyncPlaybackCoordinator? {
+        if let existing = syncPlayback { return existing }
+        let coordinator = SyncPlaybackCoordinator(
+            monotonicNowUs: monotonicNowUs,
+            localPeerId: localPeerId,
+            session: ControlSessionSyncPort(manager: controlSessionManager),
+            player: player,
+            content: content,
+            sleeper: MonotonicDeadlineSleeper(monotonicNowUs: monotonicNowUs),
+            routeState: SessionRouteStatePort(session: self),
+            nextQueueItemId: nextQueueItemId
+        )
+        syncPlayback = coordinator
+        Task { await coordinator.start() }
+        return coordinator
     }
 
     /// The user's answer on the pairing screen. Both peers must answer before any pin is written.
@@ -616,6 +649,7 @@ public final class SessionCoordinator {
             // of our state, so "nothing changed" is not a reason to stay silent.
             publishAudioState(force: true)
             await sharedLibrary?.handleConnected()
+            await syncPlayback?.handleConnected(isLocalLeader: isLocalLeader)
         case .linkLost(let reason):
             // PROTOCOL §7.8: media goes, the capture device stays (ARCHITECTURE §6.3/§6.4), and nothing
             // is retried here — §10's control ladder is the app's only reconnect loop.
@@ -624,6 +658,7 @@ public final class SessionCoordinator {
             }
             if reason == .bye { releaseVoice() }
             await sharedLibrary?.handleLinkLost()
+            await syncPlayback?.handleLinkLost()
         case .duplicateConnectionClosed, .reconnectBudgetExhausted:
             break
         }

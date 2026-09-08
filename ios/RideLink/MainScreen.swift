@@ -15,6 +15,9 @@ struct MainScreen: View {
     /// `MusicCoordinator`'s own doc comment. A `.failure` is shown inline rather than hidden, the
     /// same honesty `SecureTransportUnavailableView` gives a failed `SessionCoordinator`.
     let music: Result<MusicCoordinator, Error>
+    /// Phase 5's synchronisation plane. `nil` when either the session or the music stack failed to
+    /// construct — the card is then simply absent, exactly as `SharedLibraryView` is.
+    let syncPlayback: SyncPlaybackPresenter?
     let deviceDescription: String
 
     var body: some View {
@@ -76,6 +79,13 @@ struct MainScreen: View {
                 if coordinator.state.status == .connected || coordinator.state.status == .rideActive,
                    let sharedLibrary = coordinator.sharedLibrary {
                     SharedLibraryView(coordinator: sharedLibrary, onPlayLocally: playSharedTrackLocally)
+
+                    // PROTOCOL §5/§9's synchronisation plane, gated the same way: every Phase 5
+                    // frame is absent from the pre-authentication allowlist, so there is nothing
+                    // here to drive before the trust gate has passed (ADR-024 §8).
+                    if let syncPlayback {
+                        SyncPlaybackView(presenter: syncPlayback, sharedLibrary: sharedLibrary)
+                    }
                 }
 
                 DiagnosticsCard(
