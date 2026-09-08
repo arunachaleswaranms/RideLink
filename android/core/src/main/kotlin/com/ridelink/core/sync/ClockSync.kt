@@ -29,6 +29,12 @@ object ClockSync {
     private const val EWMA_ALPHA_NUM: Long = 2
     private const val EWMA_ALPHA_DEN: Long = 10
 
+    /** How many round-trip measurements [RttWindow] keeps. ~2 minutes of PROTOCOL §1 keepalive. */
+    const val RTT_WINDOW_CAPACITY: Int = 64
+    private const val P95_NUMERATOR: Long = 95
+    private const val P95_DENOMINATOR: Long = 100
+    private const val P95_ROUNDING: Long = 99
+
     /** One `(t1,t2,t3,t4)` round trip, all monotonic microseconds. */
     data class Sample(
         val t1MonoUs: Long,
@@ -86,6 +92,55 @@ object ClockSync {
         val rtts = kept.map { it.rttUs }
         val jitterUs = truncDiv(rtts.max() - rtts.min(), 2)
         return RawEstimate(best.offsetUs, best.rttUs, jitterUs, kept.size)
+    }
+
+    /**
+     * Nearest-rank p95 of a set of round-trip times, in microseconds — the value ARCHITECTURE §7.2's
+     * `LEAD = max(120 ms, 4 x rtt_p95)` is computed from ([SessionClock.leadUs]).
+     *
+     * Integer arithmetic only, and the rank is `ceil(0.95 * n)` expressed as `(95n + 99) / 100` so
+     * Kotlin `Long` and Swift `Int64` division produce the identical index. `null` for an empty
+     * input rather than a fabricated zero: "no measurement yet" and "0 us" must never be confused,
+     * because the second would silently produce the 120 ms floor as though it had been measured.
+     *
+     * Deliberately part of [ClockSync] rather than a second RTT tracker: the round-trip times this
+     * ranks are the *same* `PING`/`PONG` samples [applyWindow] already consumes, and there is one
+     * authoritative source of clock/RTT truth per session (CLAUDE.md rule 8's shape, applied to the
+     * timing plane).
+     */
+    fun rttP95Us(rttsUs: List<Long>): Long? {
+        if (rttsUs.isEmpty()) return null
+        val sorted = rttsUs.sorted()
+        val rank = (sorted.size.toLong() * P95_NUMERATOR + P95_ROUNDING) / P95_DENOMINATOR
+        val index = (rank - 1).coerceIn(0L, (sorted.size - 1).toLong()).toInt()
+        return sorted[index]
+    }
+
+    /**
+     * A bounded, most-recent-first-out window of round-trip times feeding [rttP95Us]. Holds at most
+     * [RTT_WINDOW_CAPACITY] samples — every queue this project adds is bounded by construction
+     * (ADR-021 §5's rule, applied here), and an unbounded RTT history on a two-hour ride would be
+     * the one growing collection in the session.
+     *
+     * Not thread-safe, matching [com.ridelink.core.transfer.OperationFence]: the one owner
+     * (`network.control.SessionClockTracker`) confines it.
+     */
+    class RttWindow(
+        private val capacity: Int = RTT_WINDOW_CAPACITY,
+    ) {
+        private val samples = ArrayDeque<Long>()
+
+        val size: Int get() = samples.size
+
+        fun record(rttUs: Long) {
+            if (rttUs <= 0) return // matches [Sample]'s own rtt > 0 filter: a non-positive rtt is not a measurement
+            samples.addLast(rttUs)
+            while (samples.size > capacity) samples.removeFirst()
+        }
+
+        fun p95Us(): Long? = rttP95Us(samples.toList())
+
+        fun reset() = samples.clear()
     }
 
     /**

@@ -6,6 +6,7 @@ import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
 import androidx.media3.common.PlaybackException
+import androidx.media3.common.PlaybackParameters
 import androidx.media3.exoplayer.ExoPlayer
 import com.ridelink.core.model.LocalEntryId
 import com.ridelink.core.player.MusicFailure
@@ -100,7 +101,17 @@ class ExoPlayerMusicPlayer(
                 PlaybackCommand.Stop -> {
                     exoPlayer.stop()
                     stopPositionTicking()
-                    updateState { it.copy(playing = false, positionMs = 0) }
+                    // Phase 5 brief §38: a stop must never leave a drift nudge in force on the
+                    // player the next track would inherit. Rate is reset here, not only by the
+                    // sync coordinator, so the invariant holds even for a purely local Stop.
+                    exoPlayer.setPlaybackParameters(PlaybackParameters(NORMAL_RATE.toFloat()))
+                    updateState { it.copy(playing = false, positionMs = 0, rate = NORMAL_RATE) }
+                }
+                is PlaybackCommand.SetRate -> {
+                    // Media3's `speed` also drives pitch correction internally; at the +/-0.2 % the
+                    // drift ladder asks for this is ~3.5 cents and inaudible (ARCHITECTURE §7.3).
+                    exoPlayer.setPlaybackParameters(PlaybackParameters(command.rate.toFloat()))
+                    updateState { it.copy(rate = command.rate) }
                 }
             }
             Result.success(Unit)
@@ -211,5 +222,6 @@ class ExoPlayerMusicPlayer(
 
     private companion object {
         const val POSITION_TICK_MS = 250L
+        const val NORMAL_RATE = 1.0
     }
 }

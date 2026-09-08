@@ -24,6 +24,14 @@ import RideLinkCore
 public actor AVAudioEnginePlayer: Player {
     private let engine = AVAudioEngine()
     private let playerNode = AVAudioPlayerNode()
+    /// Phase 5's rate-nudge tier (ARCHITECTURE §7.3 names this exact unit). Sits between the player
+    /// node and the main mixer so `PlaybackCommand.setRate` has somewhere to land; at the +/-0.2 %
+    /// the drift ladder asks for, resampling shifts pitch by ~3.5 cents, which is inaudible.
+    ///
+    /// It is in the graph unconditionally rather than attached on demand: rewiring a running
+    /// `AVAudioEngine` mid-playback would interrupt rendering, which is the opposite of what a drift
+    /// correction is for. At `rate == 1.0` it is a pass-through.
+    private let varispeed = AVAudioUnitVarispeed()
 
     private var audioFile: AVAudioFile?
     private var totalFrames: AVAudioFramePosition = 0
@@ -45,7 +53,9 @@ public actor AVAudioEnginePlayer: Player {
 
     public init() {
         engine.attach(playerNode)
-        engine.connect(playerNode, to: engine.mainMixerNode, format: nil)
+        engine.attach(varispeed)
+        engine.connect(playerNode, to: varispeed, format: nil)
+        engine.connect(varispeed, to: engine.mainMixerNode, format: nil)
     }
 
     public func execute(_ command: PlaybackCommand) async {
@@ -60,6 +70,8 @@ public actor AVAudioEnginePlayer: Player {
             seekCommand(positionMs: positionMs)
         case .stop:
             stopCommand()
+        case .setRate(let rate):
+            setRateCommand(rate)
         }
     }
 
@@ -169,7 +181,16 @@ public actor AVAudioEnginePlayer: Player {
         playerNode.stop()
         generation += 1
         seekOffsetFrames = 0
-        updateState { $0.copy(positionMs: 0, playing: false) }
+        // Phase 5 brief §38: a stop must never leave a drift nudge in force on the player the next
+        // track would inherit. Reset here, not only by the sync coordinator, so the invariant holds
+        // even for a purely local Stop.
+        varispeed.rate = Float(Self.normalRate)
+        updateState { $0.copy(positionMs: 0, playing: false, rate: Self.normalRate) }
+    }
+
+    private func setRateCommand(_ rate: Double) {
+        varispeed.rate = Float(rate)
+        updateState { $0.copy(rate: rate) }
     }
 
     // MARK: - Scheduling and position
@@ -251,6 +272,7 @@ public actor AVAudioEnginePlayer: Player {
 
     private static let positionTickNanoseconds: UInt64 = 250_000_000
     private static let millisecondsPerSecond: Double = 1000
+    private static let normalRate: Double = 1.0
 }
 
 private extension PlayerState {

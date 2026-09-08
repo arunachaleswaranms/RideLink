@@ -134,7 +134,11 @@ public actor ControlSessionManager {
     private var keepaliveTask: Task<Void, Never>?
     private var clockSyncTask: Task<Void, Never>?
     private var lastPongAtMonoUs: Int64 = .min
-    private var clockState: ClockSync.EstimatorState?
+    /// The session's one clock/RTT owner (ARCHITECTURE §7.1, ADR-024 §2). Replaces the plain
+    /// `clockState` field this class used to carry: the estimator state, the bounded RTT window the
+    /// Phase 5 scheduling lead is computed from, and the published `SessionClockEstimate` all belong
+    /// to one object, and there is deliberately no second RTT tracker anywhere in the codebase.
+    private var clockTracker = SessionClockTracker()
     private var endedDeliberately = false
     /// Distinct from `endedDeliberately` (which also becomes true after an ordinary BYE, where
     /// this manager stays alive and should accept a future reconnect). `isShutDown` is only ever
@@ -239,6 +243,26 @@ public actor ControlSessionManager {
         activeSessionId: { [weak self] in await self?.currentSessionId() ?? SessionId("n/a") },
         authenticatedWriter: { [weak self] in await self?.authenticatedWriter() }
     )
+
+    /// The Phase 5 half of the control plane (PROTOCOL §5 playback commands and §9 queue
+    /// replication), extracted for exactly the same reason `voice`/`audioState`/`manifest`/
+    /// `transfer` are. Every one of its types is likewise **absent** from
+    /// `preAuthenticationFrameTypes`: an unauthenticated peer can no more issue a `PLAY` than it can
+    /// a `VOICE_OFFER`, and that absence is the whole of the access control (ADR-024 §8).
+    public func playbackRelay() -> PlaybackRelay { playback }
+
+    private lazy var playback: PlaybackRelay = PlaybackRelay(
+        localPeerId: localPeerId,
+        monotonicNowUs: monotonicNowUs,
+        nextSeq: { [seqCounter] in seqCounter.nextSeq() },
+        activeSessionId: { [weak self] in await self?.currentSessionId() ?? SessionId("n/a") },
+        authenticatedWriter: { [weak self] in await self?.authenticatedWriter() }
+    )
+
+    /// The live session-clock estimate the Phase 5 playback layer schedules against
+    /// (ARCHITECTURE §7.1/§7.2). `nil` before the first accepted window, and non-`ready` while the
+    /// estimator has an unconfirmed step — see `SessionClockTracker`.
+    public func sessionClockEstimate() -> SessionClockEstimate? { clockTracker.estimate }
 
     private func currentSessionId() -> SessionId { activeSessionId }
 
@@ -474,7 +498,7 @@ public actor ControlSessionManager {
         activeSocket = candidate.socket
         activeSessionId = sessionId
         endedDeliberately = false
-        clockState = nil
+        clockTracker.reset()
         authenticated = false
         lastPongAtMonoUs = monotonicNowUs()
         await reconnectController.reset()
@@ -753,6 +777,9 @@ public actor ControlSessionManager {
             if TransferMessageTypes.all.contains(envelope.type) {
                 await transfer.countPreAuthenticationDrop()
             }
+            if PlaybackMessageTypes.all.contains(envelope.type) || QueueMessageTypes.all.contains(envelope.type) {
+                await playback.countPreAuthenticationDrop()
+            }
             return
         }
         switch envelope.type {
@@ -779,7 +806,12 @@ public actor ControlSessionManager {
             guard isPlausibleClockSample(t1: t1, t2: t2, t3: t3, t4: t4) else { return }
             lastPongAtMonoUs = t4
             pingRequests.succeed(id: t1, with: ClockSync.Sample(t1MonoUs: t1, t2MonoUs: t2, t3MonoUs: t3, t4MonoUs: t4))
-            updateDiagnostics { $0.rttMs = Double((t4 - t1) - (t3 - t2)) / 1000.0 }
+            let rttUs = (t4 - t1) - (t3 - t2)
+            // Every PONG feeds the RTT window, keepalive ones included: ARCHITECTURE §7.2's
+            // `4 x rtt_p95` wants all the history the link has produced, while the *offset* estimate
+            // still only ever moves on a full §7.1 window.
+            clockTracker.recordRtt(rttUs)
+            updateDiagnostics { $0.rttMs = Double(rttUs) / 1000.0 }
         case "PAIR_REQUEST", "PAIR_CONFIRM", "PAIR_RESULT":
             await handlePairingFrame(socket: socket, type: envelope.type, payload: envelope.payload)
         // Reachable only past the guard above, so only for an authenticated peer (PROTOCOL §7.1).
@@ -796,6 +828,14 @@ public actor ControlSessionManager {
         case TransferMessageTypes.request, TransferMessageTypes.offer, TransferMessageTypes.progress,
             TransferMessageTypes.result, TransferMessageTypes.cancel:
             await transfer.deliver(type: envelope.type, payload: envelope.payload)
+        // Reachable only past the guard above, so only for an authenticated peer (PROTOCOL §5).
+        case PlaybackMessageTypes.play, PlaybackMessageTypes.pause, PlaybackMessageTypes.resume,
+            PlaybackMessageTypes.seek, PlaybackMessageTypes.next, PlaybackMessageTypes.previous,
+            PlaybackMessageTypes.positionReport, PlaybackMessageTypes.playbackState:
+            await playback.deliverPlayback(type: envelope.type, payload: envelope.payload)
+        // Reachable only past the guard above, so only for an authenticated peer (PROTOCOL §9).
+        case QueueMessageTypes.add, QueueMessageTypes.remove, QueueMessageTypes.move, QueueMessageTypes.snapshot:
+            await playback.deliverQueue(type: envelope.type, payload: envelope.payload)
         case "BYE":
             await endConnection(socket, reason: .bye)
         case "ERROR":
@@ -889,8 +929,7 @@ public actor ControlSessionManager {
             }
         }
         guard !samples.isEmpty else { return }
-        let result = ClockSync.applyWindow(previous: clockState, samples: samples)
-        clockState = result.newState
+        let result = clockTracker.applyWindow(samples)
         updateDiagnostics {
             $0.clockOffsetUs = result.offsetUs ?? $0.clockOffsetUs
             $0.clockJitterUs = result.jitterUs ?? $0.clockJitterUs
@@ -1029,6 +1068,7 @@ public actor ControlSessionManager {
         await audioState.reset()
         await manifest.reset()
         await transfer.reset()
+        await playback.reset()
         pendingActivation = nil
         updatePairingPrompt(nil)
         endedDeliberately = true

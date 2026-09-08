@@ -3,16 +3,13 @@ package com.ridelink.network.control
 import com.ridelink.core.model.PeerId
 import com.ridelink.core.model.SessionId
 import com.ridelink.core.model.SpkiHash
-import com.ridelink.core.protocol.AudioStateMessageTypes
 import com.ridelink.core.protocol.Envelope
-import com.ridelink.core.protocol.ManifestMessageTypes
-import com.ridelink.core.protocol.TransferMessageTypes
-import com.ridelink.core.protocol.VoiceMessageTypes
 import com.ridelink.core.security.PinDecision
 import com.ridelink.core.security.TrustedPeer
 import com.ridelink.core.security.TrustedPeerStore
 import com.ridelink.core.sync.ClockSync
 import com.ridelink.network.manifest.ManifestRelay
+import com.ridelink.network.playback.PlaybackRelay
 import com.ridelink.network.transfer.TransferRelay
 import com.ridelink.network.voice.AuthenticatedFrameWriter
 import com.ridelink.network.voice.VoiceSignalRelay
@@ -181,8 +178,13 @@ class ControlSessionManager(
     @Volatile
     private var lastPongAtMonoUs: Long = Long.MIN_VALUE
 
-    @Volatile
-    private var clockState: ClockSync.EstimatorState? = null
+    /**
+     * The session's one clock/RTT owner (ARCHITECTURE §7.1, ADR-024 §2). Replaces the plain
+     * `clockState` field this class used to carry: the estimator state, the bounded RTT window the
+     * Phase 5 scheduling lead is computed from, and the published [SessionClockEstimate] all belong
+     * to one object, and there is deliberately no second RTT tracker anywhere in the codebase.
+     */
+    val clock: SessionClockTracker = SessionClockTracker()
 
     @Volatile
     private var endedDeliberately = false
@@ -259,20 +261,22 @@ class ControlSessionManager(
     val reconnectCount: Int get() = reconnectController.reconnectCount
 
     /**
-     * The `VOICE_*` half of the control plane (PROTOCOL §7): the signal sink, the outbound transport,
-     * and the refusal counters.
+     * Every message family that hangs off the authenticated control connection (PROTOCOL §4.4, §5,
+     * §7, §8.1, §8.2, §9), constructed once with a single live-evaluated authenticated-writer
+     * supplier.
      *
-     * Extracted rather than inlined here, because this class was already the largest in the codebase
-     * and `docs/STATUS.md` §4 problem 18 predicted it would get worse — detekt's `LargeClass` fired
-     * the first time Phase 2a tried to add the wiring inline, which is the tool doing its job.
+     * Extracted to [ControlRelays] because Phase 5's relay took this class over detekt's
+     * `LargeClass` ceiling and `config/detekt/detekt.yml` says in its own words that the headroom
+     * bought last time "is the last of it" — so the answer is the extraction that file prescribes,
+     * not a sixth raise. Five near-identical eleven-line construction blocks became one.
      *
-     * Its writer supplier yields non-null **only while the trust gate has passed**, so there is no
-     * send path for a voice frame on an unauthenticated connection. The inbound gate is separate and
-     * stronger: [handleFrame]'s pre-authentication allowlist drops every `VOICE_*` type before the
-     * dispatch below can reach the relay at all (PROTOCOL §7.1).
+     * The writer below yields non-null **only while the trust gate has passed**, so there is no send
+     * path for any of these families on an unauthenticated connection. The inbound gate is separate
+     * and stronger: [handleFrame]'s pre-authentication allowlist drops every one of their types
+     * before dispatch can reach a relay at all.
      */
-    val voice: VoiceSignalRelay =
-        VoiceSignalRelay(
+    private val relays: ControlRelays =
+        ControlRelays(
             localPeerId = localPeerId,
             monotonicNowUs = monotonicNowUs,
             nextSeq = { seqCounter.nextSeq() },
@@ -287,73 +291,15 @@ class ControlSessionManager(
             },
         )
 
-    /**
-     * The `AUDIO_STATE` half of the control plane (PROTOCOL §4.4), extracted for the same reason
-     * [voice] is: `docs/STATUS.md` §4 problem 18, and nothing here touches the session, the handshake,
-     * pairing, reconnect or the clock.
-     *
-     * `AUDIO_STATE` is **absent** from [PRE_AUTHENTICATION_FRAME_TYPES], so an unauthenticated peer's
-     * is dropped before [handleFrame]'s dispatch can reach the relay — the same construction that makes
-     * `VOICE_*` inert before the trust gate (PROTOCOL §7.1), applied to the message §4.1's handshake
-     * diagram puts on the trusted path.
-     */
-    val audioState: AudioStateRelay =
-        AudioStateRelay(
-            localPeerId = localPeerId,
-            monotonicNowUs = monotonicNowUs,
-            nextSeq = { seqCounter.nextSeq() },
-            activeSessionId = { activeSessionId },
-            authenticatedWriter = {
-                val socket = activeSocket
-                if (socket == null || !authenticated) {
-                    null
-                } else {
-                    AuthenticatedFrameWriter { envelope -> socket.writeFrame(envelope) }
-                }
-            },
-        )
+    val voice: VoiceSignalRelay get() = relays.voice
 
-    /**
-     * The `MANIFEST_*` half of the control plane (PROTOCOL §8.1), extracted for the same reason
-     * [voice] and [audioState] are. `MANIFEST_*` is likewise absent from
-     * [PRE_AUTHENTICATION_FRAME_TYPES] (brief §22: unpaired peers never receive the catalogue).
-     */
-    val manifest: ManifestRelay =
-        ManifestRelay(
-            localPeerId = localPeerId,
-            monotonicNowUs = monotonicNowUs,
-            nextSeq = { seqCounter.nextSeq() },
-            activeSessionId = { activeSessionId },
-            authenticatedWriter = {
-                val socket = activeSocket
-                if (socket == null || !authenticated) {
-                    null
-                } else {
-                    AuthenticatedFrameWriter { envelope -> socket.writeFrame(envelope) }
-                }
-            },
-        )
+    val audioState: AudioStateRelay get() = relays.audioState
 
-    /**
-     * The `TRANSFER_*` half of the control plane (PROTOCOL §8.2) — the small negotiation messages
-     * only; the bulk byte stream itself never touches this class (ADR-023). Extracted for the same
-     * reason as [manifest].
-     */
-    val transfer: TransferRelay =
-        TransferRelay(
-            localPeerId = localPeerId,
-            monotonicNowUs = monotonicNowUs,
-            nextSeq = { seqCounter.nextSeq() },
-            activeSessionId = { activeSessionId },
-            authenticatedWriter = {
-                val socket = activeSocket
-                if (socket == null || !authenticated) {
-                    null
-                } else {
-                    AuthenticatedFrameWriter { envelope -> socket.writeFrame(envelope) }
-                }
-            },
-        )
+    val manifest: ManifestRelay get() = relays.manifest
+
+    val transfer: TransferRelay get() = relays.transfer
+
+    val playback: PlaybackRelay get() = relays.playback
 
     /**
      * Binds the OS-selected dynamic port and starts accepting inbound candidates. This instance
@@ -569,7 +515,7 @@ class ControlSessionManager(
             activeSessionId = candidate.outcome.sessionId
             endedDeliberately = false
         }
-        clockState = null
+        clock.reset()
         authenticated = false
         lastPongAtMonoUs = monotonicNowUs()
         reconnectController.reset()
@@ -842,32 +788,17 @@ class ControlSessionManager(
         // completed TLS but not RideLink authentication must not be able to reach it, and
         // PING/PONG in particular can never mark authentication complete.
         if (!authenticated && frame.envelope.type !in PRE_AUTHENTICATION_FRAME_TYPES) {
-            // Counted rather than merely dropped when it is a voice frame: PROTOCOL §7.1's whole
-            // point is that VOICE_* is inert before the trust gate, and "it never happened" and
-            // "it happened and was refused" are different facts on a diagnostics screen.
-            if (frame.envelope.type in VoiceMessageTypes.ALL) voice.countPreAuthenticationDrop()
-            if (frame.envelope.type == AudioStateMessageTypes.AUDIO_STATE) audioState.countPreAuthenticationDrop()
-            if (frame.envelope.type in ManifestMessageTypes.ALL) manifest.countPreAuthenticationDrop()
-            if (frame.envelope.type in TransferMessageTypes.ALL) transfer.countPreAuthenticationDrop()
+            // Counted rather than merely dropped: PROTOCOL §7.1's whole point is that VOICE_* is
+            // inert before the trust gate, and "it never happened" and "it happened and was
+            // refused" are different facts on a diagnostics screen. The same holds for every other
+            // family [ControlRelays] owns, which is why the counting lives there with them.
+            relays.countPreAuthenticationDrop(frame.envelope.type)
             return
         }
         when (frame.envelope.type) {
             "PING" -> handlePing(socket, sessionId, payload)
             "PONG" -> handlePong(payload)
             "PAIR_REQUEST", "PAIR_CONFIRM", "PAIR_RESULT" -> handlePairingFrame(socket, frame.envelope.type, payload)
-            // Reachable only past the guard above, so only for an authenticated peer (PROTOCOL §7.1).
-            VoiceMessageTypes.OFFER, VoiceMessageTypes.ANSWER, VoiceMessageTypes.ICE, VoiceMessageTypes.STATE ->
-                voice.deliver(frame.envelope.type, payload)
-            // Reachable only past the guard above, so only for an authenticated peer (PROTOCOL §4.1).
-            AudioStateMessageTypes.AUDIO_STATE -> audioState.deliver(payload)
-            // Reachable only past the guard above, so only for an authenticated peer (PROTOCOL §8.1).
-            ManifestMessageTypes.REQUEST, ManifestMessageTypes.BEGIN, ManifestMessageTypes.PAGE,
-            ManifestMessageTypes.END, ManifestMessageTypes.ABORT,
-            -> manifest.deliver(frame.envelope.type, payload)
-            // Reachable only past the guard above, so only for an authenticated peer (PROTOCOL §8.2).
-            TransferMessageTypes.REQUEST, TransferMessageTypes.OFFER, TransferMessageTypes.PROGRESS,
-            TransferMessageTypes.RESULT, TransferMessageTypes.CANCEL,
-            -> transfer.deliver(frame.envelope.type, payload)
             "BYE" -> endConnection(socket, LinkLossReason.BYE)
             "ERROR" -> {
                 if (requiredBooleanField(payload, "fatal") != true) return
@@ -880,7 +811,10 @@ class ControlSessionManager(
                     endConnection(socket, LinkLossReason.BYE)
                 }
             }
-            else -> Unit // PROTOCOL §2 rule 2: unknown types ignored, logged, not fatal
+            // Every remaining known type belongs to a relay, and is reachable only past the guard
+            // above — so only for an authenticated peer (PROTOCOL §4.4, §5, §7.1, §8.1, §8.2, §9).
+            // A type no relay owns falls through to PROTOCOL §2 rule 2: ignored, logged, not fatal.
+            else -> relays.deliver(frame.envelope.type, payload)
         }
     }
 
@@ -924,7 +858,12 @@ class ControlSessionManager(
         if (!isPlausibleClockSample(t1, t2, t3, t4)) return
         lastPongAtMonoUs = t4
         pendingPings.remove(t1)?.complete(ClockSync.Sample(t1, t2, t3, t4))
-        _diagnostics.update { it.copy(rttMs = ((t4 - t1) - (t3 - t2)) / MICROS_PER_MS) }
+        val rttUs = (t4 - t1) - (t3 - t2)
+        // Every PONG feeds the RTT window, keepalive ones included: ARCHITECTURE §7.2's
+        // `4 x rtt_p95` wants all the history the link has produced, while the *offset* estimate
+        // still only ever moves on a full §7.1 window.
+        clock.recordRtt(rttUs)
+        _diagnostics.update { it.copy(rttMs = rttUs / MICROS_PER_MS) }
     }
 
     /**
@@ -1027,8 +966,7 @@ class ControlSessionManager(
                 sample
             }
         if (samples.isEmpty()) return
-        val result = ClockSync.applyWindow(clockState, samples)
-        clockState = result.newState
+        val result = clock.applyWindow(samples)
         _diagnostics.update {
             it.copy(
                 clockOffsetUs = result.offsetUs ?: it.clockOffsetUs,
@@ -1128,10 +1066,7 @@ class ControlSessionManager(
         // not survive into the next — the same hazard STATUS §2h fixed for control events, applied to
         // the voice sink. The coordinator also detaches it, and doing both is deliberate: neither
         // teardown path may depend on the other having run.
-        voice.reset()
-        audioState.reset()
-        manifest.reset()
-        transfer.reset()
+        relays.reset()
         pendingActivation = null
         _pairingPrompt.value = null
         endedDeliberately = true

@@ -56,6 +56,21 @@ sealed class PlaybackCommand {
     ) : PlaybackCommand()
 
     object Stop : PlaybackCommand()
+
+    /**
+     * Phase 5's rate-nudge tier (ADR-004 / ARCHITECTURE §7.3): `ExoPlayer.setPlaybackParameters` on
+     * Android, an `AVAudioUnitVarispeed` in the engine graph on iOS. Added to this seam rather than
+     * reached for through a platform type, so `DriftController`'s pure decision has one place to
+     * land on both platforms.
+     *
+     * [rate] is a multiplier around 1.0 and the drift ladder only ever asks for
+     * [com.ridelink.core.playback.DriftController.RATE_SLOWER], `RATE_NORMAL` or `RATE_FASTER`.
+     * Restoring **exactly** 1.0 when correction ends is a Phase 5 invariant (brief §38), which is
+     * why the value is carried explicitly rather than as a signed delta a caller could round.
+     */
+    data class SetRate(
+        val rate: Double,
+    ) : PlaybackCommand()
 }
 
 /**
