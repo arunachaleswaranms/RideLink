@@ -27,7 +27,8 @@ Consequences · Alternatives considered.
 | [020](ADR-020-webrtc-voice-foundation.md) | Phase 2a voice foundation: pinned WebRTC distributions, leader-is-offerer, host-only ICE, and the `stop`/`release` audio-session split | Accepted · **amended A1** (2 Sep 2026 — the Apple pin moves to M152 because upstream deleted M151) · **A2** (2 Sep 2026 — the generation guard is strict) |
 | [021](ADR-021-intercom-transmission-and-capture-ownership.md) | Phase 2b intercom: one capture owner, one policy object, transmission gated at the audio track and never at the device | Accepted |
 | [022](ADR-022-media-session-without-mediasessionservice.md) | A real `MediaSession`, owned by the existing ride foreground service, without subclassing `MediaSessionService` | Accepted |
-| [023](ADR-023-bulk-transfer-session-binding.md) | Bulk transfer session binding, listener lifecycle and cache trust model | Accepted |
+| [023](ADR-023-bulk-transfer-session-binding.md) | Bulk transfer session binding, listener lifecycle and cache trust model | Accepted · **amended A1–A5** (5–8 Sep 2026 — five closure audits) |
+| [024](ADR-024-synchronized-playback-integration.md) | Phase 5 synchronized-playback integration | Accepted |
 
 ADRs 011–016 and the three amendments came out of the pre-Phase-1 correction pass recorded in
 [`../STATUS.md`](../STATUS.md#2-what-changed-in-the-correction-pass). ADRs 017–018 came out of the
@@ -63,6 +64,14 @@ authenticated session rather than to the peer in general, and what makes a verif
 trustworthy enough to serve or play. It extends ADR-015's already-settled "the bulk plane is
 authorised per transfer, not by the control connection" position with the session-generation guard
 that makes a reconnect's old transfer state inert rather than merely unlikely to resurface.
+
+ADR-024 answers what Phase 5's own wire spec (PROTOCOL §5, §9) left unsaid or said twice: the
+follower→leader intent needed a message and got `command_seq: 0` rather than four new types; `RESUME`
+and `PLAYBACK_STATE` had no payload; §9's 2 000-item queue cap does not actually fit
+`MAX_CONTROL_FRAME_BYTES`, so **the cap moved and the frame limit did not**; and §9 put `status` on
+the wire in the same paragraph that called it untrusted, so it is gone. It deliberately does **not**
+re-open ADR-004 (the drift ladder and the never-restream decision) or ADR-010 (leadership) — it
+records only what integrating them found unanswered.
 
 **Adding one:** next free number, update this table, link it from the relevant section of
 `ARCHITECTURE.md`.

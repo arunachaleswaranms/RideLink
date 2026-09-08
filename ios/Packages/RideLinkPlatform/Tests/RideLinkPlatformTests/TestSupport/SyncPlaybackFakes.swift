@@ -59,9 +59,13 @@ actor FakeSyncSession: SyncSessionPort {
 
     func attach(queue: (any QueueSink)?) { queueSink = queue }
 
-    func deliver(_ message: PlaybackMessage) { playbackSink?.submit(message) }
+    func deliver(_ message: PlaybackMessage) { playbackSink?.submit(message, generation: generation) }
 
-    func deliver(_ message: QueueMessage) { queueSink?.submit(message) }
+    func deliver(_ message: QueueMessage) { queueSink?.submit(message, generation: generation) }
+
+    /// Delivers a frame tagged with a generation the caller chooses — used to prove that a frame
+    /// dispatched under a session that has since ended is inert.
+    func deliver(_ message: PlaybackMessage, generation: Int64) { playbackSink?.submit(message, generation: generation) }
 
     func playbackMessages() -> [PlaybackMessage] { sent.compactMap { $0 as? PlaybackMessage } }
 
@@ -101,6 +105,14 @@ actor FakeSyncPlayer: SyncPlayerPort {
 
     private(set) var calls: [Call] = []
     private var state = PlayerState()
+    /// The local monotonic instant of the **first** `start`, for the two-peer test's start-error
+    /// measurement. Only the first: a later drift correction must not move the figure.
+    private(set) var firstStartAtMonoUs: Int64?
+    private var monotonicNowUs: (@Sendable () -> Int64)?
+
+    /// Supplied only by the two-peer test, which needs the instant a start happened rather than just
+    /// the fact that it did.
+    func stampStartsWith(_ clock: @escaping @Sendable () -> Int64) { monotonicNowUs = clock }
 
     func playerState() async -> PlayerState { state }
 
@@ -110,7 +122,10 @@ actor FakeSyncPlayer: SyncPlayerPort {
 
     func prepare(content: SyncPlayableContent, positionMs: Int64) async { calls.append(.prepare(content.contentHash, positionMs)) }
 
-    func start() async { calls.append(.start) }
+    func start() async {
+        if firstStartAtMonoUs == nil { firstStartAtMonoUs = monotonicNowUs?() }
+        calls.append(.start)
+    }
 
     func pause() async { calls.append(.pause) }
 

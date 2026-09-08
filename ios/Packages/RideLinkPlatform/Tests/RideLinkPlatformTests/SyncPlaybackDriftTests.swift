@@ -47,6 +47,7 @@ final class SyncPlaybackDriftTests: XCTestCase {
         await coordinator.handleConnected(isLocalLeader: false)
         await settle()
         await content.addLocal(SyncTestValues.hash(1))
+        let before = await coordinator.diagnostics.inboundProcessedCount
         await session.deliver(
             .play(
                 header: PlaybackCommandHeader(
@@ -58,18 +59,56 @@ final class SyncPlaybackDriftTests: XCTestCase {
                 queueItemId: SyncTestValues.ulid(1)
             )
         )
-        await settle()
+        // The `PLAY` must be fully applied before the first cadence tick is driven: a tick that
+        // finds no timeline yet does nothing at all — correctly — and would leave the wait below
+        // with nothing to observe. A 1-in-100 stress failure found exactly that.
+        await expect("the PLAY was applied") { [coordinator] in
+            await coordinator!.diagnostics.inboundProcessedCount > before
+        }
+        await expect("playback started") { [player] in await player!.calls.contains(.start) }
         await player.clearCalls()
         await session.clearSent()
     }
 
-    /// Advances to the next 5 s report tick with the player reporting `expected + driftMs`.
+    private func deliverAndAwait(_ message: PlaybackMessage) async {
+        let before = await coordinator.diagnostics.inboundProcessedCount
+        await session.deliver(message)
+        await expect("the frame was considered") { [coordinator] in
+            await coordinator!.diagnostics.inboundProcessedCount > before
+        }
+    }
+
+    /// Waits for a condition rather than for a fixed number of scheduler yields.
+    private func expect(_ description: String, _ condition: @escaping () async -> Bool) async {
+        let deadline = Date().addingTimeInterval(5)
+        while Date() < deadline {
+            if await condition() { return }
+            await Task.yield()
+        }
+        XCTFail("timed out waiting for: \(description)")
+    }
+
+    /// Advances to the next 5 s report tick with the player reporting `expected + driftMs`, then
+    /// waits for that tick to actually **finish**.
+    ///
+    /// The wait is on `correctionTickCount`, not on a number of scheduler yields. A tick spans
+    /// several actor hops — sending the report, re-proving the session and epoch, reading the route
+    /// state, applying the correction — and "yield 40 times and hope" is a race that fails roughly
+    /// 7 % of the time on a loaded machine. It was found by stress-running this suite, reproduced on
+    /// the first attempt, and fixed here in the harness rather than by re-running: the production
+    /// behaviour was correct throughout, and the counter it now publishes is a real FR-023 figure.
     private func tick(driftMs: Int64, playing: Bool = true) async {
         guard let nextTickUs = clock.pendingDeadlines().max() else { return XCTFail("no tick is armed") }
+        let before = await coordinator.diagnostics.correctionTickCount
         let elapsedMs = (nextTickUs - anchorUs) / 1_000
         await player.setState(PlayerState(positionMs: elapsedMs + driftMs, durationMs: 600_000, playing: playing))
         clock.advance(to: nextTickUs)
-        await settle()
+        let deadline = Date().addingTimeInterval(5)
+        while Date() < deadline {
+            if await coordinator.diagnostics.correctionTickCount > before { return }
+            await Task.yield()
+        }
+        XCTFail("the cadence tick never completed")
     }
 
     func testATickReportsOurOwnPositionAgainstTheAuthoritativeTimeline() async {
@@ -168,7 +207,6 @@ final class SyncPlaybackDriftTests: XCTestCase {
         await tick(driftMs: 40)
         await player.clearCalls()
         await coordinator.leaveSynchronizedMode()
-        await settle()
         let calls = await player.calls
         XCTAssertEqual(calls.last, .setRate(1.0))
         let active = await coordinator.isSynchronizedModeActive()
@@ -179,8 +217,7 @@ final class SyncPlaybackDriftTests: XCTestCase {
 
     func testAPeerPositionReportForADifferentTrackIsIgnored() async {
         await startPlaying()
-        await session.deliver(.positionReport(trackHash: SyncTestValues.hash(9), positionMs: 1_000, atSessionUs: clock.now(), playing: true, playbackRate: 1.0))
-        await settle()
+        await deliverAndAwait(.positionReport(trackHash: SyncTestValues.hash(9), positionMs: 1_000, atSessionUs: clock.now(), playing: true, playbackRate: 1.0))
         let diagnostics = await coordinator.diagnostics
         XCTAssertNil(diagnostics.peerDriftMs, "a report for another track says nothing about this one")
     }
@@ -189,13 +226,11 @@ final class SyncPlaybackDriftTests: XCTestCase {
         await startPlaying()
         // The same track_hash, but stamped before this play of it began — brief §32's exact case,
         // and why content_hash alone is not enough to identify a playback epoch.
-        await session.deliver(.positionReport(trackHash: SyncTestValues.hash(1), positionMs: 55_000, atSessionUs: anchorUs - 1, playing: true, playbackRate: 1.0))
-        await settle()
+        await deliverAndAwait(.positionReport(trackHash: SyncTestValues.hash(1), positionMs: 55_000, atSessionUs: anchorUs - 1, playing: true, playbackRate: 1.0))
         var diagnostics = await coordinator.diagnostics
         XCTAssertNil(diagnostics.peerDriftMs)
 
-        await session.deliver(.positionReport(trackHash: SyncTestValues.hash(1), positionMs: 40, atSessionUs: anchorUs + 1_000_000, playing: true, playbackRate: 1.0))
-        await settle()
+        await deliverAndAwait(.positionReport(trackHash: SyncTestValues.hash(1), positionMs: 40, atSessionUs: anchorUs + 1_000_000, playing: true, playbackRate: 1.0))
         diagnostics = await coordinator.diagnostics
         XCTAssertEqual(diagnostics.peerDriftMs, -960, "the peer is 960 ms behind the timeline")
     }

@@ -234,8 +234,8 @@ class PlaybackAuthenticationGateTest {
                 sessionB.collectInto(scope)
 
                 val spy = Phase5Spy()
-                sessionA.manager.playback.playbackSink = PlaybackSink { spy.playback.add(it) }
-                sessionA.manager.playback.queueSink = QueueSink { spy.queue.add(it) }
+                sessionA.manager.playback.playbackSink = PlaybackSink { message, _ -> spy.playback.add(message) }
+                sessionA.manager.playback.queueSink = QueueSink { message, _ -> spy.queue.add(message) }
 
                 val portA = sessionA.manager.startListening(a.local)
                 val portB = sessionB.manager.startListening(b.local)

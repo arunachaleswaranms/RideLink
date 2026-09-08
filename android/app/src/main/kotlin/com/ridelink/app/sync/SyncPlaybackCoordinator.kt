@@ -28,6 +28,8 @@ import com.ridelink.network.playback.PlaybackSink
 import com.ridelink.network.playback.QueueSink
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.channels.BufferOverflow
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -115,18 +117,19 @@ class SyncPlaybackCoordinator(
     private var currentEpochToken: Long = -1L
 
     init {
+        // Both sinks enqueue rather than launch. A coroutine per frame preserves only the order in
+        // which coroutines are *started*: `onPlaybackMessage` suspends (content resolution, the
+        // decoder pre-roll), so frame N+1 can overtake frame N inside the suspension and a follower
+        // would drop the overtaken command as stale — `CommandOrderGate` doing exactly its job on
+        // input that reached it out of order. One bounded channel, one consumer, arrival order
+        // preserved. Found by stress-running this phase's iOS suites, and fixed identically on both
+        // platforms; the iOS mirror uses the `OrderedEventChannel` Phase 1b already introduced for
+        // the same hazard (`docs/STATUS.md` §2h).
         session.playback.playbackSink =
-            PlaybackSink { message ->
-                // Captured at dispatch, exactly as Phase 4's ManifestSink/TransferSink do, and
-                // re-proved at every transition below rather than only here (ADR-023 Amendment A3).
-                val generation = session.currentAuthGeneration
-                scope.launch { onPlaybackMessage(message, generation) }
-            }
+            PlaybackSink { message, generation -> enqueue(Inbound.Playback(message, generation)) }
         session.playback.queueSink =
-            QueueSink { message ->
-                val generation = session.currentAuthGeneration
-                scope.launch { onQueueMessage(message, generation) }
-            }
+            QueueSink { message, generation -> enqueue(Inbound.Queue(message, generation)) }
+        scope.launch { drainInbound() }
         scope.launch {
             session.events.collect { event ->
                 when (event) {
@@ -136,6 +139,48 @@ class SyncPlaybackCoordinator(
                     else -> Unit
                 }
             }
+        }
+    }
+
+    /** One inbound Phase 5 frame, already parsed, with the generation live when it was read. */
+    private sealed class Inbound {
+        data class Playback(
+            val message: PlaybackMessage,
+            val generation: Long,
+        ) : Inbound()
+
+        data class Queue(
+            val message: QueueMessage,
+            val generation: Long,
+        ) : Inbound()
+    }
+
+    /**
+     * Bounded, like every other queue this project adds (ADR-021 §5). Dropping the oldest is the
+     * right policy here specifically: the command that matters is the newest, [CommandOrderGate]
+     * already drops anything stale, and PROTOCOL §5's `PLAYBACK_STATE` is the reconciliation anchor
+     * for whatever a drop cost. A drop is counted rather than silent.
+     */
+    private val inbound =
+        Channel<Inbound>(capacity = INBOUND_CAPACITY, onBufferOverflow = BufferOverflow.DROP_OLDEST)
+
+    private fun enqueue(item: Inbound) {
+        if (inbound.trySend(item).isFailure) {
+            _diagnostics.update { it.copy(droppedInboundCount = it.droppedInboundCount + 1) }
+        }
+    }
+
+    /**
+     * Drains [inbound], one frame at a time, in arrival order. One consumer, so frame N+1 is never
+     * handled before frame N — see the sink wiring above for why that is a correctness property.
+     */
+    private suspend fun drainInbound() {
+        for (item in inbound) {
+            when (item) {
+                is Inbound.Playback -> onPlaybackMessage(item.message, item.generation)
+                is Inbound.Queue -> onQueueMessage(item.message, item.generation)
+            }
+            _diagnostics.update { it.copy(inboundProcessedCount = it.inboundProcessedCount + 1) }
         }
     }
 
@@ -193,6 +238,7 @@ class SyncPlaybackCoordinator(
                 playbackRate = DriftController.RATE_NORMAL,
                 hardSeekCount = 0,
                 lastScheduleErrorUs = null,
+                correctionTickCount = 0,
                 sessionGeneration = session.currentAuthGeneration,
             )
         }
@@ -824,6 +870,8 @@ class SyncPlaybackCoordinator(
             )
         }
         applyCorrection(outcome.action, generation, token)
+        // Last, so the counter means "this tick finished" rather than "this tick began".
+        _diagnostics.update { it.copy(correctionTickCount = it.correctionTickCount + 1) }
     }
 
     private suspend fun applyCorrection(
@@ -936,5 +984,6 @@ class SyncPlaybackCoordinator(
 
     private companion object {
         val POSITION_REPORT_INTERVAL_US = PlaybackBounds.POSITION_REPORT_INTERVAL_MS * 1_000
+        const val INBOUND_CAPACITY = 256
     }
 }

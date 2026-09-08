@@ -234,7 +234,7 @@ final class PlaybackSpy: PlaybackSink, @unchecked Sendable {
         return log
     }
 
-    func submit(_ message: PlaybackMessage) {
+    func submit(_ message: PlaybackMessage, generation _: Int64) {
         lock.lock()
         defer { lock.unlock() }
         log.append(message)
@@ -251,7 +251,7 @@ final class QueueSpy: QueueSink, @unchecked Sendable {
         return log
     }
 
-    func submit(_ message: QueueMessage) {
+    func submit(_ message: QueueMessage, generation _: Int64) {
         lock.lock()
         defer { lock.unlock() }
         log.append(message)

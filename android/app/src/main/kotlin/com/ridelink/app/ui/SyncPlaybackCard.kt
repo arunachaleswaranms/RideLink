@@ -131,6 +131,7 @@ private fun SyncDiagnosticsBlock(sync: SyncPlaybackCoordinator) {
         SyncDiagnosticRow("hard seeks", d.hardSeekCount.toString())
         SyncDiagnosticRow("schedule error", d.lastScheduleErrorUs?.let { "$it us (software only)" } ?: "—")
         SyncDiagnosticRow("route transitioning", d.routeTransitioning.toString())
+        SyncDiagnosticRow("correction ticks", d.correctionTickCount.toString())
         SyncDiagnosticRow("session generation", d.sessionGeneration.toString())
     }
 }

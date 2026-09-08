@@ -23,7 +23,7 @@ Read these before changing anything. They are authoritative; this file is a summ
 | What's on the wire? | `docs/PROTOCOL.md` |
 | How do we verify? | `docs/TEST_PLAN.md` |
 | State now / exact next task | `docs/STATUS.md` |
-| Why this way? | `docs/DECISIONS/` (ADR-001…020) |
+| Why this way? | `docs/DECISIONS/` (ADR-001…024) |
 | What was actually measured? | `docs/test-results/` — including the Phase 1b security spike |
 | What did the hardware do? | `docs/PHASE0_RESULTS.md` (awaiting user input) |
 
@@ -50,8 +50,9 @@ Read these before changing anything. They are authoritative; this file is a summ
 | 16 | **Voice media may never start before the trust gate.** `VOICE_*` is absent from the pre-authentication frame allowlist, and that absence *is* its access control (ADR-020). The ADR-010 leader is always the WebRTC offerer — never the TCP initiator. ICE is an empty server list and `VoiceEngineConfig` has no field that could carry a STUN/TURN server. `VoiceEngine.stop()` drops the peer connection; only `release()` closes the capture device, because reopening it renegotiates the Bluetooth profile and Android forbids reopening a microphone from the background | Never add a voice type to the pre-auth allowlist; never infer the offerer from who dialled; never add an ICE server "just for testing"; never let a link blip release capture |
 | 17 | **The intercom transmission gate never touches the capture device.** PTT, VOX and mute gate the *outbound WebRTC audio track* (`AudioTrack.setEnabled` / `RTCAudioTrack.isEnabled`); the capture device and platform audio session are opened once, while foreground-visible, and stay open for the whole ride segment. Every decision lives in the pure, mirrored `IntercomTransmission` table (ADR-021), whose action vocabulary has **no** capture case — that absence *is* the enforcement, and `protocol/vectors/intercom/` pins it. `AUDIO_STATE` is absent from the pre-authentication allowlist for the same reason `VOICE_*` is | Never open or close capture per utterance; never route a PTT press to `VoiceAudioSession`; never rebuild the `PeerConnection` for a mute; never branch on a mode id; never flip `confidence` off `assumed` without A-12/A-13 |
 | 15 | **`ControlEvent.Connected` means "the surviving connection passed the RideLink trust gate"** (ADR-019). `PAIRING -> CONNECTING` opens only on `PeerTrusted` (stored pin matched) or `PairingSucceeded` (both users confirmed and the pin was written). The gate table is `SessionGate` on both platforms, pinned by `vectors/session-gate/` | Never read "TLS and HELLO succeeded" as authentication; never let `Connected` imply pairing success; never start a task that presumes an authenticated peer just because a socket exists |
+| 18 | **Phase 5 decides nothing in a coordinator.** Ordering is `CommandOrderGate`, deadline mapping is `ScheduledCommand`, correction is `DriftController`, queue algebra is `SharedQueue`, timing is `SessionClock` — all pure, mirrored and pinned by `protocol/vectors/{ordering,drift,queue,session-clock}/`. The **leader alone** assigns `command_seq`; a follower sends the *same message type* with `command_seq: 0` (ADR-024 §3), and an authoritative `command_seq` arriving at the leader is a role violation. Scheduling is session/monotonic time only, never wall-clock. Every audible effect goes through the ONE `MusicCoordinator`; the system media controls enter that same leader-ordered path through its gate | Never let a coordinator decide ordering or correction; never let a follower allocate a `command_seq`; never add a second player, queue, `MediaSession` or RTT tracker; never leave a drift nudge behind — correction always ends at exactly 1.0 |
 
-Reasoning: `docs/DECISIONS/ADR-001…021`.
+Reasoning: `docs/DECISIONS/ADR-001…024`.
 
 ## Platform stack and baselines
 
@@ -88,7 +89,7 @@ a laptop unit test, not surface on a ride.
 - Adding or changing a message shape means adding or updating vectors in the same change.
 - A vector that passes on one platform only is a release blocker.
 - Every protocol bug found on a device gets a vector added **before** the fix.
-- `vectors/sas/` and `vectors/identity/` contain fabricated test values only. Never a real key, token, exporter output or pairing code. Five vector sets are **generated**, each deliberately an independent third implementation of what it pins — `identity/`, `session-gate/`, `voice-signal/`, `voice-fsm/`, `intercom/` and `audio-state/`. Edit the generator, not the JSON.
+- `vectors/sas/` and `vectors/identity/` contain fabricated test values only. Never a real key, token, exporter output or pairing code. Most vector sets are **generated**, each deliberately an independent third implementation of what it pins — `identity/`, `session-gate/`, `voice-signal/`, `voice-fsm/`, `intercom/`, `audio-state/`, and Phase 5's `session-clock/`, `ordering/`, `drift/`, `queue/`, `playback-messages/` and `queue-messages/`. Edit the generator, not the JSON.
 
 ## Never change protocol or architecture silently
 
@@ -158,6 +159,14 @@ python3 tools/generate_voice_fsm_vectors.py
 python3 tools/generate_intercom_vectors.py
 python3 tools/generate_audio_state_vectors.py
 
+# Regenerate the Phase 5 synchronisation vectors (ADR-024; all six independent third transcriptions)
+python3 tools/generate_session_clock_vectors.py
+python3 tools/generate_ordering_vectors.py
+python3 tools/generate_drift_vectors.py
+python3 tools/generate_queue_vectors.py
+python3 tools/generate_playback_messages_vectors.py
+python3 tools/generate_queue_messages_vectors.py
+
 # Requirements doc (DOCX is read-only input; never modify it)
 python3 tools/extract_docx.py docs/RideLink_Requirements_and_Implementation_Plan.docx
 ```
@@ -190,25 +199,36 @@ resume are deferred, but the chunk and page framing keep both possible.
 
 ## Current phase
 
-**Phase 4 — shared library + authenticated peer file transfer. Implementation complete; the
-real-device shared-library/transfer gate is open. Phase 5 has not started.**
+**Phase 5 — synchronized playback. Implementation complete; the real-device
+synchronized-playback gate is open. Phase 6 and Phase 7 have not started.**
 
 `docs/STATUS.md` is the authority on this and is kept current; the sections below are the
 architectural summary for phases 1a–2b and remain accurate for *those* phases. Phase 3 (local music
-player, ADR-022) and Phase 4 (shared catalogue + `ContentHash`-keyed transfer on a second
-session-bound TLS connection, ADR-023) both landed after this section was last rewritten and are
-both implementation-complete on both platforms with their real-device gates open — see
-`docs/STATUS.md` §2q–§2y.
+player, ADR-022), Phase 4 (shared catalogue + `ContentHash`-keyed transfer on a second session-bound
+TLS connection, ADR-023) and Phase 5 (clock-scheduled playback, drift correction and a replicated
+queue, ADR-004 + ADR-024) all landed after this section was last rewritten and are implementation-
+complete on both platforms with their real-device gates open — see `docs/STATUS.md` §2q–§2aa.
 
-**Phase 4 has been closure-audited four times** (ADR-023 Amendments A1–A4), each pass finding real
+**Phase 4 has been closure-audited five times** (ADR-023 Amendments A1–A5), each pass finding real
 integration/lifecycle defects in code that was already CI-green: eighteen, then two, then two, then
-three. Read that as the standing lesson it is — on this codebase, "CI-green" and "correct" are
-different claims, and the gap between them has consistently been in session lifetime, cancellation
-ownership and platform I/O contracts rather than in the wire format or the pure domain layer.
+four, then three. Read that as the standing lesson it is — on this codebase, "CI-green" and "correct"
+are different claims, and the gap between them has consistently been in session lifetime,
+cancellation ownership and platform I/O contracts rather than in the wire format or the pure domain
+layer. **Phase 5 has not been closure-audited at all yet**, and should be read accordingly.
 
-Phase 0 (hardware feasibility) is complete; do **not** repeat it. Phases 1a, 1b, 2a, 2b, 3 and 4 are
-all implementation-complete and green on both platforms. **The overall "2 Intercom" milestone is not
-complete** — its hardware gates (TEST_PLAN A-01, A-02, A-04, A-09 and V-01…V-11) have not run.
+Phase 0 (hardware feasibility) is complete; do **not** repeat it. Phases 1a, 1b, 2a, 2b, 3, 4 and 5
+are all implementation-complete and green on both platforms. **The overall "2 Intercom" milestone is
+not complete** — its hardware gates (TEST_PLAN A-01, A-02, A-04, A-09 and V-01…V-11) have not run.
+
+**Phase 5** (ADR-004, ADR-024, `docs/STATUS.md` §2aa) turned the Phase 1a clock layer and the Phase 3
+player into synchronised playback:
+
+- **Every distributed decision is a pure, mirrored, vector-pinned table** — `CommandOrderGate`, `ScheduledCommand`, `PlaybackTimeline`, `DriftController`, `SharedQueue`, `SessionClock`. The coordinators are wiring and lifetime, never policy. That is ADR-019's direct lesson (rule 18 above).
+- **One clock estimator, extended not duplicated.** `ClockSync` gained `rtt_p95` and a bounded window; `SessionClockTracker` owns offset, RTT history and readiness per session. Readiness is *not* "we have a number": an unconfirmed 30 ms step means no new command is scheduled, while playback already in flight keeps its last accepted offset.
+- **The follower→leader intent is `command_seq: 0`** — the same message type, no new type (ADR-024 §3). An authoritative `command_seq` arriving at the leader is a role violation, which is what makes "a follower cannot fabricate one" checked rather than assumed.
+- **Five specification gaps were found and resolved in ADR-024, not silently in code**: `RESUME` and `PLAYBACK_STATE` had no payload; the intent hop had no message; §9's 2 000-item queue cap does not fit the 256 KiB frame cap (**the cap moved to 1 000; the frame limit did not**); and §9 put `status` on the wire in the same paragraph that called it untrusted (**removed**).
+- **Six new shared vector sets**, each an independent third transcription: `session-clock/`, `ordering/`, `drift/`, `queue/`, `playback-messages/`, `queue-messages/`.
+- **Nothing ran on a phone, and no audio was decoded, mixed or played anywhere.** The local two-peer integration measures 47 µs of *mapped session start error* in one process over loopback — a software scheduling figure. **No alignment figure exists**, and the <100 ms product target and <50 ms stretch target must not be described as approached. TEST_PLAN §5.2's S-01…S-12 are what will change that.
 
 **Phase 1b** gave the secure control channel: TLS 1.3 with mutual authentication,
 `identity_spki_sha256` pinning, first-meeting SAS pairing and persisted trust, on top of the

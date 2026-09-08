@@ -15,13 +15,26 @@ import java.util.concurrent.ConcurrentHashMap
 
 /** Receives parsed, bounds-checked PROTOCOL §5 playback messages. Implemented by the sync coordinator. */
 fun interface PlaybackSink {
-    /** Must be non-suspending and never block: it is called from the control read loop. */
-    fun submit(message: PlaybackMessage)
+    /**
+     * Must be non-suspending and never block: it is called from the control read loop.
+     *
+     * [generation] is the authentication generation that was live **when the frame was read off the
+     * wire** (ADR-023 §3). It is a parameter rather than something the receiver looks up, because a
+     * receiver that looks it up reads whatever is live when its own work happens to run — the exact
+     * shape of bug ADR-023 Amendment A3 found in Phase 4.
+     */
+    fun submit(
+        message: PlaybackMessage,
+        generation: Long,
+    )
 }
 
 /** Receives parsed, bounds-checked PROTOCOL §9 queue messages. */
 fun interface QueueSink {
-    fun submit(message: QueueMessage)
+    fun submit(
+        message: QueueMessage,
+        generation: Long,
+    )
 }
 
 /**
@@ -100,9 +113,10 @@ class PlaybackRelay internal constructor(
     fun deliverPlayback(
         type: String,
         payload: JsonObject,
+        generation: Long,
     ) {
         when (val result = PlaybackCodec.parse(type, payload)) {
-            is PlaybackCodec.Result.Parsed -> playbackSink?.submit(result.message)
+            is PlaybackCodec.Result.Parsed -> playbackSink?.submit(result.message, generation)
             is PlaybackCodec.Result.Rejected -> playbackRejections.merge(result.reason, 1) { a, b -> a + b }
         }
     }
@@ -110,9 +124,10 @@ class PlaybackRelay internal constructor(
     fun deliverQueue(
         type: String,
         payload: JsonObject,
+        generation: Long,
     ) {
         when (val result = QueueCodec.parse(type, payload)) {
-            is QueueCodec.Result.Parsed -> queueSink?.submit(result.message)
+            is QueueCodec.Result.Parsed -> queueSink?.submit(result.message, generation)
             is QueueCodec.Result.Rejected -> queueRejections.merge(result.reason, 1) { a, b -> a + b }
         }
     }

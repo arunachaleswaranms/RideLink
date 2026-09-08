@@ -836,10 +836,10 @@ public actor ControlSessionManager {
         case PlaybackMessageTypes.play, PlaybackMessageTypes.pause, PlaybackMessageTypes.resume,
             PlaybackMessageTypes.seek, PlaybackMessageTypes.next, PlaybackMessageTypes.previous,
             PlaybackMessageTypes.positionReport, PlaybackMessageTypes.playbackState:
-            await playback.deliverPlayback(type: envelope.type, payload: envelope.payload)
+            await playback.deliverPlayback(type: envelope.type, payload: envelope.payload, generation: authenticationGeneration)
         // Reachable only past the guard above, so only for an authenticated peer (PROTOCOL §9).
         case QueueMessageTypes.add, QueueMessageTypes.remove, QueueMessageTypes.move, QueueMessageTypes.snapshot:
-            await playback.deliverQueue(type: envelope.type, payload: envelope.payload)
+            await playback.deliverQueue(type: envelope.type, payload: envelope.payload, generation: authenticationGeneration)
         case "BYE":
             await endConnection(socket, reason: .bye)
         case "ERROR":

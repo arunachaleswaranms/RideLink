@@ -87,6 +87,8 @@ class ControlRelays internal constructor(
      * Hands an **authenticated** frame to whichever relay owns its type. Called only from the read
      * loop's post-trust-gate dispatch.
      *
+     * @param generation the authentication generation live when this frame was read off the wire
+     *   (ADR-023 §3), passed through to the Phase 5 sinks rather than looked up by them.
      * @return false if no family owns [type], which PROTOCOL §2 rule 2 makes a non-fatal "ignore
      *   and log" rather than an error — that rule is what lets a newer peer introduce a message
      *   type against an older build.
@@ -94,14 +96,15 @@ class ControlRelays internal constructor(
     fun deliver(
         type: String,
         payload: JsonObject,
+        generation: Long,
     ): Boolean {
         when (type) {
             in VoiceMessageTypes.ALL -> voice.deliver(type, payload)
             AudioStateMessageTypes.AUDIO_STATE -> audioState.deliver(payload)
             in ManifestMessageTypes.ALL -> manifest.deliver(type, payload)
             in TransferMessageTypes.ALL -> transfer.deliver(type, payload)
-            in PlaybackMessageTypes.ALL -> playback.deliverPlayback(type, payload)
-            in QueueMessageTypes.ALL -> playback.deliverQueue(type, payload)
+            in PlaybackMessageTypes.ALL -> playback.deliverPlayback(type, payload, generation)
+            in QueueMessageTypes.ALL -> playback.deliverQueue(type, payload, generation)
             else -> return false
         }
         return true

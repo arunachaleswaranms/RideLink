@@ -814,7 +814,7 @@ class ControlSessionManager(
             // Every remaining known type belongs to a relay, and is reachable only past the guard
             // above — so only for an authenticated peer (PROTOCOL §4.4, §5, §7.1, §8.1, §8.2, §9).
             // A type no relay owns falls through to PROTOCOL §2 rule 2: ignored, logged, not fatal.
-            else -> relays.deliver(frame.envelope.type, payload)
+            else -> relays.deliver(frame.envelope.type, payload, authenticationGeneration)
         }
     }
 

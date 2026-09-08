@@ -79,4 +79,20 @@ data class SyncPlaybackDiagnostics(
     val routeTransitioning: Boolean = false,
     /** ADR-023 §3's authentication generation. A Phase 5 event tagged with an older one is inert. */
     val sessionGeneration: Long = 0,
+    /**
+     * How many PROTOCOL §5 cadence ticks have completed — one report sent and one ladder decision
+     * applied. A real FR-023 figure (a stalled counter means correction has stopped, which is worth
+     * seeing), and the precise completion signal a test needs instead of guessing how many scheduler
+     * turns a tick takes. Mirrors `RideLinkPlatform.SyncPlaybackDiagnostics.correctionTickCount`,
+     * where a stress run found that guessing is a ~7 % flake.
+     */
+    val correctionTickCount: Int = 0,
+    /**
+     * How many inbound Phase 5 frames this coordinator has finished considering — applied, or
+     * deliberately refused as duplicate/stale/role-violating. A real FR-023 figure, and the precise
+     * signal a test needs instead of guessing how many scheduler turns a frame takes.
+     */
+    val inboundProcessedCount: Int = 0,
+    /** Frames dropped because the bounded inbound channel was full. Nonzero means a pathological peer. */
+    val droppedInboundCount: Int = 0,
 )

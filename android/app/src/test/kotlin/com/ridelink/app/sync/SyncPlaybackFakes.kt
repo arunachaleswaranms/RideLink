@@ -46,6 +46,8 @@ object SyncTestValues {
 class FakeSyncSession : SyncSessionPort {
     val sent = mutableListOf<Any>()
 
+    private var forward: FakeSyncSession? = null
+
     override val playback: PlaybackChannelPort =
         object : PlaybackChannelPort {
             override var playbackSink: PlaybackSink? = null
@@ -53,11 +55,13 @@ class FakeSyncSession : SyncSessionPort {
 
             override suspend fun send(message: PlaybackMessage): Boolean {
                 sent.add(message)
+                forward?.deliver(message)
                 return true
             }
 
             override suspend fun send(message: QueueMessage): Boolean {
                 sent.add(message)
+                forward?.deliver(message)
                 return true
             }
         }
@@ -83,9 +87,18 @@ class FakeSyncSession : SyncSessionPort {
     /** What the peer would have received, in order, of one type. */
     inline fun <reified T> sentOfType(): List<T> = sent.filterIsInstance<T>()
 
-    fun deliver(message: PlaybackMessage) = playback.playbackSink?.submit(message)
+    /**
+     * Joins this peer's outbound wire to [other]'s inbound one — the in-process stand-in for the
+     * control connection in the two-peer test. Delivery is immediate and ordered, which is what a
+     * TCP control connection gives; what it deliberately does not model is TLS, framing or loss.
+     */
+    fun forwardTo(other: FakeSyncSession) {
+        forward = other
+    }
 
-    fun deliver(message: QueueMessage) = playback.queueSink?.submit(message)
+    fun deliver(message: PlaybackMessage) = playback.playbackSink?.submit(message, currentAuthGeneration)
+
+    fun deliver(message: QueueMessage) = playback.queueSink?.submit(message, currentAuthGeneration)
 }
 
 /** Records every player call in order — the whole assertion surface for "what did the audio do". */
@@ -112,6 +125,9 @@ class FakeSyncPlayer : SyncPlayerPort {
     }
 
     val calls = mutableListOf<Call>()
+
+    /** Fires on every recorded call — the two-peer test uses it to stamp *when* a start happened. */
+    var onCall: ((Call) -> Unit)? = null
     private val stateFlow = MutableStateFlow(PlayerState())
     override val playerState: StateFlow<PlayerState> = stateFlow.asStateFlow()
 
@@ -123,27 +139,32 @@ class FakeSyncPlayer : SyncPlayerPort {
         content: SyncPlayableContent,
         positionMs: Long,
     ) {
-        calls.add(Call.Prepare(content.contentHash, positionMs))
+        record(Call.Prepare(content.contentHash, positionMs))
     }
 
     override suspend fun start() {
-        calls.add(Call.Start)
+        record(Call.Start)
     }
 
     override suspend fun pause() {
-        calls.add(Call.Pause)
+        record(Call.Pause)
     }
 
     override suspend fun seek(positionMs: Long) {
-        calls.add(Call.Seek(positionMs))
+        record(Call.Seek(positionMs))
     }
 
     override suspend fun setRate(rate: Double) {
-        calls.add(Call.SetRate(rate))
+        record(Call.SetRate(rate))
     }
 
     override suspend fun stop() {
-        calls.add(Call.Stop)
+        record(Call.Stop)
+    }
+
+    private fun record(call: Call) {
+        calls.add(call)
+        onCall?.invoke(call)
     }
 }
 

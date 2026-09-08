@@ -37,3 +37,18 @@ failure > 2 s).
 | One phone plays aloud for both | Physically impossible — each person has their own Bluetooth audio device |
 | Fixed startup delay, no clock sync | Crystal drift is 10–50 ppm ⇒ 36–180 ms/hour. Fails the 30-minute drift test by construction |
 | Correct drift by seeking only | Audible clicks and repeated words. Hence the rate-nudge tier for the common mid-range case |
+
+---
+
+## See also
+
+**This ADR is unchanged and unamended.** Its mechanics — never restream, schedule against a synced
+clock, the four-tier ladder, `LEAD = max(120 ms, 4 × rtt_p95)` — are exactly what Phase 5
+implemented.
+
+[ADR-024](ADR-024-synchronized-playback-integration.md) records the *integration-level* decisions
+this one does not cover (the follower→leader intent convention, two unspecified payloads, the
+snapshot-only queue replication rule, the corrected queue cap, and where peer content availability
+comes from), and the one refinement it does make to ARCHITECTURE §7.3: each device measures its own
+drift against the authoritative timeline rather than the leader computing the follower's. It does not
+re-open anything decided here.

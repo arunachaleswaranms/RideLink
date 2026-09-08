@@ -55,6 +55,10 @@ public actor SyncPlaybackCoordinator {
     var epoch = OperationFence()
     var currentEpochToken: Int64 = -1
 
+    /// The ordered inbound pipe. Bounded, like every other queue this project adds (ADR-021 §5).
+    let inbound = OrderedEventChannel<Phase5Inbound>(bufferingNewest: SyncPlaybackCoordinator.inboundCapacity)
+    private var drainTask: Task<Void, Never>?
+
     public var onDiagnosticsChanged: (@Sendable (SyncPlaybackDiagnostics) -> Void)?
     public var onQueueChanged: (@Sendable (SharedQueueState) -> Void)?
 
@@ -81,9 +85,23 @@ public actor SyncPlaybackCoordinator {
     /// Attaches the two Phase 5 sinks. Called once by the composition root, after construction, so
     /// the actor is fully initialised before anything can be delivered into it.
     public func start() async {
-        await session.channel.setPlaybackSink(PlaybackForwarder(coordinator: self))
-        await session.channel.setQueueSink(QueueForwarder(coordinator: self))
+        drainTask = Task { [weak self] in await self?.drainInbound() }
+        await session.channel.setPlaybackSink(PlaybackForwarder(inbound: inbound))
+        await session.channel.setQueueSink(QueueForwarder(inbound: inbound))
     }
+
+    /// Ends the drain. The channel outlives individual sessions deliberately — a session boundary is
+    /// expressed by the generation each frame carries, not by tearing the pipe down — so this is for
+    /// process/coordinator teardown only.
+    public func shutdown() async {
+        inbound.finish()
+        drainTask?.cancel()
+        drainTask = nil
+        tickTask?.cancel()
+        tickTask = nil
+    }
+
+    static let inboundCapacity = 256
 
     public func setDiagnosticsObserver(_ observer: (@Sendable (SyncPlaybackDiagnostics) -> Void)?) {
         onDiagnosticsChanged = observer
@@ -148,6 +166,7 @@ public actor SyncPlaybackCoordinator {
         diagnostics.hardSeekCount = 0
         diagnostics.lastScheduleErrorUs = nil
         diagnostics.sessionGeneration = await session.currentAuthGeneration()
+        diagnostics.correctionTickCount = 0
         publishQueue()
         publishDiagnostics()
     }
@@ -158,9 +177,6 @@ public actor SyncPlaybackCoordinator {
         let live = await session.currentAuthGeneration()
         return generation == live
     }
-
-    /// The live session generation, read at *dispatch* time by the two sink forwarders.
-    func captureGeneration() async -> Int64 { await session.currentAuthGeneration() }
 
     // MARK: - The clock
 

@@ -2,13 +2,20 @@ import Foundation
 import RideLinkCore
 
 /// Where a PROTOCOL §5 playback frame that has passed the ADR-019 trust gate is delivered.
+///
+/// `generation` is the authentication generation that was live **when the frame was read off the
+/// wire** (ADR-023 §3). It is a parameter rather than something the receiver looks up, because a
+/// receiver that looks it up reads whatever is live when its own work happens to run — which is the
+/// exact shape of bug ADR-023 Amendment A3 found in Phase 4.
+///
+/// `submit` must be non-suspending and must not block: it is called from the control read loop.
 public protocol PlaybackSink: Sendable {
-    func submit(_ message: PlaybackMessage)
+    func submit(_ message: PlaybackMessage, generation: Int64)
 }
 
 /// Where a PROTOCOL §9 queue frame that has passed the ADR-019 trust gate is delivered.
 public protocol QueueSink: Sendable {
-    func submit(_ message: QueueMessage)
+    func submit(_ message: QueueMessage, generation: Int64)
 }
 
 /// The Phase 5 half of the control plane (PROTOCOL §5 and §9): decode inbound frames, encode
@@ -91,19 +98,19 @@ public actor PlaybackRelay {
 
     /// Called only from the read loop's authenticated dispatch. A malformed frame is dropped and the
     /// connection survives — the framing was intact, only this message's shape was wrong.
-    public func deliverPlayback(type: String, payload: [String: JSONValue]) {
+    public func deliverPlayback(type: String, payload: [String: JSONValue], generation: Int64) {
         switch PlaybackCodec.parse(type: type, payload: payload) {
         case .parsed(let message):
-            playbackSink?.submit(message)
+            playbackSink?.submit(message, generation: generation)
         case .rejected(let reason):
             playbackRejections[reason, default: 0] += 1
         }
     }
 
-    public func deliverQueue(type: String, payload: [String: JSONValue]) {
+    public func deliverQueue(type: String, payload: [String: JSONValue], generation: Int64) {
         switch QueueCodec.parse(type: type, payload: payload) {
         case .parsed(let message):
-            queueSink?.submit(message)
+            queueSink?.submit(message, generation: generation)
         case .rejected(let reason):
             queueRejections[reason, default: 0] += 1
         }

@@ -22,9 +22,10 @@ subscription and no telemetry — the app is expected to work with mobile data s
 
 ## Status
 
-**Phase 0 (hardware feasibility) is done. Phases 1a, 1b, 2a and 2b are implementation-complete; the
-real-device gate is pending for all four.** The overall "2 Intercom" milestone is **not** complete —
-its hardware gates have not run.
+**Phase 0 (hardware feasibility) is done. Phases 1a, 1b, 2a, 2b, 3, 4 and 5 are
+implementation-complete; the real-device gate is pending for all of them.** The overall "2 Intercom"
+milestone is **not** complete — its hardware gates have not run. Phase 6 (intercom/music
+coexistence) and Phase 7 (Ride Mode + resilience) have not started.
 
 Phase 1b's two open security risks are closed with measurements rather than argument: a
 hand-encoded self-signed X.509 certificate that Apple's parser, BoringSSL and OpenSSL all accept,
@@ -60,6 +61,16 @@ implements `AUDIO_STATE` (no wire change), moves the whole `AVAudioSession`/`Aud
 surface into a shared pure reducer, and adds monotonic setup-timing instrumentation. Decisions:
 [`ADR-021`](docs/DECISIONS/ADR-021-intercom-transmission-and-capture-ownership.md).
 
+**Phase 5 adds synchronized playback:** clock-scheduled `PLAY`/`PAUSE`/`RESUME`/`SEEK`/`NEXT`/
+`PREVIOUS` against a session clock derived from the existing NTP-style estimator, a replicated shared
+queue with one serialisation point, and ADR-004's four-tier drift ladder. Music audio never crosses
+the peer link — each phone plays its own local copy, and only commands, queue state and position
+reports travel. Every distributed decision lives in a pure, mirrored table pinned by six new shared
+vector sets rather than inside a coordinator, and a follower's intent is the *same* message type with
+`command_seq: 0`, so a follower structurally cannot allocate an ordering value. Decisions:
+[`ADR-004`](docs/DECISIONS/ADR-004-local-synchronized-playback.md) and
+[`ADR-024`](docs/DECISIONS/ADR-024-synchronized-playback-integration.md).
+
 **None of it has run on the two real phones, and no audio has been captured or played anywhere.**
 This environment has no Android device or emulator and only an iOS simulator; the Android media path
 has no test at all, and neither audio-session implementation has ever executed on a device.
@@ -68,7 +79,9 @@ gate yet — the app says so on screen. **No latency figure exists**, and the se
 measure how long the app took to bring voice up: they contain no Bluetooth hop and no jitter buffer,
 and mouth-to-ear latency cannot be inferred from them. See [`docs/STATUS.md`](docs/STATUS.md) for
 exactly what is verified and what is not, and [`docs/TEST_PLAN.md`](docs/TEST_PLAN.md) §3.1a/§3.1b
-for the line drawn item by item.
+for the line drawn item by item. Phase 5 adds nothing to that picture: **no alignment figure of any
+kind exists**, and the <100 ms music-synchronisation target must not be described as approached until
+TEST_PLAN §5.2's S-03 produces a real measurement from two phones and a recorder.
 
 ## Repository layout
 

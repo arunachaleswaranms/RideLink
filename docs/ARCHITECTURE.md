@@ -319,7 +319,8 @@ the session clock.
 - **Election:** the peer with the lexicographically smaller `peer_id` leads. `peer_id` is fixed at pairing, so this is stable, needs no negotiation, and cannot flap.
 - **Independent of the transport.** Leadership has nothing to do with which side called `connect()` or which socket survived §4.2. [ADR-010](DECISIONS/ADR-010-internal-leader-election.md) and [ADR-015](DECISIONS/ADR-015-duplicate-connection-resolution.md) use deliberately different keys so the two concerns cannot be conflated by accident.
 - **Recovery:** with two devices there is no quorum question. On reconnect the same rule re-elects the same leader. If the leader is the one that vanished, the survivor keeps playing locally and resumes as follower on reconnect.
-- **Ordering:** any peer may *issue* a command. The follower sends its intent to the leader; the leader assigns the authoritative `command_seq` and `effective_at`, then broadcasts. Both apply. Simultaneous conflicting commands are resolved by the leader's arrival order — deterministic by construction rather than by timestamp comparison.
+- **Ordering:** any peer may *issue* a command. The follower sends its intent to the leader; the leader assigns the authoritative `command_seq` and `effective_at`, then broadcasts. Both apply — including the leader, through the identical code path, because an "issuer applies immediately" shortcut is precisely how two phones end up on two timelines. Simultaneous conflicting commands are resolved by the leader's arrival order — deterministic by construction rather than by timestamp comparison.
+- **The intent needs no message type of its own:** it is the same type with `command_seq: 0` (PROTOCOL §5, [ADR-024 §3](DECISIONS/ADR-024-synchronized-playback-integration.md)). That also makes the role rule checkable — a follower cannot fabricate an authoritative `command_seq`, because the leader refuses to accept one at all.
 - **Latency cost:** a follower-issued command costs one extra half-RTT (~5–20 ms on a local link). Negligible against the ≥120 ms `effective_at` scheduling lead described in §7.
 - **Optimistic local feedback:** the issuing device may update its *UI* immediately (button state) but must not change *audio* until the leader's broadcast arrives. This keeps the UI responsive without ever letting the two devices diverge audibly.
 
@@ -635,6 +636,20 @@ Filtering, because a single sample on Wi-Fi is worthless:
 `session_time` = leader's monotonic clock. Every device converts:
 `session_time = local_mono + offset_to_leader` (leader's offset is 0).
 
+**Readiness gates scheduling, and it is not the same as having a number** (Phase 5,
+[ADR-024 §2](DECISIONS/ADR-024-synchronized-playback-integration.md)). The estimate is *ready* only
+once a window has been accepted or confirmed, and stops being ready the moment rule 5 rejects one
+pending confirmation, or a window produces no estimate at all. A synchronised command is never
+issued or scheduled against a clock in that state; the last accepted offset stays in place for
+playback already in flight, and **local playback is untouched** — the ride keeps its music, it simply
+stops being synchronised until the estimator is healthy again. The leader waits for its own estimator
+too, even though its offset is zero by definition: it cannot observe the follower's convergence, and
+its own first accepted window is the best evidence that both bursts completed on a healthy link.
+
+`ClockSync` also produces the **`rtt_p95`** §7.2's scheduling lead needs, from a bounded window fed by
+every `PONG` (keepalive included, not only the burst samples). There is one clock/RTT estimator per
+session and no second RTT tracker anywhere in the codebase.
+
 ### 7.2 Scheduled start
 
 ```
@@ -645,6 +660,15 @@ Filtering, because a single sample on Wi-Fi is worthless:
 5. each device converts effective_at → its own local monotonic deadline
 6. each device pre-rolls the decoder, then starts at that deadline
 ```
+
+Step 2's "confirm possession" is the gate REQUIREMENTS §9.4 requires: a track present on only one
+phone cannot begin synchronised playback. A peer holds content if its synced manifest advertises it
+**or** it reported verifying a transfer this device served it in this session — the latter because a
+manifest is generated from the Phase 3 library alone, so a track the peer holds only in its verified
+Phase 4 cache appears in no manifest ([ADR-024 §7](DECISIONS/ADR-024-synchronized-playback-integration.md)).
+
+A deadline that has already passed by the time a device is ready to act on it is **applied
+immediately and counted**, never skipped and never scheduled backwards (PROTOCOL §5 rule 2).
 
 Pre-roll before the deadline is what makes this work — both platforms need tens of milliseconds
 to open and prime a decoder, and doing it after the deadline guarantees a late start.
@@ -657,9 +681,26 @@ the render thread, which is materially more precise than a timer callback.
 Two independent crystals will diverge (typically 10–50 ppm ⇒ 36–180 ms/hour), so measure and
 correct — but the brief is explicit that constant seeking for tiny errors is wrong.
 
-Every 5 s both devices report `POSITION_REPORT { track_hash, position_ms, at_session_time }`.
-The leader computes `drift = follower_position − expected_position`, then applies a **dead-band
-ladder**:
+Every 5 s both devices report `POSITION_REPORT { track_hash, position_ms, at_session_us, playing,
+playback_rate }`.
+
+**Each device measures its own drift against the authoritative timeline, and corrects itself**
+(Phase 5, [ADR-024 §10](DECISIONS/ADR-024-synchronized-playback-integration.md), refining this
+section's earlier "the leader computes and applies"). Drift is
+`actual local position − expected position at the current session time`, where "expected" comes from
+the anchor the last accepted command set — never one phone's reported position minus the other's,
+because those two numbers are sampled at different session instants and separated by a network delay,
+so their difference is not a drift. Both phones tracking one authoritative timeline converges to the
+same result with strictly less to go wrong, and it keeps correcting through a moment when reports are
+not arriving.
+
+The peer's `POSITION_REPORT` is still consumed and still produces a number: **the peer's** drift
+against that same timeline, which is FR-023's `music_drift_ms`. It is diagnostics and corrective
+input, never a command, and it can never outrank one. It is bound to the current playback epoch by
+`track_hash` **and** `at_session_us >= ` the timeline's anchor, so a report from a previous play of
+the same track is inert.
+
+Whichever device measures it, the **dead-band ladder** is the same:
 
 | \|drift\| | Action | Why |
 |---|---|---|
@@ -677,9 +718,23 @@ Rate nudging is the interesting part and is available on both platforms:
 `AVAudioUnitVarispeed` / `AVAudioEngine`'s rate. Both resample rather than change pitch
 audibly at 0.2 %.
 
+**Hysteresis is the gap between the tiers, not a separate mechanism.** A nudge engages at
+|drift| ≥ 25 ms and disengages only once |drift| < 15 ms — never merely on falling back below the
+engage threshold — and a nudge already at the requested rate re-emits nothing. There is no input that
+both engages and releases, which is what makes oscillation impossible rather than unlikely. The
+**third** qualifying hard seek inside 60 s becomes the failure declaration rather than a third seek:
+seeking a third time in a minute is the definition of not converging.
+
+Whenever correction ends — converged, suspended by a track change, a declared failure, a session
+loss, or the user leaving synchronised mode — the playback rate is restored to **exactly 1.0**. The
+ladder never leaves 0.998 or 1.002 behind on the local player.
+
 **Targets** (reconciled in [ADR-008](DECISIONS/ADR-008-requirement-conflict-resolutions.md)):
 hard acceptance ≤150 ms, product target <100 ms, stretch <50 ms. The dead-band above is set so
-that steady-state error stays under 25 ms, which leaves ample margin.
+that steady-state error stays under 25 ms, which leaves ample margin. **None of the three has been
+measured**: every figure Phase 5 produces is a *software* scheduling number, and mouth-to-ear or
+speaker-to-speaker alignment includes a decoder, a mixer and two Bluetooth hops that no laptop test
+touches.
 
 ---
 
@@ -910,6 +965,21 @@ isolating them buys nothing.
 Concurrency: `SessionCoordinator`, `ControlChannel` and `TransferManager` are `actor`s — each
 owns mutable state touched from network and UI contexts, which is exactly the case actors are
 for. `RideLinkCore` types are `Sendable` value types.
+
+**Phase 5 additions** (ADR-004, ADR-024). Android: `core.playback` (the pure tables —
+`CommandOrderGate`, `ScheduledCommand`, `PlaybackTimeline`, `DriftController`, `SharedQueue`),
+`core.sync.SessionClock`, `core.protocol.{PlaybackCodec, QueueCodec}`, `network.playback.PlaybackRelay`
+and `app.sync.SyncPlaybackCoordinator`. iOS mirrors each in `RideLinkCore.Playback`,
+`RideLinkCore.Sync`, `RideLinkCore.Protocol` and `RideLinkPlatform.Control` — with
+`SyncPlaybackCoordinator` in **`RideLinkPlatform`, not the app target**, because the app target has
+no test target and its Android twin is unit-tested. Only the adapters over `MusicCoordinator` stay in
+the app.
+
+`network.control.ControlRelays` also appeared in Phase 5: the five message-family relays
+(`VOICE_*`, `AUDIO_STATE`, `MANIFEST_*`, `TRANSFER_*`, Phase 5) were five near-identical
+construction blocks inside `ControlSessionManager`, and adding a sixth took that class past detekt's
+`LargeClass` ceiling. `config/detekt/detekt.yml` records that the headroom bought for it in Phase 2a
+"is the last of it", so the answer was the extraction that file prescribes rather than another raise.
 
 ### 9.3 The shared seam
 

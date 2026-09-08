@@ -10,7 +10,9 @@ import XCTest
 ///
 /// **The only clock is `FakeMonotonicClock`** — time moves when a test moves it and never otherwise,
 /// so a failure here is a statement about the algorithm rather than about how busy the machine was.
-/// `settle()` drains the actor's queued work; it waits on the cooperative pool, not on wall time.
+/// Waits are on **published counters** (`inboundProcessedCount`, `correctionTickCount`), never on a
+/// fixed number of scheduler yields: handling one frame or one cadence tick spans several actor
+/// hops, and "yield 40 times and hope" is a race a stress run of this suite caught at roughly 8 %.
 ///
 /// The pure tables these tests drive (`CommandOrderGate`, `DriftController`, `SharedQueue`,
 /// `SessionClock`) are pinned separately and identically on both platforms by `protocol/vectors/`.
@@ -60,6 +62,41 @@ final class SyncPlaybackCoordinatorTests: XCTestCase {
     }
 
     private var lead: Int64 { SessionClock.leadUs(rttP95Us: 8_000) }
+
+    /// Delivers a frame and waits for the coordinator to have **finished considering it** — applied,
+    /// or deliberately refused. The wait is on `inboundProcessedCount`, not on a number of scheduler
+    /// yields: handling one frame spans several actor hops, and "yield 40 times and hope" is a race
+    /// that a stress run of this suite caught at roughly 8 %.
+    private func deliverAndAwait(_ message: PlaybackMessage) async {
+        let before = await coordinator.diagnostics.inboundProcessedCount
+        await session.deliver(message)
+        await awaitProcessed(beyond: before)
+    }
+
+    private func deliverAndAwait(_ message: QueueMessage) async {
+        let before = await coordinator.diagnostics.inboundProcessedCount
+        await session.deliver(message)
+        await awaitProcessed(beyond: before)
+    }
+
+    private func awaitProcessed(beyond before: Int) async {
+        let deadline = Date().addingTimeInterval(5)
+        while Date() < deadline {
+            if await coordinator.diagnostics.inboundProcessedCount > before { return }
+            await Task.yield()
+        }
+        XCTFail("the coordinator never finished considering the frame")
+    }
+
+    /// Waits for a condition rather than for a fixed number of yields, for the same reason.
+    private func expect(_ description: String, _ condition: @escaping () async -> Bool) async {
+        let deadline = Date().addingTimeInterval(5)
+        while Date() < deadline {
+            if await condition() { return }
+            await Task.yield()
+        }
+        XCTFail("timed out waiting for: \(description)")
+    }
 
     // MARK: - Role and clock readiness
 
@@ -115,8 +152,7 @@ final class SyncPlaybackCoordinatorTests: XCTestCase {
     func testAPlayForContentThisDeviceLacksDoesNotStartAndRequestsTheTransfer() async {
         await build()
         await connect(asLeader: false)
-        await session.deliver(playCommand(seq: 1, effectiveAt: clock.now() + 200_000))
-        await settle()
+        await deliverAndAwait(playCommand(seq: 1, effectiveAt: clock.now() + 200_000))
         let calls = await player.calls
         XCTAssertTrue(calls.isEmpty, "PROTOCOL §5 rule 4: never start a track that is not present")
         let requests = await content.transferRequests
@@ -130,8 +166,7 @@ final class SyncPlaybackCoordinatorTests: XCTestCase {
         await connect(asLeader: false)
         await content.addLocal(SyncTestValues.hash(1))
         let effectiveAt = clock.now() + 500_000
-        await session.deliver(playCommand(seq: 1, effectiveAt: effectiveAt))
-        await settle()
+        await deliverAndAwait(playCommand(seq: 1, effectiveAt: effectiveAt))
         var calls = await player.calls
         XCTAssertEqual(calls, [.prepare(SyncTestValues.hash(1), 0)])
         XCTAssertTrue(clock.pendingDeadlines().contains(effectiveAt), "the command waits for its own deadline")
@@ -142,7 +177,7 @@ final class SyncPlaybackCoordinatorTests: XCTestCase {
         XCTAssertEqual(calls.count, 1, "nothing may start before the deadline")
 
         clock.advance(to: effectiveAt)
-        await settle()
+        await expect("the scheduled start fired") { [player] in await player!.calls.contains(.start) }
         calls = await player.calls
         XCTAssertEqual(calls.last, .start)
         let diagnostics = await coordinator.diagnostics
@@ -153,8 +188,10 @@ final class SyncPlaybackCoordinatorTests: XCTestCase {
         await build()
         await connect(asLeader: false)
         await content.addLocal(SyncTestValues.hash(1))
-        await session.deliver(playCommand(seq: 1, effectiveAt: clock.now() - 250_000))
-        await settle()
+        await deliverAndAwait(playCommand(seq: 1, effectiveAt: clock.now() - 250_000))
+        // The command is applied in its own task, which `inboundProcessedCount` deliberately does
+        // not cover — it counts frames considered, not actions performed.
+        await expect("the late command applied") { [player] in await player!.calls.contains(.start) }
         let calls = await player.calls
         XCTAssertTrue(calls.contains(.start), "a late command applies, it is never skipped")
         let diagnostics = await coordinator.diagnostics
@@ -173,13 +210,11 @@ final class SyncPlaybackCoordinatorTests: XCTestCase {
         await connect(asLeader: false)
         await content.addLocal(SyncTestValues.hash(1))
         let at = clock.now() + 100_000
-        await session.deliver(playCommand(seq: 5, effectiveAt: at))
-        await settle()
+        await deliverAndAwait(playCommand(seq: 5, effectiveAt: at))
         let afterFirst = await player.calls.count
 
-        await session.deliver(playCommand(seq: 5, effectiveAt: at))
-        await session.deliver(playCommand(seq: 4, effectiveAt: at))
-        await settle()
+        await deliverAndAwait(playCommand(seq: 5, effectiveAt: at))
+        await deliverAndAwait(playCommand(seq: 4, effectiveAt: at))
         let calls = await player.calls
         XCTAssertEqual(calls.count, afterFirst, "neither a duplicate nor a stale command may touch the player")
         let diagnostics = await coordinator.diagnostics
@@ -192,8 +227,7 @@ final class SyncPlaybackCoordinatorTests: XCTestCase {
         await build()
         await connect(asLeader: false)
         await content.addLocal(SyncTestValues.hash(1))
-        await session.deliver(playCommand(seq: PlaybackBounds.unassignedCommandSeq, effectiveAt: clock.now()))
-        await settle()
+        await deliverAndAwait(playCommand(seq: PlaybackBounds.unassignedCommandSeq, effectiveAt: clock.now()))
         var diagnostics = await coordinator.diagnostics
         XCTAssertEqual(diagnostics.roleViolationCount, 1)
         var calls = await player.calls
@@ -203,8 +237,7 @@ final class SyncPlaybackCoordinatorTests: XCTestCase {
         await connect(asLeader: true)
         await content.addLocal(SyncTestValues.hash(1))
         await content.addPeer(SyncTestValues.hash(1))
-        await session.deliver(playCommand(seq: 9, effectiveAt: clock.now()))
-        await settle()
+        await deliverAndAwait(playCommand(seq: 9, effectiveAt: clock.now()))
         diagnostics = await coordinator.diagnostics
         XCTAssertEqual(diagnostics.roleViolationCount, 1, "a follower cannot fabricate an authoritative command_seq")
         calls = await player.calls
@@ -231,8 +264,7 @@ final class SyncPlaybackCoordinatorTests: XCTestCase {
         await connect(asLeader: true)
         await content.addLocal(SyncTestValues.hash(1))
         await content.addPeer(SyncTestValues.hash(1))
-        await session.deliver(intentPause())
-        await settle()
+        await deliverAndAwait(intentPause())
         let sent = await session.playbackMessages()
         guard case .pause(let header, _)? = sent.first else { return XCTFail("expected a stamped PAUSE, got \(sent)") }
         XCTAssertEqual(header.commandSeq, PlaybackBounds.firstCommandSeq)
@@ -243,9 +275,8 @@ final class SyncPlaybackCoordinatorTests: XCTestCase {
     func testTwoSimultaneousFollowerIntentsReceiveConsecutiveSequenceNumbers() async {
         await build()
         await connect(asLeader: true)
-        await session.deliver(intentPause())
-        await session.deliver(intentPause())
-        await settle()
+        await deliverAndAwait(intentPause())
+        await deliverAndAwait(intentPause())
         let seqs = await session.playbackMessages().compactMap { message -> Int64? in
             guard case .pause(let header, _) = message else { return nil }
             return header.commandSeq
@@ -284,8 +315,8 @@ final class SyncPlaybackCoordinatorTests: XCTestCase {
         let adds = await session.queueMessages().filter { if case .add = $0 { return true } else { return false } }
         XCTAssertEqual(adds.count, 1)
 
-        await session.deliver(
-            .snapshot(
+        await deliverAndAwait(
+            QueueMessage.snapshot(
                 queueRevision: 42,
                 items: [SharedQueueItem(
                     queueItemId: SyncTestValues.ulid(1), trackHash: SyncTestValues.hash(1),
@@ -294,7 +325,6 @@ final class SyncPlaybackCoordinatorTests: XCTestCase {
                 currentIndex: 0
             )
         )
-        await settle()
         queue = await coordinator.queueState
         XCTAssertEqual(queue.revision, 42)
         XCTAssertEqual(queue.currentItemId, SyncTestValues.ulid(1))
@@ -307,8 +337,8 @@ final class SyncPlaybackCoordinatorTests: XCTestCase {
         await settle()
         let before = await session.queueMessages().count
 
-        await session.deliver(
-            .add(
+        await deliverAndAwait(
+            QueueMessage.add(
                 header: QueueCommandHeader(commandSeq: PlaybackBounds.unassignedCommandSeq, queueRevision: 0),
                 items: [QueueAddItem(
                     queueItemId: SyncTestValues.ulid(7), trackHash: SyncTestValues.hash(2),
@@ -316,7 +346,6 @@ final class SyncPlaybackCoordinatorTests: XCTestCase {
                 )]
             )
         )
-        await settle()
         let diagnostics = await coordinator.diagnostics
         XCTAssertEqual(diagnostics.staleRevisionCount, 1)
         let after = await session.queueMessages().count
@@ -331,9 +360,12 @@ final class SyncPlaybackCoordinatorTests: XCTestCase {
         await build()
         await connect(asLeader: false)
         await content.addLocal(SyncTestValues.hash(1))
-        await session.deliver(playCommand(seq: 1, effectiveAt: clock.now() + 100_000))
+        // Tagged with generation 1 at dispatch, exactly as the read loop would — and the session has
+        // already moved on by the time the coordinator considers it.
         await session.setGeneration(2)
-        await settle()
+        let before = await coordinator.diagnostics.inboundProcessedCount
+        await session.deliver(playCommand(seq: 1, effectiveAt: clock.now() + 100_000), generation: 1)
+        await awaitProcessed(beyond: before)
         let calls = await player.calls
         XCTAssertTrue(calls.isEmpty, "an old session's command may never touch the new session's player")
     }
@@ -342,8 +374,7 @@ final class SyncPlaybackCoordinatorTests: XCTestCase {
         await build()
         await connect(asLeader: false)
         await content.addLocal(SyncTestValues.hash(1))
-        await session.deliver(playCommand(seq: 1, effectiveAt: clock.now()))
-        await settle()
+        await deliverAndAwait(playCommand(seq: 1, effectiveAt: clock.now()))
         await player.clearCalls()
 
         await coordinator.handleLinkLost()
@@ -363,12 +394,10 @@ final class SyncPlaybackCoordinatorTests: XCTestCase {
         await content.addLocal(SyncTestValues.hash(1))
         await content.addLocal(SyncTestValues.hash(2))
         let firstAt = clock.now() + 400_000
-        await session.deliver(playCommand(seq: 1, effectiveAt: firstAt, seed: 1))
-        await settle()
+        await deliverAndAwait(playCommand(seq: 1, effectiveAt: firstAt, seed: 1))
 
         let secondAt = clock.now() + 600_000
-        await session.deliver(playCommand(seq: 2, effectiveAt: secondAt, seed: 2))
-        await settle()
+        await deliverAndAwait(playCommand(seq: 2, effectiveAt: secondAt, seed: 2))
 
         clock.advance(to: firstAt)
         await settle()
@@ -376,7 +405,7 @@ final class SyncPlaybackCoordinatorTests: XCTestCase {
         XCTAssertFalse(calls.contains(.start), "track A's timer must not start track B")
 
         clock.advance(to: secondAt)
-        await settle()
+        await expect("the surviving epoch's start fired") { [player] in await player!.calls.contains(.start) }
         calls = await player.calls
         XCTAssertEqual(calls.last, .start)
         let diagnostics = await coordinator.diagnostics

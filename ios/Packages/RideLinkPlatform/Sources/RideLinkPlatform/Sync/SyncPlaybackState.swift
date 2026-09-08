@@ -68,6 +68,15 @@ public struct SyncPlaybackDiagnostics: Sendable, Equatable {
     public var routeTransitioning = false
     /// ADR-023 §3's authentication generation. A Phase 5 event tagged with an older one is inert.
     public var sessionGeneration: Int64 = 0
+    /// How many PROTOCOL §5 cadence ticks have completed — one report sent and one ladder decision
+    /// applied. A real FR-023 figure (a stalled counter means correction has stopped, which is worth
+    /// seeing), and the precise completion signal a test needs instead of guessing how many
+    /// scheduler yields a tick takes.
+    public var correctionTickCount = 0
+    /// How many inbound Phase 5 frames this coordinator has finished considering — applied, or
+    /// deliberately refused as duplicate/stale/role-violating. A real FR-023 figure, and the precise
+    /// signal a test needs instead of guessing how many scheduler turns a frame takes.
+    public var inboundProcessedCount = 0
 
     public init() {}
 }

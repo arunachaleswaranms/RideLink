@@ -1,7 +1,14 @@
 # RideLink Peer Protocol — v1
 
-**Status:** specification baseline for Phases 1–2b. **Wire version:** `1`.
-**Last updated:** 4 September 2026 (Phase 2b — §4.4 gained §4.4.1: the `revision` and sample-rate
+**Status:** specification baseline for Phases 1–5. **Wire version:** `1`.
+**Last updated:** 8 September 2026 (Phase 5 — §5 gained the follower-intent convention
+(`command_seq: 0`), `RESUME`'s and `PLAYBACK_STATE`'s payloads, and the shared `MAX_WIRE_INT` bound;
+§9's queue cap is corrected from 2 000 to **1 000** (2 000 does not fit `MAX_CONTROL_FRAME_BYTES`,
+which does not move) and `status` is **removed** from `QUEUE_SNAPSHOT` (§9 called it untrusted in the
+same paragraph that put it on the wire). §11 gained six vector directories. **No existing field
+moved and no existing example changed**; see
+[ADR-024](DECISIONS/ADR-024-synchronized-playback-integration.md).
+Previously 4 September 2026 (Phase 2b — §4.4 gained §4.4.1: the `revision` and sample-rate
 bounds, what does and does not move the revision, and the authentication gate `AUDIO_STATE` shares
 with `VOICE_*`. §4.4's `intercom_mode` is now stated as a **superset** of §7.4's `mode` rather than a
 mirror of it — the resolution of a contradiction in this document's own wording — and §7.4's `mode`
@@ -35,6 +42,8 @@ sync, playback commands, queue replication, catalogue manifests and transfer neg
 | `MAX_ENTRIES_PER_PAGE` | **256** |
 | `MAX_VOICE_SDP_BYTES` | **16 384** (16 KiB) — one `VOICE_OFFER`/`VOICE_ANSWER` `sdp`, §7.5 |
 | `MAX_VOICE_CANDIDATE_BYTES` | **512** — one `VOICE_ICE` `candidate`, §7.5 |
+| `MAX_QUEUE_ITEMS` | **1 000** — the shared queue's cap, §9 ([ADR-024 §6](DECISIONS/ADR-024-synchronized-playback-integration.md)) |
+| `MAX_WIRE_INT` | **9 007 199 254 740 991** (2^53 − 1) — every `uint64` field's bound, §5 |
 | Keepalive | `PING` every 2 s; peer declared lost after 6 s of silence |
 
 `MAX_CONTROL_FRAME_BYTES` is a defensive limit and does **not** move: a control message larger
@@ -543,10 +552,34 @@ Common fields on every playback command payload:
 
 | Field | Meaning |
 |---|---|
-| `command_seq` | uint64, leader-assigned, strictly increasing. **The ordering authority.** |
+| `command_seq` | uint64, leader-assigned, strictly increasing **from 1**. **The ordering authority.** `0` is reserved — see the intent convention below |
 | `effective_at_session_us` | session-clock instant at which the command takes audible effect |
-| `issued_by` | `peer_id` of the user who pressed the button (for UI attribution) |
+| `issued_by` | `peer_id` of the user who pressed the button (for UI attribution). Never an ordering or authorisation input |
 | `queue_revision` | queue version this command assumes; stale ⇒ reject and resync |
+
+**The follower→leader intent, and why it needs no message type**
+([ADR-024 §3](DECISIONS/ADR-024-synchronized-playback-integration.md)). A follower sends the **same
+message type** with `command_seq: 0` and `effective_at_session_us: 0`. Zero is not an ordering value:
+`command_seq` starts at 1, so it is unambiguously "unassigned". The leader validates the intent,
+assigns the next `command_seq` and a fresh `effective_at_session_us`, and broadcasts. It ignores the
+intent's `effective_at_session_us` outright — a follower has no authority to choose when something
+becomes audible.
+
+That makes the role rule checkable rather than assumed:
+
+| arriving at | `command_seq == 0` | `command_seq >= 1` |
+|---|---|---|
+| the **leader** | an intent — validate, stamp, broadcast | **role violation**, dropped and counted |
+| a **follower** | **role violation**, dropped and counted | authoritative — order and apply |
+
+A follower cannot fabricate an authoritative `command_seq`, because the leader refuses to accept one
+at all. `protocol/vectors/ordering/` pins the whole table.
+
+Every `uint64` field in this section — `command_seq`, `queue_revision`, `effective_at_session_us`,
+`at_session_us` — is bounded at `MAX_WIRE_INT` (2^53 − 1). Above that a JSON number does not survive
+a `Double`-backed decoder intact, and two peers would silently disagree about an ordering value
+([ADR-024 §9](DECISIONS/ADR-024-synchronized-playback-integration.md)). `position_ms` is bounded at
+86 400 000 (24 h) and `playback_rate` at `[0.5, 2.0]`.
 
 ```json
 // PLAY
@@ -559,10 +592,14 @@ Common fields on every playback command payload:
   "effective_at_session_us": 90260000000,           "effective_at_session_us": 90512000000,
   "queue_revision": 12, "issued_by": "a3f1…" }      "queue_revision": 12, "issued_by": "a3f1…" }
 
-// NEXT / PREVIOUS
-{ "command_seq": 91, "effective_at_session_us": 90600000000,
-  "queue_revision": 12, "issued_by": "b7c1…" }
+// NEXT / PREVIOUS                                // RESUME
+{ "command_seq": 91,                             { "command_seq": 89, "position_ms": 45120,
+  "effective_at_session_us": 90600000000,          "effective_at_session_us": 90300000000,
+  "queue_revision": 12, "issued_by": "b7c1…" }     "queue_revision": 12, "issued_by": "a3f1…" }
 ```
+
+`RESUME` takes `PAUSE`'s shape (ADR-024 §4): resuming from an explicit position is what lets both
+phones restart from the same instant rather than from whatever each had drifted to while paused.
 
 Rules:
 
@@ -580,7 +617,25 @@ Rules:
 ```
 
 `PLAYBACK_STATE` is the full authoritative snapshot the leader emits after any correction or
-reconnect — the reconciliation anchor, not an incremental update.
+reconnect — the reconciliation anchor, not an incremental update. Its shape is §10's
+`STATE_SNAPSHOT.playback` plus the two ordering values an anchor needs (ADR-024 §4):
+
+```json
+{ "command_seq": 94, "queue_revision": 13,
+  "track_hash": "sha256:1f3a…", "queue_item_id": "01J9…",
+  "position_ms": 128400, "playing": true, "at_session_us": 90990000000 }
+```
+
+`track_hash` and `queue_item_id` are **nullable** — "nothing is loaded" is a representable
+authoritative state. A follower adopts the `command_seq` so ordering continues from the authoritative
+value, and re-anchors its timeline when the snapshot describes the track it is already playing; it
+deliberately starts nothing, because a change of track is a `PLAY`.
+
+**Binding a `POSITION_REPORT` to a playback epoch.** `track_hash` alone is not enough — the same
+track can legitimately be played again — so a receiver additionally requires
+`at_session_us >= ` the current timeline's anchor. A report for the right track stamped before this
+epoch began is from the previous play of it and is dropped. No generation field is needed on the wire
+for this ([ADR-024 §11](DECISIONS/ADR-024-synchronized-playback-integration.md)).
 
 ---
 
@@ -1100,17 +1155,22 @@ bulk connection and the requester deletes its `.part`.
 { "command_seq": 92, "queue_revision": 13,      { "queue_revision": 13, "items": [
   "items": [ { "queue_item_id": "01J9…",          { "queue_item_id": "01J9…",
                "track_hash": "sha256:1f3a…",        "track_hash": "sha256:1f3a…",
-               "added_by": "a3f1…",                 "added_by": "a3f1…", "order": 0,
-               "position": "end" } ] }              "status": "ready" } ],
-                                                  "current_index": 0 }
+               "added_by": "a3f1…",                 "added_by": "a3f1…", "order": 1024 } ],
+               "position": "end" } ] }            "current_index": 0 }
+
+// QUEUE_REMOVE                                 // QUEUE_MOVE
+{ "command_seq": 93, "queue_revision": 14,      { "command_seq": 94, "queue_revision": 15,
+  "queue_item_ids": [ "01J9…" ] }                 "queue_item_id": "01J9…", "to_index": 2 }
 ```
 
-- The leader owns `queue_revision`, incrementing on every accepted mutation.
-- `queue_item_id` is a ULID minted by the *issuer*, so an add is idempotent under retry.
-- `order` uses sparse integers (steps of 1024) so `QUEUE_MOVE` rarely needs to renumber.
-- `status` ∈ `ready | remote_only | transferring | unavailable` — derived locally from presence, never trusted from the peer.
-- A follower mutation that loses a race is rejected with `ERROR/stale_revision`; the follower applies the next `QUEUE_SNAPSHOT`. **The snapshot always wins** — there is no merge algorithm to get subtly wrong.
-- `QUEUE_SNAPSHOT` is subject to the frame cap. A queue is user-curated and bounded in practice, but the sender must still check: a snapshot exceeding the cap is sent as a `queue_revision`-consistent sequence in a later protocol revision. **V1 caps the queue at 2 000 items** so this cannot happen — enforced at `QUEUE_ADD` with `ERROR/capability_missing`.
+- The leader owns `queue_revision`, incrementing on every accepted mutation — and **only** on one that changes something. A re-add of a `queue_item_id` already present, a remove of an absent id, or a move to the index already occupied are no-ops that leave the revision alone; a revision that moved without the queue moving would desynchronise the peers for no reason.
+- `queue_item_id` is a ULID minted by the *issuer*, so an add is idempotent under retry — and so the same `track_hash` can occupy the queue more than once as separately removable entries.
+- `order` uses sparse integers (steps of 1024) so `QUEUE_MOVE` rarely needs to renumber. When an insert exhausts a gap, the whole list is renumbered to fresh multiples of the step, so there is exactly one resulting order sequence for a given list.
+- `position` ∈ `end | next`; an unrecognised value degrades to `end` (§2 rule 2's posture, applied to a value).
+- **The three mutation types are the follower→leader intent channel; `QUEUE_SNAPSHOT` is the only way the queue reaches a follower** ([ADR-024 §5](DECISIONS/ADR-024-synchronized-playback-integration.md)). The leader applies, bumps the revision and broadcasts a snapshot; a follower adopts it wholesale, revision included, and never increments a revision itself. **The snapshot always wins** — there is no merge algorithm to get subtly wrong, and no CRDT.
+- A follower mutation that loses a race is refused with `ERROR/stale_revision` **and answered with a fresh `QUEUE_SNAPSHOT`** — the leader re-broadcasts authoritative state rather than waiting for a `STATE_REQUEST`.
+- `QUEUE_SNAPSHOT` is subject to the frame cap. **V1 caps the queue at 1 000 items**, enforced at `QUEUE_ADD` with `ERROR/capability_missing`. *(Corrected from 2 000 by [ADR-024 §6](DECISIONS/ADR-024-synchronized-playback-integration.md): at ~190 encoded bytes per item, 2 000 items is ~378 KB against a 262 144-byte cap, so the earlier claim that it "cannot happen" was arithmetically wrong. The **cap moved, the frame limit did not** — §1's rule stands.)* The sender still checks its encoded size, mirroring §8.1 rule 6.
+- **`status` is not on the wire.** An earlier draft of this section listed `status ∈ ready | remote_only | transferring | unavailable` on a snapshot item while stating in the same paragraph that it is "derived locally from presence, never trusted from the peer". A field that must never be trusted has no reason to be sent, and sending it hands a peer a channel to influence what the local UI claims about local storage. It is removed (ADR-024 §6); availability is `core.transfer.Availability`, as it always was. A peer that still sends it is tolerated as an unknown field and the value is ignored.
 
 ---
 
@@ -1174,12 +1234,15 @@ incompatibility a laptop-side test failure instead of a roadside mystery
 |---|---|
 | `envelope/*.json` | encode/decode round-trip, unknown-field tolerance, unknown-type tolerance, oversize rejection (262 144 + 1), malformed rejection |
 | `clock/*.json` | given 11 `(t1,t2,t3,t4)` samples with injected outliers ⇒ expected offset/rtt/jitter |
-| `drift/*.json` | given drift series ⇒ expected ladder action (`none`/`nudge`/`seek`/`fail`) |
-| `queue/*.json` | concurrent mutation sequences ⇒ expected final queue and revision |
+| `drift/*.json` | ARCHITECTURE §7.3's ladder as `(state, drift, route_state) -> (action, state)`: the 24/25/119/120/121/1999/2000/2001 boundaries in both signs, plus whole series where hysteresis, the 3-seeks-in-60 s budget and route-transition suspension become visible at all |
+| `queue/*.json` | §9's queue algebra as whole mutation sequences ⇒ expected queue, `current_index` and revision, including every no-op that must **not** advance the revision, duplicate-track entries under distinct ids, snapshot adoption, and the 1 000-item cap |
+| `session-clock/*.json` | ARCHITECTURE §7.1's `session_us` mapping and its inverse, nearest-rank `rtt_p95`, `LEAD = max(120 ms, 4 × rtt_p95)` at and past its floor and ceiling, and §5 rule 2's schedule-or-apply-immediately decision |
+| `playback-messages/*.json` | Field-level `PLAY`/`PAUSE`/`RESUME`/`SEEK`/`NEXT`/`PREVIOUS`/`POSITION_REPORT`/`PLAYBACK_STATE` validation: every required field missing, every field wrong-typed, every numeric bound at and one past its edge, ULID and `content_hash` formats, `PLAYBACK_STATE`'s two nullable identity fields, and unknown-field tolerance. Accepted rows assert the **re-encoded** payload, pinning encode and parse as inverses |
+| `queue-messages/*.json` | Field-level `QUEUE_*` validation, including that no encoder can emit a `status` field and that `current_index` is required-but-nullable |
 | `manifest/*.json` | two manifests ⇒ expected presence classification and delta |
 | `manifest-paging/*.json` | page-splitting for 1 / 1 000 / 5 000 entries and pathological metadata ⇒ expected page boundaries, per-page byte bound, and `MANIFEST_END` digest |
 | `manifest-paging-errors/*.json` | missing / duplicated / reordered page, wrong `manifest_id`, wrong `base_revision`, truncated stream, malformed page ⇒ expected rejection and *unchanged* live manifest |
-| `ordering/*.json` | out-of-order/duplicate/stale `command_seq` streams ⇒ expected applied set |
+| `ordering/*.json` | §2.1/§5's ordering as the full `(role, last_applied, incoming) -> decision` cross product, plus whole streams ⇒ expected applied set. Includes both role violations: an authoritative command arriving at the leader, and an intent arriving at a follower |
 | `sas/*.json` | fixed 32-byte exporter output ⇒ expected 6-digit SAS, per the table in §4.5.2 (test-only secrets) |
 | `identity/*.json` | SPKI hash formatting, pin match / mismatch, certificate re-issue with unchanged SPKI ⇒ still trusted |
 | `dedup/*.json` | `conn_tiebreak` pairs ⇒ which side's initiated connection survives; equal-value tie ⇒ both close |

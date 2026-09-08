@@ -119,6 +119,7 @@ struct SyncPlaybackView: View {
             row("hard seeks", String(diagnostics.hardSeekCount))
             row("schedule error", diagnostics.lastScheduleErrorUs.map { "\($0) us (software only)" } ?? "—")
             row("route transitioning", String(diagnostics.routeTransitioning))
+            row("correction ticks", String(diagnostics.correctionTickCount))
             row("session generation", String(diagnostics.sessionGeneration))
         }
     }

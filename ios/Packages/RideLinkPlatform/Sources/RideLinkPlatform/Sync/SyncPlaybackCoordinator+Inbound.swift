@@ -187,6 +187,22 @@ extension SyncPlaybackCoordinator {
         }
     }
 
+    /// Drains the inbound channel, one frame at a time, in arrival order. One consumer, so frame
+    /// N+1 is never handled before frame N — see `PlaybackForwarder`'s doc comment for why that is a
+    /// correctness property and not a tidiness one.
+    func drainInbound() async {
+        for await item in inbound.stream {
+            switch item {
+            case .playback(let message, let generation):
+                await onPlaybackMessage(message, generation: generation)
+            case .queue(let message, let generation):
+                await onQueueMessage(message, generation: generation)
+            }
+            diagnostics.inboundProcessedCount += 1
+            publishDiagnostics()
+        }
+    }
+
     // MARK: - Applying
 
     func applyAuthoritative(_ message: PlaybackMessage, generation: Int64, estimate: SessionClockEstimate) async {
@@ -425,6 +441,9 @@ extension SyncPlaybackCoordinator {
         diagnostics.routeTransitioning = transitioning
         publishDiagnostics()
         await applyCorrection(outcome.action, generation: generation, token: token)
+        // Last, so the counter means "this tick finished" rather than "this tick began".
+        diagnostics.correctionTickCount += 1
+        publishDiagnostics()
     }
 
     private func applyCorrection(_ action: DriftAction, generation: Int64, token: Int64) async {
@@ -521,29 +540,40 @@ extension SyncPlaybackCoordinator {
     static let positionReportIntervalUs: Int64 = PlaybackBounds.positionReportIntervalMs * 1_000
 }
 
-/// Forwards a `PLAY`/`PAUSE`/… frame into the actor, tagging it at *dispatch* with the session
-/// generation that was live when the read loop produced it.
-struct PlaybackForwarder: PlaybackSink {
-    let coordinator: SyncPlaybackCoordinator
+/// One inbound Phase 5 frame, already parsed, carrying the authentication generation that was live
+/// when the read loop produced it.
+enum Phase5Inbound: Sendable {
+    case playback(PlaybackMessage, generation: Int64)
+    case queue(QueueMessage, generation: Int64)
+}
 
-    func submit(_ message: PlaybackMessage) {
-        let coordinator = self.coordinator
-        Task {
-            let generation = await coordinator.captureGeneration()
-            await coordinator.onPlaybackMessage(message, generation: generation)
-        }
+/// Forwards a `PLAY`/`PAUSE`/… frame into the coordinator's **ordered** inbound channel.
+///
+/// **Why a channel and not a `Task` per frame.** The previous shape — `Task { await
+/// coordinator.onPlaybackMessage(…) }` — preserved only the order in which tasks were *created*;
+/// Swift makes no guarantee that independently created tasks run in creation order, which
+/// `OrderedEventChannel`'s own doc comment already says in as many words. A stress run of this
+/// phase's suites caught it: two frames delivered back to back were processed out of order roughly
+/// 8 % of the time. On the wire that is a real defect, not a test artefact — a follower processing
+/// `PAUSE(seq 6)` before `PLAY(seq 5)` would drop the `PLAY` as stale (`CommandOrderGate` doing
+/// exactly its job) and pause a track it never loaded. Same primitive, same reason as the Phase 1b
+/// control-event ordering fix (`docs/STATUS.md` §2h).
+///
+/// `send` is synchronous, so the read loop is never blocked and the frame's arrival order is the
+/// channel's order.
+struct PlaybackForwarder: PlaybackSink {
+    let inbound: OrderedEventChannel<Phase5Inbound>
+
+    func submit(_ message: PlaybackMessage, generation: Int64) {
+        inbound.send(.playback(message, generation: generation))
     }
 }
 
 struct QueueForwarder: QueueSink {
-    let coordinator: SyncPlaybackCoordinator
+    let inbound: OrderedEventChannel<Phase5Inbound>
 
-    func submit(_ message: QueueMessage) {
-        let coordinator = self.coordinator
-        Task {
-            let generation = await coordinator.captureGeneration()
-            await coordinator.onQueueMessage(message, generation: generation)
-        }
+    func submit(_ message: QueueMessage, generation: Int64) {
+        inbound.send(.queue(message, generation: generation))
     }
 }
 
