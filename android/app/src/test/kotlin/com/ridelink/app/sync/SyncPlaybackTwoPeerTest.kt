@@ -414,6 +414,138 @@ class SyncPlaybackTwoPeerTest {
             assertEquals(play.header.effectiveAtSessionUs, pair.followerStartSessionUs)
         }
 
+    // --- ADR-024 Amendment A2: the peer never sees what the leader has not delivered ---------------
+
+    /**
+     * The two-peer statement of Amendment A2's whole invariant: **the leader may not hold local
+     * authoritative state the peer was never told about.**
+     *
+     * The leader's outbound writer is stalled mid-write and its one-slot backlog filled, so the next
+     * authoritative operation meets a genuinely full outbound path. What must then be true of the
+     * *follower* — a real second coordinator, not an assertion about the leader's internals — is
+     * that its queue revision, its `command_seq` and its player agree with the leader's throughout.
+     */
+    @Test
+    fun `an operation the leader could not deliver leaves both peers agreeing`() =
+        runTest(StandardTestDispatcher()) {
+            val pair = Pair(this, leaderOutboundCapacity = 2)
+            pair.connect()
+            pair.leader.content.localHashes
+                .add(SyncTestValues.hash(1).value)
+            pair.leader.content.peerHashes
+                .add(SyncTestValues.hash(1).value)
+            pair.follower.content.localHashes
+                .add(SyncTestValues.hash(1).value)
+            pair.leader.coordinator.playSynchronized(SyncTestValues.hash(1))
+            runCurrent()
+            val play =
+                pair.leader.session
+                    .sentOfType<PlaybackMessage.Play>()
+                    .single()
+            pair.advanceSessionTo(play.header.effectiveAtSessionUs)
+            runCurrent()
+            pair.clearPlayers()
+
+            // Stall the leader's writer mid-frame, then fill its outbound path behind that frame.
+            val gate = kotlinx.coroutines.CompletableDeferred<Unit>()
+            pair.leader.session.sendGate = gate
+            pair.leader.coordinator.pause()
+            runCurrent()
+            pair.leader.coordinator.seek(1_000)
+            runCurrent()
+            pair.leader.coordinator.seek(2_000)
+            runCurrent()
+
+            // The next authoritative operation cannot be admitted at all.
+            pair.leader.coordinator.next()
+            runCurrent()
+            gate.complete(Unit)
+            pair.advanceSessionTo(play.header.effectiveAtSessionUs + 4_000_000)
+            runCurrent()
+
+            val leaderDiagnostics = pair.leader.coordinator.diagnostics.value
+            val followerDiagnostics = pair.follower.coordinator.diagnostics.value
+            assertTrue(leaderDiagnostics.outboundAuthorityLost, "the leader knows it failed to deliver")
+            assertEquals(
+                leaderDiagnostics.lastAppliedCommandSeq,
+                followerDiagnostics.lastAppliedCommandSeq,
+                "the two peers applied exactly the same authoritative commands",
+            )
+            assertEquals(
+                pair.leader.coordinator.queueState.value.revision,
+                pair.follower.coordinator.queueState.value.revision,
+                "and hold the same queue revision",
+            )
+            assertEquals(
+                pair.leader.player.calls
+                    .filter { it !is FakeSyncPlayer.Call.SetRate },
+                pair.follower.player.calls
+                    .filter { it !is FakeSyncPlayer.Call.SetRate },
+                "and drove their players identically — the undelivered SEEKs and NEXT reached neither",
+            )
+        }
+
+    /**
+     * The same invariant across a **session boundary** rather than a capacity limit: the leader's
+     * backlog is authorised by Session A and the boundary lands while it is still queued.
+     */
+    @Test
+    fun `an operation stranded by a session boundary reaches neither peer`() =
+        runTest(StandardTestDispatcher()) {
+            val pair = Pair(this)
+            pair.connect()
+            pair.leader.content.localHashes
+                .add(SyncTestValues.hash(1).value)
+            pair.leader.content.peerHashes
+                .add(SyncTestValues.hash(1).value)
+            pair.follower.content.localHashes
+                .add(SyncTestValues.hash(1).value)
+            pair.leader.coordinator.playSynchronized(SyncTestValues.hash(1))
+            runCurrent()
+            val play =
+                pair.leader.session
+                    .sentOfType<PlaybackMessage.Play>()
+                    .single()
+            pair.advanceSessionTo(play.header.effectiveAtSessionUs)
+            runCurrent()
+            pair.clearPlayers()
+            pair.follower.session.sent
+                .clear()
+
+            val gate = kotlinx.coroutines.CompletableDeferred<Unit>()
+            pair.leader.session.sendGate = gate
+            pair.leader.coordinator.pause()
+            runCurrent()
+            pair.leader.coordinator.seek(9_000)
+            runCurrent()
+
+            // Session A ends on both sides; the leader's backlog is still queued.
+            pair.leader.session.emit(
+                com.ridelink.network.control.ControlEvent
+                    .LinkLost(LINK_LOST),
+            )
+            pair.follower.session.emit(
+                com.ridelink.network.control.ControlEvent
+                    .LinkLost(LINK_LOST),
+            )
+            runCurrent()
+            pair.reconnect(generation = 2)
+            gate.complete(Unit)
+            runCurrent()
+
+            assertTrue(
+                pair.follower.player.calls
+                    .none { it is FakeSyncPlayer.Call.Seek && it.positionMs == 9_000L },
+                "Session A's SEEK never reached the follower under Session B",
+            )
+            assertEquals(
+                0L,
+                pair.follower.coordinator.queueState.value.revision,
+                "and Session B began from an empty authoritative queue on both sides",
+            )
+            assertEquals(0L, pair.leader.coordinator.queueState.value.revision)
+        }
+
     // --- the harness ------------------------------------------------------------------------------
 
     /**
@@ -431,6 +563,8 @@ class SyncPlaybackTwoPeerTest {
     /** Two coordinators joined so each one's `send` becomes the other's `deliver`. */
     private inner class Pair(
         private val scope: TestScope,
+        /** Injected only by the Amendment A2 scenarios, which need the outbound edge forced. */
+        private val leaderOutboundCapacity: Int = 256,
     ) {
         val leaderClock = FakeMonotonicClock(nowUs = LEADER_START_US)
         val followerClock = FakeMonotonicClock(nowUs = LEADER_START_US - OFFSET_US)
@@ -444,17 +578,19 @@ class SyncPlaybackTwoPeerTest {
         init {
             val leaderSession = FakeSyncSession()
             val followerSession = FakeSyncSession()
-            leader = build(SyncTestValues.leaderPeerId, leaderSession, leaderClock, 100)
-            follower = build(SyncTestValues.followerPeerId, followerSession, followerClock, 500)
+            leader = build(SyncTestValues.leaderPeerId, leaderSession, leaderClock, 100, leaderOutboundCapacity)
+            follower = build(SyncTestValues.followerPeerId, followerSession, followerClock, 500, 256)
             leaderSession.forwardTo(followerSession)
             followerSession.forwardTo(leaderSession)
         }
 
+        @Suppress("LongParameterList") // one per collaborator the peer owns, plus the injected bound
         private fun build(
             peerId: PeerId,
             session: FakeSyncSession,
             clock: FakeMonotonicClock,
             idBase: Int,
+            outboundCapacity: Int,
         ): Peer {
             val player = FakeSyncPlayer()
             val content = FakeSyncContent()
@@ -470,6 +606,7 @@ class SyncPlaybackTwoPeerTest {
                     sleeper = clock.sleeper,
                     routeTransitioning = { false },
                     nextQueueItemId = { SyncTestValues.ulid(seed++) },
+                    outboundCapacity = outboundCapacity,
                 )
             return Peer(peerId, session, player, content, coordinator)
         }
@@ -517,6 +654,21 @@ class SyncPlaybackTwoPeerTest {
             follower.player.calls.clear()
         }
 
+        /** A fresh authentication generation on both peers (ADR-023 §3), as a reconnect produces. */
+        suspend fun reconnect(generation: Long) {
+            leader.session.currentAuthGeneration = generation
+            follower.session.currentAuthGeneration = generation
+            leader.session.emit(
+                com.ridelink.network.control.ControlEvent
+                    .Connected(follower.localPeerId, SESSION_ID, true),
+            )
+            follower.session.emit(
+                com.ridelink.network.control.ControlEvent
+                    .Connected(leader.localPeerId, SESSION_ID, false),
+            )
+            scope.runCurrent()
+        }
+
         /** Moves both clocks to the same **session** instant, each through its own offset. */
         fun advanceSessionTo(sessionUs: Long) {
             leaderClock.advanceTo(SessionClock.localMonoUs(sessionUs, LEADER_OFFSET_TO_SESSION))
@@ -542,5 +694,9 @@ class SyncPlaybackTwoPeerTest {
          * visible.
          */
         const val LEADER_OFFSET_TO_SESSION = 0L
+
+        val LINK_LOST =
+            com.ridelink.network.control.LinkLossReason
+                .NETWORK
     }
 }

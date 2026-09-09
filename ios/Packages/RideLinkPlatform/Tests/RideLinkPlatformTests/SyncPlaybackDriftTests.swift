@@ -261,7 +261,9 @@ final class SyncPlaybackDriftTests: XCTestCase {
         let deadline = Date().addingTimeInterval(5)
         while Date() < deadline {
             let diagnostics = await coordinator.diagnostics
-            if diagnostics.outboundSentCount == diagnostics.outboundEnqueuedCount { return }
+            // Amendment A2: "attempted", not "sent" — a refused or stale frame is a
+            // completed attempt, and the drain is quiescent once it has considered every frame.
+            if diagnostics.outboundAttemptCount == diagnostics.outboundEnqueuedCount { return }
             await Task.yield()
         }
         XCTFail("the ordered outbound path never drained")

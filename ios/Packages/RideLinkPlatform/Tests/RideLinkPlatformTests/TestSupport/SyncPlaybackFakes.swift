@@ -39,6 +39,18 @@ actor FakeSyncSession: SyncSessionPort {
     private var playbackSink: (any PlaybackSink)?
     private var queueSink: (any QueueSink)?
 
+    /// ADR-024 Amendment A2 Finding C: what the authenticated transport answers. `PlaybackRelay.send`
+    /// returns false when there is no authenticated writer or the write throws, and A2 exists because
+    /// the drain used to count that as a send.
+    private var sendResult = true
+    /// Amendment A2 Finding B: parks the single outbound consumer **inside** a write, so a test can
+    /// land a session boundary strictly between one frame reaching the wire and the next being
+    /// considered — the real "socket is slow, backlog exists" shape.
+    private var sendGate: CheckedContinuation<Void, Never>?
+    private var sendGateArmed = false
+    /// The authentication generation live at the instant each frame was actually written.
+    private(set) var sentGenerations: [Int64] = []
+
     nonisolated var channel: any SyncPlaybackChannel { FakeChannel(session: self) }
 
     func currentAuthGeneration() async -> Int64 { generation }
@@ -53,7 +65,10 @@ actor FakeSyncSession: SyncSessionPort {
 
     func record(_ message: any Sendable) { sent.append(message) }
 
-    func clearSent() { sent.removeAll() }
+    func clearSent() {
+        sent.removeAll()
+        sentGenerations.removeAll()
+    }
 
     func attach(playback: (any PlaybackSink)?) { playbackSink = playback }
 
@@ -71,6 +86,37 @@ actor FakeSyncSession: SyncSessionPort {
 
     func queueMessages() -> [QueueMessage] { sent.compactMap { $0 as? QueueMessage } }
 
+    func setSendResult(_ value: Bool) { sendResult = value }
+
+    /// Arms the write gate. Every subsequent write parks until `releaseSendGate`.
+    func armSendGate() { sendGateArmed = true }
+
+    func releaseSendGate() {
+        sendGateArmed = false
+        let parked = sendGate
+        sendGate = nil
+        parked?.resume()
+    }
+
+    var isSendGateParked: Bool { sendGate != nil }
+
+    /// `PlaybackRelay.write`, modelled exactly: park where the socket would, then refuse the frame
+    /// unless the generation that authorised it is still the live one (Amendment A2 Finding B). A
+    /// real relay resolves the writer and the `session_id` for that generation and writes to *that*
+    /// connection; refusing here is the same guarantee expressed the way a fake can.
+    fileprivate func write(_ message: any Sendable, authorizingGeneration: Int64) async -> Bool {
+        if sendGateArmed {
+            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                sendGate = continuation
+            }
+        }
+        guard sendResult else { return false }
+        guard authorizingGeneration == generation else { return false }
+        sent.append(message)
+        sentGenerations.append(generation)
+        return true
+    }
+
     struct FakeChannel: SyncPlaybackChannel {
         let session: FakeSyncSession
 
@@ -79,15 +125,13 @@ actor FakeSyncSession: SyncSessionPort {
         func setQueueSink(_ sink: (any QueueSink)?) async { await session.attach(queue: sink) }
 
         @discardableResult
-        func send(_ message: PlaybackMessage) async -> Bool {
-            await session.record(message)
-            return true
+        func send(_ message: PlaybackMessage, authorizingGeneration: Int64) async -> Bool {
+            await session.write(message, authorizingGeneration: authorizingGeneration)
         }
 
         @discardableResult
-        func send(_ message: QueueMessage) async -> Bool {
-            await session.record(message)
-            return true
+        func send(_ message: QueueMessage, authorizingGeneration: Int64) async -> Bool {
+            await session.write(message, authorizingGeneration: authorizingGeneration)
         }
     }
 }
@@ -114,7 +158,45 @@ actor FakeSyncPlayer: SyncPlayerPort {
     /// the fact that it did.
     func stampStartsWith(_ clock: @escaping @Sendable () -> Int64) { monotonicNowUs = clock }
 
-    func playerState() async -> PlayerState { state }
+    func playerState() async -> PlayerState {
+        if stateGateArmed {
+            if stateGateSkips > 0 {
+                stateGateSkips -= 1
+            } else {
+                stateGateArmed = false
+                await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                    stateGateContinuation = continuation
+                }
+            }
+        }
+        return state
+    }
+
+    // MARK: - The player-state gate (ADR-024 Amendment A2 Finding E)
+
+    private var stateGateArmed = false
+    private var stateGateSkips = 0
+    private var stateGateContinuation: CheckedContinuation<Void, Never>?
+
+    /// Parks a `playerState()` read after letting `skipping` of them through.
+    ///
+    /// `emitPlaybackState…` awaits `playerState()` immediately before its ownership proof and its
+    /// enqueue, so parking that read is what puts a session or epoch boundary strictly *inside* the
+    /// window Amendment A2 Finding E is about. On an actor every `await` is a re-entrancy point, so
+    /// this is the real interleaving rather than a stand-in for it.
+    func armStateGate(skipping: Int) {
+        stateGateArmed = true
+        stateGateSkips = skipping
+    }
+
+    func releaseStateGate() {
+        stateGateArmed = false
+        let parked = stateGateContinuation
+        stateGateContinuation = nil
+        parked?.resume()
+    }
+
+    var isStateGateParked: Bool { stateGateContinuation != nil }
 
     func setState(_ value: PlayerState) { state = value }
 

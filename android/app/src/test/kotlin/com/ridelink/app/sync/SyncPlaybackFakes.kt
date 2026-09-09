@@ -46,6 +46,24 @@ object SyncTestValues {
 class FakeSyncSession : SyncSessionPort {
     val sent = mutableListOf<Any>()
 
+    /**
+     * ADR-024 Amendment A2 Finding C: what the authenticated transport answers. `PlaybackRelay.send`
+     * returns false when there is no authenticated writer or the write throws, and A2 exists because
+     * the drain used to count that as a send.
+     */
+    var sendResult: Boolean = true
+
+    /**
+     * Amendment A2 Finding B: parks the single outbound consumer **inside** a send, so a test can
+     * land a session boundary strictly between one frame reaching the wire and the next being
+     * considered — the real "socket is slow, backlog exists" shape, rather than a hoped-for
+     * interleaving.
+     */
+    var sendGate: kotlinx.coroutines.CompletableDeferred<Unit>? = null
+
+    /** The authentication generation live at the instant each frame was actually written. */
+    val sentGenerations = mutableListOf<Long>()
+
     private var forward: FakeSyncSession? = null
 
     override val playback: PlaybackChannelPort =
@@ -53,18 +71,37 @@ class FakeSyncSession : SyncSessionPort {
             override var playbackSink: PlaybackSink? = null
             override var queueSink: QueueSink? = null
 
-            override suspend fun send(message: PlaybackMessage): Boolean {
-                sent.add(message)
-                forward?.deliver(message)
-                return true
-            }
+            override suspend fun send(
+                message: PlaybackMessage,
+                authorizingGeneration: Long,
+            ): Boolean = write(message, authorizingGeneration) { forward?.deliver(message) }
 
-            override suspend fun send(message: QueueMessage): Boolean {
-                sent.add(message)
-                forward?.deliver(message)
-                return true
-            }
+            override suspend fun send(
+                message: QueueMessage,
+                authorizingGeneration: Long,
+            ): Boolean = write(message, authorizingGeneration) { forward?.deliver(message) }
         }
+
+    /**
+     * `PlaybackRelay.write`, modelled exactly: park where the socket would, then refuse the frame
+     * unless the generation that authorised it is still the live one (ADR-024 Amendment A2
+     * Finding B). A real relay resolves the writer and the `session_id` for that generation and
+     * writes to *that* socket; refusing here is the same guarantee expressed the way a fake can.
+     */
+    @Suppress("ReturnCount") // the gate, the scripted result and the generation check
+    private suspend fun write(
+        message: Any,
+        authorizingGeneration: Long,
+        deliver: () -> Unit,
+    ): Boolean {
+        sendGate?.await()
+        if (!sendResult) return false
+        if (authorizingGeneration != currentAuthGeneration) return false
+        sent.add(message)
+        sentGenerations.add(currentAuthGeneration)
+        deliver()
+        return true
+    }
 
     private val eventFlow = MutableSharedFlow<ControlEvent>(extraBufferCapacity = 32)
     override val events: SharedFlow<ControlEvent> = eventFlow.asSharedFlow()

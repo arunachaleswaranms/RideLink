@@ -107,6 +107,51 @@ final class SyncPlaybackTwoPeerTests: XCTestCase {
         }
     }
 
+    // MARK: - ADR-024 Amendment A2 (the delivery audit), over real TLS
+
+    /// Amendment A2 Finding C over a **real authenticated TLS connection**, with no fake standing in
+    /// for the transport: the leader's control session is shut down, so `PlaybackRelay.send`
+    /// genuinely returns false — no authenticated writer, exactly as on a dropped link.
+    ///
+    /// What must then be true is the whole of A2: the leader does **not** apply a command the
+    /// follower can never receive, the failure is explicit rather than counted-and-ignored, and the
+    /// follower's applied `command_seq` is unchanged.
+    func testACommandTheRealTransportCouldNotSendIsNeverAppliedLocallyOverRealTls() async throws {
+        try await twoPairedPhones { leader, follower in
+            await leader.content.addLocal(SyncTestValues.hash(1))
+            await leader.content.addPeer(SyncTestValues.hash(1))
+            await follower.content.addLocal(SyncTestValues.hash(1))
+            await leader.coordinator.playSynchronized(SyncTestValues.hash(1))
+            try await Self.expect("both peers started") {
+                let leaderStarted = await leader.player.calls.contains(.start)
+                let followerStarted = await follower.player.calls.contains(.start)
+                return leaderStarted && followerStarted
+            }
+            let appliedBefore = await leader.coordinator.diagnostics.lastAppliedCommandSeq
+            let followerAppliedBefore = await follower.coordinator.diagnostics.lastAppliedCommandSeq
+            await leader.player.clearCalls()
+
+            // The real control session goes away. Nothing is mocked: the relay now has no
+            // authenticated writer, so its `send` answers false the way it does on a dead link.
+            await leader.manager.shutdown()
+            await leader.coordinator.pause()
+
+            try await Self.expect("the leader observed the failed write") {
+                await leader.coordinator.diagnostics.outboundFailedCount > 0
+            }
+            let diagnostics = await leader.coordinator.diagnostics
+            XCTAssertTrue(diagnostics.outboundAuthorityLost, "the failure is explicit, never a counter nobody reads")
+            XCTAssertEqual(diagnostics.syncState, .transportFailed)
+            XCTAssertEqual(diagnostics.lastAppliedCommandSeq, appliedBefore,
+                           "the leader committed nothing for a frame the transport refused")
+            let calls = await leader.player.calls
+            XCTAssertFalse(calls.contains(.pause), "and paused nothing the follower will never hear about")
+            let followerDiagnostics = await follower.coordinator.diagnostics
+            XCTAssertEqual(followerDiagnostics.lastAppliedCommandSeq, followerAppliedBefore,
+                           "the follower is exactly where the leader is")
+        }
+    }
+
     // MARK: - ADR-024 Amendment A1 (the closure audit), over real TLS
 
     /// Amendment A1 Finding A over a **real authenticated TLS connection**: the pillion presses Play
@@ -258,7 +303,10 @@ final class SyncPlaybackTwoPeerTests: XCTestCase {
         let coordinator: SyncPlaybackCoordinator
         let player: FakeSyncPlayer
         let content: FakeSyncContent
-        private let manager: ControlSessionManager
+        /// `internal`, not `private`: the Amendment A2 scenario ends the *real* control session to
+        /// make the relay's `send` genuinely answer false, which is the only honest way to reach
+        /// Finding C's path without a fake standing in for the transport.
+        let manager: ControlSessionManager
 
         init(manager: ControlSessionManager, localPeerId: PeerId, monotonicNowUs: @escaping @Sendable () -> Int64) {
             self.manager = manager

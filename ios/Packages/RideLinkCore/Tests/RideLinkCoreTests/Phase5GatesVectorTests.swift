@@ -4,11 +4,11 @@ import XCTest
 @testable import RideLinkCore
 
 /// Runs `protocol/vectors/phase5-gates/phase5_gates_vectors.json` — ADR-024 Amendment A1's three
-/// decision tables. The mirror is `com.ridelink.core.playback.Phase5GatesVectorTest`, running the
-/// **same file**.
+/// decision tables and Amendment A2's two. The mirror is
+/// `com.ridelink.core.playback.Phase5GatesVectorTest`, running the **same file**.
 ///
-/// The three tables are the audit's answer to CLAUDE.md rule 18: each was coordinator control flow
-/// before this amendment, so no vector could pin it and the two platforms had already drifted.
+/// All five are the audits' answer to CLAUDE.md rule 18: each was coordinator control flow before
+/// its amendment, so no vector could pin it and the two platforms had already drifted.
 final class Phase5GatesVectorTests: XCTestCase {
     private func document() throws -> [String: Any] {
         // swiftlint:disable:next force_cast
@@ -147,5 +147,89 @@ final class Phase5GatesVectorTests: XCTestCase {
         XCTAssertEqual(doc.int("default_inbound_capacity"), Phase5GateBounds.defaultInboundCapacity)
         XCTAssertEqual(doc.int("default_deferred_command_capacity"), Phase5GateBounds.defaultDeferredCommandCapacity)
         XCTAssertEqual(doc.int64("deferred_retry_interval_us"), Phase5GateBounds.deferredRetryIntervalUs)
+        XCTAssertEqual(doc.int("default_outbound_capacity"), Phase5GateBounds.defaultOutboundCapacity)
+    }
+
+    // MARK: - ADR-024 Amendment A2
+
+    func testOutboundCommitFullCrossProduct() throws {
+        let rows = try document().array("outbound_commit")
+        for element in rows {
+            guard let row = element as? [String: Any] else { continue }
+            let input = row.dict("input")
+            let commit = OutboundCommitGate.decide(
+                authority: OutboundAuthority(rawValue: input.str("authority"))!,
+                outcome: OutboundOutcome(rawValue: input.str("outcome"))!
+            )
+            XCTAssertEqual(
+                OutboundCommit(rawValue: row.dict("expected").str("commit")),
+                commit,
+                "vector \(row.str("name"))"
+            )
+        }
+        XCTAssertEqual(rows.count, 12, "the complete 3 authorities x 4 outcomes cross product")
+    }
+
+    func testAuthoritativeHoldCrossProduct() throws {
+        let rows = try document().array("authoritative_hold")
+        for element in rows {
+            guard let row = element as? [String: Any] else { continue }
+            let input = row.dict("input")
+            let admission = AuthoritativeHoldGate.decide(
+                heldCount: input.int("held_count"),
+                capacity: input.int("capacity")
+            )
+            XCTAssertEqual(
+                HoldAdmission(rawValue: row.dict("expected").str("admission")),
+                admission,
+                "vector \(row.str("name"))"
+            )
+        }
+        XCTAssertEqual(rows.count, 24, "4 capacities x 6 hold depths")
+    }
+
+    /// Amendment A2's central rules, asserted against *this* implementation rather than against the
+    /// JSON: **only an actual send commits**, only an authoritative frame fails closed, and nothing
+    /// overtakes held authoritative work.
+    func testTheAmendmentA2InvariantsHoldForThisImplementation() {
+        for authority in OutboundAuthority.allCases {
+            for outcome in OutboundOutcome.allCases {
+                let commit = OutboundCommitGate.decide(authority: authority, outcome: outcome)
+                XCTAssertEqual(
+                    outcome == .sent,
+                    commit == .commit,
+                    "admission is not delivery, and send == false is not a send"
+                )
+                if authority != .authoritative {
+                    XCTAssertNotEqual(
+                        commit,
+                        .abortFailClosed,
+                        "an intent or an advisory frame never owned authority to fail closed on"
+                    )
+                }
+                if authority == .authoritative, outcome != .sent {
+                    XCTAssertEqual(
+                        commit,
+                        .abortFailClosed,
+                        "a leader may never commit locally what the follower never received"
+                    )
+                }
+            }
+        }
+        for capacity in 0 ... 17 {
+            for held in 0 ... 17 {
+                let admission = AuthoritativeHoldGate.decide(heldCount: held, capacity: capacity)
+                if held > 0 {
+                    XCTAssertNotEqual(
+                        admission,
+                        .processNow,
+                        "nothing may overtake held authoritative work and change what it means"
+                    )
+                }
+                if held >= capacity, held > 0 {
+                    XCTAssertEqual(admission, .overflow, "the hold buffer's bound is real")
+                }
+            }
+        }
     }
 }

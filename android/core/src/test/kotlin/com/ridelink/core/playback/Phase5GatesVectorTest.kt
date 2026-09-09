@@ -14,10 +14,10 @@ import kotlin.test.assertTrue
 
 /**
  * Runs `protocol/vectors/phase5-gates/phase5_gates_vectors.json` — ADR-024 Amendment A1's three
- * decision tables, shared byte-for-byte with `Phase5GatesVectorTests` on iOS.
+ * decision tables and Amendment A2's two, shared byte-for-byte with `Phase5GatesVectorTests` on iOS.
  *
- * The three tables are the audit's answer to CLAUDE.md rule 18: each was coordinator control flow
- * before this amendment, so no vector could pin it and the two platforms had already drifted.
+ * All five are the audits' answer to CLAUDE.md rule 18: each was coordinator control flow before its
+ * amendment, so no vector could pin it and the two platforms had already drifted.
  */
 class Phase5GatesVectorTest {
     private val doc by lazy { Vectors.load("phase5-gates/phase5_gates_vectors.json").jsonObject }
@@ -170,6 +170,97 @@ class Phase5GatesVectorTest {
         }
     }
 
+    // --- ADR-024 Amendment A2 ------------------------------------------------------------------
+
+    @Test
+    fun outboundCommitFullCrossProduct() {
+        val rows = doc["outbound_commit"]!!.jsonArray
+        for (element in rows) {
+            val row = element.jsonObject
+            val input = row["input"]!!.jsonObject
+            val commit =
+                OutboundCommitGate.decide(
+                    authority = OutboundAuthority.valueOf(input["authority"]!!.jsonPrimitive.content),
+                    outcome = OutboundOutcome.valueOf(input["outcome"]!!.jsonPrimitive.content),
+                )
+            assertEquals(
+                OutboundCommit.valueOf(row["expected"]!!.jsonObject["commit"]!!.jsonPrimitive.content),
+                commit,
+                "vector ${row["name"]!!.jsonPrimitive.content}",
+            )
+        }
+        assertEquals(12, rows.size, "the complete 3 authorities x 4 outcomes cross product")
+    }
+
+    @Test
+    fun authoritativeHoldCrossProduct() {
+        val rows = doc["authoritative_hold"]!!.jsonArray
+        for (element in rows) {
+            val row = element.jsonObject
+            val input = row["input"]!!.jsonObject
+            val admission =
+                AuthoritativeHoldGate.decide(
+                    heldCount = input["held_count"]!!.jsonPrimitive.int,
+                    capacity = input["capacity"]!!.jsonPrimitive.int,
+                )
+            assertEquals(
+                HoldAdmission.valueOf(row["expected"]!!.jsonObject["admission"]!!.jsonPrimitive.content),
+                admission,
+                "vector ${row["name"]!!.jsonPrimitive.content}",
+            )
+        }
+        assertEquals(24, rows.size, "4 capacities x 6 hold depths")
+    }
+
+    /**
+     * Amendment A2's central rule, asserted against *this* implementation rather than against the
+     * JSON: **only an actual send commits**, and only an authoritative frame fails closed.
+     */
+    @Test
+    fun theOutboundCommitInvariantsHoldForThisImplementation() {
+        for (authority in OutboundAuthority.entries) {
+            for (outcome in OutboundOutcome.entries) {
+                val commit = OutboundCommitGate.decide(authority, outcome)
+                assertEquals(
+                    outcome == OutboundOutcome.SENT,
+                    commit == OutboundCommit.COMMIT,
+                    "admission is not delivery, and send == false is not a send",
+                )
+                if (authority != OutboundAuthority.AUTHORITATIVE) {
+                    assertTrue(
+                        commit != OutboundCommit.ABORT_FAIL_CLOSED,
+                        "an intent or an advisory frame never owned authority to fail closed on",
+                    )
+                }
+                if (authority == OutboundAuthority.AUTHORITATIVE && outcome != OutboundOutcome.SENT) {
+                    assertEquals(
+                        OutboundCommit.ABORT_FAIL_CLOSED,
+                        commit,
+                        "a leader may never commit locally what the follower never received",
+                    )
+                }
+            }
+        }
+    }
+
+    @Test
+    fun theAuthoritativeHoldInvariantsHoldForThisImplementation() {
+        for (capacity in 0..17) {
+            for (held in 0..17) {
+                val admission = AuthoritativeHoldGate.decide(held, capacity)
+                if (held > 0) {
+                    assertTrue(
+                        admission != HoldAdmission.PROCESS_NOW,
+                        "nothing may overtake held authoritative work and change what it means",
+                    )
+                }
+                if (held >= capacity && held > 0) {
+                    assertEquals(HoldAdmission.OVERFLOW, admission, "the hold buffer's bound is real")
+                }
+            }
+        }
+    }
+
     @Test
     fun theBoundsAreSaneRelativeToEachOther() {
         assertFalse(
@@ -193,6 +284,10 @@ class Phase5GatesVectorTest {
         assertEquals(
             doc["deferred_retry_interval_us"]!!.jsonPrimitive.long,
             Phase5GateBounds.DEFERRED_RETRY_INTERVAL_US,
+        )
+        assertEquals(
+            doc["default_outbound_capacity"]!!.jsonPrimitive.int,
+            Phase5GateBounds.DEFAULT_OUTBOUND_CAPACITY,
         )
     }
 }
