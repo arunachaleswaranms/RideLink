@@ -87,8 +87,12 @@ public protocol SyncPlayerPort: Sendable {
 public protocol SyncPlaybackChannel: Sendable {
     func setPlaybackSink(_ sink: (any PlaybackSink)?) async
     func setQueueSink(_ sink: (any QueueSink)?) async
-    @discardableResult func send(_ message: PlaybackMessage) async -> Bool
-    @discardableResult func send(_ message: QueueMessage) async -> Bool
+    /// - Parameter authorizingGeneration: the authentication generation that authorised this frame
+    ///   (ADR-024 Amendment A2 Finding B). The relay refuses outright unless it is still the live
+    ///   one, so a frame that waited on the ordered outbound queue across a session boundary can
+    ///   never be written using the replacement session's writer or `session_id`.
+    @discardableResult func send(_ message: PlaybackMessage, authorizingGeneration: Int64) async -> Bool
+    @discardableResult func send(_ message: QueueMessage, authorizingGeneration: Int64) async -> Bool
 }
 
 /// `SyncPlaybackCoordinator`'s exact call surface on `ControlSessionManager`: the Phase 5 channel,
@@ -135,10 +139,14 @@ public struct ControlSessionPlaybackChannel: SyncPlaybackChannel {
     public func setQueueSink(_ sink: (any QueueSink)?) async { await manager.playbackRelay().setQueueSink(sink) }
 
     @discardableResult
-    public func send(_ message: PlaybackMessage) async -> Bool { await manager.playbackRelay().send(message) }
+    public func send(_ message: PlaybackMessage, authorizingGeneration: Int64) async -> Bool {
+        await manager.playbackRelay().send(message, authorizingGeneration: authorizingGeneration)
+    }
 
     @discardableResult
-    public func send(_ message: QueueMessage) async -> Bool { await manager.playbackRelay().send(message) }
+    public func send(_ message: QueueMessage, authorizingGeneration: Int64) async -> Bool {
+        await manager.playbackRelay().send(message, authorizingGeneration: authorizingGeneration)
+    }
 }
 
 /// Zero-behaviour-change wrapper — the app composition root's production call site.

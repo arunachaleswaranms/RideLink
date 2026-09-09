@@ -2,6 +2,7 @@ package com.ridelink.app.sync
 
 import com.ridelink.core.model.ContentHash
 import com.ridelink.core.model.PeerId
+import com.ridelink.core.playback.AuthoritativeHoldGate
 import com.ridelink.core.playback.CommandAdmission
 import com.ridelink.core.playback.CommandOrderDecision
 import com.ridelink.core.playback.CommandOrderGate
@@ -9,7 +10,12 @@ import com.ridelink.core.playback.DriftAction
 import com.ridelink.core.playback.DriftController
 import com.ridelink.core.playback.DriftInput
 import com.ridelink.core.playback.DriftState
+import com.ridelink.core.playback.HoldAdmission
 import com.ridelink.core.playback.IngressAdmission
+import com.ridelink.core.playback.OutboundAuthority
+import com.ridelink.core.playback.OutboundCommit
+import com.ridelink.core.playback.OutboundCommitGate
+import com.ridelink.core.playback.OutboundOutcome
 import com.ridelink.core.playback.PendingCommandGate
 import com.ridelink.core.playback.PendingPlayDecision
 import com.ridelink.core.playback.PendingPlayGate
@@ -85,6 +91,26 @@ import kotlinx.coroutines.sync.withLock
  * - **Received is not applied** ([lastReceivedSeq] versus [lastAppliedSeq]) (Finding D).
  * - **One press of Play survives its waits** ([pendingPlay]) (Findings A and E).
  * - **A superseded correction has no side effects at all** ([owns]) (Finding F).
+ *
+ * ## What ADR-024 Amendment A2 (the second closure audit) changed here
+ *
+ * - **Authority is bound to delivery** ([drainOutbound], [OutboundCommitGate]). A leader's
+ *   `command_seq`, its `queue_revision` and the local audible effect are committed **only after the
+ *   authenticated transport actually accepted the frame**. Admission to [outbound] is not delivery,
+ *   and `send` returning false is not a send. Before this, an overflow incremented a counter and
+ *   returned, and the drain incremented "sent" for a write that had just failed — either way the
+ *   leader played a command the follower never received (Findings A and C).
+ * - **Every outbound frame carries the generation that authorised it** ([Outbound.generation]).
+ *   The queue deliberately outlives sessions, so resolving the writer at send time meant a Session A
+ *   frame could be written under Session B's `session_id` — the session-confusion class Phase 4
+ *   Amendments A3/A5 hardened against, on the other end of the pipe (Finding B).
+ * - **Nothing overtakes held authoritative work** ([deferredEvents], [AuthoritativeHoldGate]). A1
+ *   held a command whose clock was untrusted but let a later `QUEUE_SNAPSHOT` apply straight past
+ *   it, so the held `NEXT` resolved against a revision it was never authored against. The whole
+ *   authoritative stream is now held in arrival order and replayed in it (Finding D).
+ * - **A correction's snapshot keeps the correction's own identity**
+ *   ([emitPlaybackStateIfOwned]). Reading the *live* generation inside the emit meant a snapshot
+ *   caused by a correction in Session A could be enqueued into Session B (Finding E).
  */
 @Suppress("TooManyFunctions", "LongParameterList", "LargeClass")
 class SyncPlaybackCoordinator(
@@ -100,8 +126,13 @@ class SyncPlaybackCoordinator(
     private val nextQueueItemId: () -> String,
     /** Injectable purely so a test can force the ingress edge at 1 or 2 rather than racing 256 frames. */
     inboundCapacity: Int = Phase5GateBounds.DEFAULT_INBOUND_CAPACITY,
-    /** Injectable for the same reason: how many commands may wait for a trustworthy clock. */
+    /** Injectable for the same reason: how many authoritative events may wait for a trustworthy clock. */
     private val deferredCommandCapacity: Int = Phase5GateBounds.DEFAULT_DEFERRED_COMMAND_CAPACITY,
+    /**
+     * Injectable for the same reason again (Amendment A2): a test forces the *outbound* admission
+     * edge at 1 rather than producing 256 frames faster than a fake socket drains them.
+     */
+    outboundCapacity: Int = Phase5GateBounds.DEFAULT_OUTBOUND_CAPACITY,
 ) {
     private val _diagnostics = MutableStateFlow(SyncPlaybackDiagnostics())
     val diagnostics: StateFlow<SyncPlaybackDiagnostics> = _diagnostics.asStateFlow()
@@ -157,8 +188,18 @@ class SyncPlaybackCoordinator(
     private var driftState: DriftState = DriftController.reset()
     private var tickJob: Job? = null
 
-    /** Amendment A1 Finding D: authoritative commands held, in order, until the clock is trustworthy. */
-    private val deferredCommands = ArrayDeque<DeferredCommand>()
+    /**
+     * Amendment A1 Finding D, widened by Amendment A2 Finding D: the **authoritative event stream**
+     * held in arrival order while the clock is untrustworthy.
+     *
+     * A1 held commands only, and let a later `QUEUE_SNAPSHOT` apply straight past them — so a held
+     * `NEXT` authored against revision 5 executed against revision 6 and stepped to the wrong track.
+     * Once anything is held, every later authoritative frame whose semantics could change a held
+     * command's meaning joins the queue behind it, and the whole stream replays in the order the
+     * leader chose. A `POSITION_REPORT` is never held: it produces one diagnostics number and can
+     * change no command's meaning.
+     */
+    private val deferredEvents = ArrayDeque<DeferredEvent>()
     private var deferredDrainJob: Job? = null
 
     /**
@@ -178,6 +219,37 @@ class SyncPlaybackCoordinator(
      * action fails its ownership proof and returns at once, so it never holds the chain up.
      */
     private var scheduledChain: Job? = null
+
+    /**
+     * The tail of the **leader's authoritative apply chain** (Amendment A2 Finding A).
+     *
+     * A leader's own command is applied by [drainOutbound]'s commit hook, once the transport has
+     * confirmed the frame went out — which is the whole point of A2. Applying it *on* that consumer
+     * would stall the outbound path behind a decoder pre-roll, so the apply is launched instead; and
+     * a launched coroutine preserves only the order in which coroutines start, which is precisely
+     * the defect Amendment A1 Finding G was about. Each apply therefore joins the previous one,
+     * exactly as [scheduledChain] does, so commit order — which *is* `command_seq` order, because
+     * one consumer commits — is apply order.
+     */
+    private var applyChain: Job? = null
+
+    /**
+     * Amendment A2 Findings A and C: an authoritative frame this device produced never reached the
+     * peer, so Phase 5 authority is over for this authentication generation.
+     *
+     * Latched rather than retried. There is no protocol message that tells a peer about a command it
+     * never received (`STATE_REQUEST` remains unimplemented — ADR-024 Amendment A2 §H), so the only
+     * honest options are to continue from a state only this device knows about, which is the
+     * divergence A2 exists to close, or to stop being authoritative. This is the second.
+     *
+     * Synchronised mode is left when it latches, so `MusicCoordinator`'s transport controls go
+     * straight back to Phase 3 behaviour rather than being answered by a coordinator that will
+     * refuse them. Local music is untouched (ADR-004, FR-025).
+     *
+     * `@Volatile` because [drainOutbound] writes it while producers read it.
+     */
+    @Volatile
+    private var outboundAuthorityLost = false
 
     /** Amendment A1 Findings A/E: the one retained synchronised-Play request. */
     private var pendingPlay: PendingPlay? = null
@@ -238,15 +310,21 @@ class SyncPlaybackCoordinator(
      * — authoritative command, follower intent, queue snapshot, position report, playback state —
      * is enqueued here and written by the single consumer below, in enqueue order.
      *
-     * Bounded and **not** lossy: `trySend` failing is counted as
+     * Bounded and **not** lossy: an admission refusal is *returned to the producer*
+     * ([enqueueOutbound] answers false) and counted as
      * [SyncPlaybackDiagnostics.outboundOverflowCount]. Its producer is this device, so a full queue
-     * means the control socket is wedged rather than that a peer is misbehaving — which is also why
-     * this is strictly better than the previous shape, where each send blocked its own coroutine and
-     * an unbounded number of them could pile up behind a stalled socket.
+     * means the control socket is wedged rather than that a peer is misbehaving.
+     *
+     * **Amendment A2 Finding A: a refusal is a failure of the operation, not a statistic.** It used
+     * to increment a counter and return `Unit`, so no caller could learn the frame had been refused
+     * — and every caller carried straight on to stamp, publish and apply. That is a leader playing a
+     * command the follower will never receive. What this queue holds is therefore no longer a bare
+     * frame but an [Outbound] envelope: the generation that authorised it (Finding B) and the commit
+     * hook the single consumer invokes with the real outcome (Findings A and C).
      */
     private val outbound =
         Phase5FrameQueue<Outbound>(
-            capacity = OUTBOUND_CAPACITY,
+            capacity = outboundCapacity,
             // Never coalesced: a frame this device has already stamped may not be superseded.
             kindOf = { Phase5FrameKind.COMMAND },
             coalesceKeyOf = { null },
@@ -312,22 +390,64 @@ class SyncPlaybackCoordinator(
         }
     }
 
-    /** One outbound Phase 5 frame, waiting its turn on the one ordered outbound path. */
-    private sealed class Outbound {
-        data class Playback(
-            val message: PlaybackMessage,
-        ) : Outbound()
+    /**
+     * One outbound Phase 5 frame, waiting its turn on the one ordered outbound path — with the two
+     * things Amendment A2 found missing from it.
+     *
+     * @param generation the authentication generation that **authorised** this frame, captured when
+     *   it was created rather than looked up when it is written (Finding B). The outbound queue
+     *   deliberately outlives individual sessions, so a frame stamped under Session A that is still
+     *   queued when Session B activates must not be written using Session B's writer and
+     *   `session_id`. Looking the generation up at send time is exactly how that happens.
+     * @param authority what committing this frame's local effect would mean — see [OutboundAuthority].
+     * @param onOutcome the producer's commit hook, invoked by the single consumer with what actually
+     *   happened. This is where a leader's `command_seq`, its `queue_revision` and its local audible
+     *   effect are committed, and it runs on the one consumer, so commits happen strictly in send
+     *   order (Findings A and C).
+     */
+    private class Outbound(
+        val generation: Long,
+        val authority: OutboundAuthority,
+        val frame: Frame,
+        val onOutcome: (suspend (OutboundOutcome) -> Unit)? = null,
+    ) {
+        sealed class Frame {
+            data class Playback(
+                val message: PlaybackMessage,
+            ) : Frame()
 
-        data class Queue(
-            val message: QueueMessage,
-        ) : Outbound()
+            data class Queue(
+                val message: QueueMessage,
+            ) : Frame()
+        }
     }
 
-    /** An authoritative command accepted for ordering but not yet applied, because the clock is not trusted. */
-    private data class DeferredCommand(
-        val message: PlaybackMessage,
-        val generation: Long,
-    )
+    /**
+     * One authoritative event accepted for ordering but not yet applied — because the clock is not
+     * trusted, or because something ahead of it is not (Amendment A1 Finding D, widened by
+     * Amendment A2 Finding D).
+     */
+    private sealed class DeferredEvent {
+        abstract val generation: Long
+
+        /** A `PLAY`/`PAUSE`/`RESUME`/`SEEK`/`NEXT`/`PREVIOUS` the order gate accepted. */
+        data class Command(
+            val message: PlaybackMessage,
+            override val generation: Long,
+        ) : DeferredEvent()
+
+        /** PROTOCOL §9's authoritative queue state, held so it cannot change a held command's meaning. */
+        data class QueueSnapshot(
+            val message: QueueMessage.Snapshot,
+            override val generation: Long,
+        ) : DeferredEvent()
+
+        /** PROTOCOL §5's reconciliation anchor, held for the same reason. */
+        data class PlaybackState(
+            val message: PlaybackMessage.PlaybackStateSnapshot,
+            override val generation: Long,
+        ) : DeferredEvent()
+    }
 
     /**
      * One press of Play, retained across the waits it has to survive (Amendment A1 Findings A/E).
@@ -437,24 +557,168 @@ class SyncPlaybackCoordinator(
         }
     }
 
-    private fun enqueueOutbound(frame: Outbound) {
-        if (outbound.offer(frame) == IngressAdmission.OVERFLOW) {
+    /**
+     * Hands one frame to the ordered outbound path.
+     *
+     * **Amendment A2 Finding A: this answers whether the frame was accepted, and every caller
+     * branches on the answer.** It used to return `Unit`, so a refusal was a counter and the caller
+     * carried on regardless — stamping a `command_seq`, bumping a `queue_revision` and starting
+     * audio for a frame that had just been thrown away.
+     *
+     * @return true if the frame is now on the one ordered outbound path. Being on it is *still* not
+     *   delivery: [drainOutbound] is what learns that, and [Outbound.onOutcome] is what acts on it.
+     */
+    private fun enqueueOutbound(envelope: Outbound): Boolean {
+        if (outbound.offer(envelope) == IngressAdmission.OVERFLOW) {
             _diagnostics.update { it.copy(outboundOverflowCount = it.outboundOverflowCount + 1) }
-            return
+            return false
         }
         _diagnostics.update { it.copy(outboundEnqueuedCount = it.outboundEnqueuedCount + 1) }
+        return true
     }
 
-    /** The single writer. Enqueue order is wire order, which is the whole of Finding B's invariant. */
+    /**
+     * The single writer, and — since Amendment A2 — the single **commit point** for anything this
+     * device says with authority.
+     *
+     * Enqueue order is wire order, which was the whole of A1 Finding B's invariant. A2 adds the two
+     * facts that invariant did not carry:
+     *
+     * - **the frame is written under the session that authorised it, or not at all** (Finding B).
+     *   The generation is the envelope's, captured when the frame was created; resolving the writer
+     *   at send time meant a Session A frame could be written with Session B's `session_id`;
+     * - **the transport's answer is consumed** (Finding C). `send` returns false when there is no
+     *   authenticated writer or the write throws, and that used to increment "sent" anyway.
+     *
+     * Commits happen here, on this one consumer, so they are strictly in send order — which is
+     * `command_seq` order, because this consumer is also what sends. That is what makes
+     * "no authoritative local commit without outbound delivery" a property of the pipeline rather
+     * than of every call site remembering to check.
+     */
     private suspend fun drainOutbound() {
         while (true) {
-            val frame = outbound.take() ?: return
-            when (frame) {
-                is Outbound.Playback -> session.playback.send(frame.message)
-                is Outbound.Queue -> session.playback.send(frame.message)
+            val envelope = outbound.take() ?: return
+            val outcome =
+                when {
+                    !outboundUsable(envelope.generation) -> OutboundOutcome.STALE_SESSION
+                    sendFrame(envelope.frame, envelope.generation) -> OutboundOutcome.SENT
+                    else -> OutboundOutcome.TRANSPORT_FAILED
+                }
+            // Counted *after* the attempt finished, never before it started: this pair is what a
+            // test reads to know the wire has caught up, and a counter incremented ahead of the
+            // write would say "drained" while a frame was still inside the socket.
+            _diagnostics.update {
+                val counted = it.copy(outboundAttemptCount = it.outboundAttemptCount + 1)
+                when (outcome) {
+                    OutboundOutcome.SENT -> counted.copy(outboundSentCount = counted.outboundSentCount + 1)
+                    OutboundOutcome.STALE_SESSION -> counted.copy(outboundStaleCount = counted.outboundStaleCount + 1)
+                    else -> counted.copy(outboundFailedCount = counted.outboundFailedCount + 1)
+                }
             }
-            _diagnostics.update { it.copy(outboundSentCount = it.outboundSentCount + 1) }
+            envelope.onOutcome?.invoke(outcome)
         }
+    }
+
+    private suspend fun sendFrame(
+        frame: Outbound.Frame,
+        generation: Long,
+    ): Boolean =
+        when (frame) {
+            is Outbound.Frame.Playback -> session.playback.send(frame.message, generation)
+            is Outbound.Frame.Queue -> session.playback.send(frame.message, generation)
+        }
+
+    /**
+     * Whether a frame authorised under [generation] may still be written (Amendment A2 Finding B).
+     *
+     * Two ways it may not. The obvious one is that the session it belonged to is gone — the
+     * generation is strictly increasing per authentication (ADR-023 §3), so a mismatch is decisive,
+     * and [stillCurrent] additionally refuses a link that has dropped but not yet re-authenticated.
+     * The other is that Phase 5 authority for this very generation has already been abandoned: once
+     * one authoritative frame failed, sending the ones queued behind it would tell the peer about
+     * commands whose predecessor it never got, which is a different divergence rather than a
+     * recovery.
+     */
+    private fun outboundUsable(generation: Long): Boolean = stillCurrent(generation) && !outboundAuthorityLost
+
+    /**
+     * What a producer does when the ordered outbound path refuses its frame outright
+     * (Amendment A2 Finding A). The frame never existed as far as the peer is concerned, so nothing
+     * it would have committed may be committed.
+     */
+    private fun onOutboundRefused(
+        authority: OutboundAuthority,
+        generation: Long,
+    ) {
+        when (OutboundCommitGate.decide(authority, OutboundOutcome.ADMISSION_REFUSED)) {
+            OutboundCommit.ABORT_FAIL_CLOSED -> failClosedOutbound(generation)
+            else -> Unit
+        }
+    }
+
+    /**
+     * ADR-024 Amendment A2's fail-closed posture: **an authoritative frame this device produced did
+     * not reach the peer, so this device stops being authoritative.**
+     *
+     * Deliberately not a retry and deliberately not a reconciliation. `STATE_REQUEST` is catalogued
+     * in PROTOCOL §3 and still unimplemented, and even implemented it would be the *peer* asking for
+     * state it knows it is missing — a peer that never received a command does not know to ask. The
+     * two honest options are therefore to carry on from a state only this device knows about, which
+     * is the divergence this amendment exists to close, or to stop. This is stopping.
+     *
+     * What it does **not** do is stop the music, and it deliberately does **not** supersede the
+     * playback epoch. Synchronised mode is left, so `MusicCoordinator`'s transport controls answer
+     * locally again; correction stops and the rate goes back to exactly 1.0 (ADR-004, FR-025). But a
+     * frame the transport *did* accept, still in flight when a later one failed, must still commit
+     * and still take effect — the peer has it, so refusing to apply it here would manufacture the
+     * mirror image of the divergence this whole amendment is closing. Only work that was never
+     * delivered is abandoned. Recovery is a new session, which clears the latch in
+     * [resetForNewSession].
+     */
+    private fun failClosedOutbound(generation: Long) {
+        // A dead session needs no latch: its authority is already gone, and latching would then
+        // survive into the session that replaced it.
+        if (generation != session.currentAuthGeneration) return
+        if (outboundAuthorityLost) return
+        outboundAuthorityLost = true
+        syncEnabled = false
+        tickJob?.cancel()
+        tickJob = null
+        playRequestFence.supersede()
+        val cancelled = if (pendingPlay != null) 1 else 0
+        pendingPlay = null
+        transferRequestedForToken = null
+        deferredEvents.clear()
+        deferredDrainJob?.cancel()
+        deferredDrainJob = null
+        driftState = DriftController.reset()
+        scope.launch { restoreRate() }
+        _diagnostics.update {
+            it.copy(
+                syncState = SyncState.TRANSPORT_FAILED,
+                outboundAuthorityLost = true,
+                deferredCommandCount = 0,
+                localDriftMs = null,
+                peerDriftMs = null,
+                cancelledPendingPlayCount = it.cancelledPendingPlayCount + cancelled,
+            )
+        }
+    }
+
+    /**
+     * Runs a leader's own authoritative apply, in commit order (Amendment A2 Finding A).
+     *
+     * See [applyChain]: the commit hook runs on [drainOutbound]'s single consumer, so doing the
+     * apply there would stall the outbound path behind a decoder pre-roll, and launching it
+     * unchained would throw away the very order the commit point exists to establish.
+     */
+    private fun chainApply(action: suspend () -> Unit) {
+        val previous = applyChain
+        applyChain =
+            scope.launch {
+                previous?.join()
+                action()
+            }
     }
 
     // --- session lifecycle -------------------------------------------------------------------
@@ -501,7 +765,13 @@ class SyncPlaybackCoordinator(
         playRequestFence.supersede()
         val cancelled = if (pendingPlay != null) 1 else 0
         pendingPlay = null
-        deferredCommands.clear()
+        transferRequestedForToken = null
+        deferredEvents.clear()
+        // Amendment A2 Finding B: a fresh generation retires everything the previous one authorised.
+        // Frames still queued outbound stay physically queued and become inert, because each carries
+        // the generation that authorised it and `outboundUsable` refuses to write them.
+        outboundAuthorityLost = false
+        applyChain = null
         lastReceivedSeq = null
         lastAppliedSeq = null
         nextSeq = PlaybackBounds.FIRST_COMMAND_SEQ
@@ -529,6 +799,7 @@ class SyncPlaybackCoordinator(
                 correctionTickCount = 0,
                 deferredCommandCount = 0,
                 ingressDesynchronized = false,
+                outboundAuthorityLost = false,
                 cancelledPendingPlayCount = it.cancelledPendingPlayCount + cancelled,
                 sessionGeneration = session.currentAuthGeneration,
             )
@@ -597,57 +868,118 @@ class SyncPlaybackCoordinator(
      *
      * Amendment A1 Finding B: the allocation and the hand-off to the ordered outbound queue are one
      * critical section, so nothing can be stamped against a revision that reaches the peer later.
+     *
+     * **Amendment A2 Finding A: the local commit moved out of this function entirely.** It used to
+     * set `lastReceivedSeq`/`lastAppliedSeq` inside the lock and then apply the command — both
+     * unconditionally, because [enqueueOutbound] could not report a refusal and [drainOutbound]
+     * ignored the transport's answer. A full outbound queue or a dead socket therefore produced a
+     * leader playing a command the follower never received. What happens here now is *candidate*
+     * work: stamp, try to admit, and consume the sequence number only if the admission succeeded.
+     * Everything after that is [onCommandOutcome], which the single outbound consumer calls with
+     * what actually happened.
      */
-    @Suppress("ReturnCount") // one early-out per role and per readiness gate
+    @Suppress("ReturnCount") // one early-out per role, per readiness gate and per admission refusal
     private suspend fun issue(build: (PlaybackCommandHeader) -> PlaybackMessage) {
         val currentRole = role ?: return
+        if (outboundAuthorityLost) return
         val generation = session.currentAuthGeneration
         if (currentRole == PlaybackRole.FOLLOWER) {
-            commandMutex.withLock {
-                if (!stillCurrent(generation)) return
-                val header =
-                    PlaybackCommandHeader(
-                        PlaybackBounds.UNASSIGNED_COMMAND_SEQ,
-                        0L,
-                        localPeerId,
-                        _queueState.value.revision,
-                    )
-                enqueueOutbound(Outbound.Playback(build(header)))
-            }
+            val admitted =
+                commandMutex.withLock {
+                    if (!stillCurrent(generation)) return
+                    val header =
+                        PlaybackCommandHeader(
+                            PlaybackBounds.UNASSIGNED_COMMAND_SEQ,
+                            0L,
+                            localPeerId,
+                            _queueState.value.revision,
+                        )
+                    // An intent owns no authority (ADR-024 §3), so nothing local is riding on it and
+                    // there is nothing to roll back — but a refusal is still not a send.
+                    enqueueOutbound(Outbound(generation, OutboundAuthority.INTENT, Outbound.Frame.Playback(build(header))))
+                }
+            if (!admitted) onOutboundRefused(OutboundAuthority.INTENT, generation)
             return
         }
         val estimate = readyEstimate() ?: return
-        val message =
-            commandMutex.withLock {
-                if (!stillCurrent(generation)) return
-                val seq = nextSeq
-                nextSeq += 1
-                val header =
-                    PlaybackCommandHeader(
-                        seq,
-                        sessionNowUs(estimate) + estimate.leadUs,
-                        localPeerId,
-                        _queueState.value.revision,
-                    )
-                val built = build(header)
-                enqueueOutbound(Outbound.Playback(built))
-                // The leader is the assigner, so its own command cannot be lost between accepting
-                // and applying it: there is no inbound path that could replay it (an authoritative
-                // command arriving at the leader is a role violation), so received and applied move
-                // together here. Finding D's split matters on the receiving side.
-                lastReceivedSeq = seq
-                lastAppliedSeq = seq
-                built
-            }
-        val commandSeq = headerOf(message)?.commandSeq
-        _diagnostics.update {
-            it.copy(nextCommandSeq = nextSeq, lastAppliedCommandSeq = commandSeq, lastReceivedCommandSeq = commandSeq)
+        var admitted = false
+        commandMutex.withLock {
+            if (!stillCurrent(generation) || outboundAuthorityLost) return
+            val seq = nextSeq
+            val header =
+                PlaybackCommandHeader(
+                    seq,
+                    sessionNowUs(estimate) + estimate.leadUs,
+                    localPeerId,
+                    _queueState.value.revision,
+                )
+            val built = build(header)
+            admitted =
+                enqueueOutbound(
+                    Outbound(generation, OutboundAuthority.AUTHORITATIVE, Outbound.Frame.Playback(built)) { outcome ->
+                        onCommandOutcome(seq, built, generation, estimate, outcome)
+                    },
+                )
+            // Amendment A2 §6: a `command_seq` becomes authoritative exactly when the frame carrying
+            // it enters the outbound authority pipeline, and not a moment earlier. A refused
+            // candidate leaves no gap, because it was never assigned.
+            if (admitted) nextSeq = seq + 1
         }
-        if (!stillCurrent(generation)) return
-        // The leader applies its own command exactly as the follower will: same header, same
-        // effective instant, same code path. There is no "issuer applies immediately" shortcut,
-        // because that shortcut is precisely how two phones end up on two timelines.
-        applyAuthoritative(message, generation, estimate)
+        if (!admitted) {
+            onOutboundRefused(OutboundAuthority.AUTHORITATIVE, generation)
+            return
+        }
+        _diagnostics.update { it.copy(nextCommandSeq = nextSeq) }
+    }
+
+    /**
+     * The leader's own command, once the transport has answered (Amendment A2 Findings A and C).
+     *
+     * The leader is the assigner, so its own command cannot be lost between accepting and applying
+     * it — there is no inbound path that could replay it, because an authoritative command arriving
+     * at the leader is a role violation. Received and applied therefore still move together here;
+     * A1 Finding D's split matters on the receiving side. What changed is *when*: only on
+     * [OutboundOutcome.SENT], because a command the follower never received is not a command.
+     *
+     * The apply itself goes through the leader's ordered [applyChain] rather than running on the
+     * outbound consumer, so a decoder pre-roll cannot stall the wire. The leader applies its own
+     * command exactly as the follower will — same header, same effective instant, same code path —
+     * because an "issuer applies immediately" shortcut is precisely how two phones end up on two
+     * timelines.
+     */
+    @Suppress("ReturnCount") // one per commit decision, plus the session re-proof
+    private suspend fun onCommandOutcome(
+        seq: Long,
+        message: PlaybackMessage,
+        generation: Long,
+        estimate: SessionClockEstimate,
+        outcome: OutboundOutcome,
+    ) {
+        when (OutboundCommitGate.decide(OutboundAuthority.AUTHORITATIVE, outcome)) {
+            OutboundCommit.ABORT_FAIL_CLOSED -> {
+                failClosedOutbound(generation)
+                return
+            }
+            OutboundCommit.ABORT_QUIET -> return
+            OutboundCommit.COMMIT -> Unit
+        }
+        var committed = false
+        commandMutex.withLock {
+            // Deliberately **not** gated on [outboundAuthorityLost]: this frame reached the peer, so
+            // the peer will act on it, and the only consistent thing this device can do is act on it
+            // too. The latch stops *new* authority; it does not un-send what was sent.
+            if (!stillCurrent(generation)) return@withLock
+            // maxOf, not assignment: these commit on the outbound consumer, in send order, and a
+            // monotone write says the same thing without depending on that ordering twice over.
+            lastReceivedSeq = maxOf(lastReceivedSeq ?: seq, seq)
+            lastAppliedSeq = maxOf(lastAppliedSeq ?: seq, seq)
+            committed = true
+        }
+        if (!committed) return
+        _diagnostics.update {
+            it.copy(lastAppliedCommandSeq = lastAppliedSeq, lastReceivedCommandSeq = lastReceivedSeq)
+        }
+        chainApply { applyAuthoritative(message, generation, estimate) }
     }
 
     // --- user-facing actions (also the system media controls' path, brief §39) ------------------
@@ -671,6 +1003,9 @@ class SyncPlaybackCoordinator(
     fun playSynchronized(contentHash: ContentHash) {
         scope.launch {
             role ?: return@launch
+            // Amendment A2: authority for this generation is over, so there is nothing to press
+            // Play *into*. Local playback is Phase 3's again and answers this on its own.
+            if (outboundAuthorityLost) return@launch
             syncEnabled = true
             val generation = session.currentAuthGeneration
             val addition =
@@ -792,12 +1127,17 @@ class SyncPlaybackCoordinator(
     @Suppress("ReturnCount") // one early-out per role, plus the session re-proof inside the critical section
     private suspend fun mutateQueue(mutation: SharedQueueMutation) {
         val currentRole = role ?: return
+        if (outboundAuthorityLost) return
         if (currentRole == PlaybackRole.FOLLOWER) {
             val generation = session.currentAuthGeneration
-            commandMutex.withLock {
-                if (!stillCurrent(generation)) return
-                enqueueOutbound(Outbound.Queue(queueIntent(mutation)))
-            }
+            val admitted =
+                commandMutex.withLock {
+                    if (!stillCurrent(generation)) return
+                    enqueueOutbound(
+                        Outbound(generation, OutboundAuthority.INTENT, Outbound.Frame.Queue(queueIntent(mutation))),
+                    )
+                }
+            if (!admitted) onOutboundRefused(OutboundAuthority.INTENT, generation)
             return
         }
         applyLeaderMutation(mutation)
@@ -818,22 +1158,60 @@ class SyncPlaybackCoordinator(
      * command stamped for the new revision therefore cannot leave this device ahead of the snapshot
      * that created it, and one stamped for the old revision cannot be overtaken by it.
      */
+    @Suppress("ReturnCount") // the session re-proof, the no-op mutation and the admission refusal
     private suspend fun applyLeaderMutation(mutation: SharedQueueMutation) {
         val generation = session.currentAuthGeneration
+        var refused = false
         val changed =
             commandMutex.withLock {
-                if (!stillCurrent(generation)) return
+                if (!stillCurrent(generation) || outboundAuthorityLost) return
                 val outcome = SharedQueue.apply(_queueState.value, mutation)
                 if (outcome.rejection != null || !outcome.changed) return@withLock false
+                // Amendment A2 Finding A / §7: the candidate state is computed first and becomes
+                // authoritative only once the snapshot that carries it has been admitted to the one
+                // ordered outbound path. A refused snapshot leaves the revision exactly where it
+                // was, so the leader can never sit on a revision the follower has no way to learn.
+                val admitted =
+                    enqueueOutbound(
+                        Outbound(
+                            generation,
+                            OutboundAuthority.AUTHORITATIVE,
+                            Outbound.Frame.Queue(snapshotOf(outcome.state)),
+                        ) { result -> onQueueOutcome(generation, result) },
+                    )
+                if (!admitted) {
+                    refused = true
+                    return@withLock false
+                }
                 _queueState.value = outcome.state
-                enqueueOutbound(Outbound.Queue(snapshotOf(outcome.state)))
                 true
             }
-        if (changed) {
-            publishQueue()
-            // Finding A: the leader's own mutation is the authoritative queue state, so a Play that
-            // was waiting for exactly this revision may now be issued.
-            resolvePendingPlay()
+        if (refused) {
+            onOutboundRefused(OutboundAuthority.AUTHORITATIVE, generation)
+            return
+        }
+        if (changed) publishQueue()
+    }
+
+    /**
+     * The leader's queue mutation, once the transport has answered (Amendment A2 Findings A and C).
+     *
+     * A1 Finding A's "the leader's own mutation is the authoritative queue state, so a Play waiting
+     * for exactly this revision may now be issued" is still true — but only once the peer has
+     * actually been told the revision. Issuing a `PLAY` stamped for a revision the follower never
+     * received is the same divergence one layer up, and the follower's own §5 rule 3 check would
+     * refuse it.
+     */
+    private suspend fun onQueueOutcome(
+        generation: Long,
+        outcome: OutboundOutcome,
+    ) {
+        when (OutboundCommitGate.decide(OutboundAuthority.AUTHORITATIVE, outcome)) {
+            OutboundCommit.ABORT_FAIL_CLOSED -> failClosedOutbound(generation)
+            OutboundCommit.ABORT_QUIET -> Unit
+            // Launched rather than awaited: resolving a retained Play resolves content, which
+            // suspends, and the one outbound consumer must keep draining while it does.
+            OutboundCommit.COMMIT -> scope.launch { resolvePendingPlay() }
         }
     }
 
@@ -845,13 +1223,19 @@ class SyncPlaybackCoordinator(
      * and the playback state in the order the leader decided them.
      */
     private suspend fun rebroadcastAuthoritativeState() {
-        if (role != PlaybackRole.LEADER) return
+        if (role != PlaybackRole.LEADER || outboundAuthorityLost) return
         val generation = session.currentAuthGeneration
         commandMutex.withLock {
             if (!stillCurrent(generation)) return
-            enqueueOutbound(Outbound.Queue(snapshotOf(_queueState.value)))
+            // ADVISORY (Amendment A2): it carries no new revision and no new `command_seq`. It
+            // re-states authority the peer has already been told about, and PROTOCOL §9's "the
+            // snapshot always wins" makes the next one subsume this one, so a failure here is a
+            // missed reconciliation attempt rather than a divergence.
+            enqueueOutbound(
+                Outbound(generation, OutboundAuthority.ADVISORY, Outbound.Frame.Queue(snapshotOf(_queueState.value))),
+            )
         }
-        emitPlaybackState()
+        emitCurrentPlaybackState()
     }
 
     // --- the transport-control actions, shared with the system media controls -------------------
@@ -886,7 +1270,8 @@ class SyncPlaybackCoordinator(
         playRequestFence.supersede()
         val cancelled = if (pendingPlay != null) 1 else 0
         pendingPlay = null
-        deferredCommands.clear()
+        transferRequestedForToken = null
+        deferredEvents.clear()
         deferredDrainJob?.cancel()
         deferredDrainJob = null
         timeline = null
@@ -936,7 +1321,7 @@ class SyncPlaybackCoordinator(
     ) {
         if (!stillCurrent(generation)) return
         when (message) {
-            is QueueMessage.Snapshot -> adoptSnapshot(message)
+            is QueueMessage.Snapshot -> adoptSnapshot(message, generation)
             is QueueMessage.Add -> onQueueIntent(message.header, SharedQueueMutation.Add(message.items), generation)
             is QueueMessage.Remove -> onQueueIntent(message.header, SharedQueueMutation.Remove(message.queueItemIds), generation)
             is QueueMessage.Move ->
@@ -951,8 +1336,20 @@ class SyncPlaybackCoordinator(
      * It is also the queue half of Amendment A1's reconciliation: adopting authoritative queue state
      * is precisely what makes a desynchronised queue coherent again.
      */
-    private suspend fun adoptSnapshot(message: QueueMessage.Snapshot) {
+    private suspend fun adoptSnapshot(
+        message: QueueMessage.Snapshot,
+        generation: Long,
+    ) {
         if (role != PlaybackRole.FOLLOWER) return
+        // Amendment A2 Finding D: a snapshot must not overtake a command already held for the clock.
+        // Applying revision n+1 ahead of a held `NEXT` authored against revision n changes what that
+        // `NEXT` means, and no later check can recover the intent it destroyed.
+        if (holdIfOvertaking({ gen -> DeferredEvent.QueueSnapshot(message, gen) }, generation)) return
+        applyQueueSnapshot(message)
+    }
+
+    /** [adoptSnapshot] with the hold gate already answered — the drain's entry point too. */
+    private suspend fun applyQueueSnapshot(message: QueueMessage.Snapshot) {
         _queueState.value = SharedQueue.applySnapshot(message.queueRevision, message.items, message.currentIndex)
         queueDesynchronized = false
         publishDesynchronized()
@@ -973,6 +1370,7 @@ class SyncPlaybackCoordinator(
         generation: Long,
     ) {
         val currentRole = role ?: return
+        if (outboundAuthorityLost) return
         when (CommandOrderGate.decide(currentRole, lastReceivedSeq, header.commandSeq)) {
             CommandOrderDecision.INTENT -> Unit
             CommandOrderDecision.ROLE_VIOLATION -> {
@@ -987,7 +1385,15 @@ class SyncPlaybackCoordinator(
             // state rather than waiting to be asked, which is strictly better than a STATE_REQUEST
             // round trip and needs no message type §3 does not already list.
             commandMutex.withLock {
-                if (stillCurrent(generation)) enqueueOutbound(Outbound.Queue(snapshotOf(_queueState.value)))
+                if (stillCurrent(generation)) {
+                    enqueueOutbound(
+                        Outbound(
+                            generation,
+                            OutboundAuthority.ADVISORY,
+                            Outbound.Frame.Queue(snapshotOf(_queueState.value)),
+                        ),
+                    )
+                }
             }
             return
         }
@@ -1024,7 +1430,13 @@ class SyncPlaybackCoordinator(
         // refused *without* spending its sequence number, so the authoritative snapshot that
         // reconciles us is what decides where ordering resumes from.
         if (playbackDesynchronized || queueDesynchronized) return
-        if (header.queueRevision != _queueState.value.revision) {
+        // Amendment A2 Finding D: the revision rule is checked **against the state this command will
+        // actually be applied to**. While an authoritative stream is held, the `QUEUE_SNAPSHOT` that
+        // created this command's revision is itself held in front of it, so the revision applied
+        // *now* is deliberately the older one and checking here would refuse a perfectly ordered
+        // command for a revision it is about to be given. The check moves to the replay, in
+        // [drainDeferredEvents].
+        if (deferredEvents.isEmpty() && header.queueRevision != _queueState.value.revision) {
             _diagnostics.update { it.copy(staleRevisionCount = it.staleRevisionCount + 1) }
             return
         }
@@ -1050,25 +1462,18 @@ class SyncPlaybackCoordinator(
         val admission =
             PendingCommandGate.decide(
                 clockReady = estimate != null && estimate.ready,
-                deferredCount = deferredCommands.size,
+                deferredCount = deferredEvents.size,
                 capacity = deferredCommandCapacity,
             )
         when (admission) {
-            CommandAdmission.OVERFLOW -> {
-                // The same halt-and-reconcile posture as an ingress overflow, and for the same
-                // reason: more authority is outstanding than we can honestly account for.
-                _diagnostics.update { it.copy(inboundOverflowCount = it.inboundOverflowCount + 1) }
-                playbackDesynchronized = true
-                queueDesynchronized = true
-                publishDesynchronized()
-            }
+            CommandAdmission.OVERFLOW -> onHoldOverflow()
             CommandAdmission.DEFER -> {
                 commandMutex.withLock { lastReceivedSeq = header.commandSeq }
-                deferredCommands.addLast(DeferredCommand(message, generation))
+                deferredEvents.addLast(DeferredEvent.Command(message, generation))
                 _diagnostics.update {
                     it.copy(
                         lastReceivedCommandSeq = header.commandSeq,
-                        deferredCommandCount = deferredCommands.size,
+                        deferredCommandCount = deferredEvents.size,
                         syncState = if (it.ingressDesynchronized) it.syncState else SyncState.CLOCK_UNREADY,
                         clockReady = false,
                     )
@@ -1089,6 +1494,60 @@ class SyncPlaybackCoordinator(
     }
 
     /**
+     * More authoritative work is outstanding than may be held. The same explicit halt-and-reconcile
+     * posture as an ingress overflow, and for the same reason: more authority is outstanding than we
+     * can honestly account for, and applying part of it in the wrong order is worse than admitting
+     * we lost track.
+     */
+    private fun onHoldOverflow() {
+        _diagnostics.update { it.copy(inboundOverflowCount = it.inboundOverflowCount + 1) }
+        playbackDesynchronized = true
+        queueDesynchronized = true
+        publishDesynchronized()
+    }
+
+    /**
+     * A held command's `queue_revision` did not match the revision the replay had reached by the
+     * time it came round (Amendment A2 Finding D).
+     *
+     * In a stream the leader actually produced this cannot happen: replaying its frames in arrival
+     * order reproduces the revisions it stamped them against. Reaching here therefore means a frame
+     * between them is missing — an ingress overflow, or a leader that failed closed mid-sequence —
+     * so the honest answer is PROTOCOL §5 rule 3's refusal *plus* the same halt-and-reconcile
+     * posture as every other "we can no longer account for the authority we hold".
+     */
+    private fun onHeldRevisionMismatch() {
+        _diagnostics.update { it.copy(staleRevisionCount = it.staleRevisionCount + 1) }
+        playbackDesynchronized = true
+        queueDesynchronized = true
+        publishDesynchronized()
+    }
+
+    /**
+     * Amendment A2 Finding D: whether an authoritative **state** frame may be applied now, or must
+     * join the held stream so it cannot change the meaning of a command already waiting.
+     *
+     * @return true when the frame was held (and the caller must stop), false when it may proceed.
+     */
+    private fun holdIfOvertaking(
+        build: (Long) -> DeferredEvent,
+        generation: Long,
+    ): Boolean =
+        when (AuthoritativeHoldGate.decide(deferredEvents.size, deferredCommandCapacity)) {
+            HoldAdmission.PROCESS_NOW -> false
+            HoldAdmission.OVERFLOW -> {
+                onHoldOverflow()
+                true
+            }
+            HoldAdmission.HOLD -> {
+                deferredEvents.addLast(build(generation))
+                _diagnostics.update { it.copy(deferredCommandCount = deferredEvents.size) }
+                startDeferredDrain(generation)
+                true
+            }
+        }
+
+    /**
      * Re-checks the clock on a short cadence while commands wait, so a held `PLAY` becomes audible
      * as soon as the estimator recovers rather than at the next 5 s position-report tick. One loop
      * at a time, ended by the session boundary or by the buffer emptying.
@@ -1097,43 +1556,88 @@ class SyncPlaybackCoordinator(
         if (deferredDrainJob?.isActive == true) return
         deferredDrainJob =
             scope.launch {
-                while (deferredCommands.isNotEmpty() && stillCurrent(generation)) {
+                while (deferredEvents.isNotEmpty() && stillCurrent(generation)) {
                     sleeper.sleepUntil(monotonicNowUs() + Phase5GateBounds.DEFERRED_RETRY_INTERVAL_US)
                     if (!stillCurrent(generation)) return@launch
-                    drainDeferredCommands()
+                    drainDeferredEvents()
                 }
             }
     }
 
     /**
-     * Applies held commands in authoritative order, and only while the clock stays trustworthy.
-     * [lastAppliedSeq] moves here — at the point the command actually takes effect — which is the
-     * whole of Finding D's "received is not applied".
+     * Replays the held authoritative event stream **in original arrival order** (Amendment A1
+     * Finding D, widened by Amendment A2 Finding D).
+     *
+     * A1 drained commands, and only commands, so a `QUEUE_SNAPSHOT` that arrived while a `NEXT` was
+     * held had already been applied by the time the `NEXT` ran — and the `NEXT` then stepped a queue
+     * it was never authored against. The fix is *not* to re-check the revision here and drop the
+     * command, which would lose an authoritative operation all over again; it is that nothing
+     * overtook it in the first place, so replaying the stream reproduces exactly what the leader
+     * decided.
+     *
+     * A command needs a trustworthy clock and stops the drain until it has one. An authoritative
+     * state frame does not — it names its own instant and PROTOCOL §5 rule 2 applies it immediately
+     * — but it can only ever reach the head of this queue *after* every command in front of it has
+     * been applied, so its position in the stream is what preserves the semantics.
+     *
+     * [lastAppliedSeq] moves here, at the point a command actually takes effect, which is the whole
+     * of A1 Finding D's "received is not applied".
      */
     @Suppress("ReturnCount") // one early-out per reason draining must stop: halted, untrusted clock, dead session
-    private suspend fun drainDeferredCommands() {
-        while (deferredCommands.isNotEmpty()) {
+    private suspend fun drainDeferredEvents() {
+        while (deferredEvents.isNotEmpty()) {
             if (playbackDesynchronized || queueDesynchronized) return
-            val estimate = estimate()
-            if (estimate == null || !estimate.ready) return
-            val held = deferredCommands.first()
+            val held = deferredEvents.first()
             if (!stillCurrent(held.generation)) {
-                deferredCommands.clear()
+                deferredEvents.clear()
                 _diagnostics.update { it.copy(deferredCommandCount = 0) }
                 return
             }
-            deferredCommands.removeFirst()
-            val seq = headerOf(held.message)?.commandSeq
-            commandMutex.withLock { if (seq != null) lastAppliedSeq = seq }
-            _diagnostics.update {
-                it.copy(
-                    lastAppliedCommandSeq = seq,
-                    deferredCommandCount = deferredCommands.size,
-                    recoveredCommandCount = it.recoveredCommandCount + 1,
-                    clockReady = true,
-                )
+            when (held) {
+                is DeferredEvent.Command -> {
+                    val estimate = estimate()
+                    if (estimate == null || !estimate.ready) return
+                    val heldHeader = headerOf(held.message)
+                    if (heldHeader != null && heldHeader.queueRevision != _queueState.value.revision) {
+                        deferredEvents.removeFirst()
+                        _diagnostics.update { it.copy(deferredCommandCount = deferredEvents.size) }
+                        onHeldRevisionMismatch()
+                        return
+                    }
+                    deferredEvents.removeFirst()
+                    val seq = heldHeader?.commandSeq
+                    commandMutex.withLock { if (seq != null) lastAppliedSeq = seq }
+                    _diagnostics.update {
+                        it.copy(
+                            lastAppliedCommandSeq = seq,
+                            deferredCommandCount = deferredEvents.size,
+                            recoveredCommandCount = it.recoveredCommandCount + 1,
+                            clockReady = true,
+                        )
+                    }
+                    applyAuthoritative(held.message, held.generation, estimate)
+                }
+                is DeferredEvent.QueueSnapshot -> {
+                    deferredEvents.removeFirst()
+                    _diagnostics.update {
+                        it.copy(
+                            deferredCommandCount = deferredEvents.size,
+                            recoveredCommandCount = it.recoveredCommandCount + 1,
+                        )
+                    }
+                    applyQueueSnapshot(held.message)
+                }
+                is DeferredEvent.PlaybackState -> {
+                    deferredEvents.removeFirst()
+                    _diagnostics.update {
+                        it.copy(
+                            deferredCommandCount = deferredEvents.size,
+                            recoveredCommandCount = it.recoveredCommandCount + 1,
+                        )
+                    }
+                    applyPeerPlaybackState(held.message, held.generation)
+                }
             }
-            applyAuthoritative(held.message, held.generation, estimate)
         }
     }
 
@@ -1151,11 +1655,19 @@ class SyncPlaybackCoordinator(
         if (header.queueRevision != _queueState.value.revision) {
             _diagnostics.update { it.copy(staleRevisionCount = it.staleRevisionCount + 1) }
             commandMutex.withLock {
-                if (stillCurrent(generation)) enqueueOutbound(Outbound.Queue(snapshotOf(_queueState.value)))
+                if (stillCurrent(generation)) {
+                    enqueueOutbound(
+                        Outbound(
+                            generation,
+                            OutboundAuthority.ADVISORY,
+                            Outbound.Frame.Queue(snapshotOf(_queueState.value)),
+                        ),
+                    )
+                }
             }
             return
         }
-        if (!stillCurrent(generation)) return
+        if (!stillCurrent(generation) || outboundAuthorityLost) return
         syncEnabled = true
         if (message is PlaybackMessage.Play) {
             // Amendment A1 Finding E, the other user's half: the leader retains the follower's Play
@@ -1352,7 +1864,7 @@ class SyncPlaybackCoordinator(
             _diagnostics.update {
                 it.copy(lateCommandCount = it.lateCommandCount + 1, lastScheduleErrorUs = decision.latenessUs)
             }
-        } else {
+        } else if (!outboundAuthorityLost) {
             _diagnostics.update { it.copy(syncState = SyncState.SCHEDULED) }
         }
         // Finding G: joined to the previous armed action, so the authoritative order the leader chose
@@ -1408,6 +1920,9 @@ class SyncPlaybackCoordinator(
         _diagnostics.update {
             when {
                 it.syncState == SyncState.SYNC_FAILED -> it
+                // Amendment A2: a command landing on time says nothing about the authority we know
+                // did not reach the peer, and this state is latched for the generation.
+                it.outboundAuthorityLost -> it
                 // Keyed on the *latch* rather than on the displayed state: once reconciliation has
                 // cleared it, a command landing on time is genuinely news again. Guarding on the
                 // displayed value instead would leave DESYNCHRONIZED on screen forever, because
@@ -1442,7 +1957,7 @@ class SyncPlaybackCoordinator(
     private suspend fun tickOnce(generation: Long) {
         // A held command whose clock has recovered is applied before anything is measured against a
         // timeline it may be about to replace.
-        drainDeferredCommands()
+        drainDeferredEvents()
         val active = timeline ?: return
         val token = currentEpochToken
         val estimate = estimate()
@@ -1456,14 +1971,20 @@ class SyncPlaybackCoordinator(
         val nowSessionUs = sessionNowUs(estimate)
         val state = player.playerState.value
         val durationMs = state.durationMs.takeIf { it > 0 }
+        // ADVISORY (Amendment A2): one diagnostics number on the peer's screen. A failed report is
+        // one missing sample, superseded by the next tick 5 s later — never a divergence.
         enqueueOutbound(
-            Outbound.Playback(
-                PlaybackMessage.PositionReport(
-                    active.trackHash,
-                    state.positionMs.coerceAtLeast(0),
-                    nowSessionUs,
-                    state.playing,
-                    state.rate,
+            Outbound(
+                generation,
+                OutboundAuthority.ADVISORY,
+                Outbound.Frame.Playback(
+                    PlaybackMessage.PositionReport(
+                        active.trackHash,
+                        state.positionMs.coerceAtLeast(0),
+                        nowSessionUs,
+                        state.playing,
+                        state.rate,
+                    ),
                 ),
             ),
         )
@@ -1531,7 +2052,9 @@ class SyncPlaybackCoordinator(
                 _diagnostics.update {
                     it.copy(lastCorrection = SyncCorrection.HARD_SEEK, hardSeekCount = it.hardSeekCount + 1)
                 }
-                emitPlaybackState()
+                // Amendment A2 Finding E: the correction's *own* generation and epoch, carried to
+                // the enqueue rather than replaced there by whatever is live by then.
+                emitPlaybackStateIfOwned(generation, token)
             }
             DriftAction.DeclareSyncFailure -> {
                 // ARCHITECTURE §7.3 tier four and FR-025: stop correcting, restore exactly 1.0,
@@ -1545,31 +2068,78 @@ class SyncPlaybackCoordinator(
                         playbackRate = DriftController.RATE_NORMAL,
                     )
                 }
-                emitPlaybackState()
+                emitPlaybackStateIfOwned(generation, token)
             }
         }
     }
 
-    /** PROTOCOL §5: the leader's authoritative snapshot after a correction. Never an incremental update. */
-    @Suppress("ReturnCount") // one early-out per precondition: the role, a usable estimate, and the session
-    private suspend fun emitPlaybackState() {
+    /**
+     * PROTOCOL §5's authoritative snapshot, emitted **because the leader chose to re-state its
+     * current state now** — the reconciliation re-broadcast, and nothing else.
+     *
+     * Amendment A2 Finding E made this a separate function from [emitPlaybackStateIfOwned]. Reading
+     * the live generation is correct *here*, because "now" is what this call means; it is exactly
+     * wrong for a snapshot that exists as a consequence of some earlier operation, and one function
+     * cannot honestly serve both.
+     */
+    private suspend fun emitCurrentPlaybackState() {
         if (role != PlaybackRole.LEADER) return
-        val estimate = estimate() ?: return
         val generation = session.currentAuthGeneration
+        emitPlaybackStateFrame(generation) { stillCurrent(generation) }
+    }
+
+    /**
+     * PROTOCOL §5's authoritative snapshot, emitted **as a consequence of a correction**, and
+     * therefore carrying that correction's own authorisation all the way to the enqueue
+     * (Amendment A2 Finding E).
+     *
+     * The old shape took no arguments and read `session.currentAuthGeneration` *inside itself*. A
+     * correction that had legitimately proved `owns(generationA, tokenA)` before calling it could
+     * therefore have that proof replaced, one suspension later, by whatever generation happened to
+     * be live — so a snapshot caused by a correction in Session A could be enqueued into Session B.
+     * That is the same "authorising generation versus live generation" distinction ADR-023
+     * Amendments A3/A5 drew in Phase 4, and A1 Finding F's "a superseded correction has zero
+     * effects" was one read of the live generation short of being true.
+     *
+     * The proof is taken again *inside* the critical section, immediately before the enqueue, so
+     * neither the two reads above it nor the lock acquisition itself is a hole in it.
+     */
+    private suspend fun emitPlaybackStateIfOwned(
+        generation: Long,
+        token: Long,
+    ) {
+        if (role != PlaybackRole.LEADER) return
+        emitPlaybackStateFrame(generation) { owns(generation, token) }
+    }
+
+    @Suppress("ReturnCount") // one early-out per precondition: a usable estimate, then the ownership proof
+    private suspend fun emitPlaybackStateFrame(
+        generation: Long,
+        stillOwned: () -> Boolean,
+    ) {
+        if (outboundAuthorityLost) return
+        val estimate = estimate() ?: return
         val state = player.playerState.value
         commandMutex.withLock {
-            if (!stillCurrent(generation)) return
+            if (!stillOwned()) return
             val active = timeline
+            // ADVISORY (Amendment A2): PROTOCOL §5 calls this "the full authoritative snapshot …
+            // the reconciliation anchor, not an incremental update", so the next one subsumes it and
+            // a failed send costs nothing that cannot be re-stated. It carries no new `command_seq`.
             enqueueOutbound(
-                Outbound.Playback(
-                    PlaybackMessage.PlaybackStateSnapshot(
-                        commandSeq = lastAppliedSeq ?: (nextSeq - 1).coerceAtLeast(0),
-                        queueRevision = _queueState.value.revision,
-                        trackHash = active?.trackHash,
-                        queueItemId = active?.queueItemId,
-                        positionMs = state.positionMs.coerceAtLeast(0),
-                        playing = state.playing,
-                        atSessionUs = sessionNowUs(estimate),
+                Outbound(
+                    generation,
+                    OutboundAuthority.ADVISORY,
+                    Outbound.Frame.Playback(
+                        PlaybackMessage.PlaybackStateSnapshot(
+                            commandSeq = lastAppliedSeq ?: (nextSeq - 1).coerceAtLeast(0),
+                            queueRevision = _queueState.value.revision,
+                            trackHash = active?.trackHash,
+                            queueItemId = active?.queueItemId,
+                            positionMs = state.positionMs.coerceAtLeast(0),
+                            playing = state.playing,
+                            atSessionUs = sessionNowUs(estimate),
+                        ),
                     ),
                 ),
             )
@@ -1616,12 +2186,25 @@ class SyncPlaybackCoordinator(
      * §5 rule 2's "apply immediately and count the lateness" is what happens rather than any reuse
      * of an expired instant as if it were still ahead.
      */
-    @Suppress("ReturnCount") // the role gate, the reconciliation branch, then two epoch-binding checks
     private suspend fun onPeerPlaybackState(
         snapshot: PlaybackMessage.PlaybackStateSnapshot,
         generation: Long,
     ) {
         if (role != PlaybackRole.FOLLOWER) return
+        // Amendment A2 Finding D: the reconciliation anchor is authoritative state, so it waits its
+        // turn behind held commands exactly as a queue snapshot does. Its supersede rule below then
+        // runs against whatever is *still* held at that point, which is the honest reading of "the
+        // authoritative state is strictly newer than the command that produced it".
+        if (holdIfOvertaking({ gen -> DeferredEvent.PlaybackState(snapshot, gen) }, generation)) return
+        applyPeerPlaybackState(snapshot, generation)
+    }
+
+    /** [onPeerPlaybackState] with the hold gate already answered — the drain's entry point too. */
+    @Suppress("ReturnCount") // the reconciliation branch, then two epoch-binding checks
+    private suspend fun applyPeerPlaybackState(
+        snapshot: PlaybackMessage.PlaybackStateSnapshot,
+        generation: Long,
+    ) {
         commandMutex.withLock {
             val current = lastReceivedSeq
             if (current == null || snapshot.commandSeq > current) {
@@ -1630,13 +2213,15 @@ class SyncPlaybackCoordinator(
             }
             // Anything held for the clock that the snapshot already accounts for is superseded by
             // it — the authoritative state is strictly newer than the command that produced it.
-            deferredCommands.removeAll { held -> (headerOf(held.message)?.commandSeq ?: 0) <= snapshot.commandSeq }
+            deferredEvents.removeAll { held ->
+                held is DeferredEvent.Command && (headerOf(held.message)?.commandSeq ?: 0) <= snapshot.commandSeq
+            }
         }
         _diagnostics.update {
             it.copy(
                 lastAppliedCommandSeq = lastAppliedSeq,
                 lastReceivedCommandSeq = lastReceivedSeq,
-                deferredCommandCount = deferredCommands.size,
+                deferredCommandCount = deferredEvents.size,
             )
         }
         val wasDesynchronized = playbackDesynchronized
@@ -1695,12 +2280,5 @@ class SyncPlaybackCoordinator(
 
     private companion object {
         val POSITION_REPORT_INTERVAL_US = PlaybackBounds.POSITION_REPORT_INTERVAL_MS * 1_000
-
-        /**
-         * The ordered outbound queue's bound. Generous relative to what one device can generate: a
-         * cadence tick every 5 s plus whatever two people press. Reaching it means the socket is not
-         * draining, which is counted rather than hidden.
-         */
-        const val OUTBOUND_CAPACITY = 256
     }
 }

@@ -122,9 +122,21 @@ interface PlaybackChannelPort {
 
     var queueSink: QueueSink?
 
-    suspend fun send(message: PlaybackMessage): Boolean
+    /**
+     * @param authorizingGeneration the authentication generation that authorised this frame
+     *   (ADR-024 Amendment A2 Finding B). The relay refuses outright unless it is still the live
+     *   one, so a frame that waited on the ordered outbound queue across a session boundary can
+     *   never be written using the replacement session's writer or `session_id`.
+     */
+    suspend fun send(
+        message: PlaybackMessage,
+        authorizingGeneration: Long,
+    ): Boolean
 
-    suspend fun send(message: QueueMessage): Boolean
+    suspend fun send(
+        message: QueueMessage,
+        authorizingGeneration: Long,
+    ): Boolean
 }
 
 /**
@@ -166,9 +178,15 @@ internal class PlaybackRelayAdapter(
             delegate.queueSink = value
         }
 
-    override suspend fun send(message: PlaybackMessage): Boolean = delegate.send(message)
+    override suspend fun send(
+        message: PlaybackMessage,
+        authorizingGeneration: Long,
+    ): Boolean = delegate.send(message, authorizingGeneration)
 
-    override suspend fun send(message: QueueMessage): Boolean = delegate.send(message)
+    override suspend fun send(
+        message: QueueMessage,
+        authorizingGeneration: Long,
+    ): Boolean = delegate.send(message, authorizingGeneration)
 }
 
 /** Zero-behaviour-change wrapper — `AppContainer`'s production call site. */

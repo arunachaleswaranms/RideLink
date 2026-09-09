@@ -142,6 +142,8 @@ struct SyncPlaybackView: View {
         case .synced: return "SYNCHRONIZED"
         case .syncFailed: return "SYNC FAILED — local playback continues, correction stopped"
         case .desynchronized: return "RESYNCHRONIZING — waiting for authoritative state; local playback continues"
+        case .transportFailed:
+            return "NOT DELIVERED — a command never reached the peer; synchronisation stopped, local playback continues"
         }
     }
 }

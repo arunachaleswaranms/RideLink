@@ -63,6 +63,12 @@ class PlaybackRelay internal constructor(
     private val nextSeq: () -> Long,
     private val activeSessionId: () -> SessionId,
     private val authenticatedWriter: () -> AuthenticatedFrameWriter?,
+    /**
+     * ADR-023 §3's authentication generation, live. Phase 5 is the only family whose *outbound*
+     * frames outlive the step that created them — they sit on an ordered queue while the socket
+     * drains — so it is the only one that needs this (ADR-024 Amendment A2 Finding B).
+     */
+    private val currentAuthGeneration: () -> Long,
 ) {
     @Volatile
     var playbackSink: PlaybackSink? = null
@@ -81,22 +87,46 @@ class PlaybackRelay internal constructor(
 
     val queueRejectionCounts: Map<QueueMessageRejection, Int> get() = queueRejections.toMap()
 
-    /** @return true if the message was handed to a live authenticated control connection. */
-    suspend fun send(message: PlaybackMessage): Boolean = write(PlaybackCodec.wireType(message), PlaybackCodec.encode(message))
+    /**
+     * @param authorizingGeneration the authentication generation that **authorised** this frame,
+     *   captured when the coordinator created it (ADR-024 Amendment A2 Finding B). A Phase 5 frame
+     *   waits its turn on an ordered outbound queue that deliberately outlives sessions, so
+     *   resolving the writer and the `session_id` "now" is how a Session A frame ends up written
+     *   under Session B's identity. Passing the generation is what makes that impossible.
+     * @return true if the message was handed to a live authenticated control connection **belonging
+     *   to [authorizingGeneration]**.
+     */
+    suspend fun send(
+        message: PlaybackMessage,
+        authorizingGeneration: Long,
+    ): Boolean = write(PlaybackCodec.wireType(message), PlaybackCodec.encode(message), authorizingGeneration)
 
-    suspend fun send(message: QueueMessage): Boolean = write(QueueCodec.wireType(message), QueueCodec.encode(message))
+    suspend fun send(
+        message: QueueMessage,
+        authorizingGeneration: Long,
+    ): Boolean = write(QueueCodec.wireType(message), QueueCodec.encode(message), authorizingGeneration)
 
+    @Suppress("ReturnCount") // one per way this frame's authorising session can already be gone
     private suspend fun write(
         type: String,
         payload: JsonObject,
+        authorizingGeneration: Long,
     ): Boolean {
+        if (authorizingGeneration != currentAuthGeneration()) return false
         val writer = authenticatedWriter() ?: return false
+        val sessionId = activeSessionId()
+        // Re-proved after both reads and immediately before the write: `writer` is a closure over
+        // the socket that was active a moment ago, and `sessionId` is that session's id. If the
+        // generation has moved between the two, neither belongs to the frame in hand — and if it
+        // moves during the write itself, the socket the closure holds is the *old* one, already
+        // closed, so the write fails rather than landing on the new session.
+        if (authorizingGeneration != currentAuthGeneration()) return false
         return runCatching {
             writer.write(
                 ControlMessages.raw(
                     localPeerId = localPeerId,
                     type = type,
-                    sessionId = activeSessionId(),
+                    sessionId = sessionId,
                     seq = nextSeq(),
                     sentAtMonoUs = monotonicNowUs(),
                     payload = payload,

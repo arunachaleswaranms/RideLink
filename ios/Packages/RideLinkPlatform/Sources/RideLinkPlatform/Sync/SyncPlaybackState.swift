@@ -39,6 +39,21 @@ public enum SyncState: String, Sendable, Equatable {
     /// phones agree about, this one means we may no longer know what the timeline *is*. Local music
     /// keeps playing either way (ADR-004, FR-025).
     case desynchronized = "DESYNCHRONIZED"
+
+    /// ADR-024 Amendment A2: an **authoritative** frame this device produced never reached the peer
+    /// — the one ordered outbound path refused it, or the authenticated write returned false — so
+    /// this device stopped issuing authority rather than continuing from a state only it knows
+    /// about.
+    ///
+    /// The three states above are all about what *arrives*; this one is about what *leaves*. It is
+    /// latched for the whole authentication generation and cleared only by a new session, because
+    /// there is no protocol message that re-synchronises a peer which never learned of a command
+    /// (see ADR-024 Amendment A2 §H on `STATE_REQUEST`).
+    ///
+    /// Synchronised mode is left when it latches, so the transport controls go straight back to
+    /// Phase 3 behaviour and the user keeps control of their own music. **Local music keeps
+    /// playing** (ADR-004, FR-025), exactly as for every other failure in this enum.
+    case transportFailed = "TRANSPORT_FAILED"
 }
 
 /// What the ladder last decided, for the FR-023 diagnostics surface.
@@ -113,22 +128,55 @@ public struct SyncPlaybackDiagnostics: Sendable, Equatable {
     /// before the clock was known to be trustworthy spent its sequence number, so the leader's
     /// replay of it became a duplicate and nothing ever applied it.
     public var lastReceivedCommandSeq: Int64?
-    /// How many authoritative commands are held, in order, waiting for a trustworthy clock.
+    /// How many authoritative events are held, in **arrival order**, waiting for a trustworthy
+    /// clock.
+    ///
+    /// ADR-024 Amendment A2 Finding D widened this from commands alone: once a command is held,
+    /// every later authoritative frame whose semantics could change that command's meaning — a
+    /// `QUEUE_SNAPSHOT`, a `PLAYBACK_STATE` — is held behind it too, so the leader's semantic stream
+    /// replays in the order the leader chose. A `POSITION_REPORT` is deliberately never held.
     public var deferredCommandCount = 0
     /// How many held commands were applied once the clock became trustworthy again.
     public var recoveredCommandCount = 0
-    /// How many outbound Phase 5 frames this device could not hand to the transport because its own
-    /// ordered outbound queue was full (Amendment A1 Finding B). Locally produced, so a nonzero
+    /// How many outbound Phase 5 frames this device could not hand to its own ordered outbound
+    /// queue because that queue was full (Amendment A1 Finding B). Locally produced, so a nonzero
     /// value means the control socket is wedged, never a pathological peer.
+    ///
+    /// ADR-024 Amendment A2 Finding A: this is **admission refusal**, and it is no longer only a
+    /// count. An authoritative operation whose frame is refused here commits nothing — no
+    /// `command_seq`, no `queue_revision`, no local audible effect — and latches
+    /// `outboundAuthorityLost`.
     public var outboundOverflowCount = 0
     /// How many frames have been accepted onto the one ordered outbound path.
     public var outboundEnqueuedCount = 0
-    /// How many of those have actually been handed to the transport, in enqueue order.
+    /// How many admitted frames the single writer has **tried** to send (Amendment A2 Finding C).
+    /// Exactly `outboundSentCount` + `outboundFailedCount` + `outboundStaleCount`.
+    public var outboundAttemptCount = 0
+    /// How many frames the authenticated transport actually accepted — `send` returned **true**, and
+    /// nothing weaker.
     ///
-    /// The gap between this and `outboundEnqueuedCount` is a real FR-023 figure — a persistent one
-    /// means the control socket is not draining — and it is also the precise signal a test needs to
-    /// know the wire has caught up, instead of guessing how many scheduler turns a send takes.
+    /// Amendment A2 Finding C: this used to increment for every dequeued frame, including ones the
+    /// write had just refused, so `outboundSentCount == outboundEnqueuedCount` could be reported
+    /// while frames had been silently discarded. The gap between this and `outboundEnqueuedCount` is
+    /// a real FR-023 figure — a persistent one means the control socket is not draining — and it is
+    /// also the precise signal a test needs to know the wire has caught up, instead of guessing how
+    /// many scheduler turns a send takes.
     public var outboundSentCount = 0
+    /// How many frames the authenticated transport refused: no live authenticated writer, or the
+    /// write itself threw (Amendment A2 Finding C). For an authoritative frame this is a fail-closed
+    /// event, not a statistic.
+    public var outboundFailedCount = 0
+    /// How many frames were **never written** because the authentication generation that authorised
+    /// them was no longer the live one, or its Phase 5 authority had already been abandoned
+    /// (Amendment A2 Finding B).
+    ///
+    /// A nonzero value is the session-confusion class Phase 4 Amendments A3/A5 hardened against,
+    /// caught at the boundary rather than written under the new session's `session_id`.
+    public var outboundStaleCount = 0
+    /// ADR-024 Amendment A2: an authoritative frame this device produced never reached the peer, so
+    /// Phase 5 authority is over for this authentication generation. Latched until a new session;
+    /// see `SyncState.transportFailed`.
+    public var outboundAuthorityLost = false
     /// How many retained one-press synchronised Plays were issued automatically once their queue
     /// revision or their content arrived (Amendment A1 Findings A and E) — the figure that
     /// distinguishes "the user pressed Play once and it worked" from "the user pressed Play twice".

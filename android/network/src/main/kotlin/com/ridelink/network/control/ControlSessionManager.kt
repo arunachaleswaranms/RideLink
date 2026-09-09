@@ -289,6 +289,7 @@ class ControlSessionManager(
                     AuthenticatedFrameWriter { envelope -> socket.writeFrame(envelope) }
                 }
             },
+            currentAuthGeneration = { authenticationGeneration },
         )
 
     val voice: VoiceSignalRelay get() = relays.voice

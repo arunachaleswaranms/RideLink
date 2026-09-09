@@ -47,6 +47,8 @@ class ControlRelays internal constructor(
     activeSessionId: () -> SessionId,
     /** Yields a writer only while the trust gate has passed; `null` at every other moment. */
     authenticatedWriter: () -> AuthenticatedFrameWriter?,
+    /** ADR-023 §3's live authentication generation. Only [playback] needs it — see its doc. */
+    currentAuthGeneration: () -> Long,
 ) {
     val voice: VoiceSignalRelay =
         VoiceSignalRelay(localPeerId, monotonicNowUs, nextSeq, activeSessionId, authenticatedWriter)
@@ -61,7 +63,7 @@ class ControlRelays internal constructor(
         TransferRelay(localPeerId, monotonicNowUs, nextSeq, activeSessionId, authenticatedWriter)
 
     val playback: PlaybackRelay =
-        PlaybackRelay(localPeerId, monotonicNowUs, nextSeq, activeSessionId, authenticatedWriter)
+        PlaybackRelay(localPeerId, monotonicNowUs, nextSeq, activeSessionId, authenticatedWriter, currentAuthGeneration)
 
     /**
      * Records that a frame of [type] was refused because the connection had not passed the trust

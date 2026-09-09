@@ -256,7 +256,9 @@ public actor ControlSessionManager {
         monotonicNowUs: monotonicNowUs,
         nextSeq: { [seqCounter] in seqCounter.nextSeq() },
         activeSessionId: { [weak self] in await self?.currentSessionId() ?? SessionId("n/a") },
-        authenticatedWriter: { [weak self] in await self?.authenticatedWriter() }
+        authenticatedWriter: { [weak self] in await self?.authenticatedWriter() },
+        // ADR-024 Amendment A2 Finding B: -1 when this manager is gone, which matches no frame.
+        currentAuthGeneration: { [weak self] in await self?.currentAuthGeneration ?? -1 }
     )
 
     /// The live session-clock estimate the Phase 5 playback layer schedules against

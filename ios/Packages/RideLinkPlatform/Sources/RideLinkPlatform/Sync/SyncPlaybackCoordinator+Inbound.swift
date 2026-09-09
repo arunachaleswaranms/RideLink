@@ -13,12 +13,15 @@ extension SyncPlaybackCoordinator {
     /// follower** (ADR-024 §5) — §9's own "the snapshot always wins, there is no merge algorithm to
     /// get subtly wrong", taken literally.
     func mutateQueue(_ mutation: SharedQueueMutation) async {
-        guard let currentRole = role else { return }
+        guard let currentRole = role, !outboundAuthorityLost else { return }
         if currentRole == .follower {
             let generation = await session.currentAuthGeneration()
             guard await stillCurrent(generation) else { return }
             // No `await` from here to the enqueue (Amendment A1 Finding B).
-            enqueueOutbound(.queue(queueIntent(mutation)))
+            let admitted = enqueueOutbound(
+                Phase5Outbound(generation: generation, authority: .intent, frame: .queue(queueIntent(mutation)))
+            )
+            if !admitted { await onOutboundRefused(.intent, generation: generation) }
             return
         }
         await applyLeaderMutation(mutation)
@@ -39,16 +42,50 @@ extension SyncPlaybackCoordinator {
     /// created it, and one stamped for the old revision cannot be overtaken by it.
     private func applyLeaderMutation(_ mutation: SharedQueueMutation) async {
         let generation = await session.currentAuthGeneration()
-        guard await stillCurrent(generation) else { return }
+        guard await stillCurrent(generation), !outboundAuthorityLost else { return }
         let outcome = SharedQueue.apply(state: queueState, mutation: mutation)
         guard outcome.rejection == nil, outcome.changed else { return }
-        queueState = outcome.state
-        enqueueOutbound(.queue(snapshotMessage()))
+        // Amendment A2 Finding A / §7: the candidate state is computed first and becomes
+        // authoritative only once the snapshot that carries it has been admitted to the one ordered
+        // outbound path. A refused snapshot leaves the revision exactly where it was, so the leader
+        // can never sit on a revision the follower has no way to learn.
+        let candidate = outcome.state
+        let snapshot = QueueMessage.snapshot(
+            queueRevision: candidate.revision, items: candidate.items, currentIndex: candidate.currentIndex
+        )
+        let admitted = enqueueOutbound(
+            Phase5Outbound(generation: generation, authority: .authoritative, frame: .queue(snapshot)) {
+                [weak self] result in
+                await self?.onQueueOutcome(generation: generation, outcome: result)
+            }
+        )
+        guard admitted else {
+            await onOutboundRefused(.authoritative, generation: generation)
+            return
+        }
+        queueState = candidate
         publishQueue()
         publishDiagnostics()
-        // Finding A: the leader's own mutation is the authoritative queue state, so a Play that was
-        // waiting for exactly this revision may now be issued.
-        await resolvePendingPlay()
+    }
+
+    /// The leader's queue mutation, once the transport has answered (Amendment A2 Findings A and C).
+    ///
+    /// A1 Finding A's "the leader's own mutation is the authoritative queue state, so a Play waiting
+    /// for exactly this revision may now be issued" is still true — but only once the peer has
+    /// actually been told the revision. Issuing a `PLAY` stamped for a revision the follower never
+    /// received is the same divergence one layer up, and the follower's own §5 rule 3 check would
+    /// refuse it.
+    func onQueueOutcome(generation: Int64, outcome: OutboundOutcome) async {
+        switch OutboundCommitGate.decide(authority: .authoritative, outcome: outcome) {
+        case .abortFailClosed:
+            await failClosedOutbound(generation: generation)
+        case .abortQuiet:
+            break
+        case .commit:
+            // Launched rather than awaited: resolving a retained Play resolves content, which
+            // suspends, and the one outbound consumer must keep draining while it does.
+            Task { [weak self] in await self?.resolvePendingPlay() }
+        }
     }
 
     func snapshotMessage() -> QueueMessage {
@@ -59,11 +96,17 @@ extension SyncPlaybackCoordinator {
     /// Both frames go through the one ordered outbound path, so the follower sees the queue snapshot
     /// and the playback state in the order the leader decided them.
     func rebroadcastAuthoritativeState() async {
-        guard role == .leader else { return }
+        guard role == .leader, !outboundAuthorityLost else { return }
         let generation = await session.currentAuthGeneration()
         guard await stillCurrent(generation) else { return }
-        enqueueOutbound(.queue(snapshotMessage()))
-        await emitPlaybackState()
+        // ADVISORY (Amendment A2): it carries no new revision and no new `command_seq`. It re-states
+        // authority the peer has already been told about, and PROTOCOL §9's "the snapshot always
+        // wins" makes the next one subsume this one, so a failure here is a missed reconciliation
+        // attempt rather than a divergence.
+        enqueueOutbound(
+            Phase5Outbound(generation: generation, authority: .advisory, frame: .queue(snapshotMessage()))
+        )
+        await emitCurrentPlaybackState()
     }
 
     // MARK: - Retained one-press Play (Amendment A1 Findings A and E)
@@ -145,8 +188,11 @@ extension SyncPlaybackCoordinator {
             await onPeerPositionReport(trackHash: trackHash, positionMs: positionMs, atSessionUs: atSessionUs)
         case .playbackState(let commandSeq, let queueRevision, let trackHash, let queueItemId, let positionMs, let playing, let atSessionUs):
             await onPeerPlaybackState(
-                commandSeq: commandSeq, queueRevision: queueRevision, trackHash: trackHash, queueItemId: queueItemId,
-                positionMs: positionMs, playing: playing, atSessionUs: atSessionUs, generation: generation
+                PlaybackStateSnapshotFields(
+                    commandSeq: commandSeq, queueRevision: queueRevision, trackHash: trackHash,
+                    queueItemId: queueItemId, positionMs: positionMs, playing: playing, atSessionUs: atSessionUs
+                ),
+                generation: generation
             )
         default:
             await onInboundCommand(message, generation: generation)
@@ -157,7 +203,7 @@ extension SyncPlaybackCoordinator {
         guard await stillCurrent(generation) else { return }
         switch message {
         case .snapshot(let revision, let items, let currentIndex):
-            await adoptSnapshot(revision: revision, items: items, currentIndex: currentIndex)
+            await adoptSnapshot(revision: revision, items: items, currentIndex: currentIndex, generation: generation)
         case .add(let header, let items):
             await onQueueIntent(header, .add(items: items), generation: generation)
         case .remove(let header, let ids):
@@ -172,8 +218,19 @@ extension SyncPlaybackCoordinator {
     ///
     /// It is also the queue half of Amendment A1's reconciliation: adopting authoritative queue state
     /// is precisely what makes a desynchronised queue coherent again.
-    private func adoptSnapshot(revision: Int64, items: [SharedQueueItem], currentIndex: Int?) async {
+    private func adoptSnapshot(revision: Int64, items: [SharedQueueItem], currentIndex: Int?, generation: Int64) async {
         guard role == .follower else { return }
+        // Amendment A2 Finding D: a snapshot must not overtake a command already held for the clock.
+        // Applying revision n+1 ahead of a held `NEXT` authored against revision n changes what that
+        // `NEXT` means, and no later check can recover the intent it destroyed.
+        if holdIfOvertaking(
+            .queueSnapshot(revision: revision, items: items, currentIndex: currentIndex, generation: generation)
+        ) { return }
+        await applyQueueSnapshot(revision: revision, items: items, currentIndex: currentIndex)
+    }
+
+    /// `adoptSnapshot` with the hold gate already answered — the drain's entry point too.
+    func applyQueueSnapshot(revision: Int64, items: [SharedQueueItem], currentIndex: Int?) async {
         queueState = SharedQueue.applySnapshot(revision: revision, items: items, currentIndex: currentIndex)
         queueDesynchronized = false
         publishDesynchronized()
@@ -187,7 +244,7 @@ extension SyncPlaybackCoordinator {
     /// (PROTOCOL §5 rule 3) are applied here; the leader then serialises the mutation exactly as it
     /// would its own user's, which is what makes two simultaneous adds deterministic.
     private func onQueueIntent(_ header: QueueCommandHeader, _ mutation: SharedQueueMutation, generation: Int64) async {
-        guard let currentRole = role else { return }
+        guard let currentRole = role, !outboundAuthorityLost else { return }
         switch CommandOrderGate.decide(role: currentRole, lastAppliedSeq: lastReceivedSeq, incomingSeq: header.commandSeq) {
         case .intent:
             break
@@ -204,7 +261,9 @@ extension SyncPlaybackCoordinator {
             // PROTOCOL §5 rule 3's "the issuer refreshes": the leader re-broadcasts authoritative
             // state rather than waiting to be asked, which needs no message type §3 does not list.
             guard await stillCurrent(generation) else { return }
-            enqueueOutbound(.queue(snapshotMessage()))
+            enqueueOutbound(
+                Phase5Outbound(generation: generation, authority: .advisory, frame: .queue(snapshotMessage()))
+            )
             return
         }
         await mutateQueue(mutation)
@@ -235,7 +294,13 @@ extension SyncPlaybackCoordinator {
         // refused *without* spending its sequence number, so the authoritative snapshot that
         // reconciles us is what decides where ordering resumes from.
         if playbackDesynchronized || queueDesynchronized { return }
-        if header.queueRevision != queueState.revision {
+        // Amendment A2 Finding D: the revision rule is checked **against the state this command will
+        // actually be applied to**. While an authoritative stream is held, the `QUEUE_SNAPSHOT` that
+        // created this command's revision is itself held in front of it, so the revision applied
+        // *now* is deliberately the older one and checking here would refuse a perfectly ordered
+        // command for a revision it is about to be given. The check moves to the replay, in
+        // `drainDeferredEvents`.
+        if deferredEvents.isEmpty, header.queueRevision != queueState.revision {
             diagnostics.staleRevisionCount += 1
             publishDiagnostics()
             return
@@ -259,22 +324,17 @@ extension SyncPlaybackCoordinator {
         let estimate = await estimate()
         let admission = PendingCommandGate.decide(
             clockReady: estimate?.ready == true,
-            deferredCount: deferredCommands.count,
+            deferredCount: deferredEvents.count,
             capacity: deferredCommandCapacity
         )
         switch admission {
         case .overflow:
-            // The same halt-and-reconcile posture as an ingress overflow, and for the same reason:
-            // more authority is outstanding than we can honestly account for.
-            diagnostics.inboundOverflowCount += 1
-            playbackDesynchronized = true
-            queueDesynchronized = true
-            publishDesynchronized()
+            onHoldOverflow()
         case .defer_:
             lastReceivedSeq = header.commandSeq
-            deferredCommands.append(DeferredCommand(message: message, generation: generation))
+            deferredEvents.append(.command(message, generation: generation))
             diagnostics.lastReceivedCommandSeq = header.commandSeq
-            diagnostics.deferredCommandCount = deferredCommands.count
+            diagnostics.deferredCommandCount = deferredEvents.count
             if !diagnostics.ingressDesynchronized { diagnostics.syncState = .clockUnready }
             diagnostics.clockReady = false
             publishDiagnostics()
@@ -290,6 +350,52 @@ extension SyncPlaybackCoordinator {
         }
     }
 
+    /// More authoritative work is outstanding than may be held. The same explicit halt-and-reconcile
+    /// posture as an ingress overflow, and for the same reason: more authority is outstanding than we
+    /// can honestly account for, and applying part of it in the wrong order is worse than admitting
+    /// we lost track.
+    func onHoldOverflow() {
+        diagnostics.inboundOverflowCount += 1
+        playbackDesynchronized = true
+        queueDesynchronized = true
+        publishDesynchronized()
+    }
+
+    /// A held command's `queue_revision` did not match the revision the replay had reached by the
+    /// time it came round (Amendment A2 Finding D).
+    ///
+    /// In a stream the leader actually produced this cannot happen: replaying its frames in arrival
+    /// order reproduces the revisions it stamped them against. Reaching here therefore means a frame
+    /// between them is missing — an ingress overflow, or a leader that failed closed mid-sequence —
+    /// so the honest answer is PROTOCOL §5 rule 3's refusal *plus* the same halt-and-reconcile
+    /// posture as every other "we can no longer account for the authority we hold".
+    func onHeldRevisionMismatch() {
+        diagnostics.staleRevisionCount += 1
+        playbackDesynchronized = true
+        queueDesynchronized = true
+        publishDesynchronized()
+    }
+
+    /// Amendment A2 Finding D: whether an authoritative **state** frame may be applied now, or must
+    /// join the held stream so it cannot change the meaning of a command already waiting.
+    ///
+    /// - Returns: true when the frame was held (and the caller must stop), false when it may proceed.
+    func holdIfOvertaking(_ event: DeferredEvent) -> Bool {
+        switch AuthoritativeHoldGate.decide(heldCount: deferredEvents.count, capacity: deferredCommandCapacity) {
+        case .processNow:
+            return false
+        case .overflow:
+            onHoldOverflow()
+            return true
+        case .hold:
+            deferredEvents.append(event)
+            diagnostics.deferredCommandCount = deferredEvents.count
+            publishDiagnostics()
+            startDeferredDrain(generation: event.generation)
+            return true
+        }
+    }
+
     /// Re-checks the clock on a short cadence while commands wait, so a held `PLAY` becomes audible
     /// as soon as the estimator recovers rather than at the next 5 s position-report tick. One loop
     /// at a time, ended by the session boundary or by the buffer emptying.
@@ -301,39 +407,75 @@ extension SyncPlaybackCoordinator {
                 await self.sleeper.sleep(untilLocalMonoUs: self.monotonicNowUs() + Phase5GateBounds.deferredRetryIntervalUs)
                 if Task.isCancelled { return }
                 guard await self.stillCurrent(generation) else { return }
-                await self.drainDeferredCommands()
+                await self.drainDeferredEvents()
             }
         }
     }
 
     func hasDeferredWork(generation: Int64) async -> Bool {
-        guard !deferredCommands.isEmpty else { return false }
+        guard !deferredEvents.isEmpty else { return false }
         return await stillCurrent(generation)
     }
 
-    /// Applies held commands in authoritative order, and only while the clock stays trustworthy.
-    /// `lastAppliedSeq` moves here — at the point the command actually takes effect — which is the
-    /// whole of Finding D's "received is not applied".
-    func drainDeferredCommands() async {
-        while !deferredCommands.isEmpty {
+    /// Replays the held authoritative event stream **in original arrival order** (Amendment A1
+    /// Finding D, widened by Amendment A2 Finding D).
+    ///
+    /// A1 drained commands, and only commands, so a `QUEUE_SNAPSHOT` that arrived while a `NEXT` was
+    /// held had already been applied by the time the `NEXT` ran — and the `NEXT` then stepped a
+    /// queue it was never authored against. The fix is *not* to re-check the revision here and drop
+    /// the command, which would lose an authoritative operation all over again; it is that nothing
+    /// overtook it in the first place, so replaying the stream reproduces exactly what the leader
+    /// decided.
+    ///
+    /// A command needs a trustworthy clock and stops the drain until it has one. An authoritative
+    /// state frame does not — it names its own instant and PROTOCOL §5 rule 2 applies it immediately
+    /// — but it can only ever reach the head of this queue *after* every command in front of it has
+    /// been applied, so its position in the stream is what preserves the semantics.
+    ///
+    /// `lastAppliedSeq` moves here, at the point a command actually takes effect, which is the whole
+    /// of A1 Finding D's "received is not applied".
+    func drainDeferredEvents() async {
+        while !deferredEvents.isEmpty {
             if playbackDesynchronized || queueDesynchronized { return }
-            guard let estimate = await estimate(), estimate.ready else { return }
-            let held = deferredCommands[0]
+            let held = deferredEvents[0]
             guard await stillCurrent(held.generation) else {
-                deferredCommands.removeAll()
+                deferredEvents.removeAll()
                 diagnostics.deferredCommandCount = 0
                 publishDiagnostics()
                 return
             }
-            deferredCommands.removeFirst()
-            let seq = Self.headerOf(held.message)?.commandSeq
-            if let seq { lastAppliedSeq = seq }
-            diagnostics.lastAppliedCommandSeq = lastAppliedSeq
-            diagnostics.deferredCommandCount = deferredCommands.count
-            diagnostics.recoveredCommandCount += 1
-            diagnostics.clockReady = true
-            publishDiagnostics()
-            await applyAuthoritative(held.message, generation: held.generation, estimate: estimate)
+            switch held {
+            case .command(let message, let generation):
+                guard let estimate = await estimate(), estimate.ready else { return }
+                let heldHeader = Self.headerOf(message)
+                if let heldHeader, heldHeader.queueRevision != queueState.revision {
+                    deferredEvents.removeFirst()
+                    diagnostics.deferredCommandCount = deferredEvents.count
+                    onHeldRevisionMismatch()
+                    return
+                }
+                deferredEvents.removeFirst()
+                let seq = heldHeader?.commandSeq
+                if let seq { lastAppliedSeq = seq }
+                diagnostics.lastAppliedCommandSeq = lastAppliedSeq
+                diagnostics.deferredCommandCount = deferredEvents.count
+                diagnostics.recoveredCommandCount += 1
+                diagnostics.clockReady = true
+                publishDiagnostics()
+                await applyAuthoritative(message, generation: generation, estimate: estimate)
+            case .queueSnapshot(let revision, let items, let currentIndex, _):
+                deferredEvents.removeFirst()
+                diagnostics.deferredCommandCount = deferredEvents.count
+                diagnostics.recoveredCommandCount += 1
+                publishDiagnostics()
+                await applyQueueSnapshot(revision: revision, items: items, currentIndex: currentIndex)
+            case .playbackState(let fields, let generation):
+                deferredEvents.removeFirst()
+                diagnostics.deferredCommandCount = deferredEvents.count
+                diagnostics.recoveredCommandCount += 1
+                publishDiagnostics()
+                await applyPeerPlaybackState(fields, generation: generation)
+            }
         }
     }
 
@@ -345,10 +487,12 @@ extension SyncPlaybackCoordinator {
             diagnostics.staleRevisionCount += 1
             publishDiagnostics()
             guard await stillCurrent(generation) else { return }
-            enqueueOutbound(.queue(snapshotMessage()))
+            enqueueOutbound(
+                Phase5Outbound(generation: generation, authority: .advisory, frame: .queue(snapshotMessage()))
+            )
             return
         }
-        guard await stillCurrent(generation) else { return }
+        guard await stillCurrent(generation), !outboundAuthorityLost else { return }
         syncEnabled = true
         if case .play(_, let trackHash, _, let queueItemId) = message {
             // Amendment A1 Finding E, the other user's half: the leader retains the follower's Play
@@ -605,7 +749,7 @@ extension SyncPlaybackCoordinator {
             diagnostics.lateCommandCount += 1
             diagnostics.lastScheduleErrorUs = latenessUs
         case .schedule(let atLocalMonoUs):
-            diagnostics.syncState = .scheduled
+            if !outboundAuthorityLost { diagnostics.syncState = .scheduled }
             deadlineUs = atLocalMonoUs
         }
         publishDiagnostics()
@@ -665,6 +809,9 @@ extension SyncPlaybackCoordinator {
     /// command landing on time says nothing about the authority we know we are missing.
     func markSynced() {
         if diagnostics.syncState == .syncFailed { return }
+        // Amendment A2: a command landing on time says nothing about the authority we know did not
+        // reach the peer, and this state is latched for the generation.
+        if diagnostics.outboundAuthorityLost { return }
         // Keyed on the *latch* rather than on the displayed state: once reconciliation has cleared
         // it, a command landing on time is genuinely news again. Guarding on the displayed value
         // instead would leave `.desynchronized` on screen forever, because nothing else would ever
@@ -695,7 +842,7 @@ extension SyncPlaybackCoordinator {
     func tickOnce(generation: Int64) async {
         // A held command whose clock has recovered is applied before anything is measured against a
         // timeline it may be about to replace.
-        await drainDeferredCommands()
+        await drainDeferredEvents()
         guard let active = timeline else { return }
         let token = currentEpochToken
         guard let estimate = await estimate(), estimate.ready else {
@@ -708,13 +855,19 @@ extension SyncPlaybackCoordinator {
         let nowSessionUs = estimate.sessionUs(localMonoUs: monotonicNowUs())
         let state = await player.playerState()
         let durationMs: Int64? = state.durationMs > 0 ? state.durationMs : nil
-        enqueueOutbound(.playback(.positionReport(
-            trackHash: active.trackHash,
-            positionMs: max(state.positionMs, 0),
-            atSessionUs: nowSessionUs,
-            playing: state.playing,
-            playbackRate: state.rate
-        )))
+        // ADVISORY (Amendment A2): one diagnostics number on the peer's screen. A failed report is
+        // one missing sample, superseded by the next tick 5 s later — never a divergence.
+        enqueueOutbound(Phase5Outbound(
+            generation: generation,
+            authority: .advisory,
+            frame: .playback(.positionReport(
+                trackHash: active.trackHash,
+                positionMs: max(state.positionMs, 0),
+                atSessionUs: nowSessionUs,
+                playing: state.playing,
+                playbackRate: state.rate
+            ))
+        ))
         guard await owns(generation: generation, token: token) else { return }
         let transitioning = await routeState.isRouteTransitioning()
         let drift = active.driftMs(actualPositionMs: state.positionMs, atSessionUs: nowSessionUs, durationMs: durationMs)
@@ -774,7 +927,9 @@ extension SyncPlaybackCoordinator {
             guard await owns(generation: generation, token: token) else { return }
             diagnostics.lastCorrection = .hardSeek
             diagnostics.hardSeekCount += 1
-            await emitPlaybackState()
+            // Amendment A2 Finding E: the correction's *own* generation and epoch, carried to the
+            // enqueue rather than replaced there by whatever is live by then.
+            await emitPlaybackStateIfOwned(generation: generation, token: token)
         case .declareSyncFailure:
             // ARCHITECTURE §7.3 tier four and FR-025: stop correcting, restore exactly 1.0, surface
             // it — and leave local music playing.
@@ -785,29 +940,69 @@ extension SyncPlaybackCoordinator {
             diagnostics.playbackRate = DriftController.rateNormal
             diagnostics.lastCorrection = .syncFailed
             diagnostics.syncState = .syncFailed
-            await emitPlaybackState()
+            await emitPlaybackStateIfOwned(generation: generation, token: token)
         }
         publishDiagnostics()
     }
 
-    /// PROTOCOL §5: the leader's authoritative snapshot after a correction. Never an incremental
-    /// update. The ownership proof is taken after the two reads that suspend and immediately before
-    /// the enqueue, so a snapshot can never be emitted into a session this work no longer owns
-    /// (Finding F).
-    func emitPlaybackState() async {
-        guard role == .leader, let estimate = await estimate() else { return }
-        let state = await player.playerState()
+    /// PROTOCOL §5's authoritative snapshot, emitted **because the leader chose to re-state its
+    /// current state now** — the reconciliation re-broadcast, and nothing else.
+    ///
+    /// Amendment A2 Finding E made this a separate function from `emitPlaybackStateIfOwned`. Reading
+    /// the live generation is correct *here*, because "now" is what this call means; it is exactly
+    /// wrong for a snapshot that exists as a consequence of some earlier operation, and one function
+    /// cannot honestly serve both.
+    func emitCurrentPlaybackState() async {
+        guard role == .leader else { return }
         let generation = await session.currentAuthGeneration()
-        guard await stillCurrent(generation) else { return }
-        enqueueOutbound(.playback(.playbackState(
-            commandSeq: lastAppliedSeq ?? max(nextSeq - 1, 0),
-            queueRevision: queueState.revision,
-            trackHash: timeline?.trackHash,
-            queueItemId: timeline?.queueItemId,
-            positionMs: max(state.positionMs, 0),
-            playing: state.playing,
-            atSessionUs: estimate.sessionUs(localMonoUs: monotonicNowUs())
-        )))
+        await emitPlaybackStateFrame(generation: generation) { [weak self] in
+            await self?.stillCurrent(generation) ?? false
+        }
+    }
+
+    /// PROTOCOL §5's authoritative snapshot, emitted **as a consequence of a correction**, and
+    /// therefore carrying that correction's own authorisation all the way to the enqueue
+    /// (Amendment A2 Finding E).
+    ///
+    /// The old shape took no arguments and read `session.currentAuthGeneration()` *inside itself*. A
+    /// correction that had legitimately proved `owns(generation: A, token: A)` before calling it
+    /// could therefore have that proof replaced, one `await` later, by whatever generation happened
+    /// to be live — so a snapshot caused by a correction in Session A could be enqueued into
+    /// Session B. On an actor that window is not theoretical: every `await` in the chain is a
+    /// re-entrancy point. It is the same "authorising generation versus live generation" distinction
+    /// ADR-023 Amendments A3/A5 drew in Phase 4, and A1 Finding F's "a superseded correction has zero
+    /// effects" was one read of the live generation short of being true.
+    ///
+    /// The proof is taken again *immediately before* the enqueue, with no `await` between, so none
+    /// of the reads above it is a hole in it.
+    func emitPlaybackStateIfOwned(generation: Int64, token: Int64) async {
+        guard role == .leader else { return }
+        await emitPlaybackStateFrame(generation: generation) { [weak self] in
+            await self?.owns(generation: generation, token: token) ?? false
+        }
+    }
+
+    private func emitPlaybackStateFrame(generation: Int64, stillOwned: () async -> Bool) async {
+        guard !outboundAuthorityLost, let estimate = await estimate() else { return }
+        let state = await player.playerState()
+        guard await stillOwned() else { return }
+        // No `await` from here to the enqueue: the actor makes the proof and the hand-off atomic.
+        // ADVISORY (Amendment A2): PROTOCOL §5 calls this "the full authoritative snapshot … the
+        // reconciliation anchor, not an incremental update", so the next one subsumes it and a
+        // failed send costs nothing that cannot be re-stated. It carries no new `command_seq`.
+        enqueueOutbound(Phase5Outbound(
+            generation: generation,
+            authority: .advisory,
+            frame: .playback(.playbackState(
+                commandSeq: lastAppliedSeq ?? max(nextSeq - 1, 0),
+                queueRevision: queueState.revision,
+                trackHash: timeline?.trackHash,
+                queueItemId: timeline?.queueItemId,
+                positionMs: max(state.positionMs, 0),
+                playing: state.playing,
+                atSessionUs: estimate.sessionUs(localMonoUs: monotonicNowUs())
+            ))
+        ))
     }
 
     /// The peer's `POSITION_REPORT`. Bound to the current playback epoch by **both** its `track_hash`
@@ -841,55 +1036,48 @@ extension SyncPlaybackCoordinator {
     /// snapshot already carries every value needed, and the deadline it names is in the past, so §5
     /// rule 2's "apply immediately and count the lateness" is what happens rather than any reuse of
     /// an expired instant as if it were still ahead.
-    private func onPeerPlaybackState(
-        commandSeq: Int64,
-        queueRevision: Int64,
-        trackHash: ContentHash?,
-        queueItemId: String?,
-        positionMs: Int64,
-        playing: Bool,
-        atSessionUs: Int64,
-        generation: Int64
-    ) async {
+    private func onPeerPlaybackState(_ fields: PlaybackStateSnapshotFields, generation: Int64) async {
         guard role == .follower else { return }
+        // Amendment A2 Finding D: the reconciliation anchor is authoritative state, so it waits its
+        // turn behind held commands exactly as a queue snapshot does. Its supersede rule below then
+        // runs against whatever is *still* held at that point, which is the honest reading of "the
+        // authoritative state is strictly newer than the command that produced it".
+        if holdIfOvertaking(.playbackState(fields, generation: generation)) { return }
+        await applyPeerPlaybackState(fields, generation: generation)
+    }
+
+    /// `onPeerPlaybackState` with the hold gate already answered — the drain's entry point too.
+    func applyPeerPlaybackState(_ fields: PlaybackStateSnapshotFields, generation: Int64) async {
+        let commandSeq = fields.commandSeq
         if lastReceivedSeq == nil || commandSeq > (lastReceivedSeq ?? 0) {
             lastReceivedSeq = commandSeq
             lastAppliedSeq = commandSeq
         }
         // Anything held for the clock that the snapshot already accounts for is superseded by it —
         // the authoritative state is strictly newer than the command that produced it.
-        deferredCommands.removeAll { (Self.headerOf($0.message)?.commandSeq ?? 0) <= commandSeq }
+        deferredEvents.removeAll { held in
+            guard case .command(let message, _) = held else { return false }
+            return (Self.headerOf(message)?.commandSeq ?? 0) <= commandSeq
+        }
         diagnostics.lastAppliedCommandSeq = lastAppliedSeq
         diagnostics.lastReceivedCommandSeq = lastReceivedSeq
-        diagnostics.deferredCommandCount = deferredCommands.count
+        diagnostics.deferredCommandCount = deferredEvents.count
         publishDiagnostics()
         let wasDesynchronized = playbackDesynchronized
         playbackDesynchronized = false
         publishDesynchronized()
         if wasDesynchronized {
-            await restoreFromPlaybackState(
-                commandSeq: commandSeq, queueRevision: queueRevision, trackHash: trackHash, queueItemId: queueItemId,
-                positionMs: positionMs, playing: playing, atSessionUs: atSessionUs, generation: generation
-            )
+            await restoreFromPlaybackState(fields, generation: generation)
             return
         }
-        guard let active = timeline, trackHash == active.trackHash else { return }
-        timeline = active.reanchored(positionMs: positionMs, sessionUs: atSessionUs, playing: playing)
+        guard let active = timeline, fields.trackHash == active.trackHash else { return }
+        timeline = active.reanchored(positionMs: fields.positionMs, sessionUs: fields.atSessionUs, playing: fields.playing)
         driftState = DriftController.reset()
     }
 
     /// The playback half of Amendment A1's reconciliation. See `onPeerPlaybackState`.
-    private func restoreFromPlaybackState(
-        commandSeq: Int64,
-        queueRevision: Int64,
-        trackHash: ContentHash?,
-        queueItemId: String?,
-        positionMs: Int64,
-        playing: Bool,
-        atSessionUs: Int64,
-        generation: Int64
-    ) async {
-        guard let trackHash, let queueItemId else {
+    private func restoreFromPlaybackState(_ fields: PlaybackStateSnapshotFields, generation: Int64) async {
+        guard let trackHash = fields.trackHash, let queueItemId = fields.queueItemId else {
             // "Nothing is loaded" is a representable authoritative state (ADR-024 §4). Every
             // scheduled effect from the epoch we lost track of is superseded, and nothing replaces it.
             epoch.supersede()
@@ -901,10 +1089,11 @@ extension SyncPlaybackCoordinator {
         }
         guard let estimate = await readyEstimate() else { return }
         let header = PlaybackCommandHeader(
-            commandSeq: commandSeq, effectiveAtSessionUs: atSessionUs, issuedBy: localPeerId, queueRevision: queueRevision
+            commandSeq: fields.commandSeq, effectiveAtSessionUs: fields.atSessionUs, issuedBy: localPeerId,
+            queueRevision: fields.queueRevision
         )
-        await applyPlay(header, trackHash: trackHash, queueItemId: queueItemId, positionMs: positionMs,
-                        generation: generation, estimate: estimate, playing: playing)
+        await applyPlay(header, trackHash: trackHash, queueItemId: queueItemId, positionMs: fields.positionMs,
+                        generation: generation, estimate: estimate, playing: fields.playing)
     }
 
     static let positionReportIntervalUs: Int64 = PlaybackBounds.positionReportIntervalMs * 1_000

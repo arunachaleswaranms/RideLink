@@ -40,6 +40,10 @@ public actor PlaybackRelay {
     private let nextSeq: @Sendable () -> Int64
     private let activeSessionId: @Sendable () async -> SessionId
     private let authenticatedWriter: @Sendable () async -> AuthenticatedFrameWriter?
+    /// ADR-023 §3's authentication generation, live. Phase 5 is the only family whose *outbound*
+    /// frames outlive the step that created them — they sit on an ordered queue while the socket
+    /// drains — so it is the only one that needs this (ADR-024 Amendment A2 Finding B).
+    private let currentAuthGeneration: @Sendable () async -> Int64
 
     private var playbackSink: (any PlaybackSink)?
     private var queueSink: (any QueueSink)?
@@ -52,13 +56,15 @@ public actor PlaybackRelay {
         monotonicNowUs: @escaping @Sendable () -> Int64,
         nextSeq: @escaping @Sendable () -> Int64,
         activeSessionId: @escaping @Sendable () async -> SessionId,
-        authenticatedWriter: @escaping @Sendable () async -> AuthenticatedFrameWriter?
+        authenticatedWriter: @escaping @Sendable () async -> AuthenticatedFrameWriter?,
+        currentAuthGeneration: @escaping @Sendable () async -> Int64
     ) {
         self.localPeerId = localPeerId
         self.monotonicNowUs = monotonicNowUs
         self.nextSeq = nextSeq
         self.activeSessionId = activeSessionId
         self.authenticatedWriter = authenticatedWriter
+        self.currentAuthGeneration = currentAuthGeneration
     }
 
     public func setPlaybackSink(_ sink: (any PlaybackSink)?) { playbackSink = sink }
@@ -72,23 +78,45 @@ public actor PlaybackRelay {
     /// How many Phase 5 frames were dropped **because the connection had not passed the trust gate**.
     public func droppedPreAuthentication() -> Int { preAuthenticationDrops }
 
-    /// - Returns: true if the message was handed to a live authenticated control connection.
+    /// - Parameter authorizingGeneration: the authentication generation that **authorised** this
+    ///   frame, captured when the coordinator created it (ADR-024 Amendment A2 Finding B). A Phase 5
+    ///   frame waits its turn on an ordered outbound queue that deliberately outlives sessions, so
+    ///   resolving the writer and the `session_id` "now" is how a Session A frame ends up written
+    ///   under Session B's identity. Passing the generation is what makes that impossible.
+    /// - Returns: true if the message was handed to a live authenticated control connection
+    ///   **belonging to `authorizingGeneration`**.
     @discardableResult
-    public func send(_ message: PlaybackMessage) async -> Bool {
-        await write(type: PlaybackCodec.wireType(message), payload: PlaybackCodec.encode(message))
+    public func send(_ message: PlaybackMessage, authorizingGeneration: Int64) async -> Bool {
+        await write(
+            type: PlaybackCodec.wireType(message),
+            payload: PlaybackCodec.encode(message),
+            authorizingGeneration: authorizingGeneration
+        )
     }
 
     @discardableResult
-    public func send(_ message: QueueMessage) async -> Bool {
-        await write(type: QueueCodec.wireType(message), payload: QueueCodec.encode(message))
+    public func send(_ message: QueueMessage, authorizingGeneration: Int64) async -> Bool {
+        await write(
+            type: QueueCodec.wireType(message),
+            payload: QueueCodec.encode(message),
+            authorizingGeneration: authorizingGeneration
+        )
     }
 
-    private func write(type: String, payload: [String: JSONValue]) async -> Bool {
+    private func write(type: String, payload: [String: JSONValue], authorizingGeneration: Int64) async -> Bool {
+        guard authorizingGeneration == (await currentAuthGeneration()) else { return false }
         guard let writeFrame = await authenticatedWriter() else { return false }
+        let sessionId = await activeSessionId()
+        // Re-proved after both reads and immediately before the write: `writeFrame` closes over the
+        // connection that was active a moment ago, and `sessionId` is that session's id. If the
+        // generation has moved between the two, neither belongs to the frame in hand — and if it
+        // moves during the write itself, the connection the closure holds is the *old* one, already
+        // closed, so the write fails rather than landing on the new session.
+        guard authorizingGeneration == (await currentAuthGeneration()) else { return false }
         let envelope = ControlMessages.raw(
             localPeerId: localPeerId,
             type: type,
-            sessionId: await activeSessionId(),
+            sessionId: sessionId,
             seq: nextSeq(),
             sentAtMonoUs: monotonicNowUs(),
             payload: payload

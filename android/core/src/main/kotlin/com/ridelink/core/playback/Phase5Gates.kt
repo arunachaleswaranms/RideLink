@@ -1,11 +1,13 @@
 package com.ridelink.core.playback
 
-// The three decisions the Phase 5 closure audit (ADR-024 Amendment A1) moved out of the two
+// The decisions the Phase 5 closure audits (ADR-024 Amendments A1 and A2) moved out of the two
 // coordinators and into pure, mirrored, vector-pinned tables — pinned by
-// `protocol/vectors/phase5-gates/`.
+// `protocol/vectors/phase5-gates/`. A1 contributed three ([Phase5Ingress], [PendingCommandGate],
+// [PendingPlayGate]); A2 added two more at the bottom of this file ([OutboundCommitGate],
+// [AuthoritativeHoldGate]).
 //
 // They exist for the reason CLAUDE.md rule 18 gives and ADR-019 taught: a distributed rule that
-// lives inside a coordinator is a rule no vector can pin, and the audit found all three of these
+// lives inside a coordinator is a rule no vector can pin, and both audits found every one of these
 // rules living inside coordinator control flow on both platforms, each already divergent in some
 // detail. Nothing here reads a clock, touches a player or knows what a session is; every input is a
 // value the caller has already established.
@@ -211,4 +213,157 @@ object Phase5GateBounds {
 
     /** How often a receiver re-checks whether the clock has become trustworthy while commands wait. */
     const val DEFERRED_RETRY_INTERVAL_US: Long = 100_000
+
+    /**
+     * The one ordered **outbound** path's bound (Amendment A2). Generous relative to what one device
+     * can generate — a cadence tick every 5 s plus whatever two people press — so reaching it means
+     * the control socket is not draining. Reaching it is now an explicit refusal that fails an
+     * authoritative operation closed rather than a counter nobody consults.
+     */
+    const val DEFAULT_OUTBOUND_CAPACITY: Int = 256
+}
+
+// --- ADR-024 Amendment A2 (the second Phase 5 closure audit) ---------------------------------
+//
+// Two more decisions the A2 audit found living inside coordinator control flow on both platforms,
+// each already a silent divergence risk. Same reason as the three above (CLAUDE.md rule 18): a
+// distributed rule a vector cannot pin is a rule the two phones will eventually disagree about.
+
+/**
+ * What a Phase 5 frame this device is *sending* is authorised to change locally
+ * (Amendment A2 Findings A and C).
+ *
+ * The distinction is the whole of A2: a leader's `PLAY` or `QUEUE_SNAPSHOT` **is** authority — the
+ * local effect and the peer's copy are two halves of one fact — while a follower's intent and a
+ * cadence report are not. Losing the first silently is a divergence; losing either of the others is
+ * a missed button press or a missed diagnostics sample.
+ */
+enum class OutboundAuthority {
+    /**
+     * A leader-stamped command or the `QUEUE_SNAPSHOT` that carries a new `queue_revision`. Its
+     * local effect may not be committed unless the frame actually reached the transport.
+     */
+    AUTHORITATIVE,
+
+    /**
+     * A follower's `command_seq: 0` intent, or a queue mutation sent as one (ADR-024 §3). The
+     * follower owns no authority, so there is nothing to roll back — but a failure is still not a
+     * send.
+     */
+    INTENT,
+
+    /**
+     * `POSITION_REPORT`, and a `PLAYBACK_STATE`/`QUEUE_SNAPSHOT` that re-states authority the peer
+     * has already been told about. Latest-wins by PROTOCOL §5/§9's own words: the next one subsumes
+     * the one that failed.
+     */
+    ADVISORY,
+}
+
+/** What actually became of an outbound Phase 5 frame (Amendment A2 Findings A, B and C). */
+enum class OutboundOutcome {
+    /** The authenticated transport accepted it: `send` returned true. The **only** success. */
+    SENT,
+
+    /**
+     * The one bounded ordered outbound path refused it. Produced by the *producer*, before the
+     * frame ever reaches the transport (Finding A). Never a silent drop.
+     */
+    ADMISSION_REFUSED,
+
+    /**
+     * The authenticated session that authorised this frame is no longer the live one — or its
+     * Phase 5 authority has already been abandoned. Finding B: the frame carries the generation
+     * that authorised it, and a Session A frame is never written using Session B's writer.
+     */
+    STALE_SESSION,
+
+    /** `send` returned false: no authenticated writer, or the write itself failed (Finding C). */
+    TRANSPORT_FAILED,
+}
+
+/** What the producer of an outbound frame must do with the local state it was about to commit. */
+enum class OutboundCommit {
+    /** The peer has it. Commit the sequence number, the revision and the local audible effect. */
+    COMMIT,
+
+    /**
+     * Authority did not reach the peer. Commit **nothing**, and end Phase 5 authority for this
+     * generation rather than continuing from a state only this device knows about.
+     */
+    ABORT_FAIL_CLOSED,
+
+    /**
+     * Nothing was committed in the first place. Count it and carry on — a follower's undelivered
+     * intent is a button press that did not happen, and an undelivered cadence report is one
+     * missing sample.
+     */
+    ABORT_QUIET,
+}
+
+object OutboundCommitGate {
+    /**
+     * Amendment A2's central rule in four lines: **an authoritative operation commits locally only
+     * when the frame representing it was actually sent.** Admission is not delivery, and a `send`
+     * that returned false is not a send.
+     */
+    fun decide(
+        authority: OutboundAuthority,
+        outcome: OutboundOutcome,
+    ): OutboundCommit =
+        when {
+            outcome == OutboundOutcome.SENT -> OutboundCommit.COMMIT
+            authority == OutboundAuthority.AUTHORITATIVE -> OutboundCommit.ABORT_FAIL_CLOSED
+            else -> OutboundCommit.ABORT_QUIET
+        }
+}
+
+/**
+ * Whether an authoritative **state** frame may be applied now, or must wait its turn behind
+ * authoritative work already held (Amendment A2 Finding D).
+ *
+ * Amendment A1 held a command whose clock was not yet trustworthy. It did not hold anything else —
+ * so a `QUEUE_SNAPSHOT` that arrived *after* a held `NEXT` was applied *before* it, and the `NEXT`
+ * then resolved against a queue revision it was never authored against. The leader's semantic
+ * stream was reordered by the receiver, which is the exact thing `command_seq` and `queue_revision`
+ * exist to prevent.
+ *
+ * The rule is therefore not "re-check the revision at drain time and drop the command" — that
+ * would lose an authoritative operation, which is Finding A of A1 all over again. It is
+ * **nothing may overtake held authoritative work**: once anything is held, every authoritative
+ * frame whose semantics could matter joins the queue behind it and the whole stream replays in
+ * arrival order.
+ *
+ * `POSITION_REPORT` is deliberately *not* subject to this: it produces one diagnostics number and
+ * can change no command's meaning, so holding it would buy nothing and cost the bound.
+ */
+enum class HoldAdmission {
+    /** Nothing is held, so nothing can be overtaken. Apply it now. */
+    PROCESS_NOW,
+
+    /** Authoritative work is already waiting. Join the queue behind it, in arrival order. */
+    HOLD,
+
+    /**
+     * More authoritative work is outstanding than may be held. The same explicit
+     * halt-and-reconcile posture as [IngressAdmission.OVERFLOW] and [CommandAdmission.OVERFLOW] —
+     * never an eviction, and never an out-of-order application.
+     */
+    OVERFLOW,
+}
+
+object AuthoritativeHoldGate {
+    /**
+     * @param heldCount how many authoritative events are already held, in arrival order.
+     * @param capacity the same bound [PendingCommandGate] uses, so one buffer has one bound.
+     */
+    fun decide(
+        heldCount: Int,
+        capacity: Int,
+    ): HoldAdmission =
+        when {
+            heldCount <= 0 -> HoldAdmission.PROCESS_NOW
+            heldCount >= capacity -> HoldAdmission.OVERFLOW
+            else -> HoldAdmission.HOLD
+        }
 }

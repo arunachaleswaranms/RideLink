@@ -157,6 +157,8 @@ private fun syncStateLabel(state: SyncState): String =
         SyncState.SYNCED -> "SYNCHRONIZED"
         SyncState.SYNC_FAILED -> "SYNC FAILED — local playback continues, correction stopped"
         SyncState.DESYNCHRONIZED -> "RESYNCHRONIZING — waiting for authoritative state; local playback continues"
+        SyncState.TRANSPORT_FAILED ->
+            "NOT DELIVERED — a command never reached the peer; synchronisation stopped, local playback continues"
     }
 
 private const val HASH_PREFIX_CHARS = 8
