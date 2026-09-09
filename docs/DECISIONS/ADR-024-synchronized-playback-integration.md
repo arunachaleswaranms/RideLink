@@ -501,3 +501,199 @@ touch Phase 6 or Phase 7, or make any claim about audio.
 **And still does not run on a phone.** Every figure this amendment adds is a software figure. The
 <100 ms product target and the <50 ms stretch target remain unmeasured; TEST_PLAN §5.2's S-01…S-12
 are what will change that.
+
+## Amendment A2 — 9 September 2026 — delivery audit: five correctness findings on the outbound join
+
+**Status:** Accepted · appended, nothing above rewritten. Amendment A1 is unchanged.
+
+Amendment A1 closed six findings and its own stress run found a seventh. Independent verification of
+A1 then found **five more**, all on one seam A1 had built but not finished: the join between
+*deciding* something authoritative and *the peer actually receiving it*. This pass confirmed all
+five and, while fixing them, found a sixth defect of its own (**F** below) that the fix for **D**
+would otherwise have introduced.
+
+**The wire format does not change.** `MAX_CONTROL_FRAME_BYTES` is untouched, no message type is
+added, removed or activated, no field is added, moved or renamed, and every pre-existing vector set
+regenerates byte-for-byte identically. What changes is one **internal** signature —
+`PlaybackRelay.send` now takes the authorising generation — and the timing of local commits.
+
+The common shape of all five is one sentence: **A1 made the leader's order the wire order, and then
+treated "handed to the outbound queue" as if it were "the peer has it".**
+
+### A. Admission to the outbound queue was treated as delivery
+
+`enqueueOutbound` returned `Unit`. A full queue incremented `outboundOverflowCount` and returned, and
+every caller carried straight on — `issue` consumed the `command_seq`, recorded it as applied and
+scheduled the audible effect; `applyLeaderMutation` bumped `queue_revision` and published the queue.
+**The leader played a command, and sat on a revision, that the follower had no way of ever
+receiving.** Silent divergence, reported as a counter nobody read. Both platforms.
+
+`enqueueOutbound` now **answers whether the frame was accepted**, and every caller branches on it:
+
+- **`command_seq` is consumed only on admission** (§6 of the audit brief's preferred invariant). A
+  refused candidate leaves no gap, because it was never assigned;
+- **`queue_revision` becomes authoritative only on admission.** The candidate `SharedQueueState` is
+  computed first and published only once the snapshot carrying it is on the ordered path;
+- a refused **authoritative** frame fails the session closed (see **G**); a refused **intent** or
+  **advisory** frame is counted and nothing more, because neither ever owned authority to roll back.
+
+### B. An outbound frame was not bound to the session that authorised it
+
+The outbound queue deliberately outlives sessions — that is A1's design, and it is right. But the
+envelope was the bare message, and `PlaybackRelay.send` resolved the authenticated writer **and the
+`session_id`** at send time. A frame stamped under Session A that was still queued when Session B
+activated was therefore written under **Session B's identity**. That is exactly the session-confusion
+class ADR-023 Amendments A3/A5 hardened Phase 4 against, on the outbound end of the same pipe.
+
+Two independent guards now close it, and both are needed:
+
+1. **The envelope carries its authorising generation.** The single outbound consumer refuses to write
+   a frame whose generation is not the live one, counting it as `outboundStaleCount`. Frames from a
+   dead session may stay physically queued; they are inert.
+2. **The relay takes the generation as an argument.** `PlaybackRelay.send(message,
+   authorizingGeneration:)` checks it, resolves the writer and the `session_id`, checks it again, and
+   only then writes — and the writer it resolved closes over *that* session's socket, so even a
+   boundary landing inside the write fails rather than landing on the new session. The coordinator
+   guard alone narrows the window; only the relay closes it, which is why the audit's own first fix
+   was insufficient and its own test said so.
+
+`PlaybackRelay` is the only relay that takes this argument, because Phase 5 is the only family whose
+outbound frames outlive the step that created them.
+
+### C. The transport's answer was discarded and counted as success
+
+The drain did `send(frame)` and then `outboundSentCount += 1`, the `Bool` thrown away — on iOS
+silently, because `SyncPlaybackChannel.send` is `@discardableResult`. `send` answers false when there
+is no authenticated writer or the write throws, so **`outboundSentCount == outboundEnqueuedCount`
+could be reported while frames had been discarded**, and the local command had already been
+committed.
+
+The result is now consumed and split into three counters that partition every attempt:
+`outboundSentCount` (the write returned **true**, and nothing weaker), `outboundFailedCount` and
+`outboundStaleCount`, summing to `outboundAttemptCount`. All three are incremented *after* the
+attempt completes, never before it starts, because that pair is also what a test reads to know the
+wire has caught up.
+
+### D. A deferred command could later execute against a newer queue revision
+
+A1 held an authoritative command whose clock was untrustworthy — correctly, because losing it was
+Finding D of A1. It held **nothing else**. A `QUEUE_SNAPSHOT` arriving behind a held `NEXT` was
+therefore applied *immediately*, and when the clock recovered the `NEXT` resolved against a revision
+it was never authored against. `NEXT @ rev 5` on `[A, B, C]` means B; run against `[A, C]` it means
+C. The two phones select different tracks, and `command_seq` and `queue_revision` — which exist for
+precisely this — were both satisfied.
+
+Re-checking the revision at drain time and dropping the command would only convert the reordering
+into a **lost authoritative operation**, which is A1 Finding A again. The rule is instead **nothing
+may overtake held authoritative work**:
+
+- the held buffer holds an **authoritative event stream**, not a command list: playback commands,
+  `QUEUE_SNAPSHOT` and `PLAYBACK_STATE`, in arrival order;
+- `POSITION_REPORT` is deliberately **never** held. It produces one diagnostics number and can change
+  no command's meaning, so holding it would buy nothing and cost the bound;
+- when the clock recovers the whole stream replays **in original arrival order**, so the receiver
+  reproduces exactly the sequence the leader produced;
+- the bound is the same one, and overflowing it is the same explicit halt-and-reconcile as A1's — an
+  older accepted event is never evicted and later events are never applied incoherently;
+- a session boundary clears the whole stream, so nothing held under Session A can execute under B.
+
+`AuthoritativeHoldGate` is the pure, mirrored, vector-pinned table for it.
+
+### E. A correction-triggered snapshot lost its causal session and epoch
+
+A1 Finding F made a superseded correction have *zero* side effects — almost. `emitPlaybackState()`
+read `session.currentAuthGeneration` **inside itself**, after the two reads that suspend. A correction
+that had legitimately proved `owns(generation A, epoch A)` therefore handed the enqueue whatever
+generation happened to be live by then: **a snapshot caused by a correction in Session A could be
+enqueued into Session B.** On iOS that window is wide — every `await` on an actor is a re-entrancy
+point — and the regression reproduces it by parking the emit's own `playerState()` read and landing
+the boundary inside it. On Android the window is between two statements a single-threaded test
+dispatcher cannot interleave, so the mirrored test asserts the contract rather than reproducing the
+race; the defect is real there on the multi-threaded dispatcher the app actually uses.
+
+There are now **two** functions, because there are genuinely two use cases and one signature cannot
+serve both honestly:
+
+- `emitCurrentPlaybackState()` — the leader re-stating its current state *now* (the reconciliation
+  re-broadcast). Reading the live generation is correct here, because "now" is what the call means;
+- `emitPlaybackStateIfOwned(generation:token:)` — a snapshot that exists *because of* an earlier
+  operation. It carries that operation's generation and epoch all the way to the enqueue, re-proves
+  both immediately before it, and emits nothing if either has moved.
+
+### F. Found while fixing D: the revision rule was checked against the wrong state
+
+Holding `QUEUE_SNAPSHOT` behind a held command immediately broke a valid stream. The leader sends
+`SEEK @ rev 5`, `QUEUE_SNAPSHOT rev 6`, `PAUSE @ rev 6`; the receiver holds the first two, and then
+refused the `PAUSE` under PROTOCOL §5 rule 3 — because the revision *applied* was still 5, while the
+snapshot that would make it 6 was sitting in front of it. A perfectly ordered command, refused for a
+revision it was about to be given.
+
+The rule did not move; **where it is evaluated** did. §5 rule 3 is checked against the state the
+command will actually be applied to: immediately when nothing is held, and at replay time when
+something is. A mismatch at replay cannot happen in a stream the leader actually produced, so it is
+treated as evidence that a frame between them is missing, and takes the same explicit
+halt-and-reconcile posture as every other "we can no longer account for the authority we hold".
+
+### G. What happens when delivery fails: the fail-closed posture
+
+`OutboundCommitGate` is the pure, mirrored, vector-pinned table: **`COMMIT` for exactly the `SENT`
+outcome and no other**, `ABORT_FAIL_CLOSED` for any other outcome of an `AUTHORITATIVE` frame, and
+`ABORT_QUIET` for an `INTENT` or `ADVISORY` frame that never owned authority.
+
+Failing closed means **this device stops being authoritative for this authentication generation**:
+no further command is issued, no further queue mutation is accepted or served, no further
+`PLAYBACK_STATE` is emitted, and `SyncState.TRANSPORT_FAILED` says so. It deliberately does **not**
+stop the music, and deliberately does **not** supersede the playback epoch:
+
+- synchronised mode is *left*, so `MusicCoordinator`'s transport controls answer locally again and
+  the user keeps control of their own music, exactly as a Wi-Fi drop leaves them (ADR-004, FR-025);
+- correction stops and the rate returns to exactly 1.0;
+- **a frame the transport did accept still commits and still takes effect.** Refusing to apply a
+  command the peer already has would manufacture the mirror image of the divergence this amendment
+  closes. Only work that was never delivered is abandoned.
+
+Recovery is a **new session**, which clears the latch. It is not a retry, and it is not a
+reconciliation: there is no protocol message that tells a peer about a command it never received, and
+a peer that never received one does not know to ask for it.
+
+### Authoritative commit timing, stated once
+
+For a leader's authoritative operation there are three moments, and this is what happens at each:
+
+| | candidate created | admitted to the ordered outbox | authenticated send returned true |
+|---|---|---|---|
+| `command_seq` | allocated as a candidate | **consumed** | — |
+| `queue_revision` | candidate state computed | **committed and published** | pending Play re-evaluated |
+| `lastReceivedSeq` / `lastAppliedSeq` | — | — | **committed** |
+| local audible effect | — | — | **scheduled**, on the ordered apply chain |
+
+`command_seq` and `queue_revision` commit at **admission** because they must be allocated before the
+frame that carries them can be built, and a second operation must build on the first; the audit
+brief's §7 blesses exactly this. Everything with a *local effect* commits at **send success**. A send
+failure after admission is the fail-closed case in **G**, and is why the admission-time commits are
+safe: nothing further is issued under that generation.
+
+The commit hook runs on the single outbound consumer, so commits happen strictly in send order, which
+is `command_seq` order. The apply is launched onto an ordered chain rather than run on that consumer,
+so a decoder pre-roll cannot stall the wire while still preserving A1 Finding G's ordering.
+
+### What this amendment adds, and what it deliberately does not
+
+**Adds:** two pure, mirrored, vector-pinned tables (`OutboundCommitGate`, `AuthoritativeHoldGate`) in
+`core.playback.Phase5Gates` / `RideLinkCore.Playback.Phase5Gates`, pinned by 36 new rows in the
+existing `protocol/vectors/phase5-gates/`; an outbound envelope carrying its authorising generation
+and its commit hook; one `SyncState` value (`TRANSPORT_FAILED`); five diagnostics fields
+(`outboundAttemptCount`, `outboundFailedCount`, `outboundStaleCount`, `outboundAuthorityLost`, and
+the widened meaning of `deferredCommandCount`); one bound (`DEFAULT_OUTBOUND_CAPACITY`, unchanged at
+256, now named and injectable); and one internal parameter on `PlaybackRelay.send`.
+
+**Does not:** change the wire format, add a message type, **implement or activate `STATE_REQUEST`**
+(it remains catalogued in PROTOCOL §3 and unimplemented — none of these five findings needed it, and
+it would not help the one case it looks like it might, because a peer that never received a command
+does not know to request state), raise `MAX_CONTROL_FRAME_BYTES`, alter the drift ladder, its
+hysteresis or its 3-seeks-per-60 s budget, alter `LEAD = max(120 ms, 4 × rtt_p95)`, add a second
+player, queue, `MediaSession` or RTT tracker, touch Phase 6 or Phase 7, or make any claim about audio.
+
+**And still does not run on a phone.** Every figure this amendment adds is a software figure. The
+<100 ms product target and the <50 ms stretch target remain unmeasured; TEST_PLAN §5.2's S-01…S-12
+are what will change that.

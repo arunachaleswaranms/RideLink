@@ -208,9 +208,38 @@ platforms, each of which fails on the code as Phase 5 shipped:
 | F — superseded correction | A correction superseded **inside** its own player call has zero effects: no seek-budget spend, no `lastCorrection`, no `PLAYBACK_STATE` on the wire. And one refused before the call touches the player at all | `SyncPlaybackClosureAuditTest[s]` |
 | G — apply-path ordering (**found by stress-running the C regression**) | `PAUSE(n)` and `RESUME(n+1)`, both already due, take effect in authoritative order all the way to the player — asserted with the `PAUSE`'s player call **parked** while the `RESUME` is delivered and fully processed. And a superseded link does not stall the ones behind it | `SyncPlaybackClosureAuditTest[s]` |
 
-`protocol/vectors/phase5-gates/` (228 rows) pins the three tables those regressions drive, and **all
-twelve pre-existing Phase 5 vector sets regenerate byte-for-byte identically** — the wire did not
-move.
+`protocol/vectors/phase5-gates/` pins the tables those regressions drive, and **all twelve
+pre-existing Phase 5 vector sets regenerate byte-for-byte identically** — the wire did not move.
+
+**Added by the delivery audit (ADR-024 Amendment A2).** Independent verification of A1 found five
+more findings on the outbound join, all confirmed, plus a sixth found while fixing the fourth. Each
+has a deterministic regression on both platforms
+(`SyncPlaybackDeliveryAuditTest` / `SyncPlaybackDeliveryAuditTests`, 17 and 18 cases), and each was
+**verified to fail against the pre-A2 behaviour** by re-introducing that behaviour one line at a time
+— seven such mutations on Android and eight on iOS, every one caught by at least one new test.
+
+| Finding | What the regression proves | Where |
+|---|---|---|
+| A — admission is not delivery | With the outbound bound **injected** at 2 and the consumer parked strictly inside a write, an authoritative `PLAY` refused at admission consumes no `command_seq`, applies nothing, becomes audible in no way, and latches `TRANSPORT_FAILED`. A refused `QUEUE_SNAPSHOT` leaves the revision exactly where it was. A refused **follower intent** is counted and does **not** fail the session closed | `SyncPlaybackDeliveryAuditTest[s]`, two-peer on Android |
+| B — outbound frames are session-bound | A `PAUSE` inside the write and a `SEEK` queued behind it, both authorised by generation 1, meet a session boundary: neither reaches generation 2's wire, one is refused at the queue (`outboundStaleCount`) and one by the relay's own generation check (`outboundFailedCount`), `outboundSentCount` does not move, and a generation-2 command then sends normally. Same for a `QUEUE_SNAPSHOT` | `SyncPlaybackDeliveryAuditTest[s]`, two-peer on Android |
+| C — the transport's answer is the only "sent" | A write that returns false does not increment `outboundSentCount`, does increment `outboundFailedCount`, commits no `command_seq`, drives no player call, and fails the session closed. The three outcome counters sum to `outboundAttemptCount` | `SyncPlaybackDeliveryAuditTest[s]`, and **over real TLS** on iOS by shutting the real control session down so the real relay genuinely answers false |
+| D — nothing overtakes a held command | `NEXT @ rev 5` held for the clock, then `QUEUE_SNAPSHOT rev 6`: the snapshot **joins the held stream** rather than applying, and on recovery the `NEXT` prepares the track revision 5 named — then the snapshot applies, in its turn. Also `SEEK`+snapshot+`PAUSE` replaying in arrival order, a held `PLAYBACK_STATE`, a session boundary making all of it inert, and an overflow halting rather than reordering | `SyncPlaybackDeliveryAuditTest[s]` |
+| E — a correction's snapshot keeps its own identity | With the emit's **own** `playerState()` read parked, a session boundary (and separately an epoch supersession) lands strictly between the correction's ownership proof and its enqueue: no `PLAYBACK_STATE` is emitted and nothing is attributable to the correction. The control case still emits exactly one | `SyncPlaybackDeliveryAuditTests` reproduces the interleaving; `SyncPlaybackDeliveryAuditTest` asserts the contract (see below) |
+| F — the revision rule is checked against the state that will apply it (**found while fixing D**) | `SEEK @ rev 5`, `SNAPSHOT rev 6`, `PAUSE @ rev 6` are all three held and all three applied — the `PAUSE` is not refused for a revision the snapshot in front of it is about to establish | `SyncPlaybackDeliveryAuditTest[s]` |
+
+**One asymmetry, recorded rather than hidden.** Finding E's race is reproduced for real on iOS, where
+every `await` on an actor is a re-entrancy point. On Android the window falls between two statements
+a `StandardTestDispatcher` cannot interleave, so the mirrored test asserts the contract instead of
+reproducing the race. The defect is real on Android too — the app runs on a multi-threaded dispatcher
+— and the fix is the same structural one; what is missing is only a failing-before-fix demonstration.
+
+**Two-peer coverage A2 adds:** two Android coordinator-pair scenarios on clocks 7.5 s apart (an
+operation the leader could not admit; an operation stranded by a session boundary), both asserting on
+the **follower's** applied `command_seq`, queue revision and player calls; and one iOS scenario over a
+real authenticated TLS 1.3 connection with no fake transport.
+
+**The audit brief's §43/§44 stress runs were explicitly skipped at the user's request** and are not
+claimed.
 
 **Still not proven by any of it.** Every figure the amendment adds is a *software* figure. Nothing ran
 on a phone; no audio reached a speaker or a Bluetooth endpoint; and no alignment figure exists. The

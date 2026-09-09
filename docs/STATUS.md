@@ -1,22 +1,23 @@
 # RideLink — Status
 
-**Updated:** 9 September 2026 (Phase 5 closure audit A1, twenty-fifth session — see §2ab)
+**Updated:** 9 September 2026 (Phase 5 closure audit A2, twenty-sixth session — see §2ac)
 **Current milestone:** M1 (Private voice link) is **software-complete with no known defect** — its
 hardware gate is the only thing left open. M2 (local music) is implementation-complete and
 closure-audited (§2q/§2r). Phase 4 is closure-audited **five** times (§2v–§2z). **M4 (Synced ride
-music) now has its software half, and it has been audited once**: Phase 5 is closure-audited A1 on
-both platforms (§2ab) with its real-device gate open.
-**Current phase:** Phase 5 — synchronized playback, **closure-audited once** (this session, §2ab;
-the implementation is §2aa). Clock-scheduled `PLAY`/`PAUSE`/`RESUME`/`SEEK`/`NEXT`/`PREVIOUS`, a
-replicated shared queue, drift measurement and the ADR-004 correction ladder, all on top of the
-Phase 1a clock layer and the Phase 3 player. **Phase 6 (intercom/music coexistence) and Phase 7
-(Ride Mode) are untouched.**
-**Phase 5 status: SOFTWARE CLOSURE A1 COMPLETE — REAL-DEVICE SYNCHRONIZED-PLAYBACK GATE PENDING.**
-The audit §7 asked for has run (ADR-024 Amendment A1, §2ab). It was given six independently
-identified findings, **confirmed all six**, and found a **seventh** by stress-running one of its own
-new regressions. Not one was a false positive — which is the fourth consecutive time on this codebase
-that an audit of a CI-green phase has found real defects, and the reason this says "A1" rather than
-"final". Read it as one audit's worth of assurance and verify it independently.
+music) now has its software half, and it has been audited twice**: Phase 5 is closure-audited A1
+(§2ab) and A2 (§2ac) on both platforms, with its real-device gate open.
+**Current phase:** Phase 5 — synchronized playback, **closure-audited twice** (this session, §2ac;
+the first audit is §2ab, the implementation §2aa). Clock-scheduled
+`PLAY`/`PAUSE`/`RESUME`/`SEEK`/`NEXT`/`PREVIOUS`, a replicated shared queue, drift measurement and
+the ADR-004 correction ladder, all on top of the Phase 1a clock layer and the Phase 3 player.
+**Phase 6 (intercom/music coexistence) and Phase 7 (Ride Mode) are untouched.**
+**Phase 5 status: SOFTWARE CLOSURE A2 COMPLETE — REAL-DEVICE SYNCHRONIZED-PLAYBACK GATE PENDING.**
+Independent verification of A1 found **five more** findings, all on one seam A1 had built but not
+finished — the join between *deciding* something authoritative and *the peer actually receiving it*.
+**All five were confirmed**, and fixing them turned up a sixth (§2ac **F**) that the fix for the
+fourth would otherwise have introduced. Not one was a false positive — the fifth consecutive time on
+this codebase that an audit of a CI-green phase has found real defects, and the reason this says
+"A2" rather than "final". Read it as two audits' worth of assurance and verify it independently.
 
 **What the seven were, in one line each:** a follower's first Play refused by a revision its own
 queue add had just moved (**A**); the leader's semantic order not surviving to the wire, because the
@@ -3385,6 +3386,109 @@ behind).
 
 ---
 
+## 2ac. Phase 5 closure audit A2 — the outbound delivery join (9 September 2026 session, twenty-sixth)
+
+**Status: SOFTWARE CLOSURE A2 COMPLETE — REAL-DEVICE SYNCHRONIZED-PLAYBACK GATE PENDING.**
+Still not "final software closure complete", for the reason §2ab already gave and this session
+proved again: A1 was a careful audit that confirmed seven findings, and independent verification of
+*its own output* found five more. Two audits is two audits' worth of assurance.
+
+### What the audit was given, and what it found
+
+Five independently identified findings, each classified from the **current production code** rather
+than from this file, from ADR prose, from a commit message or from a test name. **All five were
+CONFIRMED.** A sixth (**F**) was found while fixing the fourth — the fix for **D** broke a valid
+frame sequence, and the test said so before the code shipped.
+
+All five share one sentence: **A1 made the leader's order the wire order, and then treated "handed
+to the outbound queue" as if it were "the peer has it".** A1's own §2ab table is about decisions
+escaping their guard; A2's is about *consequences* escaping their delivery.
+
+| | Finding | Confirmed defect | Fix |
+|---|---|---|---|
+| **A** | Admission ≠ delivery | `enqueueOutbound` returned `Unit`. A full queue counted an overflow and returned, and every caller carried on — `issue` consumed the `command_seq`, recorded it applied and scheduled the audio; `applyLeaderMutation` bumped and published `queue_revision`. **The leader played a command, and sat on a revision, the follower could never receive** | `enqueueOutbound` answers whether the frame was accepted, and every caller branches. `command_seq` and `queue_revision` are consumed **only on admission**; the local audible effect only on send success. A refused authoritative frame fails the session closed |
+| **B** | Outbound frames were not session-bound | The envelope was the bare message, and `PlaybackRelay.send` resolved the writer **and the `session_id`** at send time. The outbound queue deliberately outlives sessions, so a Session A frame still queued when Session B activated was written **under Session B's identity** — the exact class ADR-023 A3/A5 hardened Phase 4 against | Two guards, both needed: the envelope carries its **authorising generation** and the consumer refuses to write a mismatch; and `PlaybackRelay.send` **takes the generation**, checks it, resolves the writer and `session_id`, checks again, and writes to *that* session's socket. The coordinator guard alone leaves a window — the audit's own test proved it |
+| **C** | `send`'s answer was discarded | The drain did `send(frame)` then `outboundSentCount += 1`, the `Bool` thrown away — silently on iOS, where the protocol is `@discardableResult`. **`sent == enqueued` could be reported while frames had been discarded**, and the command was already committed locally | The result is consumed. Three counters partition every attempt — `outboundSentCount` (the write returned **true**, nothing weaker), `outboundFailedCount`, `outboundStaleCount` — summing to `outboundAttemptCount`, all incremented *after* the attempt completes |
+| **D** | A deferred command executed against a newer revision | A1 held a command whose clock was untrustworthy and held **nothing else**, so a `QUEUE_SNAPSHOT` arriving behind a held `NEXT` applied immediately. `NEXT @ rev 5` on `[A,B,C]` means B; run against `[A,C]` it means C. **The two phones select different tracks**, with `command_seq` and `queue_revision` both satisfied | The held buffer holds an **authoritative event stream** — commands, `QUEUE_SNAPSHOT`, `PLAYBACK_STATE` — in arrival order, replayed in arrival order. `POSITION_REPORT` is never held. Re-checking the revision at drain and dropping the command was rejected: that is A1 Finding A again |
+| **E** | A correction's snapshot lost its causal session/epoch | A1 Finding F made a superseded correction have zero effects — almost. `emitPlaybackState()` read the **live** generation inside itself, after the two reads that suspend, so **a snapshot caused by a correction in Session A could be enqueued into Session B** | Two functions: `emitCurrentPlaybackState()` (the leader re-stating *now*) and `emitPlaybackStateIfOwned(generation:token:)`, which carries the correction's own generation and epoch to the enqueue and re-proves both immediately before it |
+| **F** | The revision rule was checked against the wrong state (**found while fixing D**) | Holding `QUEUE_SNAPSHOT` behind a held command immediately broke a valid stream: `SEEK @ rev 5`, `SNAPSHOT rev 6`, `PAUSE @ rev 6` — the `PAUSE` was refused under §5 rule 3, because the revision *applied* was still 5 while the snapshot making it 6 sat in front of it | The rule did not move; **where it is evaluated** did. It is checked against the state the command will actually be applied to — immediately when nothing is held, at replay time when something is. A mismatch at replay cannot occur in a stream the leader produced, so it takes the same halt-and-reconcile posture as every other lost-authority case |
+
+### Finding B is the one worth reading twice
+
+The audit's first fix for it — tag the envelope with its generation and check it in the drain — was
+written, believed, and then **shown to be insufficient by its own regression**. The check happens
+before the send begins; the relay then resolves the writer and the `session_id` *inside* the send,
+and a boundary landing in that window still writes the old frame under the new session. Nothing but
+pushing the generation down into `PlaybackRelay.send` closes it.
+
+That is the same lesson as A1 Finding G, in a different costume: **a guard proves something about
+the instant it runs, and the thing it is guarding happens later.** The only fix that works is to
+carry the authorisation to the point of the act, rather than to re-derive it there.
+
+### Two more rules moved out of the coordinators and into pure tables
+
+CLAUDE.md rule 18, applied again. `OutboundCommitGate` (12 rows: `COMMIT` for exactly the `SENT`
+outcome and no other; `ABORT_FAIL_CLOSED` for any other outcome of an authoritative frame;
+`ABORT_QUIET` for an intent or an advisory frame) and `AuthoritativeHoldGate` (24 rows: nothing may
+overtake held authoritative work, and the bound is real) join A1's three in
+`core.playback.Phase5Gates` / `RideLinkCore.Playback.Phase5Gates`, pinned by 36 new rows in the
+existing `protocol/vectors/phase5-gates/` — generated by the same independent third transcription.
+
+### The fail-closed posture, and what it deliberately does not do
+
+An authoritative frame that did not reach the peer ends Phase 5 authority **for that authentication
+generation**: no further command, no further queue mutation, no further `PLAYBACK_STATE`, and
+`SyncState.TRANSPORT_FAILED` on the diagnostics surface. It does **not** stop the music and does
+**not** supersede the playback epoch — synchronised mode is *left*, so `MusicCoordinator`'s transport
+controls answer locally again and the ride continues as a Phase 3 ride (ADR-004, FR-025), and **a
+frame the transport did accept still commits and still takes effect**, because refusing to apply a
+command the peer already has would manufacture the mirror image of the divergence being closed.
+Recovery is a new session. `STATE_REQUEST` is **still catalogued and still unimplemented**: none of
+these five needed it, and it would not help here — a peer that never received a command does not
+know to ask for it.
+
+### How each finding was proved, rather than argued
+
+Every fix is pinned by a deterministic regression on both platforms
+(`SyncPlaybackDeliveryAuditTest` / `SyncPlaybackDeliveryAuditTests`, 17 and 18 tests), and each
+regression was **verified to fail against the pre-A2 behaviour** by re-introducing that behaviour one
+line at a time and re-running the suite. Seven such mutations on Android and eight on iOS; every one
+was caught by at least one new test. The iOS Finding E mutation is the exact pre-A2 shape — the live
+generation read after the player state — and it emits a Session A snapshot into Session B, which two
+tests catch.
+
+The Finding E interleaving is genuinely reproduced on **iOS**, by parking the emit's own
+`playerState()` read and landing the session boundary inside it; every `await` on an actor is a
+re-entrancy point, so this is the race itself and not a stand-in. On **Android** the window is
+between two statements a `StandardTestDispatcher` cannot interleave, so the mirrored test asserts the
+contract instead. **The defect is real on Android too** — the app runs on a multi-threaded dispatcher
+— and the fix is the same structural one; what is missing there is only a *failing-before-fix*
+demonstration, and this is recorded rather than papered over.
+
+### Two-peer coverage
+
+Android adds two coordinator-pair scenarios on clocks 7.5 s apart: an operation the leader could not
+admit, and an operation stranded by a session boundary. Both assert on the **follower's** applied
+`command_seq`, queue revision and player calls — not on the leader's internals. iOS adds one over a
+**real authenticated TLS 1.3 connection** with no fake standing in for the transport: the leader's
+control session is shut down so the real relay genuinely answers false, and the leader must then not
+apply a command the follower can never receive.
+
+### What did not change
+
+No wire change of any kind: `MAX_CONTROL_FRAME_BYTES` untouched, no message type added, removed or
+activated, no field added, moved or renamed, and **every pre-existing vector set regenerates
+byte-for-byte identically** (verified by running all thirteen generators; only `phase5-gates` moved,
+and only additively). One *internal* signature changed — `PlaybackRelay.send` takes the authorising
+generation. A1's seven findings and all of Phase 4's A1–A5 regressions remain green.
+
+### What is still not true
+
+**Nothing in this session ran on a phone, and no audio reached a speaker or a Bluetooth endpoint.**
+Every figure here is a software figure. The stress runs the audit brief §43/§44 describes were
+**explicitly skipped at the user's request** and are not claimed. The <100 ms product target and the
+<50 ms stretch target remain unmeasured; TEST_PLAN §5.2's S-01…S-12 are what will change that.
+
 ## 3. Tests passed / pending
 
 **Passed and verified in the Phase 5 session (8 September 2026, twenty-fourth), by actually running
@@ -3879,17 +3983,23 @@ Not blocking Phase 1. Answers needed before Phase 6.
 
 ## 7. Next exact task
 
-**Phase 5 — synchronized playback. SOFTWARE CLOSURE A1 COMPLETE — REAL-DEVICE SYNCHRONIZED-PLAYBACK
-GATE PENDING (§2ab).** Every laptop-runnable gate is green on both platforms, the audit §7 previously
-asked for has run, and all seven of its findings are fixed with regressions each verified to fail
-against the pre-fix code. All twelve pre-existing Phase 5 vector sets regenerate byte-for-byte
-identically: the wire did not move.
+**Phase 5 — synchronized playback. SOFTWARE CLOSURE A2 COMPLETE — REAL-DEVICE SYNCHRONIZED-PLAYBACK
+GATE PENDING (§2ac).** Every laptop-runnable gate is green on both platforms; the audit §7 previously
+asked for has run twice, and all thirteen findings (A1's seven, A2's six) are fixed with regressions
+each verified to fail against the pre-fix behaviour. Every pre-existing vector set regenerates
+byte-for-byte identically: the wire did not move in either pass.
 
-**"A1" is not "final", and the wording is deliberate.** §2y dropped "final" from Phase 4 after five
-audits each found real defects in code that was already CI-green. One audit of Phase 5 found seven —
-six it was given plus one its own stress run surfaced — and that is evidence *for* auditing again,
-not against it. The next audit should re-derive its findings from the production code rather than from
-this file, and should look hardest at the three places this one deliberately stopped short:
+**"A2" is not "final", and the wording is deliberate.** §2y dropped "final" from Phase 4 after five
+audits each found real defects in code that was already CI-green. A1 found seven; independent
+verification of A1 then found five more, and fixing those found a sixth. That is evidence *for*
+auditing again, not against it. The next audit should re-derive its findings from the production
+code rather than from this file, and should look hardest at the places these two deliberately stopped
+short:
+
+- **The A2 Finding E interleaving is reproduced on iOS but not on Android**, where the window falls between two statements a `StandardTestDispatcher` cannot interleave; the Android test asserts the contract instead. The defect is real there (the app runs on a multi-threaded dispatcher) and the fix is the same structural one, but a failing-before-fix demonstration is missing.
+- **A2's fail-closed posture ends Phase 5 authority for a whole authentication generation.** That is deliberate and surfaced (`SyncState.TRANSPORT_FAILED`), but it means one undeliverable frame costs the rest of the session's synchronisation. Whether that is the right product answer is a question the real-device gate should inform.
+- **The audit brief's §43/§44 stress runs were explicitly skipped at the user's request.** A1 found its seventh finding by stress-running a regression; this pass did not run one.
+
 
 - **Recovery from an ingress desynchronisation is unbounded in time.** `STATE_REQUEST` is catalogued in PROTOCOL §3 and unimplemented; a halted follower waits for the leader's next authoritative snapshot or for a session boundary. Bounding it is reconnect work (PROTOCOL §10).
 - **An authoritative `PLAY` a follower cannot serve still just waits for the leader** (PROTOCOL §5 rule 4, unchanged). Recorded in §2ab as an out-of-scope observation.
@@ -3897,7 +4007,7 @@ this file, and should look hardest at the three places this one deliberately sto
 
 **Immediately actionable next steps, in order:**
 
-1. **Independently verify closure audit A1** (§2ab, ADR-024 Amendment A1). Re-derive each of the seven findings from the current production code; the regressions are in `SyncPlaybackClosureAuditTest[s]`, `Phase5FrameQueueTest[s]` and `Phase5GatesVectorTest[s]`, and each should be confirmed to fail if its fix is reverted.
+1. **Independently verify closure audit A2** (§2ac, ADR-024 Amendment A2), and A1 with it (§2ab). Re-derive each finding from the current production code; the regressions are in `SyncPlaybackDeliveryAuditTest[s]` (A2), `SyncPlaybackClosureAuditTest[s]`, `SyncPlaybackTwoPeerTest[s]`, `Phase5FrameQueueTest[s]` and `Phase5GatesVectorTest[s]`, and each should be confirmed to fail if its fix is reverted.
 2. **Run the scheduled-start path on the iOS simulator** (§4 problem 41's remaining half). The Android emulator half is done; there is no `Context`-shaped obstacle on iOS either.
 3. **Get two real devices into this loop.** Unchanged since Phase 1a and now blocking five gates: (a) enable USB debugging on the OnePlus Nord 5; (b) set up a development-team signing identity for the iPhone 17 Pro Max.
 4. **Run the Phase 1a gate**: I-01, I-05, I-06, I-07, I-08, I-14, I-15, I-17, I-22.
