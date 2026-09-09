@@ -3482,6 +3482,16 @@ byte-for-byte identically** (verified by running all thirteen generators; only `
 and only additively). One *internal* signature changed — `PlaybackRelay.send` takes the authorising
 generation. A1's seven findings and all of Phase 4's A1–A5 regressions remain green.
 
+### Evidence
+
+- **Android:** `test` (every module), `ktlintCheck`, `detekt`, `lint`, `assembleDebug`, `assembleRelease` — all green locally on JDK 21.
+- **Android emulator:** 48 instrumented tests on the real `RideLink_API36` across `:app`, `:audio` and `:data`, including `SyncScheduledPlaybackTest` — so the Phase 5 scheduled-start path was re-run against a real `ExoPlayer` **after** this audit's changes, not assumed to still work.
+- **iOS:** `swift test` on `RideLinkCore` (**284** tests) and `RideLinkPlatform` (**369** tests), plus Debug and Release unsigned simulator builds on iPhone 17 Pro Max — all green. **SwiftLint/SwiftFormat are still not installed on this machine (§4 problem 14) and did not run; nothing here should be read as their having passed.**
+- **New tests:** 17 Android + 18 iOS delivery-audit regressions, 5 + 5 new gate vector assertions, 2 Android two-peer scenarios and 1 iOS real-TLS two-peer scenario.
+- **Pre-fix verification, done exhaustively rather than spot-checked.** Every pre-A2 behaviour was re-introduced one line at a time and the suite re-run: **seven mutations on Android, eight on iOS, every one caught by at least one new test.** The iOS Finding E mutation is the exact pre-A2 shape and emits a Session A snapshot into Session B, caught by two tests. All mutations were reverted and the suites re-run green.
+- **Vectors:** every generator in the repository re-run and diffed. **Every pre-existing set is byte-for-byte identical**; only `phase5-gates/` moved, and only additively (228 → 264 rows).
+- **CI:** run **34384138628** (run number **34**, **attempt 1**, `680f733e7f75684289f9a222d3db5bac39a3b50e`) — **green on both platforms, first attempt, nothing re-run.** Android: core unit tests, all unit tests, ktlint, detekt, lint, `assembleDebug`, `assembleRelease` all success. iOS: `RideLinkCore` tests, `RideLinkPlatform` tests, Debug and Release unsigned simulator builds all success. `connectedDebugAndroidTest` is deliberately not in CI (no emulator on the runner); the 48 instrumented tests above ran locally.
+
 ### What is still not true
 
 **Nothing in this session ran on a phone, and no audio reached a speaker or a Bluetooth endpoint.**
