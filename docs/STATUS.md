@@ -3677,10 +3677,13 @@ evidence above is sharper than Android's. But it is one coordinator, not two. Re
 
 ### Evidence
 
-- **Android:** `:core:test`, `:network:test`, `:data:test`, `:audio:test`, `:app:test`, `test` (every module), `ktlintCheck`, `detekt`, `lint`, `assembleDebug`, `assembleRelease` — see the run below for what actually executed.
-- **iOS:** `swift test` on `RideLinkCore` and `RideLinkPlatform`, plus Debug and Release unsigned simulator builds. **SwiftLint/SwiftFormat are still not installed on this machine (§4 problem 14) and did not run; nothing here should be read as their having passed.**
+- **Android:** `:core:test`, `:network:test`, `:data:test`, `:audio:test` and `:app:test` individually, then `test` (every module), `ktlintCheck`, `detekt`, `lint`, `assembleDebug` and `assembleRelease` — all green locally on JDK 21. `ktlintCheck` and `detekt` **failed first**: ktlint on chained-call wrapping in the new tests (fixed by `ktlintFormat`), and detekt with one `LongMethod` at 90 lines against an 80 ceiling on the new two-peer scenario — **fixed by extracting two helpers (`Pair.seedContent`, `Pair.dropLink`), not by moving the threshold.**
+- **Android emulator:** **48 instrumented tests, 0 failed** on the real `RideLink_API36` (Android 16, API 36, `arm64-v8a`) across `:app`, `:audio` and `:data` — including all three `SyncScheduledPlaybackTest` cases, so the Phase 5 scheduled-start path was re-run against a real `ExoPlayer` **after** this audit changed `scheduleAt`, rather than assumed to still work.
+- **iOS:** `swift test` on `RideLinkCore` (**284**) and `RideLinkPlatform` (**378**), plus Debug and Release unsigned simulator builds for iPhone 17 Pro Max — all green. **SwiftLint/SwiftFormat are still not installed on this machine (§4 problem 14) and did not run; nothing here should be read as their having passed.**
 - **New tests:** 9 Android + 9 iOS lifecycle-audit regressions, 1 Android two-peer scenario. **No new vectors** — see "the wire did not move".
-- **Pre-fix verification:** production files reverted on both platforms and the suites re-run; 7 of 9 cases fail per platform, both controls pass. Reverted and re-run green.
+- **Pre-fix verification:** production files reverted on both platforms and the suites re-run; **7 of 9 cases fail per platform** (iOS: 15 assertion failures), both same-session controls pass before and after. The two-peer scenario verified the same way. Reverted and re-run green.
+- **Stress, on the shipped code:** iOS **200 iterations, 0 failed**; Android **100 iterations with `--rerun`, 0 failed**. The Android run was **repeated from scratch** after the ktlint/detekt fixes touched test source, because the earlier clean 100× no longer described what would be committed.
+- **CI:** run **34434329199** (run number **35**, **attempt 1**, `935b62bc647f18d5135635f5d669ac08e8d6ed60`) — **green on both platforms, first attempt, nothing re-run.** Android: core unit tests, all unit tests, ktlint, detekt, lint, `assembleDebug`, `assembleRelease` all success. iOS: `RideLinkCore` tests, `RideLinkPlatform` tests, Debug and Release unsigned simulator builds all success. `connectedDebugAndroidTest` is deliberately not in CI (no emulator on the runner); the 48 instrumented tests above ran locally.
 
 ### What is still not true
 
