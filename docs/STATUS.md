@@ -1,25 +1,42 @@
 # RideLink — Status
 
-**Updated:** 9 September 2026 (Phase 5 closure audit A2, twenty-sixth session — see §2ac)
+**Updated:** 10 September 2026 (Phase 5 closure audit A3, twenty-seventh session — see §2ad)
 **Current milestone:** M1 (Private voice link) is **software-complete with no known defect** — its
 hardware gate is the only thing left open. M2 (local music) is implementation-complete and
 closure-audited (§2q/§2r). Phase 4 is closure-audited **five** times (§2v–§2z). **M4 (Synced ride
-music) now has its software half, and it has been audited twice**: Phase 5 is closure-audited A1
-(§2ab) and A2 (§2ac) on both platforms, with its real-device gate open.
-**Current phase:** Phase 5 — synchronized playback, **closure-audited twice** (this session, §2ac;
-the first audit is §2ab, the implementation §2aa). Clock-scheduled
+music) now has its software half, and it has been audited three times**: Phase 5 is closure-audited
+A1 (§2ab), A2 (§2ac) and A3 (§2ad) on both platforms, with its real-device gate open.
+**Current phase:** Phase 5 — synchronized playback, **closure-audited three times** (this session,
+§2ad; the earlier audits are §2ab and §2ac, the implementation §2aa). Clock-scheduled
 `PLAY`/`PAUSE`/`RESUME`/`SEEK`/`NEXT`/`PREVIOUS`, a replicated shared queue, drift measurement and
 the ADR-004 correction ladder, all on top of the Phase 1a clock layer and the Phase 3 player.
 **Phase 6 (intercom/music coexistence) and Phase 7 (Ride Mode) are untouched.**
-**Phase 5 status: SOFTWARE CLOSURE A2 COMPLETE — REAL-DEVICE SYNCHRONIZED-PLAYBACK GATE PENDING.**
-Independent verification of A1 found **five more** findings, all on one seam A1 had built but not
-finished — the join between *deciding* something authoritative and *the peer actually receiving it*.
-**All five were confirmed**, and fixing them turned up a sixth (§2ac **F**) that the fix for the
-fourth would otherwise have introduced. Not one was a false positive — the fifth consecutive time on
-this codebase that an audit of a CI-green phase has found real defects, and the reason this says
-"A2" rather than "final". Read it as two audits' worth of assurance and verify it independently.
+**Phase 5 status: SOFTWARE CLOSURE A3 COMPLETE — REAL-DEVICE SYNCHRONIZED-PLAYBACK GATE PENDING.**
+Independent verification of A2 named one narrow but critical remaining class — **old Session-A local
+apply/schedule work surviving a session boundary and touching Session-B state** — and all three
+findings in it were **confirmed**. The sharpest was not "old work wrote state it did not own" but
+worse: a retired `NEXT` running off the end of the *new* session's queue called `epoch.begin()` and
+**retired the live session's playback epoch**, so Session B's own armed scheduled start never fired
+and no audio ever began. Not one finding was a false positive — the sixth consecutive time on this
+codebase that an audit of a CI-green phase has found real defects, and the reason this says "A3"
+rather than "final". Read it as three audits' worth of assurance and verify it independently.
 
-**What the seven were, in one line each:** a follower's first Play refused by a revision its own
+**A2's requested stress runs, which A2 skipped, were run here** (iOS 200×, Android 100×). They found
+five more defects — **all in tests, none in production** — including **three pre-existing A2 harness
+races** (1 in 13, 1 in 9 and 1 in 7, all three of them races A1's harness had already solved and A2's
+newer one reintroduced) and a stress script of this session's own that would have reported a false
+green. §2ad records all five, because a stress run whose findings are not written down is a stress run
+nobody can trust — and because three of the five are the direct cost of A2 having skipped it.
+
+**What A3's three were, in one line each:** the apply chain was *detached* at a session boundary
+rather than retired, so a `NEXT` already delivered and committed under Session A woke up in Session B
+and stepped Session B's queue (**A**); `applyTransport`, `applySeek` and `applyStep` had **no**
+ownership proof at all, so they re-anchored the new session's timeline, stepped its queue and retired
+its playback epoch (**B**); and a retired scheduled action wrote — and on iOS published — the live
+session's `lastScheduleErrorUs` before its ownership guard, because "diagnostics only" had been
+treated as an exemption (**C**).
+
+**What A1's and A2's seven were, in one line each:** a follower's first Play refused by a revision its own
 queue add had just moved (**A**); the leader's semantic order not surviving to the wire, because the
 allocation was locked and the send was not — on iOS an actor re-entrancy point (**B**); a *lossy*
 queue immediately behind reliable ordered TCP, whose drop counter was structurally incapable of ever
@@ -3499,6 +3516,179 @@ Every figure here is a software figure. The stress runs the audit brief §43/§4
 **explicitly skipped at the user's request** and are not claimed. The <100 ms product target and the
 <50 ms stretch target remain unmeasured; TEST_PLAN §5.2's S-01…S-12 are what will change that.
 
+## 2ad. Phase 5 closure audit A3 — the apply and scheduled chains outlived their session (10 September 2026 session, twenty-seventh)
+
+**Phase 5 status: SOFTWARE CLOSURE A3 COMPLETE — REAL-DEVICE SYNCHRONIZED-PLAYBACK GATE PENDING.**
+
+Independent verification of A2 named **one narrow but critical remaining class**, and this pass
+confirmed it in full:
+
+> **Old Session-A local apply/schedule work could survive a session boundary and touch Session-B
+> state.**
+
+Three findings, all **CONFIRMED** against the production code as A2 left it, all on both platforms,
+none a false positive. That is the sixth consecutive time on this codebase that an audit of a
+CI-green phase has found real defects, and the reason this says "A3" rather than "final".
+
+### What the audit was given, and what it found
+
+| # | Given as | Classification | What it actually was |
+|---|---|---|---|
+| A | `applyChain` survives session reset | **CONFIRMED** | `resetForNewSession` did `applyChain = null` / `= nil`. That detaches the *tail reference* — it cancels nothing and fences nothing — and the tail is the **newest** node while the one that matters is the **oldest**, the one actually blocked inside a player call |
+| B | apply paths mutate before proving ownership | **CONFIRMED, three of five paths** | `applyTransport`, `applySeek` and `applyStep` had **no ownership proof at all**. `applyPlay` was already correct and is preserved |
+| C | `scheduledChain` survives session reset, and writes diagnostics before its guard | **CONFIRMED** | Both halves. The chain was detached rather than retired, and the node wrote (on iOS, wrote *and published*) `lastScheduleErrorUs` **before** `runIfCurrent` |
+
+Two paths outside the brief's list were found to be in the same class and fixed with them:
+`applyPeerPlaybackState`, whose writes follow a lock acquisition, and `restoreFromPlaybackState`,
+whose nil-track branch supersedes the epoch and clears the timeline.
+
+### The one worth reading twice
+
+Finding B's `applyStep` case is not "old work wrote state it did not own". It is worse than that.
+
+With Session B's current item **last** in its queue, a retired Session-A `NEXT` runs off the end and
+takes `applyStep`'s `selected == null` branch — which calls `playbackFence.begin()` / `epoch.begin()`.
+That **retires the live session's playback epoch**. Session B's own already-armed scheduled start then
+fails its ownership proof and *never fires*: the diagnostics sit at `SCHEDULED` and never reach
+`SYNCED`, and no audio ever starts. A dead session could silently disable the new session's playback.
+
+The regression keeps Session B's start pending across the release and asserts it still fires
+afterwards, which is the only way to see it.
+
+### Cancellation is defence one; the generation is the correctness boundary
+
+The fix has two layers and the second is the one that matters.
+
+1. **Retirement.** Every apply-chain and scheduled-chain node is created as a child of one
+   session-owned handle — a `SupervisorJob` parented to the coordinator's scope on Android, an
+   explicit live-node registry on iOS, where an unstructured `Task` has no parent to cancel. A
+   boundary cancels all of them, oldest included, and installs a fresh handle.
+2. **Fencing.** Each node captures its authorising generation and re-proves it after waiting for the
+   node ahead; every apply path proves the generation before its **first read of live state**, and
+   does so for itself rather than trusting its caller.
+
+**Cancellation alone would not be enough, and is not presented as the fix.** `ExoPlayer.prepare` runs
+on the application looper; every real `AVAudioEngine`/`AVAudioFile` callback is bridged through
+`withCheckedContinuation`. Neither observes cancellation, so a cancelled node still returns from such
+a call and carries straight on to its next statement. The regressions therefore block on a
+deliberately **non-cancellable** seam — `withContext(NonCancellable)` on Android, a checked
+continuation on iOS — so what they pin is the fence, not the cancellation.
+
+### Sent, but not yet locally applied, at a link loss
+
+Written down in ADR-024 Amendment A3 §E because it is the *opposite* of A2 §G's rule and the
+distinction is easy to get wrong. A2 says a frame the transport already accepted must still commit and
+still take effect, because the peer has it. That holds **within** a session. Across a boundary it does
+not: there is no peer left to agree with, the timeline the command was authored against is gone, and
+Session B's state was established independently — so the old effect is **abandoned locally**, never
+replayed into Session B. Local playback continues from whatever state exists at the boundary
+(ADR-004, FR-025), and recovery is fresh-session synchronisation. `STATE_REQUEST` is still not
+implemented and still not needed.
+
+### The wire did not move
+
+No message type, field, bound or encoding changed. **All thirteen vector generators in the repository
+were re-run and every existing vector reproduced byte-for-byte identically** — `phase5-gates/`
+included, because A3 adds **no gate table**: coroutine and `Task` lifetime is not a distributed
+decision, and CLAUDE.md rule 18 is about decisions. The three internal signature changes are
+`chainApply(generation:)`, and `applyTransport`/`applySeek` becoming `async` on iOS.
+
+### How each finding was proved, rather than argued
+
+Nine mirrored regressions per platform (`SyncPlaybackLifecycleAuditTest` /
+`SyncPlaybackLifecycleAuditTests`) plus one Android two-peer scenario. **The production files were
+reverted to their pre-A3 state and the suites re-run on both platforms**: seven of the nine cases
+failed on Android and the same seven on iOS (15 assertion failures), while both same-session control
+cases passed before and after — which is what makes the failures attributable to the defect rather
+than to the tests. The two-peer scenario was verified the same way.
+
+The pre-A3 evidence is specific rather than atmospheric:
+
+- Session A's `NEXT` stepped Session B's selection from Y to Z (both platforms).
+- Session A's `SEEK` re-anchored Session B's timeline, measured one cadence tick later as
+  **−598 120 ms** of fabricated drift where the correct answer is **0**.
+- Session A's `PAUSE` did the same, at **−445 000 ms**.
+- Session A scheduled into Session B's sleeper: pending deadlines `[6000000, 6000000, 3000000]`
+  where Session B alone has `[6000000, 6000000]`.
+- Session A's retired `NEXT` retired Session B's epoch, leaving it `scheduled` and never `synced`.
+- A Session-A deadline arriving 2 000 µs late overwrote Session B's `lastScheduleErrorUs` from **0**
+  to **2000**.
+
+### Stress — run this time, and it earned its place
+
+A2's requested stress runs were **explicitly skipped**; §7 recorded that as something the next audit
+should not repeat. This pass ran them: the iOS Phase 5 suites (83 tests, including the real-TLS
+two-peer suite) **200 times**, and the Android Phase 5 package (96 tests) **100 times** with `--rerun`
+so Gradle could not serve a cached result.
+
+**It found five defects, all in tests, none in production — and finding them is the point.**
+
+1. **A pre-existing A2 test flaked 1 in 13.** `testACorrectionSupersededBeforeItsSnapshotEnqueueEmitsNothing` timed out waiting for its own gate. Root cause, found by investigating rather than re-running: `handleConnected` *starts* the position-report cadence loop, but the loop computes `now + interval` and parks one task hop later. A test that advances the fake clock inside that hop moves time out from under the loop, so the deadline it then computes is a whole interval past where the test is looking and the tick never fires at all. `SyncPlaybackDriftTests` already had an `awaitTickArmed()` helper from A1's harness pass; the delivery-audit and closure-audit harnesses did not, and now do. **The production loop is correct throughout** — a real monotonic clock cannot be wound forward out from under a sleeper, and only a fake can. Android is immune because `runCurrent()` under a `StandardTestDispatcher` drains every pending coroutine before the test's next statement.
+2. **Two premise assertions in this session's own new iOS regressions were one or two task hops early**, reading `clock.pendingDeadlines()` and the queue selection immediately after a send. A scheduled node reaches the sleeper only after `applyPlay` has selected *and* pre-rolled. One failed **6 runs in 12** before being changed to wait on the condition rather than assert it.
+3. **A second pre-existing A2 harness gap, same class, found on the next run.** `leaderPlaying()` — the delivery-audit helper whose name claims "a leader with one track queued, **playing**" — waited only for the `PLAY` to reach the wire. A2 deliberately runs the leader's *own* apply *after* that, on the ordered apply chain, so the helper could return with `timeline` still nil; a cadence tick firing then returns at its `timeline` guard, correctly doing nothing, and the next tick is 5 s of fake time away that no test reaches. `testACurrentCorrectionStillEmitsExactlyOneAuthoritativeSnapshot` failed that way 1 run in 7. **`SyncPlaybackDriftTests` already carried this exact fix from A1's harness pass**, comment and all ("a 1-in-100 stress failure found exactly that"); A2's newer harness reintroduced the race, and only a stress run could show it. Now waits for the start, which is what "playing" means.
+4. **A third pre-existing A2 harness gap, 1 in 9 — and the most instructive of the set, because it failed for the one reason a test must never fail: the code was right.** `testACorrectionWhoseEpochIsSupersededBeforeItsSnapshotEnqueueEmitsNothing` supersedes the playback epoch with `playSynchronized` and then used `settle()` as the barrier before releasing its gate. `epoch.begin()` is reached only at the end of a long chain — queue add, send, commit hook, apply chain, content resolve — and A3's own two added proof hops made an already-marginal yield budget worse. When the supersession had not happened yet, the correction was *legitimately still current*, so emitting the snapshot was correct behaviour and the assertion was simply wrong to expect otherwise. Now waits for `currentTrackHash`, which `applyPlay` writes immediately after `epoch.begin()` with no `await` between. Its latent sibling had the same barrier and was fixed with it.
+5. **The first stress script itself was wrong** and is recorded because it would have produced a false green: a filtered `swift test` prints one `Executed N tests` line **per suite**, so grepping the first one only ever checked the first suite. Replaced with `swift test`'s own exit code.
+
+**The pattern in (1)–(4) is worth naming rather than just fixing.** The fake monotonic clock can be
+wound forward out from under a parked sleeper, which no real monotonic clock can — and A2's harness,
+written in a pass that skipped stress, reintroduced *three* races A1's harness had already solved.
+Android is immune to all of them, because `runCurrent()` under a `StandardTestDispatcher` drains every
+pending coroutine before the test's next statement. Recorded in §7 as something the next pass should
+consider fixing in the fake rather than in each harness.
+
+**And one negative result, kept because it is the more useful half.** A3's boundary regressions assert
+that a retired Session-A node produced *no* effect, and a fixed yield budget cannot distinguish
+"correctly fenced" from "has not run yet" — so two attempts were made to replace it with an exact
+signal: waiting for the live-node registry to empty, then awaiting the apply chain's tail. **Both were
+rejected, and the second is the lesson:** a boundary clears the chain tail in the fixed code *and* in
+the pre-A3 code, so awaiting it returns immediately and says nothing about the retired node — the
+"stronger" signal silently cost `testAnOldSessionsQueuedNextHasZeroEffectOnTheSessionThatReplacedIt`
+its pre-fix failure, which was caught only by re-running the pre-fix verification afterwards. A retired
+node is unreachable by construction and any signal precise enough to await would be an effect the fence
+exists to prevent, so the budget stays — named `awaitRetiredWorkSettled`, documented as a budget, and
+credible because of the pre-fix run rather than because of itself. **Re-run the pre-fix verification
+after changing a test's barrier, not only after changing production code.**
+
+### What did not change
+
+A2's authority semantics are untouched: `command_seq` and `queue_revision` still commit at
+admission, `lastAppliedSeq` and the local audible effect still at send success, a refused
+authoritative frame still commits nothing and ends Phase 5 authority for its generation, a transport
+failure still fails closed, and a new session still clears the latch. The deferred authoritative
+stream, `AuthoritativeHoldGate`, the held-stream overflow posture, the drift ladder, its hysteresis,
+its 3-seeks-per-60 s budget and `LEAD = max(120 ms, 4 × rtt_p95)` are all unchanged. There is still
+one `MusicCoordinator`, one player, one `SyncPlaybackCoordinator`, one shared-queue authority model
+and one session coordinator. Phase 6 and Phase 7 were not touched.
+
+### Two-peer coverage, and the gap in it
+
+Android gained one coordinator-pair scenario on clocks 7.5 s apart: the leader's `PLAY` is delivered
+to and applied by the follower while the leader's *own* apply parks in its pre-roll, a `NEXT` is
+delivered and committed behind it, both peers cross the boundary, Session B plays a different track on
+both, and the release then corrupts neither peer's queue, neither peer's player, and puts no frame on
+Session B's wire.
+
+**iOS has no two-peer A3 scenario, and that is a real gap rather than a redundancy.** That harness is
+real TLS end-to-end, and bumping the authentication generation in it requires a genuine re-pairing the
+harness cannot currently drive. The iOS proof is therefore the single-coordinator suite — which is the
+*stronger* positioning for this particular race, because the coordinator is an `actor` and every
+`await` in it is a real re-entrancy point rather than a modelled one, and indeed the iOS pre-fix
+evidence above is sharper than Android's. But it is one coordinator, not two. Recorded as problem 43.
+
+### Evidence
+
+- **Android:** `:core:test`, `:network:test`, `:data:test`, `:audio:test`, `:app:test`, `test` (every module), `ktlintCheck`, `detekt`, `lint`, `assembleDebug`, `assembleRelease` — see the run below for what actually executed.
+- **iOS:** `swift test` on `RideLinkCore` and `RideLinkPlatform`, plus Debug and Release unsigned simulator builds. **SwiftLint/SwiftFormat are still not installed on this machine (§4 problem 14) and did not run; nothing here should be read as their having passed.**
+- **New tests:** 9 Android + 9 iOS lifecycle-audit regressions, 1 Android two-peer scenario. **No new vectors** — see "the wire did not move".
+- **Pre-fix verification:** production files reverted on both platforms and the suites re-run; 7 of 9 cases fail per platform, both controls pass. Reverted and re-run green.
+
+### What is still not true
+
+**Nothing in this session ran on a phone, and no audio reached a speaker or a Bluetooth endpoint.**
+Every figure here is a software figure. **No alignment figure exists**, and the <100 ms product target
+and <50 ms stretch target must not be described as approached. TEST_PLAN §5.2's S-01…S-12 are what
+will change that. The iOS scheduled-start path still has not run on a simulator (§4 problem 41).
+
 ## 3. Tests passed / pending
 
 **Passed and verified in the Phase 5 session (8 September 2026, twenty-fourth), by actually running
@@ -3948,6 +4138,7 @@ as of this write-up — see §7.
 | 40 | **Pre-existing, codebase-wide: an integrally-valued JSON *float* is accepted on iOS and rejected on Android.** Every codec reads a `uint64` wire field through Kotlin's `longOrNull` (which rejects `"90210500000.0"`) and Swift's `Int64(exactly: Double)` (which accepts `90210500000.0`). A peer emitting `1.0` where `1` is specified would be accepted by one phone and refused by the other. **Not introduced by Phase 5** — `TransferCodec`, `ManifestCodec`, `AudioStateCodec` and `VoiceSignalCodec` have all behaved this way since their own phases, and Phase 5's codecs deliberately follow the same convention rather than diverging from four existing ones. No vector exercises it, because adding one would fail today | Low | Neither platform *emits* such a value — both encode integers as integers — so this can only be reached by a third-party or corrupted sender. Fixing it means changing four codecs plus Phase 5's two, and their vectors, in a change that is *only* that. Recorded rather than smuggled into Phase 5 |
 | 41 | **Phase 5's scheduled start has run on the Android emulator but not on the iOS simulator.** `SyncScheduledPlaybackTest` proves the pre-roll, the monotonic-deadline start and the real `setPlaybackParameters` nudge/restore against a real `ExoPlayer` on `RideLink_API36` (measured sleeper wake error 1.4–3.1 ms). The iOS half — `AVAudioEnginePlayer` started at a deadline, and `AVAudioUnitVarispeed` actually changing a rate — has **not** run anywhere. **Unlike problem 22, nothing prevents it**: the simulator exists and already runs Phase 3 media tests | Medium | **Still open after closure audit A1** (§2ab), which was scoped to seven correctness findings in the integration layer rather than to new device coverage. It is now §7 step 2. TEST_PLAN §5.2's S-01…S-12 remain the device gate beyond it either way |
 | 42 | **Recovery from a Phase 5 ingress desynchronisation is unbounded in time** (ADR-024 Amendment A1 Finding C, §2ab). An explicit, counted refusal in the bounded post-transport handoff halts a follower's application of incremental commands — nothing incoherent is ever applied, and local music keeps playing — but the halt ends only when the leader next emits authoritative state or the session ends, and **nothing prompts it**. `STATE_REQUEST` is catalogued in PROTOCOL §3 and unimplemented. Reaching the bound at all requires a peer flooding frames that cannot be superseded (latest-wins coalescing absorbs an ordinary 5 s report cadence), so this is a pathological-peer path, not a busy-link one | Medium | Implement §10's resync properly — `STATE_REQUEST` → authoritative state — as **reconnect** work, not as a Phase 5 patch. Deliberately not done blind in A1: it is a wire addition, and A1's whole claim is that the wire did not move |
+| 43 | **Phase 5's session-boundary lifecycle is proven with two coordinators on Android only.** ADR-024 Amendment A3's race — an apply-chain node created under Session A waking in Session B — is pinned on both platforms by `SyncPlaybackLifecycleAuditTest[s]` (9 cases each, 7 verified to fail pre-fix), and by one Android **coordinator-pair** scenario on clocks 7.5 s apart. iOS has no two-peer equivalent: that harness is real TLS end-to-end and bumping the authentication generation in it needs a genuine re-pairing the harness cannot currently drive. The iOS single-coordinator proof is the *stronger* positioning for this particular race — the coordinator is an `actor`, so every `await` is a real re-entrancy point, and the iOS pre-fix evidence was sharper than Android's — but it is one coordinator, not two | Low | Either teach the iOS TLS harness to re-pair (which also unblocks iOS reconnect testing generally), or accept the asymmetry as the Android/iOS harness division already recorded in TEST_PLAN §3.1c. Not a blocker: the fence itself is pinned on both platforms |
 | 26 | **APK/IPA size.** The Android AAR adds ~48 MB of native code across four ABIs; the Apple XCFramework is ~96 MB expanded and embedded in the app bundle. No ABI filtering or slice stripping is applied — the default is the safe configuration and a sideloaded personal build has no size gate | Low | Revisit if install time becomes annoying. Recorded rather than forgotten |
 | 21 | **Diagnostics now show `CONNECTING` while a six-digit code is on screen**, where they previously showed `CONNECTED`. This is deliberate and more honest (ADR-019 §5), but it is a user-visible change that has never been looked at on a real screen | Low | Confirm it reads sensibly during I-02 on the two phones; the FR-023 diagnostics screen is one of the things I-02 exercises anyway |
 | 32 | **FIXED (twelfth session, §2o, ADR-021 Amendment A2 Finding 3).** `Effect.ReleaseAudioAndStopForegroundService`'s name promised an Android foreground-service stop `SessionCoordinator.runEffect` never actually performed — confirmed exactly as originally recorded here. Fixed with a `ForegroundServiceController` seam (no `Context` inside `SessionCoordinator`) and one owner: `runEffect` awaits capture release (`StopReleaseResult`) before calling `foregroundService.stop()` — never on a timeout — and always tears down the control session afterward. `SessionCoordinatorEndingEffectTest` (new) proves the order at the integration boundary, including that a peer BYE, a timed-out release, a `NETWORK` link loss and a repeated `ENDING` all behave correctly. Kept in this table with its resolution noted rather than deleted, per this file's own discipline | ~~Medium~~ Fixed | ~~Give `SessionCoordinator` a way to reach `RideForegroundService.stop()`...~~ Done — see §2o |
@@ -3993,31 +4184,31 @@ Not blocking Phase 1. Answers needed before Phase 6.
 
 ## 7. Next exact task
 
-**Phase 5 — synchronized playback. SOFTWARE CLOSURE A2 COMPLETE — REAL-DEVICE SYNCHRONIZED-PLAYBACK
-GATE PENDING (§2ac).** Every laptop-runnable gate is green on both platforms; the audit §7 previously
-asked for has run twice, and all thirteen findings (A1's seven, A2's six) are fixed with regressions
-each verified to fail against the pre-fix behaviour. Every pre-existing vector set regenerates
-byte-for-byte identically: the wire did not move in either pass.
+**Phase 5 — synchronized playback. SOFTWARE CLOSURE A3 COMPLETE — REAL-DEVICE SYNCHRONIZED-PLAYBACK
+GATE PENDING (§2ad).** Every laptop-runnable gate is green on both platforms; the audit §7 previously
+asked for has now run three times, and all sixteen findings (A1's seven, A2's six, A3's three) are
+fixed with regressions each verified to fail against the pre-fix behaviour. Every pre-existing vector
+set regenerates byte-for-byte identically: the wire did not move in any of the three passes.
 
-**"A2" is not "final", and the wording is deliberate.** §2y dropped "final" from Phase 4 after five
-audits each found real defects in code that was already CI-green. A1 found seven; independent
-verification of A1 then found five more, and fixing those found a sixth. That is evidence *for*
-auditing again, not against it. The next audit should re-derive its findings from the production
-code rather than from this file, and should look hardest at the places these two deliberately stopped
+**"A3" is not "final", and the wording is deliberate.** §2y dropped "final" from Phase 4 after five
+audits each found real defects in code that was already CI-green. A1 found seven; verifying A1 found
+five more plus a sixth while fixing them; verifying A2 found three more. That is evidence *for*
+auditing again, not against it. The next audit should re-derive its findings from the production code
+rather than from this file, and should look hardest at the places these three deliberately stopped
 short:
 
+- **A3's race is proven with two coordinators on Android only** (§4 problem 43). The iOS proof is one `actor`-based coordinator, which is stronger positioning for *this* race but is not a pair.
 - **The A2 Finding E interleaving is reproduced on iOS but not on Android**, where the window falls between two statements a `StandardTestDispatcher` cannot interleave; the Android test asserts the contract instead. The defect is real there (the app runs on a multi-threaded dispatcher) and the fix is the same structural one, but a failing-before-fix demonstration is missing.
 - **A2's fail-closed posture ends Phase 5 authority for a whole authentication generation.** That is deliberate and surfaced (`SyncState.TRANSPORT_FAILED`), but it means one undeliverable frame costs the rest of the session's synchronisation. Whether that is the right product answer is a question the real-device gate should inform.
-- **The audit brief's §43/§44 stress runs were explicitly skipped at the user's request.** A1 found its seventh finding by stress-running a regression; this pass did not run one.
-
-
+- **The remaining `await`-heavy iOS ingress paths were fenced by inspection plus targeted tests, not exhaustively.** A3 fenced `applyPeerPlaybackState` and `restoreFromPlaybackState` because it went looking; `applyQueueSnapshot` takes no generation at all and is safe only because every caller is fenced. A future pass should decide whether that is a design or a coincidence.
+- **The fake monotonic clock can be wound forward out from under a parked sleeper**, which is a *test-harness* hazard rather than a production one (a real monotonic clock cannot) — but it has now produced flakes in three different iOS harnesses across A1 and A3, and A2's harness reintroduced two races A1's had already solved. The `awaitTickArmed()` / wait-for-the-start pattern is the fix each time; consider making the fake itself refuse to advance past an unarmed producer, rather than relying on every future harness remembering. **The stress runs A2 skipped are what surfaced all of it; do not skip them again.**
 - **Recovery from an ingress desynchronisation is unbounded in time.** `STATE_REQUEST` is catalogued in PROTOCOL §3 and unimplemented; a halted follower waits for the leader's next authoritative snapshot or for a session boundary. Bounding it is reconnect work (PROTOCOL §10).
 - **An authoritative `PLAY` a follower cannot serve still just waits for the leader** (PROTOCOL §5 rule 4, unchanged). Recorded in §2ab as an out-of-scope observation.
 - **`ControlSessionManager` is still the largest class in the codebase** (§4 problem 18) and the `PairingController` extraction is still overdue.
 
 **Immediately actionable next steps, in order:**
 
-1. **Independently verify closure audit A2** (§2ac, ADR-024 Amendment A2), and A1 with it (§2ab). Re-derive each finding from the current production code; the regressions are in `SyncPlaybackDeliveryAuditTest[s]` (A2), `SyncPlaybackClosureAuditTest[s]`, `SyncPlaybackTwoPeerTest[s]`, `Phase5FrameQueueTest[s]` and `Phase5GatesVectorTest[s]`, and each should be confirmed to fail if its fix is reverted.
+1. **Independently verify closure audit A3** (§2ad, ADR-024 Amendment A3), and A1/A2 with it (§2ab, §2ac). Re-derive each finding from the current production code; the regressions are in `SyncPlaybackLifecycleAuditTest[s]` (A3), `SyncPlaybackDeliveryAuditTest[s]` (A2), `SyncPlaybackClosureAuditTest[s]`, `SyncPlaybackTwoPeerTest[s]`, `Phase5FrameQueueTest[s]` and `Phase5GatesVectorTest[s]`, and each should be confirmed to fail if its fix is reverted.
 2. **Run the scheduled-start path on the iOS simulator** (§4 problem 41's remaining half). The Android emulator half is done; there is no `Context`-shaped obstacle on iOS either.
 3. **Get two real devices into this loop.** Unchanged since Phase 1a and now blocking five gates: (a) enable USB debugging on the OnePlus Nord 5; (b) set up a development-team signing identity for the iPhone 17 Pro Max.
 4. **Run the Phase 1a gate**: I-01, I-05, I-06, I-07, I-08, I-14, I-15, I-17, I-22.

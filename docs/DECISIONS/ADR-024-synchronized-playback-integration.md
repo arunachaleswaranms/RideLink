@@ -697,3 +697,228 @@ player, queue, `MediaSession` or RTT tracker, touch Phase 6 or Phase 7, or make 
 **And still does not run on a phone.** Every figure this amendment adds is a software figure. The
 <100 ms product target and the <50 ms stretch target remain unmeasured; TEST_PLAN §5.2's S-01…S-12
 are what will change that.
+
+## Amendment A3 — 10 September 2026 — lifecycle audit: the apply and scheduled chains outlived their session
+
+**Status:** Accepted · appended, nothing above rewritten. Amendments A1 and A2 are unchanged.
+
+A1 closed six findings and its own stress run found a seventh. A2, verifying A1, found five more and
+found a sixth while fixing them. Independent verification of A2 then named **one narrow but critical
+remaining class**, and this pass confirmed it in full:
+
+> **Old Session-A local apply/schedule work could survive a session boundary and touch Session-B
+> state.**
+
+Three findings, all confirmed against the code as A2 left it, all on both platforms.
+
+**The wire format does not change.** No message type is added, removed or activated, no field is
+added, moved or renamed, `MAX_CONTROL_FRAME_BYTES` is untouched, and all thirteen vector generators
+reproduce every existing vector byte-for-byte. What changes is *coroutine and `Task` lifetime* and
+*where an ownership proof sits* — neither of which is a distributed decision, so A3 adds **no new
+vector table**. A1's and A2's five gate tables (`Phase5Ingress`, `PendingCommandGate`,
+`PendingPlayGate`, `OutboundCommitGate`, `AuthoritativeHoldGate`) are unchanged and still pinned by
+`protocol/vectors/phase5-gates/`.
+
+The common shape of all three is one sentence: **A2 made the local commit wait for delivery, and
+then let the waiting work outlive the session that authorised it.**
+
+### A. The apply chain was detached at a session boundary, not retired
+
+A2 moved a leader's own authoritative apply to *after* the transport confirmed the frame went out,
+onto an ordered chain so a decoder pre-roll could not stall the wire (A2 §"Authoritative commit
+timing"). `resetForNewSession` then retired that chain with `applyChain = null` / `= nil`.
+
+**That detaches the tail reference. It cancels nothing and fences nothing.** The nodes already
+created went on existing, and the reference stored was the *newest* node — while the one that
+matters is the *oldest*, the one actually blocked. The reproducible interleaving:
+
+| | |
+|---|---|
+| Session A | `PLAY(seq n)` is written to the wire; A2 commits its `command_seq`; its local apply parks inside `player.prepare` |
+| Session A | `NEXT(seq n+1)` is written to the wire and committed; its local apply waits behind the parked `PLAY` |
+| — | the link drops; the generation moves; **Session B authenticates** and establishes its own queue, timeline and playback epoch |
+| Session A | the pre-roll returns. `PLAY`'s own continuation is refused (`owns` after the pre-roll — A1 Finding F). **`NEXT` then wakes and runs `applyStep` against Session B's queue** |
+
+`PLAY`'s continuation was already safe. The command *behind* it was not, because nothing between
+"the node ahead finished" and "mutate the queue" ever asked which session had authorised it.
+
+**The fix has two layers, and only the second is the correctness boundary.**
+
+1. **Retirement.** Every apply-chain and scheduled-chain node is now created as a child of one
+   session-owned handle — a `SupervisorJob` parented to the coordinator's scope on Android, an
+   explicit live-node registry on iOS, where an unstructured `Task` has no parent to cancel. A
+   boundary cancels all of them, oldest included, and installs a fresh handle. Both tails are
+   cleared in the same call, which is what makes **§G** below true by construction.
+2. **Fencing.** Each node captures the generation that authorised it and re-proves it *after*
+   waiting for the node ahead, before invoking its action.
+
+**Cancellation alone would not be enough, and must not be presented as the fix.** `ExoPlayer.prepare`
+runs on the application looper; every real `AVAudioEngine` and `AVAudioFile` callback is bridged
+through `withCheckedContinuation`. Neither observes cancellation, so a cancelled node still returns
+from such a call and carries straight on to its next statement. The generation is what stops it
+there. The regressions therefore block on a deliberately **non-cancellable** seam, so what they pin
+is the fence and not the cancellation.
+
+### B. Three apply paths mutated live state before proving anything
+
+A2 §12 already said the generation is "re-proved before every mutating step that follows a
+suspension". Three of the five apply paths did not do it at all.
+
+| path | what it did before any proof | consequence |
+|---|---|---|
+| `applyTransport` (`PAUSE`/`RESUME`) | read `currentEpochToken`, re-anchored `timeline`, armed a scheduled action | re-anchored the **new** session's timeline to an instant its own dead leader chose. The scheduled action was correctly refused, but every drift measurement afterwards was taken against a timeline no leader had authorised — measured at −598 s of fabricated drift in the iOS regression |
+| `applySeek` | the same | the same |
+| `applyStep` (`NEXT`/`PREVIOUS`) | `SharedQueue.step` against the live queue, wrote the selection, published it, and on the `selected == null` branch called `playbackFence.begin()` / `epoch.begin()`, cleared `timeline` and armed a stop | stepped the **new** session's queue; and **retired the new session's playback epoch**, so Session B's own already-armed scheduled start failed its ownership proof and never fired. The old session did not merely write state it did not own — it silently disabled the new session's audio |
+
+`applyPlay` was already correct on this point (proof after the resolve, `owns` after the pre-roll)
+and is preserved; it gains an entry proof only because it is reachable from three callers.
+
+Every apply path now proves its authorising generation **before its first read of live state**, and
+does so for itself rather than trusting its caller — `applyAuthoritative`'s entry proof is the cheap
+common case, never the guarantee. On iOS this made `applyTransport` and `applySeek` `async`, which is
+the honest cost of the proof: `stillCurrent` reads another actor. There is deliberately **no `await`
+between the proof and the writes** in either, so the proof still holds when they happen.
+
+Two paths outside the brief's list were found to be in the same class and fixed with it:
+`applyPeerPlaybackState`, whose writes follow a lock acquisition, and `restoreFromPlaybackState`,
+whose nil-track branch supersedes the epoch and clears the timeline.
+
+**Why the epoch is not required here.** `applyTransport` and `applySeek` read the epoch token *live*,
+because `PAUSE` legitimately attaches to whatever epoch is current. The session generation is the
+right fence for them; adding an epoch check would break correct within-session behaviour. The epoch
+is proved where it is owned — in `applyPlay`, and in every scheduled action.
+
+### C. A retired scheduled action wrote the live session's diagnostics
+
+`scheduleAt`'s node measured its own scheduling error immediately after its sleep and **before**
+`runIfCurrent`. The player action was correctly refused — but a Session-A deadline arriving after
+Session B was live still overwrote, and on iOS published, Session B's `lastScheduleErrorUs`: the
+FR-023 figure a rider reads as "this is how well the last synchronised command landed".
+
+`resetForNewSession` likewise only detached `scheduledChain`, so the node was there to fire at all.
+
+The ownership proof now comes **before** the measurement, and again before the sleep, so a node whose
+epoch or session is already gone returns without sleeping. **"Diagnostics only" is not an
+exemption** — A1 Finding F's "a superseded correction has *zero* effects" is the standard, and this
+was one write short of it.
+
+### D. What is now checked before any live-state mutation
+
+Stated once, for every asynchronous Phase 5 operation:
+
+| | proved before the first mutation | re-proved after |
+|---|---|---|
+| apply-chain node | cancellation, then `stillCurrent(generation)` | — (the wait for the node ahead *is* the suspension) |
+| `applyPlay` | `stillCurrent` | the content resolve, then `owns(generation, token)` after the pre-roll |
+| `applyTransport` / `applySeek` | `stillCurrent` | no suspension follows before the writes |
+| `applyStep` | `stillCurrent` | delegates to `applyPlay`, which proves again |
+| scheduled node | cancellation, then `owns(generation, token)` | the deadline sleep — before the measurement, and again before the action |
+| correction | `owns` (A1 Finding F, A2 Finding E) | unchanged |
+
+### E. Sent, but not yet locally applied, at a link loss
+
+**An authoritative frame that reached the peer under Session A and whose local effect has not yet
+happened when the session dies is abandoned locally.** It is not replayed into Session B.
+
+This is a deliberate choice and it is the *opposite* of A2 §G's rule for a frame the transport
+already accepted, so the distinction is worth being exact about. A2 says: a frame the transport
+accepted must still commit and still take effect, because *the peer has it*, and refusing to apply it
+here would manufacture divergence. That reasoning holds **within** the session — the peer is there,
+acting on it, and this device agreeing is the whole point.
+
+Across a boundary it stops holding. Phase 5 coordination has ended: there is no peer left to agree
+with, the timeline the command was authored against is gone, and Session B's state was established
+independently. Applying an old Session-A effect into Session-B state is strictly worse than dropping
+it. So local playback simply continues from whatever state exists at the boundary — Phase 3's, and
+ADR-004's "a Wi-Fi drop does not interrupt music" — and recovery is fresh-session synchronisation, not
+replay. **`STATE_REQUEST` is still not implemented and is still not needed** (A2 §H).
+
+### F. Schedule diagnostics are written only by still-owned work
+
+The general rule the three findings share, stated as a rule rather than as three fixes: **a Phase 5
+operation whose authorising generation is gone writes nothing at all** — not the queue, not the
+timeline, not the epoch, not the player, not the wire, and not a diagnostics counter.
+
+Which Phase 5 diagnostics are session-lifetime and which are process-lifetime is unchanged by this
+amendment and is worth having written down once. `resetForNewSession` clears the session-lifetime
+ones (`syncState`, `lastAppliedCommandSeq`, `lastReceivedCommandSeq`, `nextCommandSeq`,
+`queueRevision`, `queueSize`, `currentTrackHash`, `localDriftMs`, `peerDriftMs`, `lastCorrection`,
+`playbackRate`, `hardSeekCount`, `lastScheduleErrorUs`, `correctionTickCount`,
+`deferredCommandCount`, `ingressDesynchronized`, `outboundAuthorityLost`) and deliberately does not
+clear the cumulative ones (`lateCommandCount`, `duplicateCommandCount`, `staleCommandCount`,
+`roleViolationCount`, `staleRevisionCount`, `inboundProcessedCount`, `inboundOverflowCount`,
+`inboundCoalescedCount`, `recoveredCommandCount`, the five `outbound*` counters,
+`resumedPendingPlayCount`, `cancelledPendingPlayCount`). Cumulative counters may keep accumulating
+**only from work that still owns its generation**; that is the change. A retired node may not
+increment one, which is exactly what **C** got wrong.
+
+### G. A new session never waits for the old session's apply chain
+
+Session B's first apply must not join, or queue behind, a Session-A node that may be blocked
+indefinitely inside a player call. Clearing both chain tails at the boundary makes the new session's
+first node have no predecessor, so this is true by construction rather than by Session A happening to
+finish. Pinned by a regression in which Session A's apply stays blocked for the whole of Session B's
+work — connect, queue, `PLAY`, scheduled start — and is released only afterwards.
+
+### H. No wire change
+
+Restating, because it is the thing most worth being unambiguous about: no message type, no field, no
+bound, no encoding and no vector changed. The three internal signature changes are
+`chainApply(generation:)`, and `applyTransport`/`applySeek` becoming `async` on iOS.
+
+### I. Stress
+
+The A2 pass requested stress runs and did not perform them; this pass did, and they earned their
+place. The Phase 5 iOS suites were run **200 times** and the Android Phase 5 package **100 times**,
+covering the blocked-apply race, the independent-new-session race, the old-deadline race, the
+multi-node boundary, and A2's outbound-capacity and deferred-authoritative-stream regressions.
+
+**Every one of the run's findings was a test defect, not a production one**, and they are recorded
+because they are the reason stress is mandatory rather than optional:
+
+1. Two premise assertions in the new iOS regressions read `clock.pendingDeadlines()` and the queue selection immediately after a send, and both are one or two task hops early — a scheduled node reaches the sleeper only after `applyPlay` has selected *and* pre-rolled. One failed **6 runs in 12** before being changed to wait on the condition rather than assert it.
+2. A pre-existing A2 test, `testACorrectionSupersededBeforeItsSnapshotEnqueueEmitsNothing`, flaked **1 in 13**: `handleConnected` *starts* the cadence loop, which then computes `now + interval` and parks one task hop later, so a test that advances the fake clock inside that hop moves time out from under it and the tick never fires. `SyncPlaybackDriftTests` already had an `awaitTickArmed()` helper from A1's harness pass; the delivery-audit and closure-audit harnesses did not, and now do.
+3. A second pre-existing A2 harness gap, same class, found on the next run: `leaderPlaying()` waited only for the `PLAY` to reach the wire, and A2 deliberately runs the leader's *own* apply after that, so the helper could return with `timeline` still nil and a cadence tick would then correctly do nothing. `testACurrentCorrectionStillEmitsExactlyOneAuthoritativeSnapshot` failed that way **1 in 7**. `SyncPlaybackDriftTests` already carried this exact fix from A1, comment and all; A2's newer harness reintroduced the race.
+4. A third pre-existing A2 harness gap, **1 in 9**: `testACorrectionWhoseEpochIsSupersededBeforeItsSnapshotEnqueueEmitsNothing` superseded the playback epoch with `playSynchronized` and then used `settle()` as the barrier before releasing its gate. `epoch.begin()` is reached only at the end of a long chain — queue add, send, commit hook, apply chain, content resolve — and A3's own added proof hops made an already-marginal yield budget worse. When the supersession had not happened yet, the correction was *legitimately still current*, so the emit was correct and the test failed for the one reason a test must never fail: **the code was right.** Now waits for `currentTrackHash`, which `applyPlay` writes immediately after `epoch.begin()` with no `await` between. Its latent sibling (`…WhosePlaybackEpochIsSupersededEmitsNothing`) had the same barrier and was fixed with it.
+5. The first stress script itself was wrong, and is recorded because it would have produced a false green: a filtered `swift test` prints one `Executed N tests` line **per suite**, so grepping the first one only ever checked the first suite. Replaced with `swift test`'s own exit code.
+
+**Nothing in the coordinator was at fault in any of the five.** The pattern is worth naming: the fake
+monotonic clock can be wound forward out from under a parked sleeper, which no real monotonic clock
+can, and A2's harness — written in a pass that skipped stress — reintroduced *three* races A1's
+harness had already solved. Android is immune to all of them, because `runCurrent()` under a
+`StandardTestDispatcher` drains every pending coroutine before the test's next statement.
+
+**One negative result, recorded because it is the more useful half.** A3's boundary regressions assert
+that a retired Session-A node produced *no* effect, and a fixed yield budget cannot distinguish
+"correctly fenced" from "has not run yet" — so two attempts were made to replace it with an exact
+signal: waiting for the live-node registry to empty, then awaiting the apply chain's tail. **Both were
+rejected, and the second is instructive:** a boundary clears the chain tail in the fixed code *and* in
+the pre-A3 code, so awaiting it returns immediately and says nothing about the retired node — the
+"stronger" signal silently cost one regression its pre-fix failure. A retired node is unreachable by
+construction, and any signal precise enough to await would be an effect the fence exists to prevent.
+The budget therefore stays, deliberately named `awaitRetiredWorkSettled` and documented as a budget,
+and **what makes the assertions credible is the pre-fix run** — seven of nine cases failing at that
+same budget, on both platforms. The exact tail await is kept only where the tail genuinely is the node
+under test: the same-session ordering control.
+
+### What this amendment adds, and what it deliberately does not
+
+**Adds:** one session-owned lifetime handle per platform (`sessionChains` / `sessionChainNodes`);
+a generation parameter on `chainApply`; pre-mutation ownership proofs in `applyAuthoritative`,
+`applyPlay`, `applyTransport`, `applySeek`, `applyStep`, `applyPeerPlaybackState` and
+`restoreFromPlaybackState`; the ownership proof moved ahead of the schedule-error measurement; and
+two mirrored regression suites (`SyncPlaybackLifecycleAuditTest` /
+`SyncPlaybackLifecycleAuditTests`, nine tests each) plus one two-peer regression on Android.
+
+**Does not:** change the wire format or any vector; add a gate table (coroutine and `Task` lifetime
+is not a distributed decision, and CLAUDE.md's rule 18 is about *decisions*); change A2's authority
+semantics — `command_seq` and `queue_revision` still commit at admission, `lastAppliedSeq` and the
+local effect still at send success, a failed send still fails closed, a new session still clears the
+latch; change the deferred authoritative stream, `AuthoritativeHoldGate`, or the held-stream overflow
+posture; alter the drift ladder, its hysteresis or its seek budget; alter
+`LEAD = max(120 ms, 4 × rtt_p95)`; add a second player, queue, `MediaSession`, coordinator or RTT
+tracker; implement `STATE_REQUEST`; touch Phase 6 or Phase 7; or make any claim about audio.
+
+**And still does not run on a phone.** Every figure here is a software figure. The <100 ms product
+target and the <50 ms stretch target remain unmeasured, no alignment figure exists, and TEST_PLAN
+§5.2's S-01…S-12 are what will change that.
