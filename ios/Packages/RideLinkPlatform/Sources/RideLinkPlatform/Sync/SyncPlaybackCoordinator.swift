@@ -156,6 +156,28 @@ public actor SyncPlaybackCoordinator {
     /// one consumer commits — is apply order.
     var applyChain: Task<Void, Never>?
 
+    /// Every `applyChain` and `scheduledChain` node the **current** session authorised
+    /// (Amendment A3 Findings A and C), so a boundary can cancel all of them.
+    ///
+    /// A1 and A2 both stored only the *tail* of each chain, and `resetForNewSession` retired a chain
+    /// by setting that reference to `nil`. That detaches; it cancels nothing. The nodes already
+    /// created went on existing — one parked inside a decoder pre-roll, the ones behind it parked on
+    /// `await previous?.value` — and when the pre-roll finally returned they ran in whatever session
+    /// was live by then. Cancelling the tail would not have helped either: the tail is the *newest*
+    /// node, and the one that matters is the *oldest*, the one actually blocked. An unstructured
+    /// `Task` has no parent to cancel, so on this platform the set is tracked explicitly; Android
+    /// gets the same reach from one `SupervisorJob`.
+    ///
+    /// Each node removes its own entry when it finishes, so the dictionary is the *live* set rather
+    /// than a growing log.
+    ///
+    /// **Cancellation is defence one, not the correctness boundary.** `withCheckedContinuation` —
+    /// which is how every real `AVAudioEngine` and `AVAudioFile` callback is bridged — ignores
+    /// cancellation by nature, so a cancelled node still returns from such a call and carries on to
+    /// its next statement. What stops it there is the generation each node captured.
+    var sessionChainNodes: [Int64: Task<Void, Never>] = [:]
+    private var nextChainNodeId: Int64 = 0
+
     /// Amendment A2 Findings A and C: an authoritative frame this device produced never reached the
     /// peer, so Phase 5 authority is over for this authentication generation.
     ///
@@ -265,10 +287,7 @@ public actor SyncPlaybackCoordinator {
         tickTask = nil
         deferredDrainTask?.cancel()
         deferredDrainTask = nil
-        scheduledChain?.cancel()
-        scheduledChain = nil
-        applyChain?.cancel()
-        applyChain = nil
+        retireSessionChains()
     }
 
     /// Whether the ingress consumer is parked with nothing buffered — everything offered so far has
@@ -320,9 +339,11 @@ public actor SyncPlaybackCoordinator {
         tickTask = nil
         deferredDrainTask?.cancel()
         deferredDrainTask = nil
-        // Nothing new joins the previous session's chain: ordering across a session boundary is
-        // meaningless, and every link still in flight is already inert by its ownership proof.
-        scheduledChain = nil
+        // Amendment A3 Findings A and C: the previous session's chains are **retired**, not merely
+        // detached — every node of both chains, including the oldest, which is the one actually
+        // blocked. Clearing the two tails in the same call is what makes "Session B never waits for
+        // Session A" true by construction: the new session's first node has no predecessor.
+        retireSessionChains()
         // Supersede rather than begin: nothing is current until a new epoch actually starts, so a
         // timer or a report still in flight from the previous session can match no token at all.
         epoch.supersede()
@@ -337,7 +358,6 @@ public actor SyncPlaybackCoordinator {
         // Frames still queued outbound stay physically queued and become inert, because each carries
         // the generation that authorised it and `outboundUsable` refuses to write them.
         outboundAuthorityLost = false
-        applyChain = nil
         lastReceivedSeq = nil
         lastAppliedSeq = nil
         nextSeq = PlaybackBounds.firstCommandSeq
@@ -557,12 +577,52 @@ public actor SyncPlaybackCoordinator {
     /// See `applyChain`: the commit hook runs on `drainOutbound`'s single consumer, so doing the
     /// apply there would stall the outbound path behind a decoder pre-roll, and an unstructured
     /// `Task` preserves nothing at all about order — precisely the defect A1 Finding G was about.
-    func chainApply(_ action: @escaping @Sendable () async -> Void) {
+    func chainApply(generation: Int64, _ action: @escaping @Sendable () async -> Void) {
         let previous = applyChain
-        applyChain = Task {
+        let id = claimChainNodeId()
+        let node = Task { [weak self] in
             await previous?.value
-            await action()
+            await self?.runApplyNode(id: id, generation: generation, action: action)
         }
+        applyChain = node
+        trackChainNode(id, node)
+    }
+
+    /// One apply-chain node's body, once the node ahead of it has finished (Amendment A3 Finding A).
+    ///
+    /// Waiting for that node is a suspension like any other, and an authentication boundary can land
+    /// inside it — which is the whole defect. The cancellation check is cheap and prompt; the
+    /// generation is what is *decisive*, because the node ahead may have been parked in a player call
+    /// that ignored the cancellation entirely.
+    private func runApplyNode(id: Int64, generation: Int64, action: @Sendable () async -> Void) async {
+        defer { releaseChainNode(id) }
+        guard !Task.isCancelled, await stillCurrent(generation) else { return }
+        await action()
+    }
+
+    /// Reserves an identity for one chain node. Monotonic, so a retired node's own cleanup can never
+    /// remove a node the *next* session created.
+    func claimChainNodeId() -> Int64 {
+        nextChainNodeId += 1
+        return nextChainNodeId
+    }
+
+    func trackChainNode(_ id: Int64, _ node: Task<Void, Never>) {
+        sessionChainNodes[id] = node
+    }
+
+    func releaseChainNode(_ id: Int64) {
+        sessionChainNodes[id] = nil
+    }
+
+    /// Retires both chains: the live set is cleared first, then every node in it is cancelled, then
+    /// the two tails are dropped so nothing new joins what has just been retired.
+    private func retireSessionChains() {
+        let nodes = sessionChainNodes
+        sessionChainNodes.removeAll()
+        for node in nodes.values { node.cancel() }
+        scheduledChain = nil
+        applyChain = nil
     }
 
     // MARK: - Issuing
@@ -673,7 +733,7 @@ public actor SyncPlaybackCoordinator {
         diagnostics.lastAppliedCommandSeq = lastAppliedSeq
         diagnostics.lastReceivedCommandSeq = lastReceivedSeq
         publishDiagnostics()
-        chainApply { [weak self] in
+        chainApply(generation: generation) { [weak self] in
             await self?.applyAuthoritative(message, generation: generation, estimate: estimate)
         }
     }

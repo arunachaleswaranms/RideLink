@@ -603,17 +603,24 @@ extension SyncPlaybackCoordinator {
 
     // MARK: - Applying
 
+    /// Amendment A3 Finding B: **every** apply path proves its authorising generation before it
+    /// mutates anything, and each of them does so for itself rather than trusting this entry point.
+    /// The proof here is the cheap common case — an apply whose session died while it queued does no
+    /// work at all — but `applyPlay`, `applyTransport`, `applySeek` and `applyStep` are each
+    /// reachable from more than one caller and each suspends, so none of them may rely on it. On an
+    /// actor that is not fastidiousness: every `await` below is a re-entrancy point.
     func applyAuthoritative(_ message: PlaybackMessage, generation: Int64, estimate: SessionClockEstimate) async {
+        guard await stillCurrent(generation) else { return }
         switch message {
         case .play(let header, let trackHash, let positionMs, let queueItemId):
             await applyPlay(header, trackHash: trackHash, queueItemId: queueItemId, positionMs: positionMs,
                             generation: generation, estimate: estimate)
         case .pause(let header, let positionMs):
-            applyTransport(header, generation: generation, estimate: estimate, playing: false, positionMs: positionMs)
+            await applyTransport(header, generation: generation, estimate: estimate, playing: false, positionMs: positionMs)
         case .resume(let header, let positionMs):
-            applyTransport(header, generation: generation, estimate: estimate, playing: true, positionMs: positionMs)
+            await applyTransport(header, generation: generation, estimate: estimate, playing: true, positionMs: positionMs)
         case .seek(let header, let target):
-            applySeek(header, targetPositionMs: target, generation: generation, estimate: estimate)
+            await applySeek(header, targetPositionMs: target, generation: generation, estimate: estimate)
         case .next(let header):
             await applyStep(header, delta: 1, generation: generation, estimate: estimate)
         case .previous(let header):
@@ -635,6 +642,11 @@ extension SyncPlaybackCoordinator {
         estimate: SessionClockEstimate,
         playing: Bool = true
     ) async {
+        // Amendment A3 Finding B: reached from `applyAuthoritative`, from `applyStep` and from
+        // `restoreFromPlaybackState`, and `content.resolve` is real I/O on another actor. Proved on
+        // entry so a Play that only *starts* after a boundary does no work, and again below because
+        // the resolve suspends.
+        guard await stillCurrent(generation) else { return }
         let playable = await content.resolve(trackHash)
         guard await stillCurrent(generation) else { return }
         guard let playable else {
@@ -675,13 +687,25 @@ extension SyncPlaybackCoordinator {
         }
     }
 
+    /// Amendment A3 Finding B: the ownership proof is the **first** statement, before
+    /// `currentEpochToken` is read and before `timeline` is re-anchored — which is why this is now
+    /// `async` where it used to be synchronous.
+    ///
+    /// It had no proof at all. `PAUSE`/`RESUME` legitimately attach to whatever playback epoch is
+    /// current — that is why the token is read live rather than carried — so a retired command
+    /// reading it read the *new* session's epoch and re-anchored the *new* session's timeline to an
+    /// instant its own dead leader had chosen. Nothing later could recover from that: the scheduled
+    /// action was correctly refused, but every drift measurement afterwards was taken against a
+    /// timeline no leader had authorised. There is no `await` between the proof and the writes, so
+    /// the proof still holds when they happen — on an actor that is the property that matters.
     private func applyTransport(
         _ header: PlaybackCommandHeader,
         generation: Int64,
         estimate: SessionClockEstimate,
         playing: Bool,
         positionMs: Int64
-    ) {
+    ) async {
+        guard await stillCurrent(generation) else { return }
         let token = currentEpochToken
         timeline = timeline?.reanchored(positionMs: positionMs, sessionUs: header.effectiveAtSessionUs, playing: playing)
         scheduleAt(header.effectiveAtSessionUs, estimate: estimate, generation: generation, token: token) { [weak self] in
@@ -696,7 +720,14 @@ extension SyncPlaybackCoordinator {
         }
     }
 
-    private func applySeek(_ header: PlaybackCommandHeader, targetPositionMs: Int64, generation: Int64, estimate: SessionClockEstimate) {
+    /// `applyTransport`'s proof, for the same reason and in the same position.
+    private func applySeek(
+        _ header: PlaybackCommandHeader,
+        targetPositionMs: Int64,
+        generation: Int64,
+        estimate: SessionClockEstimate
+    ) async {
+        guard await stillCurrent(generation) else { return }
         let token = currentEpochToken
         timeline = timeline?.reanchored(positionMs: targetPositionMs, sessionUs: header.effectiveAtSessionUs)
         scheduleAt(header.effectiveAtSessionUs, estimate: estimate, generation: generation, token: token) { [weak self] in
@@ -708,6 +739,14 @@ extension SyncPlaybackCoordinator {
     /// hold identical `SharedQueueState` at the revision the command names, so both resolve the same
     /// item without either consulting its own local queue.
     private func applyStep(_ header: PlaybackCommandHeader, delta: Int, generation: Int64, estimate: SessionClockEstimate) async {
+        // Amendment A3 Finding B: the highest-risk path in the phase, and it had no proof at all.
+        // Everything below reads or writes *live* state — the shared queue, the selection, the
+        // playback epoch, the timeline — so the proof has to come before the first read, not before
+        // the first player call. A retired `NEXT` used to step the new session's queue; a retired
+        // `NEXT` that ran off the end of it took the `step.selected == nil` branch and called
+        // `epoch.begin()`, which **retired the live session's playback epoch** and silently stopped
+        // its scheduled start from ever firing.
+        guard await stillCurrent(generation) else { return }
         let step = SharedQueue.step(state: queueState, delta: delta)
         queueState = step.state
         publishQueue()
@@ -754,24 +793,52 @@ extension SyncPlaybackCoordinator {
         }
         publishDiagnostics()
         // Finding G: joined to the previous armed action, so the authoritative order the leader chose
-        // is the order the player is actually driven in.
+        // is the order the player is actually driven in. Amendment A3 Finding C: tracked in
+        // `sessionChainNodes`, so a boundary retires it rather than leaving it armed.
         let previous = scheduledChain
-        scheduledChain = Task { [weak self] in
+        let id = claimChainNodeId()
+        let node = Task { [weak self] in
             await previous?.value
-            guard let self else { return }
-            if let deadlineUs {
-                await self.sleeper.sleep(untilLocalMonoUs: deadlineUs)
-                // The software scheduling error, measured rather than assumed. It says nothing about
-                // audible alignment: the decoder, the mixer and two Bluetooth hops all sit between
-                // this instant and a listener's ear (brief §23/§66).
-                await self.recordScheduleError(deadlineUs: deadlineUs)
-            }
-            if await self.runIfCurrent(generation: generation, token: token, action: action) {
-                await self.markSyncedAndPublish(generation: generation, token: token)
-            }
+            await self?.runScheduledNode(
+                id: id, generation: generation, token: token, deadlineUs: deadlineUs, action: action
+            )
+        }
+        scheduledChain = node
+        trackChainNode(id, node)
+    }
+
+    /// One scheduled-action node's body, once the node ahead of it has finished.
+    ///
+    /// **Amendment A3 Finding C: the ownership proof comes before the measurement.** It used to come
+    /// after. The player action itself was correctly refused, but a Session-A deadline arriving after
+    /// Session B authenticated still overwrote Session B's `lastScheduleErrorUs` — the FR-023 figure
+    /// a rider reads as "this is how well the last synchronised command landed" — and published it.
+    /// "Diagnostics only" is not an exemption: a superseded action has *zero* effects (A1 Finding F).
+    ///
+    /// The proof is taken again after the sleep, because the sleep is a suspension and on an actor
+    /// every suspension is a re-entrancy point.
+    private func runScheduledNode(
+        id: Int64,
+        generation: Int64,
+        token: Int64,
+        deadlineUs: Int64?,
+        action: @Sendable () async -> Void
+    ) async {
+        defer { releaseChainNode(id) }
+        guard !Task.isCancelled, await owns(generation: generation, token: token) else { return }
+        if let deadlineUs {
+            await sleeper.sleep(untilLocalMonoUs: deadlineUs)
+            guard !Task.isCancelled, await owns(generation: generation, token: token) else { return }
+            recordScheduleError(deadlineUs: deadlineUs)
+        }
+        if await runIfCurrent(generation: generation, token: token, action: action) {
+            await markSyncedAndPublish(generation: generation, token: token)
         }
     }
 
+    /// The software scheduling error, measured rather than assumed. It says nothing about audible
+    /// alignment: the decoder, the mixer and two Bluetooth hops all sit between this instant and a
+    /// listener's ear (brief §23/§66).
     private func recordScheduleError(deadlineUs: Int64) {
         diagnostics.lastScheduleErrorUs = monotonicNowUs() - deadlineUs
         publishDiagnostics()
@@ -1048,6 +1115,10 @@ extension SyncPlaybackCoordinator {
 
     /// `onPeerPlaybackState` with the hold gate already answered — the drain's entry point too.
     func applyPeerPlaybackState(_ fields: PlaybackStateSnapshotFields, generation: Int64) async {
+        // Amendment A3 Finding B: everything below writes live state — the received/applied sequence
+        // numbers, the held stream, the timeline — and this is reached through the hold gate or the
+        // deferred drain, both of which suspend before getting here.
+        guard await stillCurrent(generation) else { return }
         let commandSeq = fields.commandSeq
         if lastReceivedSeq == nil || commandSeq > (lastReceivedSeq ?? 0) {
             lastReceivedSeq = commandSeq
@@ -1077,6 +1148,9 @@ extension SyncPlaybackCoordinator {
 
     /// The playback half of Amendment A1's reconciliation. See `onPeerPlaybackState`.
     private func restoreFromPlaybackState(_ fields: PlaybackStateSnapshotFields, generation: Int64) async {
+        // Amendment A3 Finding B: the nil-track branch below supersedes the playback epoch and clears
+        // the timeline, so it needs the same pre-mutation proof `applyStep` needs.
+        guard await stillCurrent(generation) else { return }
         guard let trackHash = fields.trackHash, let queueItemId = fields.queueItemId else {
             // "Nothing is loaded" is a representable authoritative state (ADR-024 §4). Every
             // scheduled effect from the epoch we lost track of is superseded, and nothing replaces it.

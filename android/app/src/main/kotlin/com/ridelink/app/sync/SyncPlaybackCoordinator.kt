@@ -41,6 +41,9 @@ import com.ridelink.network.playback.PlaybackSink
 import com.ridelink.network.playback.QueueSink
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -232,6 +235,30 @@ class SyncPlaybackCoordinator(
      * one consumer commits — is apply order.
      */
     private var applyChain: Job? = null
+
+    /**
+     * The parent of every [applyChain] and [scheduledChain] node the **current** session authorised
+     * (Amendment A3 Findings A and C).
+     *
+     * A1 and A2 both stored only the *tail* of each chain, and [resetForNewSession] retired a chain
+     * by setting that reference to null. That detaches; it does not cancel. The nodes already
+     * created went on existing — one parked inside a decoder pre-roll, the ones behind it parked on
+     * `join()` — and when the pre-roll finally returned they ran in whatever session was live by
+     * then. Cancelling the tail would not have helped either: the tail is the *newest* node, and the
+     * one that matters is the *oldest*, the one actually blocked.
+     *
+     * A `SupervisorJob` parented to [scope]'s own job gives the whole set one handle. Every node is
+     * launched as its child, so one `cancel()` retires all of them, and coordinator shutdown still
+     * reaches them because the parent chain is intact. `SupervisorJob` rather than `Job` because
+     * these nodes are siblings: one failing must not cancel the others, exactly as before.
+     *
+     * **Cancellation is defence one, not the correctness boundary.** `ExoPlayer.prepare` runs on the
+     * application looper and does not observe coroutine cancellation, so a cancelled node still
+     * returns from it and carries on to its next statement. What stops it there is the generation
+     * each node captured — see [chainApply] and [scheduleAt]. The iOS mirror says the same thing
+     * about `withCheckedContinuation`, which is how every real `AVAudioEngine` callback is bridged.
+     */
+    private var sessionChains: Job = SupervisorJob(scope.coroutineContext[Job])
 
     /**
      * Amendment A2 Findings A and C: an authoritative frame this device produced never reached the
@@ -712,11 +739,21 @@ class SyncPlaybackCoordinator(
      * apply there would stall the outbound path behind a decoder pre-roll, and launching it
      * unchained would throw away the very order the commit point exists to establish.
      */
-    private fun chainApply(action: suspend () -> Unit) {
+    private fun chainApply(
+        generation: Long,
+        action: suspend () -> Unit,
+    ) {
         val previous = applyChain
         applyChain =
-            scope.launch {
+            scope.launch(sessionChains) {
                 previous?.join()
+                // Amendment A3 Finding A: waiting for the node ahead is a suspension like any other,
+                // and an authentication boundary can land inside it — which is the whole defect. The
+                // cancellation check is cheap and prompt; the generation is what is *decisive*,
+                // because the node ahead may have been parked in a player call that ignored the
+                // cancellation entirely.
+                currentCoroutineContext().ensureActive()
+                if (!stillCurrent(generation)) return@launch
                 action()
             }
     }
@@ -754,8 +791,16 @@ class SyncPlaybackCoordinator(
         tickJob = null
         deferredDrainJob?.cancel()
         deferredDrainJob = null
-        // Nothing new joins the previous session's chain: ordering across a session boundary is
-        // meaningless, and every link still in flight is already inert by its ownership proof.
+        // Amendment A3 Findings A and C: the previous session's chains are **retired**, not merely
+        // detached. Cancelling the shared parent reaches every node of both chains — including the
+        // oldest, which is the one actually blocked — and a fresh parent means nothing the next
+        // session creates is a sibling of anything this one did.
+        sessionChains.cancel()
+        sessionChains = SupervisorJob(scope.coroutineContext[Job])
+        // Nothing new joins the previous session's chain either: ordering across a session boundary
+        // is meaningless, so the new session's first node has no predecessor to wait for. That is
+        // what makes "Session B never waits for Session A" true by construction rather than by
+        // Session A happening to finish.
         scheduledChain = null
         // Supersede rather than begin: nothing is current until a new epoch actually starts, so a
         // timer or a report still in flight from the previous session can match no token at all.
@@ -979,7 +1024,7 @@ class SyncPlaybackCoordinator(
         _diagnostics.update {
             it.copy(lastAppliedCommandSeq = lastAppliedSeq, lastReceivedCommandSeq = lastReceivedSeq)
         }
-        chainApply { applyAuthoritative(message, generation, estimate) }
+        chainApply(generation) { applyAuthoritative(message, generation, estimate) }
     }
 
     // --- user-facing actions (also the system media controls' path, brief §39) ------------------
@@ -1718,11 +1763,19 @@ class SyncPlaybackCoordinator(
 
     // --- applying -------------------------------------------------------------------------------
 
+    /**
+     * Amendment A3 Finding B: **every** apply path proves its authorising generation before it
+     * mutates anything, and each of them does so for itself rather than trusting this entry point.
+     * The proof here is the cheap common case — an apply whose session died while it queued does no
+     * work at all — but `applyPlay`, `applyTransport`, `applySeek` and `applyStep` are each
+     * reachable from more than one caller and each suspends, so none of them may rely on it.
+     */
     private suspend fun applyAuthoritative(
         message: PlaybackMessage,
         generation: Long,
         estimate: SessionClockEstimate,
     ) {
+        if (!stillCurrent(generation)) return
         when (message) {
             is PlaybackMessage.Play ->
                 applyPlay(message.header, message.trackHash, message.queueItemId, message.positionMs, generation, estimate)
@@ -1752,6 +1805,11 @@ class SyncPlaybackCoordinator(
         estimate: SessionClockEstimate,
         playing: Boolean = true,
     ) {
+        // Amendment A3 Finding B: reached from `applyAuthoritative`, from `applyStep` and from
+        // `restoreFromPlaybackState`, and `content.resolve` is real I/O. Proved on entry so a Play
+        // that only *starts* after a boundary does no work, and again below because the resolve
+        // suspends.
+        if (!stillCurrent(generation)) return
         val playable = content.resolve(trackHash)
         if (!stillCurrent(generation)) return
         if (playable == null) {
@@ -1786,6 +1844,18 @@ class SyncPlaybackCoordinator(
         scheduleAt(header.effectiveAtSessionUs, estimate, generation, token) { player.start() }
     }
 
+    /**
+     * Amendment A3 Finding B: the ownership proof is the **first** statement, before
+     * [currentEpochToken] is read and before [timeline] is re-anchored.
+     *
+     * It had none at all. `PAUSE`/`RESUME` legitimately attach to whatever playback epoch is current
+     * — that is why the token is read live rather than carried — so a retired command reading it
+     * read the *new* session's epoch and re-anchored the *new* session's timeline to an instant its
+     * own dead leader had chosen. Nothing later could recover from that: the scheduled action was
+     * correctly refused, but every drift measurement afterwards was taken against a timeline no
+     * leader had authorised. There is no suspension between the proof and the writes, so the proof
+     * still holds when they happen.
+     */
     private fun applyTransport(
         header: PlaybackCommandHeader,
         generation: Long,
@@ -1793,6 +1863,7 @@ class SyncPlaybackCoordinator(
         playing: Boolean,
         positionMs: Long,
     ) {
+        if (!stillCurrent(generation)) return
         val token = currentEpochToken
         timeline = timeline?.copy(anchorPositionMs = positionMs, anchorSessionUs = header.effectiveAtSessionUs, playing = playing)
         scheduleAt(header.effectiveAtSessionUs, estimate, generation, token) {
@@ -1806,12 +1877,14 @@ class SyncPlaybackCoordinator(
         }
     }
 
+    /** [applyTransport]'s proof, for the same reason and in the same position. */
     private fun applySeek(
         header: PlaybackCommandHeader,
         targetPositionMs: Long,
         generation: Long,
         estimate: SessionClockEstimate,
     ) {
+        if (!stillCurrent(generation)) return
         val token = currentEpochToken
         timeline = timeline?.copy(anchorPositionMs = targetPositionMs, anchorSessionUs = header.effectiveAtSessionUs)
         scheduleAt(header.effectiveAtSessionUs, estimate, generation, token) { player.seek(targetPositionMs) }
@@ -1822,12 +1895,21 @@ class SyncPlaybackCoordinator(
      * hold identical `SharedQueueState` at the revision the command names, so both resolve the same
      * item without either consulting its own local queue.
      */
+    @Suppress("ReturnCount") // the ownership proof, then PROTOCOL §5's two step outcomes
     private suspend fun applyStep(
         header: PlaybackCommandHeader,
         delta: Int,
         generation: Long,
         estimate: SessionClockEstimate,
     ) {
+        // Amendment A3 Finding B: the highest-risk path in the phase, and it had no proof at all.
+        // Everything below reads or writes *live* state — the shared queue, the selection, the
+        // playback epoch, the timeline — so the proof has to come before the first read, not before
+        // the first player call. A retired `NEXT` used to step the new session's queue; a retired
+        // `NEXT` that ran off the end of it took the `selected == null` branch and called
+        // `playbackFence.begin()`, which **retired the live session's playback epoch** and silently
+        // stopped its scheduled start from ever firing.
+        if (!stillCurrent(generation)) return
         val step = SharedQueue.step(_queueState.value, delta)
         _queueState.value = step.state
         publishQueue()
@@ -1868,13 +1950,24 @@ class SyncPlaybackCoordinator(
             _diagnostics.update { it.copy(syncState = SyncState.SCHEDULED) }
         }
         // Finding G: joined to the previous armed action, so the authoritative order the leader chose
-        // is the order the player is actually driven in.
+        // is the order the player is actually driven in. Amendment A3 Finding C: launched under
+        // [sessionChains], so a boundary retires it rather than leaving it armed.
         val previous = scheduledChain
         scheduledChain =
-            scope.launch {
+            scope.launch(sessionChains) {
                 previous?.join()
+                currentCoroutineContext().ensureActive()
+                if (!owns(generation, token)) return@launch
                 if (decision is ScheduledCommandDecision.Schedule) {
                     sleeper.sleepUntil(decision.atLocalMonoUs)
+                    currentCoroutineContext().ensureActive()
+                    // **Amendment A3 Finding C: the ownership proof comes before the measurement.**
+                    // It used to come after. The player action itself was correctly refused, but a
+                    // Session-A deadline arriving after Session B authenticated still overwrote
+                    // Session B's `lastScheduleErrorUs` — the FR-023 figure a rider reads as "this
+                    // is how well the last synchronised command landed". "Diagnostics only" is not
+                    // an exemption: a superseded action has *zero* effects (A1 Finding F).
+                    if (!owns(generation, token)) return@launch
                     // The software scheduling error, measured rather than assumed. It says nothing
                     // about audible alignment: the decoder, the mixer and two Bluetooth hops all sit
                     // between this instant and a listener's ear (brief §23/§66).
@@ -2206,6 +2299,11 @@ class SyncPlaybackCoordinator(
         generation: Long,
     ) {
         commandMutex.withLock {
+            // Amendment A3 Finding B: acquiring the lock is a suspension, and everything below it
+            // writes live state — the received/applied sequence numbers, the held stream, the
+            // timeline. Re-proved here rather than trusting the dispatch-time check in
+            // `onPlaybackMessage`.
+            if (!stillCurrent(generation)) return
             val current = lastReceivedSeq
             if (current == null || snapshot.commandSeq > current) {
                 lastReceivedSeq = snapshot.commandSeq
@@ -2248,6 +2346,10 @@ class SyncPlaybackCoordinator(
         snapshot: PlaybackMessage.PlaybackStateSnapshot,
         generation: Long,
     ) {
+        // Amendment A3 Finding B: the null-track branch below supersedes the playback epoch and
+        // clears the timeline, so this needs the same pre-mutation proof `applyStep` needs — it is
+        // reached through two suspensions (the lock above, and the drain that may call it).
+        if (!stillCurrent(generation)) return
         val trackHash = snapshot.trackHash
         val queueItemId = snapshot.queueItemId
         if (trackHash == null || queueItemId == null) {
