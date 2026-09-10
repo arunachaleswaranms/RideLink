@@ -63,6 +63,10 @@ actor FakeSyncSession: SyncSessionPort {
 
     func setClock(_ value: SessionClockEstimate?) { clock = value }
 
+    /// The leader's `LEAD = max(120 ms, 4 x rtt_p95)` comes from here, so a test that needs one
+    /// session's deadlines to outlive the next session's work sets it (ADR-024 Amendment A3).
+    func setRtt(_ value: Int64?) { rtt = value }
+
     func record(_ message: any Sendable) { sent.append(message) }
 
     func clearSent() {

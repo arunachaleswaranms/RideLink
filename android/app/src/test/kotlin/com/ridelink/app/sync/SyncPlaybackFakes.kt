@@ -11,12 +11,14 @@ import com.ridelink.core.sync.SessionClockEstimate
 import com.ridelink.network.control.ControlEvent
 import com.ridelink.network.playback.PlaybackSink
 import com.ridelink.network.playback.QueueSink
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.withContext
 import java.util.UUID
 
 // Deterministic fakes for every Phase 5 port. Nothing here reads a real clock, opens a socket or
@@ -210,7 +212,16 @@ class FakeSyncPlayer : SyncPlayerPort {
     private suspend fun record(call: Call) {
         calls.add(call)
         onCall?.invoke(call)
-        if (gateOn?.invoke(call) == true) gate?.await()
+        if (gateOn?.invoke(call) != true) return
+        val parked = gate ?: return
+        // **Deliberately not cancellable** (ADR-024 Amendment A3). `ExoPlayer.prepare` runs on the
+        // application looper and `AVAudioEngine`'s callbacks are C callbacks: neither observes
+        // coroutine or `Task` cancellation, so an apply that has been cancelled still returns from
+        // them and carries on to its next statement. Modelling that here is what makes the
+        // Amendment A3 tests prove the *generation fence* rather than merely proving that
+        // cancellation happened — which is the whole point of A3's "cancellation alone is not
+        // enough". It mirrors iOS, where `withCheckedContinuation` ignores cancellation by nature.
+        withContext(NonCancellable) { parked.await() }
     }
 }
 

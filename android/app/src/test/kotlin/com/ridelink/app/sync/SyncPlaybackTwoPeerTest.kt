@@ -546,6 +546,102 @@ class SyncPlaybackTwoPeerTest {
             assertEquals(0L, pair.leader.coordinator.queueState.value.revision)
         }
 
+    /**
+     * ADR-024 **Amendment A3**, across two coordinators: the leader's own local apply is blocked
+     * inside its player when the session dies, and the command behind it in the apply chain has
+     * already been delivered to the follower and committed by A2's outbound consumer.
+     *
+     * The single-coordinator mirror of this is `SyncPlaybackLifecycleAuditTest`, which is where the
+     * fence itself is pinned. What this adds is the *pair* property: releasing Session A's blocked
+     * apply after Session B is live corrupts neither peer's authoritative state and puts no frame on
+     * Session B's wire. **No TLS and no socket** — the same limitation as every test in this class.
+     */
+    @Test
+    fun `an old session's blocked leader apply corrupts neither peer under the session that replaced it`() =
+        runTest(StandardTestDispatcher()) {
+            val pair = Pair(this)
+            pair.connect()
+            pair.seedContent(1..2)
+
+            // The leader's own apply parks inside its pre-roll, *after* the PLAY reached the peer.
+            val gate = kotlinx.coroutines.CompletableDeferred<Unit>()
+            pair.leader.player.gate = gate
+            pair.leader.player.gateOn = {
+                it is FakeSyncPlayer.Call.Prepare && it.contentHash == SyncTestValues.hash(1)
+            }
+            pair.leader.coordinator.playSynchronized(SyncTestValues.hash(1))
+            runCurrent()
+            assertTrue(
+                pair.follower.player.calls
+                    .any { it is FakeSyncPlayer.Call.Prepare },
+                "the premise: the follower received and applied Session A's PLAY",
+            )
+            assertEquals(
+                listOf<FakeSyncPlayer.Call>(FakeSyncPlayer.Call.Prepare(SyncTestValues.hash(1), 0L)),
+                pair.leader.player.calls,
+                "the premise: the leader's own apply is parked inside its pre-roll",
+            )
+
+            // A second authoritative command, delivered and committed, queued behind the blocked one.
+            pair.leader.coordinator.next()
+            runCurrent()
+            assertEquals(
+                1,
+                pair.leader.session
+                    .sentOfType<PlaybackMessage.Next>()
+                    .size,
+                "the premise: NEXT reached the follower too",
+            )
+
+            pair.dropLink()
+            pair.reconnect(generation = 2)
+
+            // Session B, on a different track, while Session A's apply is *still* parked.
+            pair.leader.coordinator.playSynchronized(SyncTestValues.hash(2))
+            runCurrent()
+            val playB =
+                pair.leader.session
+                    .sentOfType<PlaybackMessage.Play>()
+                    .last()
+            pair.advanceSessionTo(playB.header.effectiveAtSessionUs)
+            runCurrent()
+            assertTrue(
+                pair.follower.player.calls
+                    .contains(FakeSyncPlayer.Call.Start),
+                "Session B works normally without waiting for Session A's blocked apply",
+            )
+
+            val leaderQueue = pair.leader.coordinator.queueState.value
+            val followerQueue = pair.follower.coordinator.queueState.value
+            val leaderCalls =
+                pair.leader.player.calls
+                    .toList()
+            val followerCalls =
+                pair.follower.player.calls
+                    .toList()
+            val leaderSent =
+                pair.leader.session.sent
+                    .toList()
+            val leaderTrack = pair.leader.coordinator.diagnostics.value.currentTrackHash
+            val followerTrack = pair.follower.coordinator.diagnostics.value.currentTrackHash
+
+            gate.complete(Unit)
+            runCurrent()
+
+            assertEquals(leaderQueue, pair.leader.coordinator.queueState.value, "the leader's own Session-B queue is untouched")
+            assertEquals(followerQueue, pair.follower.coordinator.queueState.value, "and so is the follower's")
+            assertEquals(leaderCalls, pair.leader.player.calls, "no old apply reached the leader's player")
+            assertEquals(followerCalls, pair.follower.player.calls, "and none reached the follower's")
+            assertEquals(
+                leaderSent,
+                pair.leader.session.sent,
+                "and Session A's continuation put no frame on Session B's wire",
+            )
+            assertEquals(SyncTestValues.hash(2), leaderTrack)
+            assertEquals(leaderTrack, pair.leader.coordinator.diagnostics.value.currentTrackHash)
+            assertEquals(followerTrack, pair.follower.coordinator.diagnostics.value.currentTrackHash)
+        }
+
     // --- the harness ------------------------------------------------------------------------------
 
     /**
@@ -652,6 +748,30 @@ class SyncPlaybackTwoPeerTest {
         fun clearPlayers() {
             leader.player.calls.clear()
             follower.player.calls.clear()
+        }
+
+        /** Makes tracks [seeds] playable on both peers and known to be held by both. */
+        fun seedContent(seeds: IntRange) {
+            for (seed in seeds) {
+                val hash = SyncTestValues.hash(seed).value
+                leader.content.localHashes.add(hash)
+                leader.content.peerHashes.add(hash)
+                follower.content.localHashes.add(hash)
+                follower.content.peerHashes.add(hash)
+            }
+        }
+
+        /** Session A ends on both sides, as a Wi-Fi drop produces. */
+        suspend fun dropLink() {
+            leader.session.emit(
+                com.ridelink.network.control.ControlEvent
+                    .LinkLost(LINK_LOST),
+            )
+            follower.session.emit(
+                com.ridelink.network.control.ControlEvent
+                    .LinkLost(LINK_LOST),
+            )
+            scope.runCurrent()
         }
 
         /** A fresh authentication generation on both peers (ADR-023 §3), as a reconnect produces. */

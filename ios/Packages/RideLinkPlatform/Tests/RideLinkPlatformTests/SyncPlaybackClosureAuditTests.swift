@@ -716,6 +716,7 @@ final class SyncPlaybackClosureAuditTests: XCTestCase {
             if case .seek = call { return true }
             return false
         }
+        await awaitTickArmed()
         let tickAt = clock.pendingDeadlines().max() ?? clock.now()
         await player.setState(
             PlayerState(positionMs: (tickAt - anchor) / 1_000 + 400, durationMs: 600_000, playing: true, rate: 1.0)
@@ -753,6 +754,7 @@ final class SyncPlaybackClosureAuditTests: XCTestCase {
         await player.clearCalls()
         let before = await coordinator.diagnostics
 
+        await awaitTickArmed()
         let tickAt = clock.pendingDeadlines().max() ?? clock.now()
         await player.setState(
             PlayerState(positionMs: (tickAt - anchor) / 1_000 + 400, durationMs: 600_000, playing: true, rate: 1.0)
@@ -842,6 +844,30 @@ final class SyncPlaybackClosureAuditTests: XCTestCase {
             await Task.yield()
         }
         XCTFail("the ordered outbound path never drained")
+    }
+
+    /// Waits until the position-report cadence loop has actually **armed** its next deadline in the
+    /// fake sleeper.
+    ///
+    /// `handleConnected` *starts* the loop; the loop computes `now + interval` and parks one task hop
+    /// later. A test that advances the clock inside that hop moves time out from under it, so the
+    /// deadline it then computes is a whole interval past where the test is looking and the tick
+    /// never fires — the wait times out with nothing to show. Found by ADR-024 Amendment A3's stress
+    /// run (1 failure in 13 on `testACorrectionSupersededBeforeItsSnapshotEnqueueEmitsNothing`);
+    /// `SyncPlaybackDriftTests` already had this helper from A1's harness pass, and this is the same
+    /// fix in the two harnesses that lacked it. The production loop is correct throughout — a real
+    /// monotonic clock cannot be wound forward out from under a sleeper, and only a fake can.
+    /// `PlaybackBounds.positionReportIntervalMs`, in microseconds — the cadence loop's own interval.
+    private static let positionReportIntervalUs: Int64 = PlaybackBounds.positionReportIntervalMs * 1_000
+
+    private func awaitTickArmed() async {
+        let deadline = Date().addingTimeInterval(5)
+        while Date() < deadline {
+            let now = clock.now()
+            if clock.pendingDeadlines().contains(where: { $0 <= now + Self.positionReportIntervalUs }) { return }
+            await Task.yield()
+        }
+        XCTFail("the position-report cadence loop never armed a deadline")
     }
 
     private func expect(_ description: String, _ condition: @escaping () async -> Bool) async {

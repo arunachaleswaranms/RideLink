@@ -86,7 +86,17 @@ final class SyncPlaybackDeliveryAuditTests: XCTestCase {
         }
         await awaitOutboundQuiescent()
         clock.advance(to: clock.now() + Self.leadUs * 2)
-        await settle()
+        // **Waited for, not settled for** (ADR-024 Amendment A3's stress run, 1 failure in 7).
+        // `awaitOutboundQuiescent` proves the PLAY reached the wire; A2 deliberately runs the
+        // leader's *own* apply after that, on the ordered apply chain, so this helper used to return
+        // with `timeline` still nil. A cadence tick firing then returns at its `timeline` guard
+        // without sending a POSITION_REPORT or evaluating the ladder — and the next tick is 5 s of
+        // fake time away, which no test reaches. A start is the real signal that the leader is
+        // "playing", which is what this helper's name claims.
+        await expect("the leader's own PLAY became audible") { [self] in
+            await player.calls.contains(.start)
+        }
+        await awaitTickArmed()
         await player.clearCalls()
         await session.clearSent()
     }
@@ -631,7 +641,16 @@ final class SyncPlaybackDeliveryAuditTests: XCTestCase {
         await content.addLocal(SyncTestValues.hash(2))
         await content.addPeer(SyncTestValues.hash(2))
         await coordinator.playSynchronized(SyncTestValues.hash(2))
-        await settle()
+        // **The supersession is waited for, not settled for** (ADR-024 Amendment A3's stress run).
+        // `playSynchronized` reaches `epoch.begin()` only at the end of a long chain — queue add,
+        // send, commit hook, apply chain, content resolve — and a fixed number of yields is a bet on
+        // how many actor hops that takes. `currentTrackHash` is written immediately after
+        // `epoch.begin()` with no `await` between, so it *is* the observable "the new epoch exists".
+        // Releasing the gate before that happens makes the correction legitimately still current,
+        // and the test then fails for the one reason it must never fail: the code was right.
+        await expect("the new playback epoch began") { [self] in
+            await coordinator.diagnostics.currentTrackHash == SyncTestValues.hash(2)
+        }
         await player.releaseStateGate()
         await settle()
 
@@ -655,7 +674,16 @@ final class SyncPlaybackDeliveryAuditTests: XCTestCase {
         await content.addLocal(SyncTestValues.hash(2))
         await content.addPeer(SyncTestValues.hash(2))
         await coordinator.playSynchronized(SyncTestValues.hash(2))
-        await settle()
+        // **The supersession is waited for, not settled for** (ADR-024 Amendment A3's stress run).
+        // `playSynchronized` reaches `epoch.begin()` only at the end of a long chain — queue add,
+        // send, commit hook, apply chain, content resolve — and a fixed number of yields is a bet on
+        // how many actor hops that takes. `currentTrackHash` is written immediately after
+        // `epoch.begin()` with no `await` between, so it *is* the observable "the new epoch exists".
+        // Releasing the gate before that happens makes the correction legitimately still current,
+        // and the test then fails for the one reason it must never fail: the code was right.
+        await expect("the new playback epoch began") { [self] in
+            await coordinator.diagnostics.currentTrackHash == SyncTestValues.hash(2)
+        }
         await player.releaseGate()
         await settle()
 
@@ -735,6 +763,27 @@ final class SyncPlaybackDeliveryAuditTests: XCTestCase {
             await Task.yield()
         }
         XCTFail("the ordered outbound path never drained")
+    }
+
+    /// Waits until the position-report cadence loop has actually **armed** its next deadline in the
+    /// fake sleeper.
+    ///
+    /// `handleConnected` *starts* the loop; the loop computes `now + interval` and parks one task hop
+    /// later. A test that advances the clock inside that hop moves time out from under it, so the
+    /// deadline it then computes is a whole interval past where the test is looking and the tick
+    /// never fires — the wait times out with nothing to show. Found by ADR-024 Amendment A3's stress
+    /// run (1 failure in 13 on `testACorrectionSupersededBeforeItsSnapshotEnqueueEmitsNothing`);
+    /// `SyncPlaybackDriftTests` already had this helper from A1's harness pass, and this is the same
+    /// fix in the two harnesses that lacked it. The production loop is correct throughout — a real
+    /// monotonic clock cannot be wound forward out from under a sleeper, and only a fake can.
+    private func awaitTickArmed() async {
+        let deadline = Date().addingTimeInterval(5)
+        while Date() < deadline {
+            let now = clock.now()
+            if clock.pendingDeadlines().contains(where: { $0 <= now + Self.positionReportUs }) { return }
+            await Task.yield()
+        }
+        XCTFail("the position-report cadence loop never armed a deadline")
     }
 
     private func expect(_ description: String, _ condition: @escaping () async -> Bool) async {
