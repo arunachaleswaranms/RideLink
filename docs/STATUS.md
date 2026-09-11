@@ -1,17 +1,33 @@
 # RideLink — Status
 
-**Updated:** 11 September 2026 (Phase 5 closure audit A4, twenty-eighth session — see §2ae)
+**Updated:** 11 September 2026 (Phase 5 closure audit A5, twenty-ninth session — see §2af)
 **Current milestone:** M1 (Private voice link) is **software-complete with no known defect** — its
 hardware gate is the only thing left open. M2 (local music) is implementation-complete and
 closure-audited (§2q/§2r). Phase 4 is closure-audited **five** times (§2v–§2z). **M4 (Synced ride
-music) now has its software half, and it has been audited four times**: Phase 5 is closure-audited
-A1 (§2ab), A2 (§2ac), A3 (§2ad) and A4 (§2ae) on both platforms, with its real-device gate open.
-**Current phase:** Phase 5 — synchronized playback, **closure-audited four times** (this session,
-§2ae; the earlier audits are §2ab, §2ac and §2ad, the implementation §2aa). Clock-scheduled
+music) now has its software half, and it has been audited five times**: Phase 5 is closure-audited
+A1 (§2ab), A2 (§2ac), A3 (§2ad), A4 (§2ae) and A5 (§2af), with its real-device gate open.
+**Current phase:** Phase 5 — synchronized playback, **closure-audited five times** (this session,
+§2af; the earlier audits are §2ab, §2ac, §2ad and §2ae, the implementation §2aa). Clock-scheduled
 `PLAY`/`PAUSE`/`RESUME`/`SEEK`/`NEXT`/`PREVIOUS`, a replicated shared queue, drift measurement and
 the ADR-004 correction ladder, all on top of the Phase 1a clock layer and the Phase 3 player.
 **Phase 6 (intercom/music coexistence) and Phase 7 (Ride Mode) are untouched.**
-**Phase 5 status: SOFTWARE CLOSURE A4 COMPLETE — REAL-DEVICE SYNCHRONIZED-PLAYBACK GATE PENDING.**
+**Phase 5 status: SOFTWARE CLOSURE A5 COMPLETE — REAL-DEVICE SYNCHRONIZED-PLAYBACK GATE PENDING.**
+
+**A5 in one paragraph.** A4 fenced the **player**. A5 is the same question asked about everything
+that is *not* the player: old Session-A asynchronous work suspends, Session B becomes live, and the
+old continuation **mutates live coordinator state** before proving anything. Three sites had no
+post-suspension proof at all — `admitAuthoritativeCommand` (which wrote a dead session's
+`command_seq` 50 into the live session's ordering floor, so `CommandOrderGate` then correctly refused
+the live session's own `command_seq` 1 as stale, permanently), `tickOnce` in three more windows
+between A4's two proofs, and `onPeerPositionReport`, which carried no generation to prove. The
+adjacent sweep also found `drainDeferredEvents` calling `removeFirst()` on a buffer a boundary had
+already emptied — a **crash** — and `playRequestFence.begin()` after a suspension cancelling the live
+session's retained Play. A fourth finding generalised A4's `ownsNow` to `stillCurrentNow` for work
+that legitimately has no playback epoch. **Android is structurally safe on all three, and not
+mirrored:** `estimate()`, `playerState` and `routeTransitioning` are synchronous there, so the
+suspensions do not exist — a stronger reason than A4's dispatcher accident. **No wire change.** Ninth
+consecutive audit of CI-green code to find real defects. **This is not "final"; assume a sixth would
+find something.**
 
 **A4 in one paragraph.** A3 fenced *operations*. A4 is the hole underneath that fence: an operation
 that passed its ownership check while Session A was valid, entered a **compound** player operation,
@@ -198,7 +214,8 @@ either pass.
 | **Phase 2b — intercom integration / audio lifecycle** | ✅ **FINAL SOFTWARE CLOSURE COMPLETE — REAL-DEVICE INTERCOM GATE PENDING** | The five modes as one interpreted policy object; transmission gated at the audio track and never at the capture device; `AUDIO_STATE` implemented with no wire change; the platform audio lifecycle as a shared pure reducer; readiness as a shared pure decision; setup-timing instrumentation (§2m, [ADR-021](DECISIONS/ADR-021-intercom-transmission-and-capture-ownership.md)). The Phase 3 closure audit's one confirmed-not-fixed defect (`stopAndAwaitRelease`/`shutdown` timeout ownership) is fixed (§2s, ADR-021 Amendment A4); a second, narrower gap in that same fix (a proven-complete release still reporting its own stale timeout, orphaning the foreground service) is fixed (§2t, ADR-021 Amendment A5) — no other known software defect remains. Nothing ran on a phone; VOX has no level source; no latency figure exists |
 | **Phase 3 — local music player** | ✅ **IMPLEMENTATION COMPLETE — REAL-DEVICE LOCAL-MUSIC GATE PENDING** | Library indexing, two-tier hashing, database/search, ExoPlayer/AVAudioEngine player, local queue, Android `MediaSession` (ADR-022), iOS `MPNowPlayingInfoCenter`/`MPRemoteCommandCenter`, all on both platforms (§2q, and this session's closure-audit hardening pass). Real-emulator instrumented evidence exists for the indexer/database/player (§2q, TEST_PLAN §4.3); nothing has run on a physical phone |
 | **Phase 4 — shared library + peer file transfer** | ✅ **SOFTWARE CLOSURE COMPLETE — REAL-DEVICE SHARED-LIBRARY/TRANSFER GATE PENDING** | Catalogue paging, `ContentHash`-keyed transfer over a second session-bound TLS connection, the two-phase verified cache, availability display, verified-cache-only local playback and a Shared Library screen on both platforms (§2u, [ADR-023](DECISIONS/ADR-023-bulk-transfer-session-binding.md)). **Closure-audited five times** — §2v (18 findings), §2w (2), §2x (2), §2y (3, one `CRITICAL`), §2z (3 lifecycle races, two of them gaps A4 had documented rather than closed) — Amendments A1–A5. "Software closure" is the narrow claim that every laptop gate passes and every named finding is fixed; the word "final" stays deliberately absent, since five consecutive audits have each found real defects in already-CI-green code. Real loopback-TLS multi-chunk transfer, a real emulator smoke check and a real simulator smoke check exist; **no phone-to-phone transfer, no real Wi-Fi/hotspot topology, no storage/battery figure** |
-| Phases 5–8 | ⬜ Not started | The earlier commits named "init phase 2a" and "phase 2a" (`d709c45`, `90cbe12`) were Phase 1b work under a misleading name. Phase 2a proper is the sixth session, §2i |
+| **Phase 5 — synchronized playback** | ✅ **SOFTWARE CLOSURE A5 COMPLETE — REAL-DEVICE SYNCHRONIZED-PLAYBACK GATE PENDING** | Clock-scheduled `PLAY`/`PAUSE`/`RESUME`/`SEEK`/`NEXT`/`PREVIOUS`, a replicated shared queue, drift measurement and the ADR-004 correction ladder, every distributed decision a pure mirrored vector-pinned table (§2aa, [ADR-024](DECISIONS/ADR-024-synchronized-playback-integration.md)). Closure-audited **five** times — A1 (§2ab), A2 (§2ac), A3 (§2ad), A4 (§2ae), A5 (§2af) — each finding real defects in already-CI-green code. Nothing ran on a phone; no alignment figure exists |
+| Phases 6–8 | ⬜ Not started | The earlier commits named "init phase 2a" and "phase 2a" (`d709c45`, `90cbe12`) were Phase 1b work under a misleading name. Phase 2a proper is the sixth session, §2i |
 
 `protocol/schema/` and `protocol/vectors/` now exist (§2c). `android/` is a real five-module
 Gradle project that builds. `ios/` now has all three pieces ARCHITECTURE §9.2 describes:
@@ -3841,7 +3858,123 @@ target and the <50 ms stretch target must not be described as approached. TEST_P
 S-01…S-12 are what will change that. The iOS scheduled-start path still has not run on a simulator
 (§4 problem 41), and `AVAudioUnitVarispeed` has still never changed a real rate.
 
+## 2af. Phase 5 closure audit A5 — coordinator-state lifetime across a suspension (11 September 2026 session, twenty-ninth)
+
+**Phase 5 status: SOFTWARE CLOSURE A5 COMPLETE — REAL-DEVICE SYNCHRONIZED-PLAYBACK GATE PENDING.**
+
+An independent verification *of A4*. A4 fenced the **player**: every `SyncPlayerPort` method is one
+externally visible effect, and `runOwnedSteps` re-proves ownership before each. A5 is the same
+question asked about everything that is **not** the player:
+
+> Old Session-A asynchronous work → `await` → Session B becomes live → the old continuation resumes
+> → it **mutates live Phase 5 coordinator state** before proving Session A is still current.
+
+The player action such a continuation goes on to attempt may be refused correctly afterwards. **The
+mutation before that refusal has already happened, and nothing later undoes it.** Full reasoning:
+[ADR-024 Amendment A5](DECISIONS/ADR-024-synchronized-playback-integration.md).
+
+### The findings
+
+| # | Finding | Verdict | Fix |
+|---|---|---|---|
+| **A** | `admitAuthoritativeCommand` awaits `estimate()` and then writes `lastReceivedSeq`/`lastAppliedSeq`, appends to `deferredEvents`, or latches both desync flags — with **no proof of any kind** after the suspension. `applyAuthoritative`'s A3 proof runs after those writes, so it refused a command whose damage was done | **CONFIRMED** | the session is re-proved — asynchronously and then synchronously — before the admission is acted on, with no `await` to any branch's writes |
+| **B** | `tickOnce` had **three** more post-suspension windows between A4's two proofs: after `estimate()` (publishes `clockUnready`), after `playerState()` (the outbound `POSITION_REPORT` **enqueue**, with the existing `owns` proof sitting *after* it), and after `isRouteTransitioning()` (`driftState` plus six diagnostics fields, with ADR-004's ladder evaluated from a dead session's samples) | **CONFIRMED** | `timeline` and `currentEpochToken` read as one; `owns` + `ownsNow` before each of the three, the second moved ahead of the enqueue |
+| **C** | `onPeerPositionReport` carried **no generation at all**, so after `playerState()` there was nothing it could prove. It wrote FR-023's observed-peer-drift figure, computed against Session A's anchor for a track Session B is not playing, onto Session B's screen | **CONFIRMED** | the dispatch generation is threaded in; the epoch is **retained and proved**, not re-read (ADR-024 A5 §C says why) |
+| **D** | The asynchronous proof is not adjacent to what it authorises — A4 Finding D's window, for work that has no playback epoch to prove. `stillCurrent` must `await session.currentAuthGeneration()`, and that `await` is itself an actor re-entrancy point | **CONFIRMED** | `stillCurrentNow(_:)` — the session half of `ownsNow`, which is now expressed through it — paired with the asynchronous proof everywhere, never instead of it |
+
+Found while sweeping for adjacent instances of the same shape (ADR-024 A5 §E lists all sixteen
+sites): `drainDeferredEvents` calls `deferredEvents.removeFirst()` after its own `await estimate()`,
+and a boundary landing in that read means `resetForNewSession` has already emptied the buffer —
+`Array.removeFirst()` on an empty collection **traps**. A crash, not a divergence. Also
+`servePlaybackIntent` and `playSynchronized`, where `playRequestFence.begin()` after a suspension
+would **cancel the live session's own retained Play**, and `emitPlaybackStateFrame`, whose
+`stillOwned` closure was `async` — so its "no `await` to the enqueue" comment was true of the
+statements and false of the guard.
+
+### Android: structurally safe, deliberately not mirrored
+
+All three findings are **STRUCTURALLY SAFE** on Android, and unlike A4 the reason is not an accident
+of the composition root's dispatcher — **the suspensions do not exist**, because the ports are
+synchronous. `estimate()`, `readyEstimate()` and `onPeerPositionReport` are `private fun`, not
+`suspend fun`; `SyncSessionPort.clockEstimate` is a `StateFlow` and `rttP95Us`/`currentAuthGeneration`
+are plain properties; `SyncPlayerPort.playerState` is a `StateFlow`; `routeTransitioning` is a
+`() -> Boolean`. The one suspension-shaped construct nearby, `commandMutex.withLock`, was inspected
+at every critical section: all bodies are non-suspending (the two that name a `suspend fun` name it
+only inside an `Outbound` commit-hook lambda, which `drainOutbound` invokes later, outside the lock),
+and `AppContainer` builds the scope as `CoroutineScope(SupervisorJob() + Dispatchers.Main)` —
+single-threaded, so a mutex no holder yields under never suspends. **No Android production change and
+no Android test churn**; reintroducing any of these windows there would take a visible
+`SyncSessionPort`/`SyncPlayerPort` interface change.
+
+### Evidence
+
+- **Pre-fix, measured on unmodified `902f3675`** with only the new test file and three new fakes'
+  gates present: `lastReceivedSeq`/`lastAppliedSeq` **50** instead of 1 (A); `deferredEvents` **1**
+  instead of 0 (A, defer branch); `outboundEnqueuedCount`/`outboundAttemptCount`/`outboundStaleCount`
+  all **1** instead of 0 (B); `driftState` **`(nudging: true, nudgeRate: 0.998)`** plus six
+  diagnostics fields (B); `peerDriftMs` **250000** instead of nil (C). Both same-session controls
+  pass before and after. Finding D's case isolates the synchronous proof and fails only under a
+  one-line revert of `stillCurrentNow`, which is the isolation it exists for. Full table in ADR-024
+  Amendment A5 §F.
+- **New regressions:** `SyncPlaybackSessionStateAuditTests` (iOS, 8 tests). Every stale-session case
+  asserts on a whole-state snapshot — both sequence numbers, the held stream, the entire
+  `SyncPlaybackDiagnostics` value, `queueState`, every player call, the wire and the armed deadlines
+  — then proves Session B's own next command, tick or report still works. Three new deterministic
+  gates in the fakes: `armClockGate`, `FakeRouteState.armGate`, and `armGenerationGate`, which parks
+  the authentication-generation read `stillCurrent` itself takes and returns the value live when it
+  parked. No sleeps.
+- **Stress:** the new suite **200/200**, zero failures. `SyncPlaybackClosureAuditTests` (A1),
+  `SyncPlaybackDeliveryAuditTests` (A2), `SyncPlaybackLifecycleAuditTests` (A3),
+  `SyncPlaybackOperationLifetimeAuditTests` (A4), `SyncPlaybackDriftTests`,
+  `SyncPlaybackCoordinatorTests` and `SyncPlaybackTwoPeerTests` **50/50 each**, zero failures.
+- **Android:** `:core:test`, `test`, `ktlint`, `detekt`, `lint`, `assembleDebug`, `assembleRelease`
+  — all green. **No emulator run this session, deliberately: no Android production code changed.**
+  §2ae's instrumented measurement of the non-suspension premise still stands and was not re-taken.
+- **iOS:** `RideLinkCore` 284 tests, `RideLinkPlatform` **393** tests (385 + 8), Debug and Release
+  unsigned simulator builds — all green. `swiftlint`/`swiftformat` are still not installed on this
+  machine and still not in CI.
+- **Vectors:** all thirteen generators re-run; `git status protocol/` empty. The wire did not move —
+  no message type, field, encoding or bound changed.
+- **CI:** recorded in the follow-up docs commit, as this project's established pattern.
+
+### What is still not true
+
+**Nothing in this session ran on a phone, and no audio reached a speaker or a Bluetooth endpoint.**
+Every figure here is a software figure. **No alignment figure exists**, and the <100 ms product
+target and the <50 ms stretch target must not be described as approached. TEST_PLAN §5.2's
+S-01…S-12 are what will change that. The iOS scheduled-start path still has not run on a simulator
+(§4 problem 41), and `AVAudioUnitVarispeed` has still never changed a real rate.
+
+Nor is A5 "final". Five Phase 4 closure audits and now five Phase 5 ones have each found real
+defects in code that was already CI-green; assume a sixth would find something too.
+
 ## 3. Tests passed / pending
+
+**Passed and verified in the Phase 5 closure audit A5 session (11 September 2026, twenty-ninth), by
+actually running the commands.** Every Gradle command was run with
+`-Dorg.gradle.java.home=/opt/homebrew/opt/openjdk@21/libexec/openjdk.jdk/Contents/Home` (§4 problem 17):
+
+- `./gradlew :core:test test ktlintCheck detekt lint assembleDebug assembleRelease` — **all green**.
+  No Android production or test source changed this session (§2af explains why), so the numbers are
+  §2ae's unchanged.
+- `swift test --package-path ios/Packages/RideLinkCore` — **284/284**.
+- `swift test --package-path ios/Packages/RideLinkPlatform` — **393/393** (was 385), the eight new
+  ones being `SyncPlaybackSessionStateAuditTests`.
+- `xcodebuild` Debug **and** Release unsigned simulator builds — both succeed.
+- **Stress, no rerun-until-green:** `SyncPlaybackSessionStateAuditTests` **200 runs, 0 failures**;
+  `SyncPlaybackClosureAuditTests`, `SyncPlaybackDeliveryAuditTests`, `SyncPlaybackLifecycleAuditTests`,
+  `SyncPlaybackOperationLifetimeAuditTests`, `SyncPlaybackDriftTests`, `SyncPlaybackCoordinatorTests`
+  and `SyncPlaybackTwoPeerTests` **50 runs each, 0 failures**.
+- **Pre-fix runs, taken against unmodified `902f3675` before any production edit:** five of the eight
+  new cases fail, with the exact contaminated values listed in §2af and ADR-024 Amendment A5 §F. The
+  two same-session controls pass before and after — which is the point of having them. The sixth
+  stale-session case isolates the synchronous ownership proof and fails only under a one-line revert
+  of `stillCurrentNow`.
+- **Vectors:** all thirteen generators re-run; `git status protocol/` empty.
+- **No emulator run this session, deliberately** — no Android production code changed, so there was
+  nothing new to measure. §2ae's `aPlayerCommandFromTheMainDispatcherDoesNotSuspend` still stands.
+- `swiftlint`/`swiftformat` are **not installed on this machine and are not in CI**; CLAUDE.md lists
+  them but the workflow has never run them, so they are not claimed here.
 
 **Passed and verified in the Phase 5 session (8 September 2026, twenty-fourth), by actually running
 the commands.** Every Gradle command was run with
@@ -4336,19 +4469,33 @@ Not blocking Phase 1. Answers needed before Phase 6.
 
 ## 7. Next exact task
 
-**Phase 5 — synchronized playback. SOFTWARE CLOSURE A4 COMPLETE — REAL-DEVICE SYNCHRONIZED-PLAYBACK
-GATE PENDING (§2ae).** Every laptop-runnable gate is green on both platforms; the audit §7 previously
-asked for has now run four times, and all twenty-two findings (A1's seven, A2's six, A3's three,
-A4's six) are fixed with regressions each verified to fail against the pre-fix behaviour. Every
-pre-existing vector set regenerates byte-for-byte identically: the wire did not move in any of the
-four passes.
+**Phase 5 — synchronized playback. SOFTWARE CLOSURE A5 COMPLETE — REAL-DEVICE SYNCHRONIZED-PLAYBACK
+GATE PENDING (§2af).** Every laptop-runnable gate is green on both platforms; the audit §7 previously
+asked for has now run five times, and all twenty-six findings (A1's seven, A2's six, A3's three,
+A4's six, A5's four) are fixed with regressions each verified to fail against the pre-fix behaviour.
+Every pre-existing vector set regenerates byte-for-byte identically: the wire did not move in any of
+the five passes.
 
-**"A4" is not "final", and the wording is deliberate.** §2y dropped "final" from Phase 4 after five
+**"A5" is not "final", and the wording is deliberate.** §2y dropped "final" from Phase 4 after five
 audits each found real defects in code that was already CI-green. A1 found seven; verifying A1 found
-five more plus a sixth while fixing them; verifying A2 found three more; verifying A3 found six more.
+five more plus a sixth while fixing them; verifying A2 found three more; verifying A3 found six more;
+verifying A4 found four more plus a crash and two more adjacent instances while sweeping for them.
 That is evidence *for* auditing again, not against it. The next audit should re-derive its findings
 from the production code rather than from this file, and should look hardest at the places these
-four deliberately stopped short:
+five deliberately stopped short:
+
+- **A5 swept the two iOS Phase 5 coordinator files and nothing else.** Every `await` in
+  `SyncPlaybackCoordinator` and `SyncPlaybackCoordinator+Inbound` was classified, but the same
+  post-suspension mutation class could exist in `SharedLibraryCoordinator`, `VoiceController` or
+  `ControlSessionManager` and this pass did not look. Phase 4's own audits went after the operation
+  half of it; the *coordinator-state* half has not been swept outside Phase 5.
+- **A5 left `resolvePendingPlay` alone on a structural argument**, not a test: the fence read is
+  synchronous at the decide, and `clearPendingPlay` is token-guarded. That is a correct reading of
+  today's code and a coincidence away from being wrong if the gate's inputs are ever reordered.
+- **`drainOutbound`'s counters and `inboundProcessedCount` are deliberately pipe-lifetime, not
+  session state.** A5 documents that and normalises it out of its snapshots. If a future change makes
+  a rider read one of them as a per-session figure, that decision needs revisiting rather than
+  assuming.
 
 - **A4's interleaving is *proven* only on iOS.** On Android it is unreachable today, and the Android
   regressions therefore build it with a suspending fake rather than reproducing production. The
@@ -4371,7 +4518,7 @@ four deliberately stopped short:
 
 **Immediately actionable next steps, in order:**
 
-1. **Independently verify closure audit A4** (§2ae, ADR-024 Amendment A4), and A1/A2/A3 with it (§2ab, §2ac, §2ad). Re-derive each finding from the current production code; the regressions are in `SyncPlaybackOperationLifetimeAuditTest[s]` (A4), `SyncPlaybackLifecycleAuditTest[s]` (A3), `SyncPlaybackDeliveryAuditTest[s]` (A2), `SyncPlaybackClosureAuditTest[s]`, `SyncPlaybackTwoPeerTest[s]`, `Phase5FrameQueueTest[s]` and `Phase5GatesVectorTest[s]`, and each should be confirmed to fail if its fix is reverted. **Run the whole `SyncPlayback` sweep in one process, not suite by suite** — three of A4's flakes were invisible individually and only appeared under the load of the real-TLS two-peer tests sharing the process.
+1. **Independently verify closure audit A5** (§2af, ADR-024 Amendment A5), and A1–A4 with it (§2ab–§2ae). Re-derive each finding from the current production code; the regressions are in `SyncPlaybackSessionStateAuditTests` (A5, iOS only — see §2af for why Android is structurally safe), `SyncPlaybackOperationLifetimeAuditTest[s]` (A4), `SyncPlaybackLifecycleAuditTest[s]` (A3), `SyncPlaybackDeliveryAuditTest[s]` (A2), `SyncPlaybackClosureAuditTest[s]`, `SyncPlaybackTwoPeerTest[s]`, `Phase5FrameQueueTest[s]` and `Phase5GatesVectorTest[s]`, and each should be confirmed to fail if its fix is reverted. **Run the whole `SyncPlayback` sweep in one process, not suite by suite** — three of A4's flakes were invisible individually and only appeared under the load of the real-TLS two-peer tests sharing the process.
 2. **Run the scheduled-start path on the iOS simulator** (§4 problem 41's remaining half). The Android emulator half is done; there is no `Context`-shaped obstacle on iOS either.
 3. **Get two real devices into this loop.** Unchanged since Phase 1a and now blocking five gates: (a) enable USB debugging on the OnePlus Nord 5; (b) set up a development-team signing identity for the iPhone 17 Pro Max.
 4. **Run the Phase 1a gate**: I-01, I-05, I-06, I-07, I-08, I-14, I-15, I-17, I-22.

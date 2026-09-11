@@ -379,6 +379,63 @@ A4 stress numbers were a false green and are not the ones quoted here.
 phone, no audio reached a speaker or a Bluetooth endpoint, and no alignment figure exists.
 S-01…S-12 remain the gate.
 
+**Added by the coordinator-state lifetime audit (ADR-024 Amendment A5).** Independent verification
+of A4 named the class A4's *player* fence does not reach, and confirmed four findings in it. A4 asks
+"may this operation still run its next **player effect**?"; A5 asks the same question about
+everything that is **not** the player.
+
+> Session A owns an inbound frame or a cadence tick and suspends inside a **port read** — the session
+> clock, the player's state, the route state. The link drops, the generation moves, **Session B**
+> authenticates and establishes its own ordering, timeline and diagnostics. Session A is then
+> released. Nothing attributable to Session A may reach Session B's coordinator state — and the
+> player action it may go on to attempt being refused correctly afterwards is **too late**, because
+> the mutation happened first.
+
+| Finding | What the regression proves | Where |
+|---|---|---|
+| A — `admitAuthoritativeCommand` wrote ordering state after `estimate()` | A Session-A authoritative `PLAY` at `command_seq` **50**, parked inside the session-clock read across the whole boundary, leaves Session B's `lastReceivedSeq`, `lastAppliedSeq`, held stream, `SharedQueueState`, **every** `SyncPlaybackDiagnostics` field, every player call, the wire and the armed deadlines byte-identical — then Session B's own next command still commits its own `command_seq`. Pre-fix both sequence numbers read **50** and Session B's own command was then refused as stale for the rest of the session | `SyncPlaybackSessionStateAuditTests` |
+| A — the same suspension, `defer` branch | With the clock untrustworthy when Session A resumes, `deferredEvents` stays **empty**. Pre-fix Session A's command joined Session B's held authoritative stream, which A2 Finding D replays *in arrival order* — so it would have executed against a queue revision no leader authored it for | `SyncPlaybackSessionStateAuditTests` |
+| B — `tickOnce` enqueued after `playerState()` | A Session-A tick parked inside the player-state read moves **no** outbound counter after the boundary. Pre-fix `outboundEnqueuedCount`, `outboundAttemptCount` and `outboundStaleCount` each read **1** where **0** was correct — the frame was refused at the wire, the accounting was not | `SyncPlaybackSessionStateAuditTests` |
+| B — `tickOnce` corrected after `isRouteTransitioning()` | A Session-A tick parked inside the route-state read leaves `driftState` and all six drift diagnostics untouched, then Session B's own next tick still measures its own drift and still nudges. Pre-fix Session B inherited `DriftState(nudging: true, nudgeRate: 0.998)` plus `localDriftMs` **60** from a dead session — and its own next tick could then no longer nudge, because the ladder's hysteresis saw a nudge already in force | `SyncPlaybackSessionStateAuditTests` |
+| C — `onPeerPositionReport` carried no generation | A Session-A `POSITION_REPORT` parked inside the player-state read leaves `peerDriftMs` **nil**; a Session-B report afterwards still sets it. Pre-fix it read **250 000 ms**, computed against Session A's anchor for a track Session B is not playing | `SyncPlaybackSessionStateAuditTests` |
+| D — the asynchronous proof is not adjacent to its mutation | The authentication-generation read that `stillCurrent` itself takes is parked, and returns the generation that was live when it parked — so the asynchronous proof answers **true** about a session that has ended. Only the synchronous, actor-local `stillCurrentNow` refuses it | `SyncPlaybackSessionStateAuditTests` |
+| controls | With **no** boundary the identical seams still work: an admission still applies, a held admission still recovers through the deferred drain, a peer report still produces FR-023's number, and a tick still reports to the wire, measures its own drift and applies ADR-004's first tier | `SyncPlaybackSessionStateAuditTests` |
+
+**Pre-fix evidence.** Unlike A4, all of A5's production code is in `RideLinkPlatform`, which *does*
+have a test target — so five of the eight cases were run against literally unmodified `902f3675`
+and failed there, with the exact values above. Finding D's case is the exception and says so: it
+needs A5's asynchronous proof present in order for there to be a suspension to land in, so its
+pre-fix run reverts exactly one thing (`stillCurrentNow` dropping its generation comparison), under
+which it is the only case in the file that fails.
+
+**Android is structurally safe here, and is deliberately not mirrored.** A4 found Android masked by
+its composition root's dispatcher and mirrored the shape anyway. A5's three suspensions **do not
+exist** on Android: `estimate()`, `readyEstimate()` and `onPeerPositionReport` are `private fun`, not
+`suspend fun`; `SyncSessionPort.clockEstimate` is a `StateFlow` and `rttP95Us`/`currentAuthGeneration`
+are plain properties; `SyncPlayerPort.playerState` is a `StateFlow`; `routeTransitioning` is a
+`() -> Boolean`. Reintroducing any of them would take a visible interface change, which is what makes
+the absence of an Android regression honest rather than a gap. Recorded here so a future reader does
+not read the missing Android suite as an oversight.
+
+**Three new deterministic gates, no sleeps.** `FakeSyncSession.armClockGate` parks a session-clock
+read; `FakeRouteState.armGate` parks a route-state read; `FakeSyncSession.armGenerationGate` parks
+the authentication-generation read `stillCurrent` itself takes and returns the value live at the
+park. One harness constraint is worth knowing: the ingress is **one ordered consumer** by
+construction (A1 Finding C), so while Session A is parked inside an inbound frame's handler nothing
+else can be delivered. Where the parked operation is inbound, Session B is established through the
+*outbound* path as a leader instead — ADR-010 recomputes the role at every handshake, so a role that
+differs between sessions is not a contrivance.
+
+**Stress.** The A5 suite **200×**, 0 failures. `SyncPlaybackClosureAuditTests` (A1),
+`SyncPlaybackDeliveryAuditTests` (A2), `SyncPlaybackLifecycleAuditTests` (A3),
+`SyncPlaybackOperationLifetimeAuditTests` (A4), `SyncPlaybackDriftTests`,
+`SyncPlaybackCoordinatorTests` and `SyncPlaybackTwoPeerTests` **50× each**, 0 failures. No flake of
+any kind, in production or in the harnesses.
+
+**Still not proven by any of it.** Every figure A5 adds is a *software* figure. Nothing ran on a
+phone, no audio reached a speaker or a Bluetooth endpoint, and no alignment figure exists.
+S-01…S-12 remain the gate.
+
 ### 3.1a Phase 2a voice — what is proven on a laptop, and what is not
 
 **Proven, and it is real media rather than a mock.** `VoiceEngineLoopbackTests` (iOS package, runs

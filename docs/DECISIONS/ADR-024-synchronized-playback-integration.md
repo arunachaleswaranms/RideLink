@@ -1103,3 +1103,236 @@ audio.
 **And still does not run on a phone.** Every figure here is a software figure. The <100 ms product
 target and the <50 ms stretch target remain unmeasured, no alignment figure exists, and TEST_PLAN
 §5.2's S-01…S-12 are what will change that.
+
+## Amendment A5 — 11 September 2026 — coordinator-state lifetime: the post-suspension mutation class
+
+**Status:** Accepted · appended, nothing above rewritten. Amendments A1, A2, A3 and A4 are unchanged.
+
+A4 fenced the **player**: every `SyncPlayerPort` method became exactly one externally visible effect,
+and `runOwnedSteps` re-proves ownership before each of them. Independent verification of A4 named the
+class that fence does not reach, and this pass confirmed it:
+
+> Old Session-A asynchronous work → `await` → Session B becomes live → the old continuation resumes
+> → it **mutates live Phase 5 coordinator state** before proving Session A is still current.
+
+A4's question was "may this operation still perform its *next player effect*?" A5's is the same
+question about everything that is **not** the player: ordering state, the held authoritative stream,
+the outbound queue, the drift state, the diagnostics. The player action such a continuation goes on
+to attempt may well be refused correctly afterwards — but **the mutation before that refusal has
+already happened, and nothing later undoes it.**
+
+**A local mutation that has been authorised is not a local mutation that may still happen.**
+
+### A. `admitAuthoritativeCommand` contaminated the new session's ordering state
+
+`estimate()` awaits `SyncSessionPort.sessionClockEstimate()` (and, on a leader, `rttP95Us()`). Both
+are cross-actor reads, and on an actor every `await` is a re-entrancy point. The three branches that
+follow it had **no proof of any kind**:
+
+| Branch | What a retired continuation wrote into Session B |
+|---|---|
+| `.apply` | `lastReceivedSeq`, `lastAppliedSeq`, and both diagnostics mirrors |
+| `.defer_` | `lastReceivedSeq`, an **append to `deferredEvents`**, `deferredCommandCount`, `syncState = .clockUnready`, and a deferred-drain task |
+| `.overflow` | `playbackDesynchronized`, `queueDesynchronized`, `inboundOverflowCount` |
+
+`applyAuthoritative`'s A3 Finding B proof is not a defence: it runs *after* those writes. It refused
+a command whose damage was done, and the consequence is permanent for the session — with
+`lastReceivedSeq = 50` carried over from a dead session, `CommandOrderGate` then correctly refused
+Session B's own `command_seq` 1 as **stale**, and every command that session ever issued with it.
+Measured, not argued: see §F.
+
+The `.defer_` branch is the worse of the three, because A2 Finding D made the held stream *replay in
+arrival order* — so a Session-A `NEXT` sitting in Session B's buffer would have stepped Session B's
+queue against a revision no leader authored it for.
+
+The same shape sat one function along, in `drainDeferredEvents`: after its own `await estimate()` the
+`.command` branch calls `deferredEvents.removeFirst()`. A boundary landing in that read means
+`resetForNewSession` has already emptied the buffer, and `Array.removeFirst()` on an empty collection
+**traps**. That one was a crash, not a divergence.
+
+### B. `tickOnce` had three post-suspension windows, not one
+
+A4 Finding E added the proof after `drainDeferredEvents()` and Finding F the one after
+`applyCorrection`. Between them sat three more suspensions with live writes after each:
+
+1. `await estimate()` → the "clock not ready" branch publishes `syncState = .clockUnready` and
+   `clockReady = false`. A retired tick announced an untrustworthy clock on the session that
+   replaced it.
+2. `await player.playerState()` → the outbound `POSITION_REPORT` **enqueue**. The existing `owns`
+   proof sat *after* it. The frame itself is correctly refused at the wire — `Phase5Outbound` carries
+   the authorising generation (A2 Finding B) — but enqueueing and counting it moved three of the new
+   session's counters, and A3 §D already settled that "it never reached the peer" is not an
+   exemption.
+3. `await routeState.isRouteTransitioning()` → `driftState` and six diagnostics fields
+   (`clockReady`, `clockOffsetUs`, `rttP95Us`, `leadUs`, `localDriftMs`, `routeTransitioning`), with
+   ADR-004's ladder evaluated from values **Session A** sampled. This is the sharpest of the three:
+   a retired tick left the live session with `DriftState(nudging: true, nudgeRate: 0.998)` and a
+   drift reading taken against a timeline that no longer existed.
+
+The tick is also where the epoch, not merely the session, is the right unit: `timeline` and
+`currentEpochToken` are now read as one, with no `await` between them, and every proof below is
+`owns`/`ownsNow` rather than the session half alone.
+
+### C. `onPeerPositionReport` did not carry a generation at all
+
+It could not prove anything, because it was never told what to prove. `await player.playerState()`,
+then `diagnostics.peerDriftMs = positionMs - expected` — FR-023's observed-peer-drift figure,
+computed against **Session A's** anchor for a track Session B is not playing, written onto Session
+B's diagnostics screen. `onPlaybackMessage` now threads its dispatch generation in.
+
+**Retain the epoch, do not re-read it.** `active` and `currentEpochToken` are captured together
+*before* the suspension and proved after it. The report's meaning is "the peer's position minus what
+*this* timeline expects at that instant" — the timeline its `track_hash` and `at_session_us` were
+just matched against. Re-reading the live timeline after the suspension would silently answer a
+different question about a different track; proving the captured epoch and otherwise producing
+nothing is the honest answer. It is the same choice `applyTransport` and `applySeek` already make.
+
+### D. The asynchronous proof is not adjacent to what it authorises
+
+A4 Finding D established this for the player and gave it `liveGeneration` + `ownsNow`. A5's three
+findings are all in work that legitimately has **no playback epoch yet** — an admission decides
+ordering before any track is chosen — so `ownsNow` could not be used without inventing an epoch
+requirement that would refuse perfectly valid work.
+
+`stillCurrentNow(_:)` is therefore the session half on its own, and `ownsNow` is now expressed as
+`stillCurrentNow && epoch.isCurrent(token)`. The pattern, everywhere:
+
+```swift
+guard await stillCurrent(generation) else { return }   // catches a generation the manager moved
+guard stillCurrentNow(generation) else { return }      // closes the window the first one's own await opens
+// no `await` here
+mutate live actor state
+```
+
+The two have **different jobs and neither is redundant.** `stillCurrent` asks the session manager and
+therefore catches a boundary this actor has not been told about yet; `stillCurrentNow` reads the
+mirrored generation this actor owns, so nothing can run on the actor between it and the mutation.
+Using the synchronous mirror *instead of* the manager proof would be a regression, because the mirror
+lags by exactly the interval between the manager advancing and `SessionCoordinator` forwarding the
+event.
+
+### E. Every site changed
+
+All iOS, all in `SyncPlaybackCoordinator` / `SyncPlaybackCoordinator+Inbound`.
+
+| Site | Suspension | What followed it unproved |
+|---|---|---|
+| `admitAuthoritativeCommand` | `estimate()` | ordering state, held stream, desync latches (Finding A) |
+| `drainDeferredEvents` | `stillCurrent`, `estimate()` | `removeFirst()` on a cleared buffer, `lastAppliedSeq` |
+| `tickOnce` | `estimate()`, `playerState()`, `isRouteTransitioning()` | Finding B's three windows |
+| `onPeerPositionReport` | `playerState()` | `peerDriftMs` (Finding C) |
+| `readyEstimate` | `estimate()` | the clock-unready diagnostics — it had no generation to prove; it takes one now |
+| `issue` | `readyEstimate`, `stillCurrent` | `nextSeq` — the session's own sequence allocator |
+| `onCommandOutcome` | `stillCurrent` | `lastReceivedSeq`/`lastAppliedSeq`, Finding A from the leader's side |
+| `playSynchronized`, `servePlaybackIntent` | `currentAuthGeneration`, `stillCurrent` | `playRequestFence.begin()`, which **supersedes the live session's retained Play** |
+| `mutateQueue`, `applyLeaderMutation`, `onQueueIntent`, `rebroadcastAuthoritativeState` | `stillCurrent` | `queueState`, outbound admission and its counters |
+| `applyPlay`, `applyTransport`, `applySeek`, `applyStep`, `applyAuthoritative`, `applyPeerPlaybackState`, `restoreFromPlaybackState`, `runApplyNode` | `stillCurrent` | A3 Finding B's live-state writes — `epoch.begin()`/`epoch.supersede()` among them |
+| `runScheduledNode`, `markSyncedAndPublish`, `applyCorrection` | `owns`, `sleeper.sleep`, `runOwnedSteps` | A3 Finding C's schedule error and the correction diagnostics |
+| `emitPlaybackStateFrame` | `estimate()`, `playerState()` | the enqueue — its `stillOwned` closure was `async`, so "no `await` to the enqueue" was true of the statements and false of the guard; the closure is now a `token: Int64?` |
+| `failClosedOutbound` | `currentAuthGeneration` | the whole fail-closed latch |
+| `onPlaybackMessage`, `onQueueMessage` | `stillCurrent` | the dispatch itself, which each handler then re-proves for |
+
+**Deliberately unchanged, with reasons:**
+
+- `resolvePendingPlay` — structurally safe. `PendingPlayGate.decide` reads `playRequestFence`
+  synchronously, a boundary supersedes it, so `operationCurrent` is false and the decision is
+  `.cancel`; `clearPendingPlay` is token-guarded and writes nothing for a token it does not hold.
+- `restoreRate` and `leaveSynchronizedMode` — the *ending* of an authority, with no generation left
+  to prove (A4 §D).
+- `drainOutbound`'s `outboundAttemptCount`/`inboundProcessedCount` — the queues deliberately outlive
+  sessions (A2 Finding B), `resetForNewSession` deliberately does not reset these, and the relay's
+  own `authorizingGeneration` argument is what refuses a stale write (A2 Finding B again). Pipe
+  accounting, not session state.
+
+### F. Pre-fix evidence — measured, not asserted
+
+Each case below was run against unmodified `902f3675` production sources, with only the new test file
+and the fakes' three new gates present. Exact values:
+
+| Case | What moved in Session B, pre-fix |
+|---|---|
+| A5-IOS-1 admission, `.apply` | `lastReceivedSeq` **50** (expected 1) · `lastAppliedSeq` **50** (expected 1) · `lastAppliedCommandSeq` 50 · and Session B's own next `PAUSE` then never committed its `command_seq` at all |
+| A5-IOS-1b admission, `.defer_` | `deferredEvents` **1** (expected 0) · `lastReceivedSeq` **50** · `deferredCommandCount` 1 · `syncState` `.clockUnready` |
+| A5-IOS-2 tick in `playerState` | `outboundEnqueuedCount` **1** · `outboundAttemptCount` **1** · `outboundStaleCount` **1** (all expected 0) |
+| A5-IOS-3 tick in `routeState` | `driftState` **`(nudging: true, nudgeRate: 0.998)`** · `clockReady` true · `clockOffsetUs` 0 · `rttP95Us` 8000 · `leadUs` 120000 · `localDriftMs` 60 — and Session B's own next tick could then no longer nudge, because the ladder's hysteresis saw a nudge already in force |
+| A5-IOS-4 peer report | `peerDriftMs` **250000** (expected nil) |
+| A5-IOS-5a / 5b same-session controls | **pass** before and after — as they must |
+
+`A5-IOS-6` isolates §D's *synchronous* half and needs A5's asynchronous proof present in order for
+there to be a suspension to land in, so its pre-fix run reverts exactly one thing — `stillCurrentNow`
+returning `role != nil` without the generation comparison — exactly as A4 did for the two compounds
+below `SyncPlayerPort`. Under that revert it is the **only** case in the file that fails, with
+`lastReceivedSeq`/`lastAppliedSeq` at 50, which is the isolation the case exists for.
+
+### G. Android: structurally safe, and why it is not mirrored
+
+A4 found Android non-defective for a reason that was an *accident of the composition root* —
+`withContext(Dispatchers.Main.immediate)` never suspending when called from the main thread — so A4
+mirrored the shape anyway. **A5's reason is stronger and is not an accident: the suspensions do not
+exist on Android, because the port signatures are synchronous.**
+
+| Finding | Android | Evidence |
+|---|---|---|
+| A | STRUCTURALLY SAFE | `estimate()` and `readyEstimate()` are `private fun`, not `suspend fun`. `SyncSessionPort.clockEstimate` is a `StateFlow` (`.value`) and `rttP95Us`/`currentAuthGeneration` are plain properties, so there is no suspension between `CommandOrderGate` accepting and the sequence-number writes |
+| B | STRUCTURALLY SAFE | `player.playerState` is a `StateFlow` and `routeTransitioning` is a `() -> Boolean` constructor parameter. No suspension between the post-drain `stillCurrent` proof and `enqueueOutbound`, nor between `owns` and the `driftState` write |
+| C | STRUCTURALLY SAFE | `onPeerPositionReport` is a `private fun` with no suspension at all, so there is no continuation that could resume into a later session |
+
+The one suspension-shaped construct in the same code is `commandMutex.withLock`. Every critical
+section in the file was inspected: all of them have non-suspending bodies (the two that mention a
+`suspend fun` mention it only *inside* an `Outbound` commit-hook lambda, which `drainOutbound`
+invokes later, outside the lock), and `AppContainer` builds the coordinator's scope as
+`CoroutineScope(SupervisorJob() + Dispatchers.Main)` — single-threaded. A mutex whose every holder
+runs to completion without yielding is never observed held, so `lock()` never suspends.
+
+Android therefore gets **no production change and no test churn**. Reintroducing any of these three
+windows there would require turning a property on `SyncSessionPort` or `SyncPlayerPort` into a
+`suspend fun`, which is a visible interface change rather than a silent one — which is the guard that
+makes not mirroring honest.
+
+### H. Regression evidence and stress
+
+`SyncPlaybackSessionStateAuditTests` (iOS, 8 tests): parked admission `.apply`, parked admission
+`.defer_`, parked tick in `playerState`, parked tick in `routeState`, parked peer report, the
+synchronous-proof isolation, and two same-session controls. Every stale-session case asserts on a
+whole-state snapshot — `lastReceivedSeq`, `lastAppliedSeq`, `deferredEvents`, the entire
+`SyncPlaybackDiagnostics` value, `queueState`, every player call, the wire, and the set of armed
+deadlines — rather than on one field, and then proves Session B's own next command, tick or report
+still works.
+
+Three new deterministic gates in the fakes make it real rather than approximate:
+`FakeSyncSession.armClockGate` parks a session-clock read, `FakeRouteState.armGate` parks a
+route-state read, and `FakeSyncSession.armGenerationGate` parks the authentication-generation read
+that `stillCurrent` itself takes, returning the value that was live when it parked. No sleeps.
+
+One structural fact the harness had to be designed around, worth recording: the ingress is **one
+ordered consumer** by construction (A1 Finding C), so while Session A is parked inside an inbound
+frame's handler nothing else can be delivered — the queue doing exactly its job. Where the parked
+operation is an inbound one, Session B is therefore established through the *outbound* path as a
+leader. A role that differs between sessions is not a contrivance: ADR-010 recomputes it at every
+handshake.
+
+**Stress:** the new suite 200/200 with zero failures; `SyncPlaybackClosureAuditTests` (A1),
+`SyncPlaybackDeliveryAuditTests` (A2), `SyncPlaybackLifecycleAuditTests` (A3),
+`SyncPlaybackOperationLifetimeAuditTests` (A4), `SyncPlaybackDriftTests`,
+`SyncPlaybackCoordinatorTests` and `SyncPlaybackTwoPeerTests` 50/50 each, zero failures.
+
+**Adds:** `stillCurrentNow` on iOS, `ownsNow` re-expressed through it, paired asynchronous/synchronous
+proofs at every site in §E, a `generation` parameter on `onPeerPositionReport` and `readyEstimate`,
+`emitPlaybackStateFrame`'s `token: Int64?` in place of its `async` closure, and one eight-test iOS
+regression suite with three new deterministic gates.
+
+**Does not:** change the wire format, any message type, any field, any encoding, any bound, or any
+vector — all thirteen generators reproduce byte-identical output; add a gate table (post-suspension
+ownership is lifetime, not a distributed decision, exactly as A3 §E and A4 argued); weaken any A1,
+A2, A3 or A4 guarantee; change Android production code; change ordering, admission, delivery-bound
+authority, the held authoritative stream, the drift ladder, `LEAD`, or the epoch/fence semantics;
+add a second player, queue, `MediaSession`, coordinator or RTT tracker; implement `STATE_REQUEST`;
+touch Phase 6 or Phase 7; or make any claim about audio.
+
+**What it deliberately does not close**, restating A4 §C one level up: a mutation already *performed*
+under Session A is not rolled back, and an indivisible platform effect already dispatched may still
+complete after the session ends. What is closed is the *next* mutation and the *next* effect.
+
+**And still does not run on a phone.** Every figure here is a software figure. The <100 ms product
+target and the <50 ms stretch target remain unmeasured, no alignment figure exists, and TEST_PLAN
+§5.2's S-01…S-12 are what will change that.
