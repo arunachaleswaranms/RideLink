@@ -1,17 +1,31 @@
 # RideLink — Status
 
-**Updated:** 10 September 2026 (Phase 5 closure audit A3, twenty-seventh session — see §2ad)
+**Updated:** 11 September 2026 (Phase 5 closure audit A4, twenty-eighth session — see §2ae)
 **Current milestone:** M1 (Private voice link) is **software-complete with no known defect** — its
 hardware gate is the only thing left open. M2 (local music) is implementation-complete and
 closure-audited (§2q/§2r). Phase 4 is closure-audited **five** times (§2v–§2z). **M4 (Synced ride
-music) now has its software half, and it has been audited three times**: Phase 5 is closure-audited
-A1 (§2ab), A2 (§2ac) and A3 (§2ad) on both platforms, with its real-device gate open.
-**Current phase:** Phase 5 — synchronized playback, **closure-audited three times** (this session,
-§2ad; the earlier audits are §2ab and §2ac, the implementation §2aa). Clock-scheduled
+music) now has its software half, and it has been audited four times**: Phase 5 is closure-audited
+A1 (§2ab), A2 (§2ac), A3 (§2ad) and A4 (§2ae) on both platforms, with its real-device gate open.
+**Current phase:** Phase 5 — synchronized playback, **closure-audited four times** (this session,
+§2ae; the earlier audits are §2ab, §2ac and §2ad, the implementation §2aa). Clock-scheduled
 `PLAY`/`PAUSE`/`RESUME`/`SEEK`/`NEXT`/`PREVIOUS`, a replicated shared queue, drift measurement and
 the ADR-004 correction ladder, all on top of the Phase 1a clock layer and the Phase 3 player.
 **Phase 6 (intercom/music coexistence) and Phase 7 (Ride Mode) are untouched.**
-**Phase 5 status: SOFTWARE CLOSURE A3 COMPLETE — REAL-DEVICE SYNCHRONIZED-PLAYBACK GATE PENDING.**
+**Phase 5 status: SOFTWARE CLOSURE A4 COMPLETE — REAL-DEVICE SYNCHRONIZED-PLAYBACK GATE PENDING.**
+
+**A4 in one paragraph.** A3 fenced *operations*. A4 is the hole underneath that fence: an operation
+that passed its ownership check while Session A was valid, entered a **compound** player operation,
+suspended inside its first sub-effect, and then performed a **second** effect after Session B was
+live. Three compounds had it — `applyTransport`'s `pause`→`seek` and `seek`→`start`,
+`MusicCoordinator.syncPrepare`'s `load`→`seek`, and `syncStop`'s `stop`→clear-the-local-queue — and
+two of the three were *below* `SyncPlayerPort`, where no coordinator proof could ever have reached.
+**The port shape was the root cause**, so the port is now one externally visible effect per method
+and `runOwnedSteps` re-proves ownership before every step. On iOS the interleaving is real and was
+genuinely defective; on Android it was **unreachable** because `withContext(Dispatchers.Main.immediate)`
+from the main thread never suspends — now measured on the emulator rather than assumed, and mirrored
+anyway so the guarantee stops depending on that accident. Building the regressions found two more,
+both A3 Finding C's shape one function further along (§2ae **E**, **F**). Seventh consecutive audit
+of CI-green code to find real defects. **This is not "final"; assume a fifth would find something.**
 Independent verification of A2 named one narrow but critical remaining class — **old Session-A local
 apply/schedule work surviving a session boundary and touching Session-B state** — and all three
 findings in it were **confirmed**. The sharpest was not "old work wrote state it did not own" but
@@ -3692,6 +3706,122 @@ Every figure here is a software figure. **No alignment figure exists**, and the 
 and <50 ms stretch target must not be described as approached. TEST_PLAN §5.2's S-01…S-12 are what
 will change that. The iOS scheduled-start path still has not run on a simulator (§4 problem 41).
 
+## 2ae. Phase 5 closure audit A4 — player-operation lifetime across a suspension (11 September 2026 session, twenty-eighth)
+
+**Phase 5 status: SOFTWARE CLOSURE A4 COMPLETE — REAL-DEVICE SYNCHRONIZED-PLAYBACK GATE PENDING.**
+
+An independent verification *of A3*. A3 fenced operations: a chain node created under Session A is
+retired at a boundary, and every apply path proves its generation before its first read of live
+state. A4 is the class A3 left open **underneath** that fence:
+
+> An operation may pass its ownership check while Session A is valid, enter a **compound** async
+> player operation, suspend inside that operation, have Session A end and Session B become live,
+> and then resume and perform **another** effect against Session B.
+
+A3 covers the command that never started. A4 covers the one that legitimately **did**: one
+ownership proof authorising *two* externally visible effects, with only the first inside its
+lifetime. Full reasoning: [ADR-024 Amendment A4](DECISIONS/ADR-024-synchronized-playback-integration.md).
+
+### The findings
+
+| # | Finding | Verdict | Fix |
+|---|---|---|---|
+| **A** | `applyTransport`'s scheduled action ran `pause`→`seek` (or `seek`→`start`) inside **one** closure behind **one** `runIfCurrent`. A Session-A `PAUSE` firing as the boundary landed paused nothing it owned and then seeked **Session B's** player | **CONFIRMED** (iOS real; Android unreachable — see below) | the action is a `[PlayerStep]`, and `runOwnedSteps` re-proves ownership before each |
+| **B** | `MusicCoordinator.syncPrepare` was materialise → `await load` → `await seek`, composed **below** `SyncPlayerPort.prepare`. No coordinator-level proof could reach between its sub-effects, so a pre-roll whose session died inside the decoder load seeked the session that replaced it | **CONFIRMED** | `prepare` split into `select` + `load` + the existing `seek`; sequencing moved up into `runOwnedSteps` |
+| **C** | `MusicCoordinator.syncStop` was `await stop` → clear the local queue, likewise below the port. A retired `NEXT`-off-the-end cleared **Session B's** local selection — its Now Playing entry and lock-screen metadata | **CONFIRMED** | `stop` split into `stop` + `clearSelection` |
+| **D** | iOS's `owns()` must `await` the session actor, so even a per-step fence left a window: the guard could resume and dispatch a step for a session that ended *while the guard was being taken*. Android's `owns()` is synchronous and never had this | **CONFIRMED (iOS only)** | `liveGeneration` + the synchronous `ownsNow`, taken with no `await` before the dispatch |
+| **E** | `tickOnce` read the live `timeline` and `currentEpochToken` straight after `await drainDeferredEvents()`, which resolves content and applies commands. A retired tick read the *new* session's state; its `POSITION_REPORT` was correctly refused at the wire, but the outbound counters still moved | **CONFIRMED** | re-prove the generation after the drain |
+| **F** | `tickOnce` incremented `correctionTickCount` unconditionally after `await applyCorrection`. A tick parked inside a rate nudge across a whole boundary woke and moved the **live** session's counter | **CONFIRMED** | re-prove before the counter. A3 Finding C's rule — "diagnostics only" is not an exemption — one function further along |
+
+**Not found, and checked rather than assumed:** `AVAudioEnginePlayer.execute` has no internal
+suspension (`load` is `async` but awaits nothing) and its `scheduleSegment` completion is already
+fenced by its own monotonic `generation`; `ExoPlayerMusicPlayer.execute` likewise never suspends and
+its position-tick job is cancelled and replaced on every load/seek/stop. **No ownership token needed
+to reach into either player**, so none does — the fence stops at the port and `MusicCoordinator`
+keeps no session dependency. Now Playing / `MediaSession` derive from `MusicCoordinator.queueState`
+and `playerState`, which are now written only through fenced steps, so the "a stale Session-A
+operation may not overwrite Session-B metadata" invariant holds transitively.
+
+### Android: masked, not safe by design — and now measured
+
+Every Android compound reaches `ExoPlayerMusicPlayer.execute`, which wraps its body in
+`withContext(Dispatchers.Main.immediate)`. Every Phase 5 caller runs on `AppContainer`'s
+`Dispatchers.Main` scope and is therefore already on the main thread, so the block starts
+undispatched and returns **without suspending** — and where nothing suspends, nothing interleaves.
+So Android was **not observably defective**, and this audit does not claim it was.
+
+That is an accident of which `CoroutineScope` the composition root happens to build: undocumented,
+untested, and one dispatcher change (or one `Player` that genuinely awaits `STATE_READY`) away from
+being false. Two things changed. The premise is now **measured on the real emulator** —
+`SyncScheduledPlaybackTest.aPlayerCommandFromTheMainDispatcherDoesNotSuspend` queues a competitor on
+the main looper and asserts it does not run between two real `ExoPlayer` commands — and the fix is
+**mirrored**, so the guarantee no longer depends on the accident.
+
+### Regression evidence
+
+`SyncPlaybackOperationLifetimeAuditTests` (iOS) and `SyncPlaybackOperationLifetimeAuditTest`
+(Android), seven tests each: parked decoder load, parked resume-seek, parked pause, parked stop, the
+correction ladder, new-session independence, and a same-session control.
+
+Two of the four compounds lived in the app target, which has **no test target on iOS** (§4 problem
+20), so they cannot be demonstrated against literally unmodified pre-A4 source and this section does
+not pretend otherwise. Three separate pre-fix runs were taken, each reverting exactly one thing:
+
+| Reverted | iOS | Android |
+|---|---|---|
+| the fence (`runOwnedSteps` proving once — pre-A4's semantics for all four compounds) | **5 of 7 fail** | **5 of 7 fail** |
+| `applyTransport` literally (its two effects back in one closure, everything else fixed) | exactly the parked-pause and parked-resume cases fail | — |
+| `tickOnce`'s post-correction proof (Finding F) | the correction case fails on `correctionTickCount` | same, `0` vs `1` |
+
+The two passing under the first revert are the correction proof (the ladder's player half was never
+vulnerable) and the same-session control (no boundary).
+
+### Stress — and what it found
+
+| Suite | Iterations | Failing | Verdict |
+|---|---|---|---|
+| iOS `SyncPlaybackOperationLifetimeAuditTests` alone | 200 | 0 | — |
+| iOS `SyncPlaybackLifecycleAuditTests` alone, before the harness fix | 400 | 4 | **test races A4 introduced** |
+| iOS `SyncPlaybackLifecycleAuditTests` alone, after | 300 | 0 | — |
+| iOS whole `SyncPlayback` sweep (90 tests, one process), post-A4 before the harness fix | 200 | 7 | **3 pre-existing, 4 amplified** |
+| iOS whole `SyncPlayback` sweep at **unmodified `72e95ec`** (83 tests) | 200 | **2** | the same three tests — **pre-existing** |
+| Android `com.ridelink.app.sync.*` | 120 | 0 | — |
+| iOS `SyncPlaybackClosureAudit` / `Delivery` / `Coordinator` / `Drift` / `TwoPeer`, each alone | 150/150/150/150/60 | 0 | load-sensitive only in the full sweep |
+
+**Every observed flake was a test race; none was a production race, and that was established by
+measurement rather than by assertion.** Two classes:
+
+1. **Caused by A4.** Making a pre-roll three player calls instead of one turned
+   `expect { player.calls.count >= 2 }` from "the second apply has begun" into a condition already
+   true before the release, after which `awaitApplyChainDrained` raced a chain node `chainApply` had
+   not created yet — the outbound counters move *before* the commit hook runs. Separately,
+   `contains(.start)` could be satisfied by an **earlier** session's start, and `.start` is recorded
+   inside the step while `markSynced` follows it, so a "before" snapshot could be taken between the
+   two. Replaced with exact signals: the second apply's own effect, a **counted** start, and
+   `syncState == .synced`.
+2. **Pre-existing, and proven so.** Three tests — `SyncPlaybackCoordinatorTests`'
+   `testAFutureDeadlinePreRollsNowAndStartsExactlyAtTheDeadline`, `SyncPlaybackDeliveryAuditTests`'
+   `testAfterARefusalTheDeliveredFrameStillAppliesAndNothingBehindItDoes` and
+   `testASeekAQueueMutationAndAPauseHeldTogetherReplayInArrivalOrder`, plus
+   `SyncPlaybackLifecycleAuditTests`' `testWithinOneSessionAScheduledDeadlineStillFiresAndStillRecordsItsError`
+   — asserted an effect after a **fixed 40-yield `settle()`** rather than waiting for it. They flake
+   only in the whole-suite sweep, where the real-TLS two-peer tests load the same process. **The
+   identical failures reproduce at unmodified `72e95ec`**, which is how they are classified rather
+   than guessed at. All four now wait for the effect itself.
+
+A4 also fixed the stress **script**: the first run grepped `with ([0-9]+) failures` and silently
+missed `with 1 failure`, reporting a false green for one iteration. The corrected pattern is what
+produced every number above. Recorded because a stress harness that cannot see a single failure is
+worse than no stress harness.
+
+### What is still not true
+
+**Nothing in this session ran on a phone, and no audio reached a speaker or a Bluetooth endpoint.**
+Every figure here is a software figure. **No alignment figure exists**, and the <100 ms product
+target and the <50 ms stretch target must not be described as approached. TEST_PLAN §5.2's
+S-01…S-12 are what will change that. The iOS scheduled-start path still has not run on a simulator
+(§4 problem 41), and `AVAudioUnitVarispeed` has still never changed a real rate.
+
 ## 3. Tests passed / pending
 
 **Passed and verified in the Phase 5 session (8 September 2026, twenty-fourth), by actually running
@@ -4187,18 +4317,29 @@ Not blocking Phase 1. Answers needed before Phase 6.
 
 ## 7. Next exact task
 
-**Phase 5 — synchronized playback. SOFTWARE CLOSURE A3 COMPLETE — REAL-DEVICE SYNCHRONIZED-PLAYBACK
-GATE PENDING (§2ad).** Every laptop-runnable gate is green on both platforms; the audit §7 previously
-asked for has now run three times, and all sixteen findings (A1's seven, A2's six, A3's three) are
-fixed with regressions each verified to fail against the pre-fix behaviour. Every pre-existing vector
-set regenerates byte-for-byte identically: the wire did not move in any of the three passes.
+**Phase 5 — synchronized playback. SOFTWARE CLOSURE A4 COMPLETE — REAL-DEVICE SYNCHRONIZED-PLAYBACK
+GATE PENDING (§2ae).** Every laptop-runnable gate is green on both platforms; the audit §7 previously
+asked for has now run four times, and all twenty-two findings (A1's seven, A2's six, A3's three,
+A4's six) are fixed with regressions each verified to fail against the pre-fix behaviour. Every
+pre-existing vector set regenerates byte-for-byte identically: the wire did not move in any of the
+four passes.
 
-**"A3" is not "final", and the wording is deliberate.** §2y dropped "final" from Phase 4 after five
+**"A4" is not "final", and the wording is deliberate.** §2y dropped "final" from Phase 4 after five
 audits each found real defects in code that was already CI-green. A1 found seven; verifying A1 found
-five more plus a sixth while fixing them; verifying A2 found three more. That is evidence *for*
-auditing again, not against it. The next audit should re-derive its findings from the production code
-rather than from this file, and should look hardest at the places these three deliberately stopped
-short:
+five more plus a sixth while fixing them; verifying A2 found three more; verifying A3 found six more.
+That is evidence *for* auditing again, not against it. The next audit should re-derive its findings
+from the production code rather than from this file, and should look hardest at the places these
+four deliberately stopped short:
+
+- **A4's interleaving is *proven* only on iOS.** On Android it is unreachable today, and the Android
+  regressions therefore build it with a suspending fake rather than reproducing production. The
+  measurement that justifies calling it unreachable is one instrumented test on one emulator
+  (`aPlayerCommandFromTheMainDispatcherDoesNotSuspend`). If that ever stops holding, the fence is
+  what saves Android — but nothing today would *tell* you it stopped holding.
+- **A4's per-step fence was applied to the player port, and only there.** `SyncContentPort` and
+  `SyncPlaybackChannel` were reviewed and are single-effect, but nothing structurally prevents a
+  future compound from appearing behind either. Whether the `PlayerStep` discipline should extend to
+  them is an open design question, not a settled one.
 
 - **A3's race is proven with two coordinators on Android only** (§4 problem 43). The iOS proof is one `actor`-based coordinator, which is stronger positioning for *this* race but is not a pair.
 - **The A2 Finding E interleaving is reproduced on iOS but not on Android**, where the window falls between two statements a `StandardTestDispatcher` cannot interleave; the Android test asserts the contract instead. The defect is real there (the app runs on a multi-threaded dispatcher) and the fix is the same structural one, but a failing-before-fix demonstration is missing.
@@ -4211,7 +4352,7 @@ short:
 
 **Immediately actionable next steps, in order:**
 
-1. **Independently verify closure audit A3** (§2ad, ADR-024 Amendment A3), and A1/A2 with it (§2ab, §2ac). Re-derive each finding from the current production code; the regressions are in `SyncPlaybackLifecycleAuditTest[s]` (A3), `SyncPlaybackDeliveryAuditTest[s]` (A2), `SyncPlaybackClosureAuditTest[s]`, `SyncPlaybackTwoPeerTest[s]`, `Phase5FrameQueueTest[s]` and `Phase5GatesVectorTest[s]`, and each should be confirmed to fail if its fix is reverted.
+1. **Independently verify closure audit A4** (§2ae, ADR-024 Amendment A4), and A1/A2/A3 with it (§2ab, §2ac, §2ad). Re-derive each finding from the current production code; the regressions are in `SyncPlaybackOperationLifetimeAuditTest[s]` (A4), `SyncPlaybackLifecycleAuditTest[s]` (A3), `SyncPlaybackDeliveryAuditTest[s]` (A2), `SyncPlaybackClosureAuditTest[s]`, `SyncPlaybackTwoPeerTest[s]`, `Phase5FrameQueueTest[s]` and `Phase5GatesVectorTest[s]`, and each should be confirmed to fail if its fix is reverted. **Run the whole `SyncPlayback` sweep in one process, not suite by suite** — three of A4's flakes were invisible individually and only appeared under the load of the real-TLS two-peer tests sharing the process.
 2. **Run the scheduled-start path on the iOS simulator** (§4 problem 41's remaining half). The Android emulator half is done; there is no `Context`-shaped obstacle on iOS either.
 3. **Get two real devices into this loop.** Unchanged since Phase 1a and now blocking five gates: (a) enable USB debugging on the OnePlus Nord 5; (b) set up a development-team signing identity for the iPhone 17 Pro Max.
 4. **Run the Phase 1a gate**: I-01, I-05, I-06, I-07, I-08, I-14, I-15, I-17, I-22.

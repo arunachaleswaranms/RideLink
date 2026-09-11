@@ -922,3 +922,184 @@ tracker; implement `STATE_REQUEST`; touch Phase 6 or Phase 7; or make any claim 
 **And still does not run on a phone.** Every figure here is a software figure. The <100 ms product
 target and the <50 ms stretch target remain unmeasured, no alignment figure exists, and TEST_PLAN
 §5.2's S-01…S-12 are what will change that.
+
+---
+
+## Amendment A4 — 11 September 2026 — player-operation lifetime / post-suspension ownership
+
+**Status:** Accepted · appended, nothing above rewritten. Amendments A1, A2 and A3 are unchanged.
+
+A3 fenced *operations*: an apply-chain or scheduled-chain node created under Session A is retired at
+a boundary, and every apply path proves its authorising generation before its first read of live
+state. Independent verification of A3 named the narrower class **underneath** that fence, and this
+pass confirmed it:
+
+> An operation may pass its ownership check while Session A is valid, enter a **compound** async
+> player operation, suspend inside that operation, have Session A end and Session B become live, and
+> then resume and perform **another** player or local-queue side effect against Session B.
+
+A3 proved that a command whose session ended *while it queued* does nothing. A4 is the case where
+the command legitimately **started**: one ownership proof authorised *two* externally visible
+effects, and only the first of them was inside the proof's lifetime.
+
+### A. The three compounds
+
+| Where | Effects behind one proof | Reachable how |
+|---|---|---|
+| `applyTransport`'s scheduled action | `pause` → `seek`, or `seek` → `start` | one closure, one `runIfCurrent` |
+| `MusicCoordinator.syncPrepare` | materialise → `load` → `seek` | *below* `SyncPlayerPort.prepare` |
+| `MusicCoordinator.syncStop` | player `stop` → clear the local queue | *below* `SyncPlayerPort.stop` |
+
+The second and third are the sharper finding, because no coordinator-level proof could ever have
+reached between their sub-effects: the port hid the compound. **The port shape was the root cause**,
+not any individual missing `guard`.
+
+### B. The exact interleaving, on iOS, where it is real
+
+`MusicCoordinator` is `@MainActor`; `AVAudioEnginePlayer` is an `actor`. So:
+
+```
+Session A  applyPlay → runOwnedSteps → player.prepare
+             → hop to MainActor → syncPrepare
+             → queueState = <A's item>
+             → await player.execute(.load)          ← MainActor released
+                                                       ── boundary: A ends, B authenticates
+                                                       ── B's applyPlay runs to completion:
+                                                          selects, loads and starts its own track
+             → await player.execute(.seek(A's pos)) ← **Session B's player, seeked by Session A**
+```
+
+`syncStop` is the same shape with `queueState = LocalQueueState()` as the second effect — a retired
+`NEXT`-off-the-end clearing the live session's Now Playing entry and lock-screen metadata.
+`applyTransport`'s pair is the same shape one layer up, and it is visible to the coordinator's own
+test seam, so it is the one demonstrable against literally unmodified source.
+
+**Android was not observably defective, and this amendment does not claim it was.** Every compound
+there reaches `ExoPlayerMusicPlayer.execute`, which wraps its body in
+`withContext(Dispatchers.Main.immediate)`; every Phase 5 caller runs on `AppContainer`'s
+`Dispatchers.Main` scope and is therefore already on the main thread, so the block starts
+undispatched and the call returns **without suspending** — and where nothing suspends, nothing
+interleaves. That is now measured rather than reasoned about:
+`SyncScheduledPlaybackTest.aPlayerCommandFromTheMainDispatcherDoesNotSuspend` queues a competitor on
+the main looper and asserts it does not run between two real `ExoPlayer` commands.
+
+That safety is an accident of which `CoroutineScope` the composition root happens to build. It was
+undocumented, untested, and one dispatcher change — or one `Player` that genuinely awaits
+`STATE_READY` — away from being false. The shape is therefore **mirrored**, so the guarantee stops
+depending on the accident, and the Android regressions build the interleaving with a genuinely
+suspending fake so the fence is proven independently of the dispatcher.
+
+### C. Why an already-started effect is treated differently from a new one
+
+The fix does **not** attempt to un-start a platform effect already dispatched. A player exposes no
+such rollback, and demanding one would be a fiction. The line this amendment draws is:
+
+> A synchronized playback operation authorised by Session A may execute an atomic platform effect
+> that was already in progress when Session A ended, but after any suspension it may not **initiate
+> another** externally visible effect unless Session A's generation and the relevant playback epoch
+> are still current.
+
+So "one indivisible effect completing late" is allowed; "choosing to do the next thing" is not.
+Making every port method exactly one indivisible effect is what turns that sentence into something
+the type system helps enforce rather than a rule someone has to remember.
+
+### D. The fix
+
+**`SyncPlayerPort` has one externally visible effect per method.** `prepare(content:positionMs:)`
+became `select(content:)` + `load(content:)` + the existing `seek(positionMs:)`; `stop()` became
+`stop()` + `clearSelection()`. `MusicCoordinator` on both platforms gained the matching
+single-effect entry points and lost both compounds.
+
+**Sequencing moved up into `SyncPlaybackCoordinator.runOwnedSteps(_:generation:token:)`**, which
+re-proves ownership before **every** step. A scheduled action is now a `[PlayerStep]` value rather
+than a closure — deliberately, because a closure can contain a second `await` and nothing about its
+type says so, which is exactly how `applyTransport` came to drive two effects behind one proof.
+`runIfCurrent` is gone; `runOwnedSteps` subsumes it, and a single-step list is the correction
+ladder's case.
+
+**iOS needed one thing Android did not.** Android's `owns()` is synchronous — `currentAuthGeneration`
+is a plain property — so a proof placed immediately before a call is atomic with dispatching it. On
+iOS `owns()` must `await` the session actor, and that `await` is itself a re-entrancy point: a
+boundary landing inside it means the guard resumes and dispatches a step for a session that ended
+while the guard was being taken. `liveGeneration` (written wherever `diagnostics.sessionGeneration`
+is, and nowhere else) and the synchronous `ownsNow` close that window, giving iOS the property
+Android gets for free. Both proofs are taken, and neither is redundant: the `async` one catches a
+generation the manager has already advanced but this actor has not been told about; the synchronous
+one makes the proof and the dispatch one actor-isolated step.
+
+**Two further findings came out of building the regressions**, both the A3 Finding C shape —
+"diagnostics only" is not an exemption — one function further along:
+
+- **Finding E:** `tickOnce` read the live `timeline` and `currentEpochToken` immediately after
+  `await drainDeferredEvents()`, which resolves content and applies commands and therefore suspends.
+  A retired session's tick read the *new* session's timeline; the `POSITION_REPORT` it enqueued was
+  correctly refused at the wire, but the outbound counters still moved. It now re-proves the
+  generation after the drain.
+- **Finding F:** `tickOnce` incremented `correctionTickCount` unconditionally after awaiting
+  `applyCorrection`. A tick parked inside a rate nudge across a whole boundary woke and moved the
+  live session's counter. Confirmed identically on both platforms (`correctionTickCount 0 → 1`).
+
+**`restoreRate` is a deliberate, documented exemption.** Its three callers — `resetForNewSession`,
+`failClosedOutbound`, `leaveSynchronizedMode` — are each the *ending* of an authority, so there is no
+generation left to prove, and fencing it would leave the previous session's nudge in force on music
+ADR-004 says keeps playing. It is idempotent and names an absolute rate, so a late one cannot fight
+a live correction into a wrong value.
+
+**What was checked and found sound.** `AVAudioEnginePlayer.execute` has no internal suspension —
+`load` is `async` but awaits nothing — and its only callback, `scheduleSegment`'s completion, is
+already fenced by its own monotonic `generation`. `ExoPlayerMusicPlayer.execute` likewise never
+suspends, and its position-tick job is cancelled and replaced on every load/seek/stop. **No
+ownership token needed to reach into either player**, so none does: the fence stops at the port, and
+`MusicCoordinator` stays free of any session dependency. Now Playing and `MediaSession` are derived
+from `MusicCoordinator.queueState`/`playerState`, both of which are now written only through fenced
+steps, so §18's invariant holds transitively rather than needing its own mechanism.
+
+### E. Regression evidence
+
+`SyncPlaybackOperationLifetimeAuditTests` (iOS, 7 tests) and `SyncPlaybackOperationLifetimeAuditTest`
+(Android, 7 tests) — parked decoder load, parked resume-seek, parked pause, parked stop, the
+correction ladder, new-session independence, and a same-session control.
+
+Two of the four compounds lived in the app target, which has **no test target on iOS**
+(`docs/STATUS.md` §4 problem 20), so they cannot be demonstrated against literally unmodified
+pre-A4 source and this amendment does not pretend otherwise. Three separate pre-fix runs were taken
+instead, each reverting exactly one thing:
+
+| Reverted | iOS | Android |
+|---|---|---|
+| the fence (`runOwnedSteps` proving once, which is pre-A4's semantics for all four compounds) | 5 of 7 fail | 5 of 7 fail |
+| `applyTransport` literally (its two effects back in one closure, everything else fixed) | exactly the parked-pause and parked-resume cases fail | — |
+| `tickOnce`'s post-correction proof (Finding F) | the correction case fails on `correctionTickCount` | same, `0` vs `1` |
+
+The two cases that pass under the first revert are the correction proof (the ladder's player half was
+never vulnerable) and the same-session control (no boundary).
+
+### F. One test-signal regression A4 caused, found by stress and fixed
+
+The A3 lifecycle suite was clean at 200/200 on unmodified `72e95ec` and flaked at roughly 1 % after
+A4 — **in the tests, not in production**. Making a pre-roll three calls instead of one turned
+`expect { player.calls.count >= 2 }` from "the second apply has begun" into a condition already true
+before the release, and `awaitApplyChainDrained` then raced a chain node `chainApply` had not created
+yet, because the outbound counters move before the commit hook runs. Separately, `.contains(.start)`
+could be satisfied by an *earlier* session's start, and `.start` is recorded inside the step while
+`markSynced` follows it, so a "before" snapshot could be taken between the two. All three signals
+were replaced with exact ones (the second apply's own effect; a counted start; `syncState == .synced`).
+Clean at 300/300 afterwards. Recorded here because the honest reading is that A4 weakened those
+signals and the stress run is what caught it.
+
+**Adds:** three single-effect port methods per platform (`select`, `load`, `clearSelection`) and the
+matching `MusicCoordinator` entry points; the `PlayerStep` value type; `runOwnedSteps`/`perform`;
+iOS's `liveGeneration` + `ownsNow`; two ownership proofs in `tickOnce`; two mirrored seven-test
+regression suites; and one instrumented measurement of Android's non-suspension premise.
+
+**Does not:** change the wire format or any vector — all thirteen generators reproduce byte-identical
+output; add a gate table (a per-step ownership proof is lifetime, not a distributed decision, exactly
+as A3 §E argued); weaken any A1, A2 or A3 guarantee; change ordering, admission, delivery-bound
+authority, the held authoritative stream, the drift ladder, `LEAD`, or the epoch/fence semantics; add
+a second player, queue, `MediaSession`, coordinator or RTT tracker; give the platform players any
+knowledge of sessions; implement `STATE_REQUEST`; touch Phase 6 or Phase 7; or make any claim about
+audio.
+
+**And still does not run on a phone.** Every figure here is a software figure. The <100 ms product
+target and the <50 ms stretch target remain unmeasured, no alignment figure exists, and TEST_PLAN
+§5.2's S-01…S-12 are what will change that.
