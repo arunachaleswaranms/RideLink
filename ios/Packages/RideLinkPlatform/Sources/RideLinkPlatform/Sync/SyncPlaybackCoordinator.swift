@@ -80,6 +80,23 @@ public actor SyncPlaybackCoordinator {
     var role: PlaybackRole?
     var syncEnabled = false
 
+    /// The authentication generation this actor has been *told* is live, mirrored locally
+    /// (ADR-024 Amendment A4 Finding D).
+    ///
+    /// `stillCurrent` asks `session` and is therefore `async` — `SyncSessionPort` is actor-facing on
+    /// this platform, unlike Android's synchronous `currentAuthGeneration`. That difference is the
+    /// whole of Finding D: an `async` proof cannot be adjacent to the effect it authorises, because
+    /// the `await` that takes it is itself a re-entrancy point, so a boundary can land between
+    /// "still current" answering true and the step it authorised being dispatched. This field is
+    /// what makes a **synchronous** proof possible, and `ownsNow` is what takes it.
+    ///
+    /// It is deliberately not a replacement for `stillCurrent`: it lags by exactly the interval
+    /// between the manager advancing the generation and `SessionCoordinator` forwarding the event.
+    /// The two are used together — the `async` proof first, catching a generation the manager has
+    /// already moved, then the synchronous one immediately before the effect, closing the window the
+    /// first one's own `await` opens.
+    var liveGeneration: Int64 = -1
+
     /// The highest `command_seq` this device has taken responsibility for — *the* input to
     /// `CommandOrderGate`. Amendment A1 Finding D: it advances when a command is accepted, whether
     /// that command is applied immediately or held for a trustworthy clock, so a replay of a held
@@ -317,6 +334,7 @@ public actor SyncPlaybackCoordinator {
         role = isLocalLeader ? .leader : .follower
         diagnostics.role = role
         diagnostics.sessionGeneration = await session.currentAuthGeneration()
+        liveGeneration = diagnostics.sessionGeneration
         publishDiagnostics()
         let generation = diagnostics.sessionGeneration
         tickTask = Task { [weak self] in await self?.tickLoop(generation: generation) }
@@ -333,6 +351,8 @@ public actor SyncPlaybackCoordinator {
     }
 
     private func resetForNewSession() async {
+        // `role = nil` alone already makes every synchronous `ownsNow` fail from here until a role
+        // is set again, which is what covers the window before `liveGeneration` is refreshed below.
         role = nil
         syncEnabled = false
         tickTask?.cancel()
@@ -381,6 +401,10 @@ public actor SyncPlaybackCoordinator {
         diagnostics.hardSeekCount = 0
         diagnostics.lastScheduleErrorUs = nil
         diagnostics.sessionGeneration = await session.currentAuthGeneration()
+        // Amendment A4 Finding D: `liveGeneration` is written wherever `diagnostics.sessionGeneration`
+        // is, and nowhere else, so there is one answer to "which generation does this actor believe
+        // is live" rather than two that could disagree.
+        liveGeneration = diagnostics.sessionGeneration
         diagnostics.correctionTickCount = 0
         diagnostics.deferredCommandCount = 0
         diagnostics.ingressDesynchronized = false
@@ -403,6 +427,70 @@ public actor SyncPlaybackCoordinator {
     /// only before the first one.
     func owns(generation: Int64, token: Int64) async -> Bool {
         await stillCurrent(generation) && epoch.isCurrent(token)
+    }
+
+    /// `owns`, taken **synchronously** from state this actor owns (ADR-024 Amendment A4 Finding D).
+    ///
+    /// Android's `owns` is already synchronous — `SyncSessionPort.currentAuthGeneration` is a plain
+    /// property there — so a proof placed immediately before an effect is atomic with dispatching
+    /// it. On this platform `owns` must `await`, and that `await` is an actor re-entrancy point: a
+    /// boundary landing in it means the guard resumes and dispatches a step for a session that ended
+    /// while the guard was being taken. Reading the mirrored generation instead makes the proof and
+    /// the dispatch one actor-isolated step, which is the same property Amendment A1 Finding B
+    /// established for stamping-and-enqueueing.
+    ///
+    /// Used **with** `owns`, never instead of it: see `liveGeneration`.
+    func ownsNow(generation: Int64, token: Int64) -> Bool {
+        role != nil && generation == liveGeneration && epoch.isCurrent(token)
+    }
+
+    // MARK: - Fenced player steps (ADR-024 Amendment A4)
+
+    /// Runs a sequence of **single-effect** player steps, re-proving ownership before each one.
+    ///
+    /// This is Amendment A4's whole invariant in one function. A3 proved that a command whose
+    /// session ended while it queued must do nothing; A4 is the narrower case A3 left open — an
+    /// operation that legitimately *started* under Session A, suspended inside its first effect, and
+    /// then chose to perform a *second* effect after Session B was live. Two player calls behind one
+    /// ownership proof is exactly that shape, and it existed in three places: `applyTransport`'s
+    /// pause-then-seek and seek-then-start, `MusicCoordinator.syncPrepare`'s load-then-seek, and
+    /// `MusicCoordinator.syncStop`'s stop-then-clear-the-local-queue.
+    ///
+    /// Two proofs per step, deliberately. `owns` catches a generation the session manager has
+    /// already advanced but this actor has not been told about yet; `ownsNow` is synchronous, so
+    /// nothing can run on this actor between it and the step it authorises. Neither is redundant —
+    /// see `liveGeneration`.
+    ///
+    /// **It does not, and cannot, un-start a step already dispatched.** ADR-024 Amendment A4 §C: an
+    /// indivisible platform effect authorised while Session A held the session may complete after
+    /// Session A ends, and rolling that back is not something a player exposes. What is closed is
+    /// the *next* effect.
+    ///
+    /// - Returns: true only if every step ran.
+    @discardableResult
+    func runOwnedSteps(_ steps: [PlayerStep], generation: Int64, token: Int64) async -> Bool {
+        for step in steps {
+            guard await owns(generation: generation, token: token) else { return false }
+            // No `await` between this proof and the dispatch below.
+            guard ownsNow(generation: generation, token: token) else { return false }
+            await perform(step)
+        }
+        return true
+    }
+
+    /// The one place a `PlayerStep` becomes a call on the port. Exhaustive by construction: a new
+    /// step cannot be added without a case here, and a new *effect* cannot be added without a step.
+    private func perform(_ step: PlayerStep) async {
+        switch step {
+        case .select(let content): await player.select(content: content)
+        case .load(let content): await player.load(content: content)
+        case .seek(let positionMs): await player.seek(positionMs: positionMs)
+        case .start: await player.start()
+        case .pause: await player.pause()
+        case .setRate(let rate): await player.setRate(rate)
+        case .stop: await player.stop()
+        case .clearSelection: await player.clearSelection()
+        }
     }
 
     // MARK: - The clock
@@ -842,6 +930,14 @@ public actor SyncPlaybackCoordinator {
     /// Whether a synchronised session currently owns transport control (brief §39/§40).
     public func isSynchronizedModeActive() -> Bool { syncEnabled && role != nil }
 
+    /// Brief §38's "correction always ends at exactly 1.0", and the one player call in this phase
+    /// that is deliberately **not** fenced (ADR-024 Amendment A4 §D).
+    ///
+    /// Its three callers — `resetForNewSession`, `failClosedOutbound` and `leaveSynchronizedMode` —
+    /// are all the *ending* of an authority, so there is no generation left to prove and fencing it
+    /// would leave the previous session's nudge in force on music ADR-004 says keeps playing. It is
+    /// idempotent, it names an absolute rate rather than a relative one, and 1.0 is what the next
+    /// session would set anyway, so a late one cannot fight a live correction into a wrong value.
     func restoreRate() async {
         await player.setRate(DriftController.rateNormal)
         diagnostics.playbackRate = DriftController.rateNormal

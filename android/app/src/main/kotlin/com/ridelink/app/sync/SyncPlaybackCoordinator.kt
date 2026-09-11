@@ -865,6 +865,60 @@ class SyncPlaybackCoordinator(
         token: Long,
     ): Boolean = stillCurrent(generation) && playbackFence.isCurrent(token)
 
+    // --- fenced player steps (ADR-024 Amendment A4) -------------------------------------------
+
+    /**
+     * Runs a sequence of **single-effect** player steps, re-proving ownership before each one.
+     *
+     * This is Amendment A4's whole invariant in one function. A3 proved that a command whose
+     * session ended while it queued must do nothing; A4 is the narrower case A3 left open — an
+     * operation that legitimately *started* under Session A, suspended inside its first effect, and
+     * then chose to perform a *second* effect after Session B was live. Two player calls behind one
+     * ownership proof is exactly that shape, and it existed in three places: [applyTransport]'s
+     * pause-then-seek and seek-then-start, `MusicCoordinator.syncPrepare`'s load-then-seek, and
+     * `MusicCoordinator.syncStop`'s stop-then-clear-the-local-queue.
+     *
+     * [owns] is synchronous here — `SyncSessionPort.currentAuthGeneration` is a plain property on
+     * this platform — so the proof and the call it authorises are one uninterruptible step by
+     * construction. The iOS mirror has to take a second, synchronous proof (`ownsNow`) to get the
+     * same property, because its session port is actor-facing and its `owns` must suspend.
+     *
+     * **It does not, and cannot, un-start a step already dispatched.** ADR-024 Amendment A4 §C: an
+     * indivisible platform effect authorised while Session A held the session may complete after
+     * Session A ends, and rolling that back is not something a player exposes. What is closed is
+     * the *next* effect.
+     *
+     * @return true only if every step ran.
+     */
+    private suspend fun runOwnedSteps(
+        steps: List<PlayerStep>,
+        generation: Long,
+        token: Long,
+    ): Boolean {
+        for (step in steps) {
+            if (!owns(generation, token)) return false
+            perform(step)
+        }
+        return true
+    }
+
+    /**
+     * The one place a [PlayerStep] becomes a call on the port. Exhaustive by construction: a new
+     * step cannot be added without a branch here, and a new *effect* cannot be added without a step.
+     */
+    private suspend fun perform(step: PlayerStep) {
+        when (step) {
+            is PlayerStep.Select -> player.select(step.content)
+            is PlayerStep.Load -> player.load(step.content)
+            is PlayerStep.Seek -> player.seek(step.positionMs)
+            is PlayerStep.SetRate -> player.setRate(step.rate)
+            PlayerStep.Start -> player.start()
+            PlayerStep.Pause -> player.pause()
+            PlayerStep.Stop -> player.stop()
+            PlayerStep.ClearSelection -> player.clearSelection()
+        }
+    }
+
     // --- the clock ---------------------------------------------------------------------------
 
     /**
@@ -1833,15 +1887,19 @@ class SyncPlaybackCoordinator(
                 syncState = if (it.syncState == SyncState.SYNC_FAILED) SyncState.SCHEDULED else it.syncState,
             )
         }
-        player.prepare(playable, positionMs)
-        if (!owns(generation, token)) return
+        // ARCHITECTURE §7.2's pre-roll, as three **single-effect** steps rather than one opaque
+        // `prepare` (Amendment A4 Findings A and B). Each is now preceded by its own ownership
+        // proof, so a pre-roll whose session ends inside the load cannot seek the one that
+        // replaced it.
+        val preRoll = listOf(PlayerStep.Select(playable), PlayerStep.Load(playable), PlayerStep.Seek(positionMs))
+        if (!runOwnedSteps(preRoll, generation, token)) return
         // A snapshot-restored track that the authority says is paused is loaded and left alone:
         // there is no instant to schedule, because nothing is about to become audible.
         if (!playing) {
             markSynced()
             return
         }
-        scheduleAt(header.effectiveAtSessionUs, estimate, generation, token) { player.start() }
+        scheduleAt(header.effectiveAtSessionUs, estimate, generation, token, listOf(PlayerStep.Start))
     }
 
     /**
@@ -1866,15 +1924,15 @@ class SyncPlaybackCoordinator(
         if (!stillCurrent(generation)) return
         val token = currentEpochToken
         timeline = timeline?.copy(anchorPositionMs = positionMs, anchorSessionUs = header.effectiveAtSessionUs, playing = playing)
-        scheduleAt(header.effectiveAtSessionUs, estimate, generation, token) {
+        // Amendment A4 Finding A: these are two effects, and they used to sit inside one lambda
+        // behind one ownership proof. As a step list, the fence is re-proved between them.
+        val steps =
             if (playing) {
-                player.seek(positionMs)
-                player.start()
+                listOf(PlayerStep.Seek(positionMs), PlayerStep.Start)
             } else {
-                player.pause()
-                player.seek(positionMs)
+                listOf(PlayerStep.Pause, PlayerStep.Seek(positionMs))
             }
-        }
+        scheduleAt(header.effectiveAtSessionUs, estimate, generation, token, steps)
     }
 
     /** [applyTransport]'s proof, for the same reason and in the same position. */
@@ -1887,7 +1945,13 @@ class SyncPlaybackCoordinator(
         if (!stillCurrent(generation)) return
         val token = currentEpochToken
         timeline = timeline?.copy(anchorPositionMs = targetPositionMs, anchorSessionUs = header.effectiveAtSessionUs)
-        scheduleAt(header.effectiveAtSessionUs, estimate, generation, token) { player.seek(targetPositionMs) }
+        scheduleAt(
+            header.effectiveAtSessionUs,
+            estimate,
+            generation,
+            token,
+            listOf(PlayerStep.Seek(targetPositionMs)),
+        )
     }
 
     /**
@@ -1918,7 +1982,16 @@ class SyncPlaybackCoordinator(
             val token = playbackFence.begin()
             currentEpochToken = token
             timeline = null
-            scheduleAt(header.effectiveAtSessionUs, estimate, generation, token) { player.stop() }
+            // Amendment A4 Finding C: `stop` used to mean "stop the player **and** clear the local
+            // queue", composed inside `MusicCoordinator` after the player call. Two steps, two
+            // proofs, so a retired stop can never clear the live session's selection.
+            scheduleAt(
+                header.effectiveAtSessionUs,
+                estimate,
+                generation,
+                token,
+                listOf(PlayerStep.Stop, PlayerStep.ClearSelection),
+            )
             return
         }
         if (!step.moved) return
@@ -1932,12 +2005,13 @@ class SyncPlaybackCoordinator(
      * monotonic clock; a deadline already past is applied **immediately** and its lateness counted.
      * Never skipped, never scheduled backwards.
      */
+    @Suppress("LongParameterList") // one deadline, one clock, two fence halves and the steps it authorises
     private fun scheduleAt(
         effectiveAtSessionUs: Long,
         estimate: SessionClockEstimate,
         generation: Long,
         token: Long,
-        action: suspend () -> Unit,
+        steps: List<PlayerStep>,
     ) {
         // Decided at *arm* time, as PROTOCOL §5 rule 2 requires: the lateness of a command is a fact
         // about when it arrived, not about when this device got round to it.
@@ -1973,29 +2047,8 @@ class SyncPlaybackCoordinator(
                     // between this instant and a listener's ear (brief §23/§66).
                     _diagnostics.update { it.copy(lastScheduleErrorUs = monotonicNowUs() - decision.atLocalMonoUs) }
                 }
-                if (runIfCurrent(generation, token) { action() }) markSynced()
+                if (runOwnedSteps(steps, generation, token)) markSynced()
             }
-    }
-
-    /**
-     * Runs [action] only if both the session and the playback epoch that authorised it are still in
-     * force. Deliberately writes **no** state of its own: a correction and a scheduled command both
-     * need this guard, and only one of them means "we are now synchronised".
-     *
-     * Amendment A1 Finding F: it **returns whether it ran**. The iOS mirror discarded that fact and
-     * then mutated diagnostics, incremented the hard-seek count and emitted a `PLAYBACK_STATE`
-     * regardless — so a correction the guard had just refused still had four visible side effects.
-     * Both platforms now branch on the answer, and re-prove ownership again after the action's own
-     * suspension before anything externally visible happens.
-     */
-    private suspend fun runIfCurrent(
-        generation: Long,
-        token: Long,
-        action: suspend () -> Unit,
-    ): Boolean {
-        if (!owns(generation, token)) return false
-        action()
-        return true
     }
 
     /**
@@ -2051,6 +2104,12 @@ class SyncPlaybackCoordinator(
         // A held command whose clock has recovered is applied before anything is measured against a
         // timeline it may be about to replace.
         drainDeferredEvents()
+        // Amendment A4 Finding E: that drain suspends — it resolves content and applies commands —
+        // so everything below it reads *live* state. Without this proof a tick belonging to a
+        // retired session read the new session's timeline and epoch and, though the frame it
+        // enqueued was correctly refused at the wire, still moved the new session's outbound
+        // counters. A3 §D already settled that "diagnostics only" is not an exemption.
+        if (!stillCurrent(generation)) return
         val active = timeline ?: return
         val token = currentEpochToken
         val estimate = estimate()
@@ -2106,6 +2165,11 @@ class SyncPlaybackCoordinator(
             )
         }
         applyCorrection(outcome.action, generation, token)
+        // Amendment A4 Finding F: `applyCorrection` suspends inside the player, so this counter had
+        // the same shape as A3 Finding C's schedule-error write — a tick belonging to a retired
+        // session incremented the *live* session's `correctionTickCount` when its parked rate call
+        // finally returned. A superseded operation has zero effects, diagnostics included.
+        if (!owns(generation, token)) return
         // Last, so the counter means "this tick finished" rather than "this tick began".
         _diagnostics.update { it.copy(correctionTickCount = it.correctionTickCount + 1) }
     }
@@ -2128,19 +2192,19 @@ class SyncPlaybackCoordinator(
         when (action) {
             DriftAction.None -> Unit
             is DriftAction.Nudge -> {
-                if (!runIfCurrent(generation, token) { player.setRate(action.rate) }) return
+                if (!runOwnedSteps(listOf(PlayerStep.SetRate(action.rate)), generation, token)) return
                 if (!owns(generation, token)) return
                 _diagnostics.update { it.copy(lastCorrection = SyncCorrection.NUDGE, playbackRate = action.rate) }
             }
             DriftAction.RestoreRate -> {
-                if (!runIfCurrent(generation, token) { player.setRate(DriftController.RATE_NORMAL) }) return
+                if (!runOwnedSteps(listOf(PlayerStep.SetRate(DriftController.RATE_NORMAL)), generation, token)) return
                 if (!owns(generation, token)) return
                 _diagnostics.update {
                     it.copy(lastCorrection = SyncCorrection.RESTORE_RATE, playbackRate = DriftController.RATE_NORMAL)
                 }
             }
             is DriftAction.HardSeek -> {
-                if (!runIfCurrent(generation, token) { player.seek(action.positionMs) }) return
+                if (!runOwnedSteps(listOf(PlayerStep.Seek(action.positionMs)), generation, token)) return
                 if (!owns(generation, token)) return
                 _diagnostics.update {
                     it.copy(lastCorrection = SyncCorrection.HARD_SEEK, hardSeekCount = it.hardSeekCount + 1)
@@ -2152,7 +2216,7 @@ class SyncPlaybackCoordinator(
             DriftAction.DeclareSyncFailure -> {
                 // ARCHITECTURE §7.3 tier four and FR-025: stop correcting, restore exactly 1.0,
                 // surface it — and leave local music playing.
-                if (!runIfCurrent(generation, token) { player.setRate(DriftController.RATE_NORMAL) }) return
+                if (!runOwnedSteps(listOf(PlayerStep.SetRate(DriftController.RATE_NORMAL)), generation, token)) return
                 if (!owns(generation, token)) return
                 _diagnostics.update {
                     it.copy(

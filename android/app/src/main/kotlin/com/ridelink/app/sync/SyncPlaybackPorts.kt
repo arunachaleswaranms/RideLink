@@ -85,24 +85,40 @@ interface SyncContentPort {
  * `com.ridelink.app.music.MusicCoordinator`, its existing `LocalQueue` and its existing
  * `ExoPlayerMusicPlayer` (brief §21) — there is no second player, no second queue and no second
  * `MediaSession` anywhere in this phase.
+ *
+ * **ADR-024 Amendment A4: every method here is exactly one externally visible effect.** It used to
+ * have a `prepare(content, positionMs)` meaning "materialise, load, then seek" and a `stop()`
+ * meaning "stop the player, then clear the local queue" — two and two effects, composed *below* the
+ * port inside [com.ridelink.app.music.MusicCoordinator], where no coordinator-level ownership proof
+ * could reach between them.
+ *
+ * On this platform those two compounds do not currently suspend: `ExoPlayerMusicPlayer.execute`
+ * wraps its body in `withContext(Dispatchers.Main.immediate)` and every Phase 5 caller is already
+ * on the main thread, so the block runs undispatched. That is a property of the *dispatcher this
+ * app happens to wire up*, not of the code — it was undocumented, untested, and one
+ * `CoroutineScope` change away from being false, while the iOS mirror (an `@MainActor` coordinator
+ * over an `actor` player) suspends for real and was genuinely defective. The shape is therefore
+ * mirrored rather than left to that accident: sequencing lives in
+ * [SyncPlaybackCoordinator.runOwnedSteps], which re-proves ownership before every step.
  */
 interface SyncPlayerPort {
     val playerState: StateFlow<PlayerState>
 
     /**
-     * ARCHITECTURE §7.2's pre-roll: load and seek to [positionMs], but do **not** start.
-     *
-     * This is also brief §26's materialisation point. The authoritative shared queue is *not* copied
-     * into `LocalQueue` wholesale — only the item that is actually current becomes the local queue's
-     * one selected entry, which is what keeps `NowPlaying`/`MediaSession` metadata and the Phase 3
-     * UI correct without two queues that could disagree about an index. `NEXT`/`PREVIOUS` are
-     * resolved from the *shared* queue (brief §25), never from the local one, so there is nothing
-     * the local copy would be consulted for.
+     * Brief §26's materialisation point, and **only** that: the item that is actually current
+     * becomes the local queue's one selected entry, which is what keeps `NowPlaying`/`MediaSession`
+     * metadata and the Phase 3 UI correct. The authoritative shared queue is deliberately never
+     * copied into `LocalQueue` wholesale — two queues that could disagree about an index is exactly
+     * the bug that would produce — and `NEXT`/`PREVIOUS` are resolved from the *shared* queue
+     * (brief §25), never from the local one.
      */
-    suspend fun prepare(
-        content: SyncPlayableContent,
-        positionMs: Long,
-    )
+    suspend fun select(content: SyncPlayableContent)
+
+    /** ARCHITECTURE §7.2's pre-roll, first half: hand the decoder the file. Never starts. */
+    suspend fun load(content: SyncPlayableContent)
+
+    /** Drops the local queue's one selected entry — the tail of what used to live inside [stop]. */
+    suspend fun clearSelection()
 
     suspend fun start()
 
@@ -114,6 +130,41 @@ interface SyncPlayerPort {
     suspend fun setRate(rate: Double)
 
     suspend fun stop()
+}
+
+/**
+ * One indivisible externally visible player effect, named so a sequence of them can be run behind a
+ * fence that is re-proved before **each** one (ADR-024 Amendment A4).
+ *
+ * Deliberately a value rather than a lambda. A `suspend () -> Unit` can contain a second suspension
+ * point and nothing about its type says so, which is precisely how [SyncPlaybackCoordinator]'s
+ * `applyTransport` came to drive `pause` then `seek` behind a single ownership proof; a list of
+ * these cannot hide one.
+ */
+sealed interface PlayerStep {
+    data class Select(
+        val content: SyncPlayableContent,
+    ) : PlayerStep
+
+    data class Load(
+        val content: SyncPlayableContent,
+    ) : PlayerStep
+
+    data class Seek(
+        val positionMs: Long,
+    ) : PlayerStep
+
+    data class SetRate(
+        val rate: Double,
+    ) : PlayerStep
+
+    data object Start : PlayerStep
+
+    data object Pause : PlayerStep
+
+    data object Stop : PlayerStep
+
+    data object ClearSelection : PlayerStep
 }
 
 /** [SyncPlaybackCoordinator]'s exact call surface on [PlaybackRelay]. */

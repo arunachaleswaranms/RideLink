@@ -103,7 +103,7 @@ class MusicCoordinator(
      *
      * The cycle between the two coordinators is deliberate and one-directional per call:
      * `MusicCoordinator` asks the gate, the gate never calls back into these gated methods (it uses
-     * `syncPrepare`/`syncStart`/... which bypass it), so there is no re-entrancy.
+     * `syncSelect`/`syncLoad`/`syncStart`/... which bypass it), so there is no re-entrancy.
      */
     @Volatile
     var syncGate: SyncPlaybackGate? = null
@@ -250,28 +250,48 @@ class MusicCoordinator(
     // immediate loop. They drive the same one player and the same one queue as everything above —
     // there is no second player, no second queue and no second MediaSession in Phase 5 (brief §21).
 
+    // **ADR-024 Amendment A4: one externally visible effect per entry point.** These were two
+    // functions — a `syncPrepare` that materialised, loaded and then seeked, and a `syncStop` that
+    // stopped the player and then cleared the local queue. Each composed several effects *below*
+    // [SyncPlayerPort], out of reach of any ownership proof `SyncPlaybackCoordinator` could take.
+    // Sequencing moved to `SyncPlaybackCoordinator.runOwnedSteps`, which re-proves ownership before
+    // every step. See `SyncPlayerPort`'s own note on why this platform was not observably defective
+    // and is mirrored anyway.
+
     /**
-     * ARCHITECTURE §7.2's pre-roll: load [location] and seek to [positionMs] **without** starting.
-     * Also makes this the local queue's one selected entry, so `NowPlaying`/`MediaSession` metadata
-     * and the Phase 3 UI describe what is actually loaded (brief §26). The shared queue itself is
-     * displayed from `SyncPlaybackCoordinator.queueState`; it is deliberately not copied wholesale
-     * into `LocalQueue`, because two queues that could disagree about an index is exactly the bug
-     * that would produce.
+     * Brief §26's materialisation point: the track that is actually current becomes the local
+     * queue's one selected entry, so `NowPlaying`/`MediaSession` metadata and the Phase 3 UI
+     * describe what is loaded. The shared queue itself is displayed from
+     * `SyncPlaybackCoordinator.queueState`; it is deliberately not copied wholesale into
+     * `LocalQueue`, because two queues that could disagree about an index is exactly the bug that
+     * would produce.
      */
-    suspend fun syncPrepare(
+    fun syncSelect(
         contentHash: ContentHash,
         localEntryId: LocalEntryId,
         location: LocalTrackLocation,
         title: String?,
         artist: String?,
-        positionMs: Long,
     ) {
         _lastMusicStartRefusal.value = null
         externalCacheSources.register(localEntryId, ExternalCacheSource(contentHash, location, title, artist))
         val item = LocalQueueItem(id = nextQueueItemId(), localEntryId = localEntryId, insertedAtMonoUs = monotonicNowUs())
         _queueState.value = LocalQueueState(items = listOf(item), currentId = item.id)
+    }
+
+    /** ARCHITECTURE §7.2's pre-roll, first half: hand the decoder the file. Never starts. */
+    suspend fun syncLoad(
+        localEntryId: LocalEntryId,
+        location: LocalTrackLocation,
+        title: String?,
+        artist: String?,
+    ) {
         player.execute(PlaybackCommand.Load(localEntryId, location, title, artist))
-        player.execute(PlaybackCommand.Seek(positionMs))
+    }
+
+    /** The tail of what used to be inside [syncStop]. */
+    fun syncClearSelection() {
+        _queueState.value = LocalQueueState()
     }
 
     suspend fun syncStart() {
@@ -293,7 +313,6 @@ class MusicCoordinator(
 
     suspend fun syncStop() {
         player.execute(PlaybackCommand.Stop)
-        _queueState.value = LocalQueueState()
     }
 
     fun importTree(treeUri: PlatformUri) =

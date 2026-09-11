@@ -64,16 +64,31 @@ public protocol SyncContentPort: Sendable {
 /// The one player/queue Phase 5 drives. Every method lands on the **existing** app-target
 /// `MusicCoordinator`, its existing `LocalQueue`, its existing `AVAudioEnginePlayer` and its
 /// existing `MPNowPlayingInfoCenter`/`MPRemoteCommandCenter` integration (brief §21).
+///
+/// **ADR-024 Amendment A4: every method here is exactly one externally visible effect.** It used to
+/// have a `prepare(content:positionMs:)` that meant "materialise, load, then seek" and a `stop()`
+/// that meant "stop the player, then clear the local queue" — two and two effects, composed *below*
+/// the port, in `MusicCoordinator`. A coordinator-level ownership proof cannot reach between the
+/// sub-effects of an operation it cannot see, so a Session-A pre-roll that suspended inside its load
+/// resumed after a boundary and seeked **Session B's** player, and a Session-A stop cleared Session
+/// B's local queue. Composition therefore moved up to `SyncPlaybackCoordinator.runOwnedSteps`, which
+/// re-proves ownership before every step; the shape of this protocol is what makes that fence
+/// exhaustive rather than a list someone has to remember to extend.
 public protocol SyncPlayerPort: Sendable {
     func playerState() async -> PlayerState
 
-    /// ARCHITECTURE §7.2's pre-roll: load and seek, but do **not** start.
-    ///
-    /// Also brief §26's materialisation point. The authoritative shared queue is *not* copied into
-    /// `LocalQueue` wholesale — only the item that is actually current becomes the local queue's one
-    /// selected entry, which keeps Now Playing metadata correct without two queues that could
-    /// disagree about an index. `NEXT`/`PREVIOUS` resolve from the *shared* queue (brief §25).
-    func prepare(content: SyncPlayableContent, positionMs: Int64) async
+    /// Brief §26's materialisation point, and **only** that: the item that is actually current
+    /// becomes the local queue's one selected entry, so Now Playing metadata describes what is
+    /// loaded. The authoritative shared queue is deliberately never copied into `LocalQueue`
+    /// wholesale — two queues that could disagree about an index is exactly the bug that would
+    /// produce — and `NEXT`/`PREVIOUS` resolve from the *shared* queue (brief §25).
+    func select(content: SyncPlayableContent) async
+
+    /// ARCHITECTURE §7.2's pre-roll, first half: hand the decoder the file. Never starts.
+    func load(content: SyncPlayableContent) async
+
+    /// Drops the local queue's one selected entry — the tail of what used to live inside `stop()`.
+    func clearSelection() async
 
     func start() async
     func pause() async
@@ -81,6 +96,23 @@ public protocol SyncPlayerPort: Sendable {
     /// ADR-004's rate-nudge tier. Always exactly 1.0 when correction ends (brief §38).
     func setRate(_ rate: Double) async
     func stop() async
+}
+
+/// One indivisible externally visible player effect, named so a sequence of them can be run behind
+/// a fence that is re-proved before **each** one (ADR-024 Amendment A4).
+///
+/// Deliberately a value rather than a closure. A closure can contain a second `await` and nothing
+/// about its type says so, which is precisely how `applyTransport` ended up performing
+/// `pause` then `seek` behind a single ownership proof; a list of these cannot hide one.
+public enum PlayerStep: Sendable, Equatable {
+    case select(SyncPlayableContent)
+    case load(SyncPlayableContent)
+    case seek(Int64)
+    case start
+    case pause
+    case setRate(Double)
+    case stop
+    case clearSelection
 }
 
 /// `SyncPlaybackCoordinator`'s exact call surface on `PlaybackRelay`.

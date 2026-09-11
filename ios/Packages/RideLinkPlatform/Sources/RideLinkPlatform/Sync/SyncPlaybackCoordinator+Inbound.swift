@@ -673,8 +673,13 @@ extension SyncPlaybackCoordinator {
         if diagnostics.syncState == .syncFailed { diagnostics.syncState = .scheduled }
         publishQueue()
         publishDiagnostics()
-        await player.prepare(content: playable, positionMs: positionMs)
-        guard await owns(generation: generation, token: token) else { return }
+        // ARCHITECTURE §7.2's pre-roll, as three **single-effect** steps rather than one opaque
+        // `prepare` (Amendment A4 Findings A and B). The materialisation, the decoder load and the
+        // seek each suspend, and each is now preceded by its own ownership proof — so a pre-roll
+        // whose session ends inside the load can no longer seek the session that replaced it.
+        guard await runOwnedSteps(
+            [.select(playable), .load(playable), .seek(positionMs)], generation: generation, token: token
+        ) else { return }
         // A snapshot-restored track that the authority says is paused is loaded and left alone:
         // there is no instant to schedule, because nothing is about to become audible.
         guard playing else {
@@ -682,9 +687,7 @@ extension SyncPlaybackCoordinator {
             publishDiagnostics()
             return
         }
-        scheduleAt(header.effectiveAtSessionUs, estimate: estimate, generation: generation, token: token) { [weak self] in
-            await self?.player.start()
-        }
+        scheduleAt(header.effectiveAtSessionUs, estimate: estimate, generation: generation, token: token, steps: [.start])
     }
 
     /// Amendment A3 Finding B: the ownership proof is the **first** statement, before
@@ -708,16 +711,15 @@ extension SyncPlaybackCoordinator {
         guard await stillCurrent(generation) else { return }
         let token = currentEpochToken
         timeline = timeline?.reanchored(positionMs: positionMs, sessionUs: header.effectiveAtSessionUs, playing: playing)
-        scheduleAt(header.effectiveAtSessionUs, estimate: estimate, generation: generation, token: token) { [weak self] in
-            guard let self else { return }
-            if playing {
-                await self.player.seek(positionMs: positionMs)
-                await self.player.start()
-            } else {
-                await self.player.pause()
-                await self.player.seek(positionMs: positionMs)
-            }
-        }
+        // Amendment A4 Finding A: these are two effects, and they used to sit inside one closure
+        // behind one ownership proof. `player.pause()` suspends — the hop to `MusicCoordinator` and
+        // on to the player is two actor boundaries — so a Session-A `PAUSE` firing as the boundary
+        // landed paused nothing it owned and then seeked **Session B's** player to Session A's
+        // position. As a step list, the fence is re-proved between them.
+        scheduleAt(
+            header.effectiveAtSessionUs, estimate: estimate, generation: generation, token: token,
+            steps: playing ? [.seek(positionMs), .start] : [.pause, .seek(positionMs)]
+        )
     }
 
     /// `applyTransport`'s proof, for the same reason and in the same position.
@@ -730,9 +732,10 @@ extension SyncPlaybackCoordinator {
         guard await stillCurrent(generation) else { return }
         let token = currentEpochToken
         timeline = timeline?.reanchored(positionMs: targetPositionMs, sessionUs: header.effectiveAtSessionUs)
-        scheduleAt(header.effectiveAtSessionUs, estimate: estimate, generation: generation, token: token) { [weak self] in
-            await self?.player.seek(positionMs: targetPositionMs)
-        }
+        scheduleAt(
+            header.effectiveAtSessionUs, estimate: estimate, generation: generation, token: token,
+            steps: [.seek(targetPositionMs)]
+        )
     }
 
     /// PROTOCOL §5's `NEXT`/`PREVIOUS`, resolved against the **shared** queue (brief §25). Both peers
@@ -755,9 +758,14 @@ extension SyncPlaybackCoordinator {
             let token = epoch.begin()
             currentEpochToken = token
             timeline = nil
-            scheduleAt(header.effectiveAtSessionUs, estimate: estimate, generation: generation, token: token) { [weak self] in
-                await self?.player.stop()
-            }
+            // Amendment A4 Finding C: `stop` used to mean "stop the player **and** clear the local
+            // queue", composed inside `MusicCoordinator` across the player's own suspension — so a
+            // Session-A stop returning after Session B had materialised a track cleared Session B's
+            // local queue and its Now Playing metadata with it. Two steps, two proofs.
+            scheduleAt(
+                header.effectiveAtSessionUs, estimate: estimate, generation: generation, token: token,
+                steps: [.stop, .clearSelection]
+            )
             return
         }
         guard step.moved else { return }
@@ -770,12 +778,16 @@ extension SyncPlaybackCoordinator {
     /// PROTOCOL §5 rule 2, exactly: a deadline still ahead is waited for on this device's own
     /// monotonic clock; a deadline already past is applied **immediately** and its lateness counted.
     /// Never skipped, never scheduled backwards.
+    /// **Amendment A4 Finding A: the action is a list of single-effect steps, not a closure.** A
+    /// closure could hold a second `await`, and its type said nothing about that — which is how
+    /// `applyTransport` came to drive two player effects behind one ownership proof. Every step in
+    /// the list is fenced independently by `runOwnedSteps`.
     private func scheduleAt(
         _ effectiveAtSessionUs: Int64,
         estimate: SessionClockEstimate,
         generation: Int64,
         token: Int64,
-        action: @escaping @Sendable () async -> Void
+        steps: [PlayerStep]
     ) {
         let decision = ScheduledCommand.decide(
             effectiveAtSessionUs: effectiveAtSessionUs,
@@ -800,7 +812,7 @@ extension SyncPlaybackCoordinator {
         let node = Task { [weak self] in
             await previous?.value
             await self?.runScheduledNode(
-                id: id, generation: generation, token: token, deadlineUs: deadlineUs, action: action
+                id: id, generation: generation, token: token, deadlineUs: deadlineUs, steps: steps
             )
         }
         scheduledChain = node
@@ -822,7 +834,7 @@ extension SyncPlaybackCoordinator {
         generation: Int64,
         token: Int64,
         deadlineUs: Int64?,
-        action: @Sendable () async -> Void
+        steps: [PlayerStep]
     ) async {
         defer { releaseChainNode(id) }
         guard !Task.isCancelled, await owns(generation: generation, token: token) else { return }
@@ -831,7 +843,7 @@ extension SyncPlaybackCoordinator {
             guard !Task.isCancelled, await owns(generation: generation, token: token) else { return }
             recordScheduleError(deadlineUs: deadlineUs)
         }
-        if await runIfCurrent(generation: generation, token: token, action: action) {
+        if await runOwnedSteps(steps, generation: generation, token: token) {
             await markSyncedAndPublish(generation: generation, token: token)
         }
     }
@@ -842,22 +854,6 @@ extension SyncPlaybackCoordinator {
     private func recordScheduleError(deadlineUs: Int64) {
         diagnostics.lastScheduleErrorUs = monotonicNowUs() - deadlineUs
         publishDiagnostics()
-    }
-
-    /// Runs `action` only if both the session and the playback epoch that authorised it are still in
-    /// force. Deliberately writes **no** state of its own: a correction and a scheduled command both
-    /// need this guard, and only one of them means "we are now synchronised".
-    ///
-    /// Amendment A1 Finding F: it **returns whether it ran**, and every caller branches on the
-    /// answer. This function used to return `Void` and take a `markSynced` flag, and the correction
-    /// call sites then mutated diagnostics, incremented the hard-seek count, set `syncFailed` and
-    /// emitted a `PLAYBACK_STATE` *unconditionally* — so a correction the guard had just refused
-    /// still had four visible side effects, one of them on the wire.
-    @discardableResult
-    func runIfCurrent(generation: Int64, token: Int64, action: @Sendable () async -> Void) async -> Bool {
-        guard await owns(generation: generation, token: token) else { return false }
-        await action()
-        return true
     }
 
     /// A scheduled authoritative command took effect, so this device is tracking the timeline. The
@@ -910,6 +906,12 @@ extension SyncPlaybackCoordinator {
         // A held command whose clock has recovered is applied before anything is measured against a
         // timeline it may be about to replace.
         await drainDeferredEvents()
+        // Amendment A4 Finding E: that drain suspends — it resolves content and applies commands —
+        // so everything below it reads *live* state. Without this proof a tick belonging to a
+        // retired session read the new session's timeline and epoch and, though the frame it
+        // enqueued was correctly refused at the wire, still moved the new session's outbound
+        // counters. A3 §D already settled that "diagnostics only" is not an exemption.
+        guard await stillCurrent(generation) else { return }
         guard let active = timeline else { return }
         let token = currentEpochToken
         guard let estimate = await estimate(), estimate.ready else {
@@ -957,6 +959,11 @@ extension SyncPlaybackCoordinator {
         diagnostics.routeTransitioning = transitioning
         publishDiagnostics()
         await applyCorrection(outcome.action, generation: generation, token: token)
+        // Amendment A4 Finding F: `applyCorrection` suspends inside the player, so this counter had
+        // the same shape as A3 Finding C's schedule-error write — a tick belonging to a retired
+        // session incremented the *live* session's `correctionTickCount` when its parked rate call
+        // finally returned. A superseded operation has zero effects, diagnostics included.
+        guard await owns(generation: generation, token: token) else { return }
         // Last, so the counter means "this tick finished" rather than "this tick began".
         diagnostics.correctionTickCount += 1
         publishDiagnostics()
@@ -974,23 +981,19 @@ extension SyncPlaybackCoordinator {
         case .none:
             return
         case .nudge(let rate):
-            guard await runIfCurrent(generation: generation, token: token, action: { [weak self] in
-                await self?.player.setRate(rate)
-            }) else { return }
+            guard await runOwnedSteps([.setRate(rate)], generation: generation, token: token) else { return }
             guard await owns(generation: generation, token: token) else { return }
             diagnostics.lastCorrection = .nudge
             diagnostics.playbackRate = rate
         case .restoreRate:
-            guard await runIfCurrent(generation: generation, token: token, action: { [weak self] in
-                await self?.player.setRate(DriftController.rateNormal)
-            }) else { return }
+            guard await runOwnedSteps(
+                [.setRate(DriftController.rateNormal)], generation: generation, token: token
+            ) else { return }
             guard await owns(generation: generation, token: token) else { return }
             diagnostics.lastCorrection = .restoreRate
             diagnostics.playbackRate = DriftController.rateNormal
         case .hardSeek(let positionMs):
-            guard await runIfCurrent(generation: generation, token: token, action: { [weak self] in
-                await self?.player.seek(positionMs: positionMs)
-            }) else { return }
+            guard await runOwnedSteps([.seek(positionMs)], generation: generation, token: token) else { return }
             guard await owns(generation: generation, token: token) else { return }
             diagnostics.lastCorrection = .hardSeek
             diagnostics.hardSeekCount += 1
@@ -1000,9 +1003,9 @@ extension SyncPlaybackCoordinator {
         case .declareSyncFailure:
             // ARCHITECTURE §7.3 tier four and FR-025: stop correcting, restore exactly 1.0, surface
             // it — and leave local music playing.
-            guard await runIfCurrent(generation: generation, token: token, action: { [weak self] in
-                await self?.player.setRate(DriftController.rateNormal)
-            }) else { return }
+            guard await runOwnedSteps(
+                [.setRate(DriftController.rateNormal)], generation: generation, token: token
+            ) else { return }
             guard await owns(generation: generation, token: token) else { return }
             diagnostics.playbackRate = DriftController.rateNormal
             diagnostics.lastCorrection = .syncFailed

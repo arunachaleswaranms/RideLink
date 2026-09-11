@@ -20,16 +20,24 @@ import java.util.UUID
 /**
  * [SyncPlayerPort] over the **one** [MusicCoordinator]: its `LocalQueue`, its one
  * `ExoPlayerMusicPlayer`, its one ADR-022 `MediaSession`.
+ *
+ * ADR-024 Amendment A4: every method below is a single call onto one [MusicCoordinator] entry point
+ * that performs exactly one externally visible effect. Nothing here composes two, and nothing it
+ * calls does either — that is what makes `SyncPlaybackCoordinator.runOwnedSteps`' per-step fence the
+ * complete story rather than a fence around an opaque compound.
  */
 internal class MusicCoordinatorPlayerPort(
     private val music: MusicCoordinator,
 ) : SyncPlayerPort {
     override val playerState: StateFlow<PlayerState> get() = music.playerState
 
-    override suspend fun prepare(
-        content: SyncPlayableContent,
-        positionMs: Long,
-    ) = music.syncPrepare(content.contentHash, content.localEntryId, content.location, content.title, content.artist, positionMs)
+    override suspend fun select(content: SyncPlayableContent) =
+        music.syncSelect(content.contentHash, content.localEntryId, content.location, content.title, content.artist)
+
+    override suspend fun load(content: SyncPlayableContent) =
+        music.syncLoad(content.localEntryId, content.location, content.title, content.artist)
+
+    override suspend fun clearSelection() = music.syncClearSelection()
 
     override suspend fun start() = music.syncStart()
 

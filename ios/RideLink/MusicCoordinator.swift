@@ -62,7 +62,7 @@ public final class MusicCoordinator {
     ///
     /// The cycle between the two coordinators is deliberate and one-directional per call:
     /// `MusicCoordinator` asks the gate, the gate never calls back into these gated methods (it uses
-    /// `syncPrepare`/`syncStart`/… which bypass it), so there is no re-entrancy.
+    /// `syncSelect`/`syncLoad`/`syncStart`/… which bypass it), so there is no re-entrancy.
     public var syncGate: (any SyncPlaybackGate)?
 
     private let player: any Player
@@ -261,25 +261,34 @@ public final class MusicCoordinator {
     // immediate loop. They drive the same one player and the same one queue as everything above —
     // there is no second player, no second queue and no second Now Playing integration (brief §21).
 
-    /// ARCHITECTURE §7.2's pre-roll: load `location` and seek to `positionMs` **without** starting.
-    /// Also makes this the local queue's one selected entry, so Now Playing metadata and the Phase 3
-    /// UI describe what is actually loaded (brief §26). The shared queue itself is displayed from
-    /// `SyncPlaybackCoordinator.queueState`; it is deliberately not copied wholesale into
-    /// `LocalQueue`, because two queues that could disagree about an index is exactly the bug that
-    /// would produce.
-    public func syncPrepare(
-        contentHash: ContentHash,
-        localEntryId: LocalEntryId,
-        location: LocalTrackLocation,
-        positionMs: Int64
-    ) async {
-        activateAudioSessionIfNeeded()
+    // **ADR-024 Amendment A4: one externally visible effect per entry point, and no `await`
+    // before the effect within one.** These were two functions — a `syncPrepare` that materialised,
+    // loaded and then seeked, and a `syncStop` that stopped the player and then cleared the local
+    // queue. Each composed several effects across a real suspension, *below* the port and therefore
+    // out of reach of any ownership proof `SyncPlaybackCoordinator` could take: this type is
+    // `@MainActor`, so `await player.execute(…)` releases the main actor and a whole replacement
+    // session can run its own pre-roll before the first one resumes to seek. Sequencing moved to
+    // `SyncPlaybackCoordinator.runOwnedSteps`, which re-proves ownership before every step.
+
+    /// Brief §26's materialisation point: the track that is actually current becomes the local
+    /// queue's one selected entry, so Now Playing metadata and the Phase 3 UI describe what is
+    /// loaded. The shared queue itself is displayed from `SyncPlaybackCoordinator.queueState`; it is
+    /// deliberately not copied wholesale into `LocalQueue`, because two queues that could disagree
+    /// about an index is exactly the bug that would produce.
+    public func syncSelect(contentHash: ContentHash, localEntryId: LocalEntryId, location: LocalTrackLocation) {
         externalCacheSources[localEntryId] = ExternalCacheSource(contentHash: contentHash, location: location)
         let item = LocalQueueItem(id: UUID().uuidString, localEntryId: localEntryId, insertedAtMonoUs: monotonicNowUs())
         queueState = LocalQueueState(items: [item], currentId: item.id)
-        await player.execute(.load(localEntryId: localEntryId, location: location))
-        await player.execute(.seek(positionMs: positionMs))
     }
+
+    /// ARCHITECTURE §7.2's pre-roll, first half: hand the decoder the file. Never starts.
+    public func syncLoad(localEntryId: LocalEntryId, location: LocalTrackLocation) async {
+        activateAudioSessionIfNeeded()
+        await player.execute(.load(localEntryId: localEntryId, location: location))
+    }
+
+    /// The tail of what used to be inside `syncStop`.
+    public func syncClearSelection() { queueState = LocalQueueState() }
 
     public func syncStart() async { await player.execute(.play) }
 
@@ -290,10 +299,7 @@ public final class MusicCoordinator {
     /// ADR-004's rate-nudge tier. Always exactly 1.0 when correction ends (brief §38).
     public func syncSetRate(_ rate: Double) async { await player.execute(.setRate(rate: rate)) }
 
-    public func syncStop() async {
-        await player.execute(.stop)
-        queueState = LocalQueueState()
-    }
+    public func syncStop() async { await player.execute(.stop) }
 
     /// Activated once, lazily, on the first real play — matching `MainActivity.attemptMusicPlay`'s
     /// "configure before use" discipline on Android, without an iOS equivalent of its

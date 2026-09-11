@@ -11,19 +11,29 @@ import RideLinkPlatform
 
 /// `SyncPlayerPort` over the **one** `MusicCoordinator`: its `LocalQueue`, its one
 /// `AVAudioEnginePlayer`, its one `MPNowPlayingInfoCenter`/`MPRemoteCommandCenter` integration.
+///
+/// ADR-024 Amendment A4: every method below is a single hop onto one `MusicCoordinator` entry point
+/// that performs exactly one externally visible effect. Nothing here composes two, and nothing it
+/// calls does either — that is what makes `SyncPlaybackCoordinator.runOwnedSteps`' per-step fence
+/// the complete story rather than a fence around an opaque compound.
 struct MusicCoordinatorPlayerPort: SyncPlayerPort {
     let music: MusicCoordinator
 
     func playerState() async -> PlayerState { await MainActor.run { music.playerState } }
 
-    func prepare(content: SyncPlayableContent, positionMs: Int64) async {
-        await music.syncPrepare(
-            contentHash: content.contentHash,
-            localEntryId: content.localEntryId,
-            location: content.location,
-            positionMs: positionMs
-        )
+    func select(content: SyncPlayableContent) async {
+        await MainActor.run {
+            music.syncSelect(
+                contentHash: content.contentHash, localEntryId: content.localEntryId, location: content.location
+            )
+        }
     }
+
+    func load(content: SyncPlayableContent) async {
+        await music.syncLoad(localEntryId: content.localEntryId, location: content.location)
+    }
+
+    func clearSelection() async { await MainActor.run { music.syncClearSelection() } }
 
     func start() async { await music.syncStart() }
 
