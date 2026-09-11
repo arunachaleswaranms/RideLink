@@ -53,11 +53,85 @@ actor FakeSyncSession: SyncSessionPort {
 
     nonisolated var channel: any SyncPlaybackChannel { FakeChannel(session: self) }
 
-    func currentAuthGeneration() async -> Int64 { generation }
+    /// ADR-024 Amendment A5 Finding D: parks the **authentication-generation read** that
+    /// `stillCurrent`/`owns` themselves take, returning the value that was live when the park
+    /// began. That is the one interleaving in which the asynchronous proof answers *true* about a
+    /// session that has already ended — the window `stillCurrentNow`/`ownsNow` exist to close, and
+    /// the only way to exercise it deterministically.
+    func currentAuthGeneration() async -> Int64 {
+        guard generationGateArmed else { return generation }
+        if generationGateSkips > 0 {
+            generationGateSkips -= 1
+            return generation
+        }
+        generationGateArmed = false
+        let parked = generation
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            generationGateContinuation = continuation
+        }
+        return parked
+    }
 
-    func sessionClockEstimate() async -> SessionClockEstimate? { clock }
+    /// ADR-024 Amendment A5 Findings A and B: parks a **session-clock read**.
+    ///
+    /// `SyncPlaybackCoordinator.estimate()` awaits this, and both `admitAuthoritativeCommand` and
+    /// `tickOnce` mutate live Phase 5 state immediately after it returns. Parking here is what puts
+    /// a real authentication boundary strictly inside that suspension.
+    func sessionClockEstimate() async -> SessionClockEstimate? {
+        guard clockGateArmed else { return clock }
+        if clockGateSkips > 0 {
+            clockGateSkips -= 1
+            return clock
+        }
+        clockGateArmed = false
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            clockGateContinuation = continuation
+        }
+        return clock
+    }
 
     func rttP95Us() async -> Int64? { rtt }
+
+    // MARK: - The clock and generation gates (ADR-024 Amendment A5)
+
+    private var clockGateArmed = false
+    private var clockGateSkips = 0
+    private var clockGateContinuation: CheckedContinuation<Void, Never>?
+    private var generationGateArmed = false
+    private var generationGateSkips = 0
+    private var generationGateContinuation: CheckedContinuation<Void, Never>?
+
+    /// Parks a `sessionClockEstimate()` read after letting `skipping` of them through.
+    func armClockGate(skipping: Int = 0) {
+        clockGateArmed = true
+        clockGateSkips = skipping
+    }
+
+    func releaseClockGate() {
+        clockGateArmed = false
+        clockGateSkips = 0
+        let parked = clockGateContinuation
+        clockGateContinuation = nil
+        parked?.resume()
+    }
+
+    var isClockGateParked: Bool { clockGateContinuation != nil }
+
+    /// Parks a `currentAuthGeneration()` read after letting `skipping` of them through.
+    func armGenerationGate(skipping: Int = 0) {
+        generationGateArmed = true
+        generationGateSkips = skipping
+    }
+
+    func releaseGenerationGate() {
+        generationGateArmed = false
+        generationGateSkips = 0
+        let parked = generationGateContinuation
+        generationGateContinuation = nil
+        parked?.resume()
+    }
+
+    var isGenerationGateParked: Bool { generationGateContinuation != nil }
 
     func setGeneration(_ value: Int64) { generation = value }
 
@@ -357,13 +431,45 @@ final class FakeMonotonicClock: @unchecked Sendable, SyncDeadlineSleeper {
     }
 }
 
-/// The route-transition supplier, flipped by a test.
+/// The route-transition supplier, flipped by a test — and parkable, because
+/// `SyncPlaybackCoordinator.tickOnce` awaits it immediately before it writes `driftState` and six
+/// diagnostics fields (ADR-024 Amendment A5 Finding B).
 actor FakeRouteState: SyncRouteStatePort {
     private var transitioning = false
+    private var gateArmed = false
+    private var gateSkips = 0
+    private var gateContinuation: CheckedContinuation<Void, Never>?
 
     func set(_ value: Bool) { transitioning = value }
 
-    func isRouteTransitioning() async -> Bool { transitioning }
+    func isRouteTransitioning() async -> Bool {
+        guard gateArmed else { return transitioning }
+        if gateSkips > 0 {
+            gateSkips -= 1
+            return transitioning
+        }
+        gateArmed = false
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            gateContinuation = continuation
+        }
+        return transitioning
+    }
+
+    /// Parks an `isRouteTransitioning()` read after letting `skipping` of them through.
+    func armGate(skipping: Int = 0) {
+        gateArmed = true
+        gateSkips = skipping
+    }
+
+    func releaseGate() {
+        gateArmed = false
+        gateSkips = 0
+        let parked = gateContinuation
+        gateContinuation = nil
+        parked?.resume()
+    }
+
+    var isGateParked: Bool { gateContinuation != nil }
 }
 
 /// Lets the actor's queued work drain before an assertion. Not a sleep against wall time: it yields
