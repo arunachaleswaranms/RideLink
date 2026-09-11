@@ -3935,7 +3935,14 @@ no Android test churn**; reintroducing any of these windows there would take a v
   machine and still not in CI.
 - **Vectors:** all thirteen generators re-run; `git status protocol/` empty. The wire did not move —
   no message type, field, encoding or bound changed.
-- **CI:** recorded in the follow-up docs commit, as this project's established pattern.
+- **CI:** run **34629186690** (run number **37**, **attempt 1**, `a68dc8db129463995fb076c809cc9eae73f165fc`)
+  — **green on both platforms, first attempt, nothing re-run.** Android: core unit tests, all unit
+  tests, ktlint, detekt, lint, `assembleDebug`, `assembleRelease` all success. iOS: `RideLinkCore`
+  tests, `RideLinkPlatform` tests, Debug and Release unsigned simulator builds all success.
+  `connectedDebugAndroidTest` is deliberately not in CI (no emulator on the runner), and no
+  emulator run was taken locally either, because no Android code changed. CI tested the **docs**
+  commit `a68dc8d`, which contains the functional commits `6613b7d` (production) and `f0f5239`
+  (tests) beneath it.
 
 ### What is still not true
 
