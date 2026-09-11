@@ -485,7 +485,7 @@ class SyncPlaybackDeliveryAuditTest {
             clock.advanceBy(LEAD_US * 4)
             runCurrent()
 
-            val prepared = player.calls.filterIsInstance<FakeSyncPlayer.Call.Prepare>()
+            val prepared = player.calls.filterIsInstance<FakeSyncPlayer.Call.Load>()
             assertEquals(1, prepared.size, "exactly one track was loaded")
             assertEquals(HASH_B, prepared.first().contentHash, "NEXT resolved against revision 5, exactly as authored")
             assertEquals(6, coordinator.queueState.value.revision, "and the snapshot then applied, in its own turn")

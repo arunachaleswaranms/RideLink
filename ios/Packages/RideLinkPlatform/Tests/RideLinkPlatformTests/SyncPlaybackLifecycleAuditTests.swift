@@ -103,20 +103,20 @@ final class SyncPlaybackLifecycleAuditTests: XCTestCase {
     }
 
     /// Session A's leader issues an authoritative `PLAY`, the transport confirms it went out, and its
-    /// **local** apply then parks inside `player.prepare` — the exact position ADR-024 Amendment A2's
+    /// **local** apply then parks inside the decoder `load` — the exact position ADR-024 Amendment A2's
     /// commit point creates and A3 is about.
     private func sentPlayBlockedInPrepare() async {
         await player.gateCalls { call in
-            if case .prepare(let hash, _) = call { return hash == Self.hashA }
+            if case .load(let hash) = call { return hash == Self.hashA }
             return false
         }
         await coordinator.playSynchronized(Self.hashA)
         await expect("PLAY A reached the wire, so A2 committed its command_seq") { [self] in
             await !session.playbackMessages().filter(\.isPlay).isEmpty
         }
-        await expect("its local apply is parked inside prepare") { [self] in await player.isGateParked }
+        await expect("its local apply is parked inside the decoder load") { [self] in await player.isGateParked }
         let calls = await player.calls
-        XCTAssertEqual(calls, [.prepare(Self.hashA, 0)], "nothing beyond the pre-roll has happened yet")
+        XCTAssertEqual(calls, [.select(Self.hashA), .load(Self.hashA)], "nothing beyond the load has happened yet")
     }
 
     /// A full authentication boundary: the link drops, the generation moves, a new session opens.
@@ -156,8 +156,20 @@ final class SyncPlaybackLifecycleAuditTests: XCTestCase {
         if !currentIsLast { await enqueueAndSettle(Self.hashZ) }
         let deadline = await playDeadline(for: Self.hashY)
         if startPlayback {
+            // Counted rather than merely contained (ADR-024 Amendment A4): Session A has often
+            // already started something, and `contains(.start)` would then answer true before
+            // Session B had done anything — leaving the "before" snapshot taken too early.
+            let startsBefore = await player.calls.filter { $0 == .start }.count
             clock.advance(to: deadline)
-            await expect("Session B started") { [self] in await player.calls.contains(.start) }
+            await expect("Session B started") { [self] in
+                await player.calls.filter { $0 == .start }.count > startsBefore
+            }
+            // `.start` is recorded *inside* the step; `markSynced` and the schedule-error
+            // measurement follow it. Snapshotting between the two produced a 1-in-70 flake where
+            // `syncState` moved from `.scheduled` to `.synced` after the "before" reading.
+            await expect("and Session B's diagnostics have settled") { [self] in
+                await coordinator.diagnostics.syncState == .synced
+            }
         }
         return deadline
     }
@@ -187,7 +199,7 @@ final class SyncPlaybackLifecycleAuditTests: XCTestCase {
 
     /// **The defect.** `resetForNewSession` did `applyChain = nil`. That detaches the *tail
     /// reference*; it cancels nothing and fences nothing. `PLAY(seq n)` parked inside
-    /// `player.prepare`, `NEXT(seq n+1)` — already written to the wire, already committed by A2's
+    /// the decoder `load`, `NEXT(seq n+1)` — already written to the wire, already committed by A2's
     /// outbound consumer — waited behind it in the chain, and when the blocked `PLAY` finally
     /// returned the `NEXT` woke up in **Session B** and ran `applyStep` against Session B's queue.
     ///
@@ -205,7 +217,9 @@ final class SyncPlaybackLifecycleAuditTests: XCTestCase {
         }
         await awaitOutboundQuiescent()
         let callsWhileBlocked = await player.calls
-        XCTAssertEqual(callsWhileBlocked, [.prepare(Self.hashA, 0)], "NEXT A's apply is queued behind PLAY A")
+        XCTAssertEqual(
+            callsWhileBlocked, [.select(Self.hashA), .load(Self.hashA)], "NEXT A's apply is queued behind PLAY A"
+        )
 
         await boundary(generation: 2)
         _ = await establishSessionB()
@@ -244,12 +258,15 @@ final class SyncPlaybackLifecycleAuditTests: XCTestCase {
 
         await coordinator.playSynchronized(Self.hashX)
         await expect("Session B's own apply ran while Session A's was still blocked") { [self] in
-            await player.calls.contains(.prepare(Self.hashX, 0))
+            await player.calls.contains(.load(Self.hashX))
         }
         await awaitOutboundQuiescent()
         let deadline = await playDeadline(for: Self.hashX)
         clock.advance(to: deadline)
         await expect("and reached its scheduled start") { [self] in await player.calls.contains(.start) }
+        await expect("and its diagnostics settled") { [self] in
+            await coordinator.diagnostics.syncState == .synced
+        }
         let track = await coordinator.diagnostics.currentTrackHash
         XCTAssertEqual(track, Self.hashX)
         let stillParked = await player.isGateParked
@@ -400,6 +417,9 @@ final class SyncPlaybackLifecycleAuditTests: XCTestCase {
         await expect("Session B's own scheduled start still fires") { [self] in
             await player.calls.contains(.start)
         }
+        await expect("and it is tracking the timeline") { [self] in
+            await coordinator.diagnostics.syncState == .synced
+        }
         let state = await coordinator.diagnostics.syncState
         XCTAssertEqual(state, .synced, "its playback epoch was never retired")
     }
@@ -416,7 +436,7 @@ final class SyncPlaybackLifecycleAuditTests: XCTestCase {
         await connectAsLeader()
         await coordinator.playSynchronized(Self.hashA)
         await expect("Session A pre-rolled and armed its start") { [self] in
-            await player.calls.contains(.prepare(Self.hashA, 0))
+            await player.calls.contains(.load(Self.hashA))
         }
         await awaitOutboundQuiescent()
         let deadlineA = await playDeadline(for: Self.hashA)
@@ -482,7 +502,7 @@ final class SyncPlaybackLifecycleAuditTests: XCTestCase {
         await build()
         await connectAsLeader()
         await coordinator.playSynchronized(Self.hashA)
-        await expect("the PLAY is armed") { [self] in await player.calls.contains(.prepare(Self.hashA, 0)) }
+        await expect("the PLAY is armed") { [self] in await player.calls.contains(.load(Self.hashA)) }
         await awaitOutboundQuiescent()
         await coordinator.seek(positionMs: Self.seekTargetMs)
         await expect("the SEEK is armed") { [self] in
@@ -543,15 +563,19 @@ final class SyncPlaybackLifecycleAuditTests: XCTestCase {
         await coordinator.next()
         await awaitOutboundQuiescent()
         let blocked = await player.calls
-        XCTAssertEqual(blocked, [.prepare(Self.hashA, 0)], "NEXT's apply is queued behind PLAY's")
+        XCTAssertEqual(blocked, [.select(Self.hashA), .load(Self.hashA)], "NEXT's apply is queued behind PLAY's")
 
         await player.releaseGate()
-        await expect("both applied") { [self] in await player.calls.count >= 2 }
+        // The second apply's *own* effect. `calls.count >= 2` used to mean that, back when a
+        // pre-roll was one call; ADR-024 Amendment A4 made a pre-roll three, which turned this
+        // wait vacuous and left `awaitApplyChainDrained` racing a node `chainApply` had not
+        // created yet (the commit hook runs after the outbound counters move).
+        await expect("both applied") { [self] in await player.calls.contains(.load(Self.hashX)) }
         await awaitApplyChainDrained()
 
         let calls = await player.calls
         XCTAssertEqual(
-            calls, [.prepare(Self.hashA, 0), .prepare(Self.hashX, 0)],
+            calls, FakeSyncPlayer.preRoll(Self.hashA, 0) + FakeSyncPlayer.preRoll(Self.hashX, 0),
             "N's local effect precedes N+1's, and neither is dropped"
         )
         let current = await coordinator.queueState.currentItem?.trackHash
@@ -565,12 +589,17 @@ final class SyncPlaybackLifecycleAuditTests: XCTestCase {
         await build()
         await connectAsLeader()
         await coordinator.playSynchronized(Self.hashA)
-        await expect("the PLAY pre-rolled") { [self] in await player.calls.contains(.prepare(Self.hashA, 0)) }
+        await expect("the PLAY pre-rolled") { [self] in await player.calls.contains(.seek(0)) }
         await awaitOutboundQuiescent()
         let deadline = await playDeadline(for: Self.hashA)
 
         clock.advance(to: deadline + Self.lateByUs)
         await expect("the start still happens") { [self] in await player.calls.contains(.start) }
+        // `markSynced` follows the recorded `.start`, so asserting the state the instant the call
+        // appears flaked ~1 in 200 whole-suite runs *before* ADR-024 Amendment A4 too.
+        await expect("and the command counts as landed") { [self] in
+            await coordinator.diagnostics.syncState == .synced
+        }
 
         let error = await coordinator.diagnostics.lastScheduleErrorUs
         XCTAssertEqual(error, Self.lateByUs, "and the measurement it exists to produce is still taken")

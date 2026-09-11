@@ -62,12 +62,12 @@ class SyncPlaybackTwoPeerTest {
             // Both pre-rolled before the deadline — ARCHITECTURE §7.2's whole point.
             assertTrue(
                 pair.leader.player.calls
-                    .any { it is FakeSyncPlayer.Call.Prepare },
+                    .any { it is FakeSyncPlayer.Call.Load },
                 "the leader pre-rolls",
             )
             assertTrue(
                 pair.follower.player.calls
-                    .any { it is FakeSyncPlayer.Call.Prepare },
+                    .any { it is FakeSyncPlayer.Call.Load },
                 "the follower pre-rolls",
             )
             assertTrue(
@@ -567,17 +567,20 @@ class SyncPlaybackTwoPeerTest {
             val gate = kotlinx.coroutines.CompletableDeferred<Unit>()
             pair.leader.player.gate = gate
             pair.leader.player.gateOn = {
-                it is FakeSyncPlayer.Call.Prepare && it.contentHash == SyncTestValues.hash(1)
+                it is FakeSyncPlayer.Call.Load && it.contentHash == SyncTestValues.hash(1)
             }
             pair.leader.coordinator.playSynchronized(SyncTestValues.hash(1))
             runCurrent()
             assertTrue(
                 pair.follower.player.calls
-                    .any { it is FakeSyncPlayer.Call.Prepare },
+                    .any { it is FakeSyncPlayer.Call.Load },
                 "the premise: the follower received and applied Session A's PLAY",
             )
             assertEquals(
-                listOf<FakeSyncPlayer.Call>(FakeSyncPlayer.Call.Prepare(SyncTestValues.hash(1), 0L)),
+                listOf<FakeSyncPlayer.Call>(
+                    FakeSyncPlayer.Call.Select(SyncTestValues.hash(1)),
+                    FakeSyncPlayer.Call.Load(SyncTestValues.hash(1)),
+                ),
                 pair.leader.player.calls,
                 "the premise: the leader's own apply is parked inside its pre-roll",
             )

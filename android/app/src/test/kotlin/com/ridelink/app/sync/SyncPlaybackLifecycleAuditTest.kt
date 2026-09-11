@@ -98,13 +98,13 @@ class SyncPlaybackLifecycleAuditTest {
 
     /**
      * Session A's leader issues an authoritative `PLAY`, the transport confirms it went out, and its
-     * **local** apply then parks inside `player.prepare` — the exact position ADR-024 Amendment A2's
+     * **local** apply then parks inside the decoder `load` — the exact position ADR-024 Amendment A2's
      * commit point creates and A3 is about. Returns the gate holding it.
      */
     private suspend fun sentPlayBlockedInPrepare(scope: TestScope): CompletableDeferred<Unit> {
         val gate = CompletableDeferred<Unit>()
         player.gate = gate
-        player.gateOn = { it is FakeSyncPlayer.Call.Prepare && it.contentHash == HASH_A }
+        player.gateOn = { it is FakeSyncPlayer.Call.Load && it.contentHash == HASH_A }
         coordinator.playSynchronized(HASH_A)
         scope.runCurrent()
         assertEquals(
@@ -113,9 +113,9 @@ class SyncPlaybackLifecycleAuditTest {
             "the premise: PLAY A was actually written to the wire, so A2 committed its command_seq",
         )
         assertEquals(
-            listOf<FakeSyncPlayer.Call>(FakeSyncPlayer.Call.Prepare(HASH_A, 0L)),
+            listOf<FakeSyncPlayer.Call>(FakeSyncPlayer.Call.Select(HASH_A), FakeSyncPlayer.Call.Load(HASH_A)),
             player.calls,
-            "the premise: its local apply is now parked inside prepare",
+            "the premise: its local apply is now parked inside the decoder load",
         )
         return gate
     }
@@ -174,7 +174,7 @@ class SyncPlaybackLifecycleAuditTest {
     /**
      * **The defect.** `resetForNewSession` did `applyChain = null`. That detaches the *tail
      * reference*; it cancels nothing and fences nothing. `PLAY(seq n)` parked inside
-     * `player.prepare`, `NEXT(seq n+1)` — already written to the wire, already committed by A2's
+     * the decoder `load`, `NEXT(seq n+1)` — already written to the wire, already committed by A2's
      * outbound consumer — waited behind it in the chain, and when the blocked `PLAY` finally
      * returned the `NEXT` woke up in **Session B** and ran `applyStep` against Session B's queue.
      *
@@ -197,7 +197,7 @@ class SyncPlaybackLifecycleAuditTest {
                 "the premise: NEXT A reached the wire too, so its command_seq is committed",
             )
             assertEquals(
-                listOf<FakeSyncPlayer.Call>(FakeSyncPlayer.Call.Prepare(HASH_A, 0L)),
+                listOf<FakeSyncPlayer.Call>(FakeSyncPlayer.Call.Select(HASH_A), FakeSyncPlayer.Call.Load(HASH_A)),
                 player.calls,
                 "the premise: NEXT A's apply is queued behind the blocked PLAY A",
             )
@@ -250,7 +250,7 @@ class SyncPlaybackLifecycleAuditTest {
             runCurrent()
 
             assertTrue(
-                player.calls.contains(FakeSyncPlayer.Call.Prepare(HASH_X, 0L)),
+                player.calls.contains(FakeSyncPlayer.Call.Load(HASH_X)),
                 "Session B's own apply ran while Session A's was still blocked",
             )
             assertTrue(player.calls.contains(FakeSyncPlayer.Call.Start), "and reached its scheduled start")
@@ -563,7 +563,7 @@ class SyncPlaybackLifecycleAuditTest {
             coordinator.next()
             runCurrent()
             assertEquals(
-                listOf<FakeSyncPlayer.Call>(FakeSyncPlayer.Call.Prepare(HASH_A, 0L)),
+                listOf<FakeSyncPlayer.Call>(FakeSyncPlayer.Call.Select(HASH_A), FakeSyncPlayer.Call.Load(HASH_A)),
                 player.calls,
                 "NEXT's apply is queued behind PLAY's",
             )
@@ -574,7 +574,7 @@ class SyncPlaybackLifecycleAuditTest {
             // PLAY A selected A; the NEXT behind it steps to X and prepares it. Both applied, in
             // order, exactly once.
             assertEquals(
-                listOf<FakeSyncPlayer.Call>(FakeSyncPlayer.Call.Prepare(HASH_A, 0L), FakeSyncPlayer.Call.Prepare(HASH_X, 0L)),
+                FakeSyncPlayer.preRoll(HASH_A, 0L) + FakeSyncPlayer.preRoll(HASH_X, 0L),
                 player.calls,
                 "N's local effect precedes N+1's, and neither is dropped",
             )

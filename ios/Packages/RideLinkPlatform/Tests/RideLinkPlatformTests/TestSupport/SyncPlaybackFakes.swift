@@ -143,12 +143,23 @@ actor FakeSyncSession: SyncSessionPort {
 /// Records every player call in order — the whole assertion surface for "what did the audio do".
 actor FakeSyncPlayer: SyncPlayerPort {
     enum Call: Equatable, Sendable {
-        case prepare(ContentHash, Int64)
+        /// ADR-024 Amendment A4 split the old `prepare(hash, positionMs)` into the three
+        /// single-effect steps it always was, because a fence cannot reach between the sub-effects
+        /// of an operation it cannot see.
+        case select(ContentHash)
+        case load(ContentHash)
+        case clearSelection
         case start
         case pause
         case seek(Int64)
         case setRate(Double)
         case stop
+    }
+
+    /// The three calls one ARCHITECTURE §7.2 pre-roll makes, in order — so a test can say "it
+    /// pre-rolled" without spelling the sequence out at fifteen call sites.
+    static func preRoll(_ hash: ContentHash, _ positionMs: Int64) -> [Call] {
+        [.select(hash), .load(hash), .seek(positionMs)]
     }
 
     private(set) var calls: [Call] = []
@@ -206,9 +217,11 @@ actor FakeSyncPlayer: SyncPlayerPort {
 
     func clearCalls() { calls.removeAll() }
 
-    func prepare(content: SyncPlayableContent, positionMs: Int64) async {
-        await record(.prepare(content.contentHash, positionMs))
-    }
+    func select(content: SyncPlayableContent) async { await record(.select(content.contentHash)) }
+
+    func load(content: SyncPlayableContent) async { await record(.load(content.contentHash)) }
+
+    func clearSelection() async { await record(.clearSelection) }
 
     func start() async {
         if firstStartAtMonoUs == nil { firstStartAtMonoUs = monotonicNowUs?() }

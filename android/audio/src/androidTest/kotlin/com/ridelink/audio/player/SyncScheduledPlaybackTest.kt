@@ -16,6 +16,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.receiveAsFlow
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import org.junit.After
@@ -159,6 +160,56 @@ class SyncScheduledPlaybackTest {
             val stopped = withTimeout(TIMEOUT_MS) { states.receiveAsFlow().filter { !it.playing && it.rate == 1.0 }.first() }
             assertEquals(1.0, stopped.rate)
             assertEquals(0, stopped.positionMs)
+        }
+
+    /**
+     * ADR-024 **Amendment A4**'s Android premise, measured rather than reasoned about.
+     *
+     * A4 found that a Phase 5 operation could pass its ownership proof, suspend inside its first
+     * player effect, and then perform a *second* effect after a session boundary. On iOS that
+     * interleaving is real. On Android it is not — and the whole reason is this: [execute] wraps its
+     * body in `withContext(Dispatchers.Main.immediate)`, and every Phase 5 caller is already on the
+     * main thread (`AppContainer`'s scope is `Dispatchers.Main`), so the block starts undispatched
+     * and the call returns without ever suspending.
+     *
+     * That claim is load-bearing for how Amendment A4 describes this platform, so it is checked
+     * against the **real** `ExoPlayer` here rather than asserted from a reading of the coroutines
+     * source. A competitor coroutine is queued on the main looper *first*; if either [execute] were
+     * a real suspension the competitor would run at it, and the recorded order would interleave.
+     *
+     * It is a statement about the dispatcher this app wires up today, not a guarantee — which is
+     * exactly why `SyncPlaybackCoordinator.runOwnedSteps` fences every step regardless.
+     */
+    @Test
+    fun aPlayerCommandFromTheMainDispatcherDoesNotSuspend() =
+        runBlocking {
+            val entry = LocalEntryId("5e5e5e5e-0000-0000-0000-000000000004")
+            player.execute(PlaybackCommand.Load(entry, LocalTrackLocation(fixtureUri("normal.m4a").toString())))
+            withTimeout(TIMEOUT_MS) { states.receiveAsFlow().filter { it.durationMs > 0 }.first() }
+
+            val order = mutableListOf<String>()
+            val main = CoroutineScope(Dispatchers.Main)
+            val subject =
+                main.launch {
+                    // Queued on the main looper behind this coroutine: it can only run if something
+                    // below actually yields the thread.
+                    main.launch { order.add("competitor") }
+                    order.add("first-effect")
+                    player.execute(PlaybackCommand.Seek(0))
+                    order.add("second-effect")
+                    player.execute(PlaybackCommand.Pause)
+                    order.add("done")
+                }
+            subject.join()
+            // The competitor still has to run before this assertion is meaningful.
+            withTimeout(TIMEOUT_MS) { while (order.size < 4) delay(1) }
+
+            assertEquals(
+                listOf("first-effect", "second-effect", "done", "competitor"),
+                order,
+                "ExoPlayerMusicPlayer.execute does not suspend when called from the main thread, " +
+                    "which is why ADR-024 Amendment A4's interleaving is unreachable on Android today",
+            )
         }
 
     private companion object {

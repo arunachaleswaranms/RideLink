@@ -166,14 +166,18 @@ class SyncPlaybackCoordinatorTest {
             val effectiveAt = clock.nowUs() + 500_000
             session.deliver(playCommand(seq = 1, effectiveAt = effectiveAt))
             runCurrent()
-            assertEquals(listOf<FakeSyncPlayer.Call>(FakeSyncPlayer.Call.Prepare(SyncTestValues.hash(1), 0)), player.calls.toList())
+            assertEquals(FakeSyncPlayer.preRoll(SyncTestValues.hash(1), 0), player.calls.toList())
             // The 5 s position-report tick is also waiting; what matters is that the command's own
             // deadline is among them and is the future instant the leader chose.
             assertTrue(clock.pendingDeadlines.contains(effectiveAt), "the command waits for its own deadline")
 
             clock.advanceTo(effectiveAt - 1)
             runCurrent()
-            assertEquals(1, player.calls.size, "nothing may start before the deadline")
+            assertEquals(
+                FakeSyncPlayer.preRoll(SyncTestValues.hash(1), 0),
+                player.calls.toList(),
+                "nothing may start before the deadline",
+            )
 
             clock.advanceTo(effectiveAt)
             runCurrent()

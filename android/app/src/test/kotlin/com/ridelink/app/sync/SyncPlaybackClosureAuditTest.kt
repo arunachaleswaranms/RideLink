@@ -336,7 +336,7 @@ class SyncPlaybackClosureAuditTest {
             assertFalse(coordinator.diagnostics.value.ingressDesynchronized)
             assertEquals(3, coordinator.diagnostics.value.lastAppliedCommandSeq, "all three applied")
             val calls = player.calls.toList()
-            assertTrue(calls.contains(FakeSyncPlayer.Call.Prepare(HASH_A, 0)), "the PLAY was not lost")
+            assertTrue(calls.contains(FakeSyncPlayer.Call.Load(HASH_A)), "the PLAY was not lost")
             assertTrue(
                 calls.indexOf(FakeSyncPlayer.Call.Pause) < calls.indexOfFirst { it == FakeSyncPlayer.Call.Seek(6_000) },
                 "arrival order survived: PAUSE(2) took effect before RESUME(3)",
@@ -433,7 +433,8 @@ class SyncPlaybackClosureAuditTest {
             assertEquals(7, diagnostics.lastAppliedCommandSeq, "ordering resumes from the authoritative value")
             assertEquals(3, diagnostics.queueRevision)
             assertTrue(
-                player.calls.contains(FakeSyncPlayer.Call.Prepare(HASH_A, 12_000)),
+                player.calls.contains(FakeSyncPlayer.Call.Load(HASH_A)) &&
+                    player.calls.contains(FakeSyncPlayer.Call.Seek(12_000)),
                 "the snapshot loads what the halt could not — PROTOCOL §5 rule 2 applies its past instant immediately",
             )
             assertTrue(player.calls.contains(FakeSyncPlayer.Call.Start))
@@ -600,7 +601,7 @@ class SyncPlaybackClosureAuditTest {
             assertEquals(10, diagnostics.lastAppliedCommandSeq, "applied at the point it actually took effect")
             assertEquals(0, diagnostics.deferredCommandCount)
             assertEquals(1, diagnostics.recoveredCommandCount)
-            assertEquals(1, player.calls.count { it is FakeSyncPlayer.Call.Prepare }, "exactly once, never twice")
+            assertEquals(1, player.calls.count { it is FakeSyncPlayer.Call.Load }, "exactly once, never twice")
         }
 
     /** Authoritative order survives the wait: `PLAY(n)` then `PAUSE(n+1)` may not become `PAUSE` alone. */
@@ -622,7 +623,7 @@ class SyncPlaybackClosureAuditTest {
             runCurrent()
 
             val calls = player.calls.toList()
-            val prepared = calls.indexOfFirst { it is FakeSyncPlayer.Call.Prepare }
+            val prepared = calls.indexOfFirst { it is FakeSyncPlayer.Call.Load }
             val paused = calls.indexOf(FakeSyncPlayer.Call.Pause)
             assertTrue(prepared >= 0, "the PLAY was not discarded in favour of the PAUSE")
             assertTrue(paused > prepared, "the PAUSE took effect after the PLAY, exactly as the leader ordered them")

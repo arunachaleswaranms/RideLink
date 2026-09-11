@@ -143,10 +143,20 @@ class FakeSyncSession : SyncSessionPort {
 /** Records every player call in order — the whole assertion surface for "what did the audio do". */
 class FakeSyncPlayer : SyncPlayerPort {
     sealed class Call {
-        data class Prepare(
+        /**
+         * ADR-024 Amendment A4 split the old `Prepare(hash, positionMs)` into the three
+         * single-effect steps it always was, because a fence cannot reach between the sub-effects
+         * of an operation it cannot see.
+         */
+        data class Select(
             val contentHash: ContentHash,
-            val positionMs: Long,
         ) : Call()
+
+        data class Load(
+            val contentHash: ContentHash,
+        ) : Call()
+
+        object ClearSelection : Call()
 
         object Start : Call()
 
@@ -165,6 +175,17 @@ class FakeSyncPlayer : SyncPlayerPort {
 
     val calls = mutableListOf<Call>()
 
+    companion object {
+        /**
+         * The three calls one ARCHITECTURE §7.2 pre-roll makes, in order — so a test can say "it
+         * pre-rolled" without spelling the sequence out at a dozen call sites.
+         */
+        fun preRoll(
+            contentHash: ContentHash,
+            positionMs: Long,
+        ): List<Call> = listOf(Call.Select(contentHash), Call.Load(contentHash), Call.Seek(positionMs))
+    }
+
     /** Fires on every recorded call — the two-peer test uses it to stamp *when* a start happened. */
     var onCall: ((Call) -> Unit)? = null
     private val stateFlow = MutableStateFlow(PlayerState())
@@ -174,11 +195,16 @@ class FakeSyncPlayer : SyncPlayerPort {
         stateFlow.value = state
     }
 
-    override suspend fun prepare(
-        content: SyncPlayableContent,
-        positionMs: Long,
-    ) {
-        record(Call.Prepare(content.contentHash, positionMs))
+    override suspend fun select(content: SyncPlayableContent) {
+        record(Call.Select(content.contentHash))
+    }
+
+    override suspend fun load(content: SyncPlayableContent) {
+        record(Call.Load(content.contentHash))
+    }
+
+    override suspend fun clearSelection() {
+        record(Call.ClearSelection)
     }
 
     override suspend fun start() {

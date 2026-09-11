@@ -194,7 +194,13 @@ final class SyncPlaybackDeliveryAuditTests: XCTestCase {
         await session.releaseSendGate()
         await awaitOutboundQuiescent()
         clock.advance(to: clock.now() + Self.leadUs * 4)
-        await settle()
+        // The delivered PAUSE's own effect, rather than a fixed yield budget: the budget flaked
+        // ~1 in 200 whole-suite runs *before* ADR-024 Amendment A4, because the scheduled node has
+        // to wake through the sleeper before it can drive the player. The negative assertions
+        // below are only meaningful once the positive one has actually landed.
+        await expect("the delivered PAUSE reached the player") { [self] in
+            await player.calls.contains(.pause)
+        }
 
         sent = await session.playbackMessages()
         XCTAssertEqual(sent.filter { if case .pause = $0 { return true } else { return false } }.count, 1,
@@ -441,7 +447,7 @@ final class SyncPlaybackDeliveryAuditTests: XCTestCase {
         await settle()
 
         let prepared = await player.calls.compactMap { call -> ContentHash? in
-            if case .prepare(let hash, _) = call { return hash }
+            if case .load(let hash) = call { return hash }
             return nil
         }
         XCTAssertEqual(prepared.count, 1, "exactly one track was loaded")
@@ -483,7 +489,12 @@ final class SyncPlaybackDeliveryAuditTests: XCTestCase {
             await coordinator.diagnostics.deferredCommandCount == 0
         }
         clock.advance(to: clock.now() + Self.leadUs * 4)
-        await settle()
+        // Both replayed effects, rather than a fixed yield budget — see the note in
+        // `testAfterARefusalTheDeliveredFrameStillAppliesAndNothingBehindItDoes`.
+        await expect("both held commands reached the player") { [self] in
+            let recorded = await player.calls
+            return recorded.contains(.seek(12_000)) && recorded.contains(.pause)
+        }
 
         let calls = await player.calls
         guard let seekIndex = calls.firstIndex(of: .seek(12_000)), let pauseIndex = calls.firstIndex(of: .pause) else {

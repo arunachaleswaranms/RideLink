@@ -43,8 +43,8 @@ final class SyncPlaybackTwoPeerTests: XCTestCase {
                 return leaderStarted && followerStarted
             }
 
-            let leaderPrepared = await leader.player.calls.contains { if case .prepare = $0 { return true } else { return false } }
-            let followerPrepared = await follower.player.calls.contains { if case .prepare = $0 { return true } else { return false } }
+            let leaderPrepared = await leader.player.calls.contains { if case .load = $0 { return true } else { return false } }
+            let followerPrepared = await follower.player.calls.contains { if case .load = $0 { return true } else { return false } }
             XCTAssertTrue(leaderPrepared, "ARCHITECTURE §7.2: the decoder is pre-rolled before the deadline")
             XCTAssertTrue(followerPrepared)
 

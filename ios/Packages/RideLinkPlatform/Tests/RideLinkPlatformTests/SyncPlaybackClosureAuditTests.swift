@@ -234,11 +234,11 @@ final class SyncPlaybackClosureAuditTests: XCTestCase {
 
         // Stall the consumer strictly inside the decoder pre-roll, holding the PLAY in flight.
         await player.gateCalls { call in
-            if case .prepare = call { return true }
+            if case .load = call { return true }
             return false
         }
         await session.deliver(playCommand(seq: 1, effectiveAt: clock.now()))
-        await expect("the consumer parks inside prepare") { await self.player.isGateParked }
+        await expect("the consumer parks inside the decoder load") { await self.player.isGateParked }
 
         await session.deliver(pauseCommand(seq: 2, effectiveAt: clock.now(), positionMs: 5_000))
         await session.deliver(resumeCommand(seq: 3, effectiveAt: clock.now(), positionMs: 6_000))
@@ -254,7 +254,7 @@ final class SyncPlaybackClosureAuditTests: XCTestCase {
         XCTAssertEqual(diagnostics.inboundOverflowCount, 0, "nothing was refused")
         XCTAssertFalse(diagnostics.ingressDesynchronized)
         let calls = await player.calls
-        XCTAssertTrue(calls.contains(.prepare(SyncTestValues.hash(1), 0)), "the PLAY was not lost")
+        XCTAssertTrue(calls.contains(.load(SyncTestValues.hash(1))), "the PLAY was not lost")
         guard let pauseIndex = calls.firstIndex(of: .pause),
               let resumeSeekIndex = calls.firstIndex(of: .seek(6_000)) else {
             return XCTFail("expected a pause and a resume seek, got \(calls)")
@@ -272,11 +272,11 @@ final class SyncPlaybackClosureAuditTests: XCTestCase {
         await content.addLocal(SyncTestValues.hash(1))
 
         await player.gateCalls { call in
-            if case .prepare = call { return true }
+            if case .load = call { return true }
             return false
         }
         await session.deliver(playCommand(seq: 1, effectiveAt: clock.now()))
-        await expect("the consumer parks inside prepare") { await self.player.isGateParked }
+        await expect("the consumer parks inside the decoder load") { await self.player.isGateParked }
 
         // One fits; the second has nowhere to go and is refused rather than evicting the first.
         await session.deliver(pauseCommand(seq: 2, effectiveAt: clock.now(), positionMs: 5_000))
@@ -301,7 +301,7 @@ final class SyncPlaybackClosureAuditTests: XCTestCase {
         await connect(asLeader: false)
         await content.addLocal(SyncTestValues.hash(1))
         await player.gateCalls { call in
-            if case .prepare = call { return true }
+            if case .load = call { return true }
             return false
         }
         await session.deliver(playCommand(seq: 1, effectiveAt: clock.now()))
@@ -336,7 +336,7 @@ final class SyncPlaybackClosureAuditTests: XCTestCase {
         XCTAssertEqual(diagnostics.queueRevision, 3)
         let prepared = await player.calls
         XCTAssertTrue(
-            prepared.contains(.prepare(SyncTestValues.hash(1), 12_000)),
+            prepared.contains(.load(SyncTestValues.hash(1))) && prepared.contains(.seek(12_000)),
             "the snapshot loads what the halt could not — PROTOCOL §5 rule 2 applies its past instant immediately"
         )
         // The *start* leaves by the ordered scheduled-action chain (Finding G), which is asynchronous
@@ -356,7 +356,7 @@ final class SyncPlaybackClosureAuditTests: XCTestCase {
         await connect(asLeader: false)
         await content.addLocal(SyncTestValues.hash(1))
         await player.gateCalls { call in
-            if case .prepare = call { return true }
+            if case .load = call { return true }
             return false
         }
         await session.deliver(playCommand(seq: 1, effectiveAt: clock.now()))
@@ -480,14 +480,14 @@ final class SyncPlaybackClosureAuditTests: XCTestCase {
         clock.advance(to: clock.now() + Phase5GateBounds.deferredRetryIntervalUs)
         // The effect, not the counter that precedes it: `lastAppliedSeq` moves before
         // `applyAuthoritative` drives the player, so waiting on it would assert too early.
-        await expect("the held PLAY reaches the player") { await self.player.calls.contains(.prepare(SyncTestValues.hash(1), 0)) }
+        await expect("the held PLAY reaches the player") { await self.player.calls.contains(.load(SyncTestValues.hash(1))) }
 
         diagnostics = await coordinator.diagnostics
         XCTAssertEqual(diagnostics.lastAppliedCommandSeq, 10, "applied at the point it actually took effect")
         XCTAssertEqual(diagnostics.deferredCommandCount, 0)
         XCTAssertEqual(diagnostics.recoveredCommandCount, 1)
         let prepares = await player.calls.filter { call in
-            if case .prepare = call { return true }
+            if case .load = call { return true }
             return false
         }
         XCTAssertEqual(prepares.count, 1, "exactly once, never twice")
@@ -514,12 +514,12 @@ final class SyncPlaybackClosureAuditTests: XCTestCase {
 
         let calls = await player.calls
         let prepared = calls.firstIndex { call in
-            if case .prepare = call { return true }
+            if case .load = call { return true }
             return false
         }
         let paused = calls.firstIndex(of: .pause)
         guard let prepared, let paused else {
-            return XCTFail("expected both a prepare and a pause, got \(calls)")
+            return XCTFail("expected both a load and a pause, got \(calls)")
         }
         XCTAssertGreaterThan(paused, prepared, "the PAUSE took effect after the PLAY, exactly as ordered")
         let recovered = await coordinator.diagnostics.recoveredCommandCount

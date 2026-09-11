@@ -190,13 +190,19 @@ final class SyncPlaybackCoordinatorTests: XCTestCase {
         let effectiveAt = clock.now() + 500_000
         await deliverAndAwait(playCommand(seq: 1, effectiveAt: effectiveAt))
         var calls = await player.calls
-        XCTAssertEqual(calls, [.prepare(SyncTestValues.hash(1), 0)])
-        XCTAssertTrue(clock.pendingDeadlines().contains(effectiveAt), "the command waits for its own deadline")
+        XCTAssertEqual(calls, FakeSyncPlayer.preRoll(SyncTestValues.hash(1), 0))
+        // Arming happens several task hops past the last pre-roll call — `scheduleAt` creates the
+        // node, the node awaits its predecessor, proves ownership, and only then reaches the
+        // sleeper. Asserting it directly flaked ~1 in 200 whole-suite runs *before* ADR-024
+        // Amendment A4 as well; the deadline appearing in the sleeper is the exact signal.
+        await expect("the command waits for its own deadline") { [clock] in
+            clock?.pendingDeadlines().contains(effectiveAt) ?? false
+        }
 
         clock.advance(to: effectiveAt - 1)
         await settle()
         calls = await player.calls
-        XCTAssertEqual(calls.count, 1, "nothing may start before the deadline")
+        XCTAssertEqual(calls, FakeSyncPlayer.preRoll(SyncTestValues.hash(1), 0), "nothing may start before the deadline")
 
         clock.advance(to: effectiveAt)
         await expect("the scheduled start fired") { [player] in await player!.calls.contains(.start) }
