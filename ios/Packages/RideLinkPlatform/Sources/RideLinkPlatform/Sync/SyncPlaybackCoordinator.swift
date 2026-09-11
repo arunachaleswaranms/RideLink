@@ -429,19 +429,30 @@ public actor SyncPlaybackCoordinator {
         await stillCurrent(generation) && epoch.isCurrent(token)
     }
 
-    /// `owns`, taken **synchronously** from state this actor owns (ADR-024 Amendment A4 Finding D).
+    /// `stillCurrent`, taken **synchronously** from state this actor owns (ADR-024 Amendment A5,
+    /// generalising Amendment A4 Finding D).
     ///
-    /// Android's `owns` is already synchronous — `SyncSessionPort.currentAuthGeneration` is a plain
-    /// property there — so a proof placed immediately before an effect is atomic with dispatching
-    /// it. On this platform `owns` must `await`, and that `await` is an actor re-entrancy point: a
-    /// boundary landing in it means the guard resumes and dispatches a step for a session that ended
-    /// while the guard was being taken. Reading the mirrored generation instead makes the proof and
-    /// the dispatch one actor-isolated step, which is the same property Amendment A1 Finding B
-    /// established for stamping-and-enqueueing.
+    /// Android's `stillCurrent` is already synchronous — `SyncSessionPort.currentAuthGeneration` is
+    /// a plain property there — so a proof placed immediately before a mutation is atomic with
+    /// performing it. On this platform it must `await`, and that `await` is an actor re-entrancy
+    /// point: a boundary landing in it means the guard resumes and mutates state for a session that
+    /// ended while the guard was being taken. Reading the mirrored generation instead makes the
+    /// proof and the mutation one actor-isolated step, which is the same property Amendment A1
+    /// Finding B established for stamping-and-enqueueing.
     ///
-    /// Used **with** `owns`, never instead of it: see `liveGeneration`.
+    /// A4 gave this only to work that owns a **playback epoch** (`ownsNow`). A5's three findings are
+    /// all in work that legitimately has no epoch yet — an admission decides ordering before any
+    /// track is chosen — so requiring one would refuse perfectly valid work. The session half alone
+    /// is what such an operation can honestly prove, and it is what it must prove.
+    ///
+    /// Used **with** `stillCurrent`, never instead of it: see `liveGeneration`.
+    func stillCurrentNow(_ generation: Int64) -> Bool {
+        role != nil && generation == liveGeneration
+    }
+
+    /// `owns`, taken synchronously. `stillCurrentNow` plus the playback epoch, for work that has one.
     func ownsNow(generation: Int64, token: Int64) -> Bool {
-        role != nil && generation == liveGeneration && epoch.isCurrent(token)
+        stillCurrentNow(generation) && epoch.isCurrent(token)
     }
 
     // MARK: - Fenced player steps (ADR-024 Amendment A4)
@@ -514,8 +525,18 @@ public actor SyncPlaybackCoordinator {
         }
     }
 
-    func readyEstimate() async -> SessionClockEstimate? {
-        guard let estimate = await estimate(), estimate.ready else {
+    /// `estimate`, with the "not ready" diagnostics it publishes fenced by the generation that asked
+    /// for it (ADR-024 Amendment A5).
+    ///
+    /// `estimate()` suspends — `sessionClockEstimate()` and `rttP95Us()` are both cross-actor reads —
+    /// and this used to publish straight afterwards with no generation available to prove. A leader
+    /// whose session ended inside that read announced `clockUnready` on the session that replaced it.
+    func readyEstimate(generation: Int64) async -> SessionClockEstimate? {
+        let estimate = await estimate()
+        guard await stillCurrent(generation) else { return nil }
+        // No `await` between this proof and the writes below.
+        guard stillCurrentNow(generation) else { return nil }
+        guard let estimate, estimate.ready else {
             if !diagnostics.ingressDesynchronized { diagnostics.syncState = .clockUnready }
             diagnostics.clockReady = false
             publishDiagnostics()
@@ -638,6 +659,8 @@ public actor SyncPlaybackCoordinator {
         // A dead session needs no latch: its authority is already gone, and latching would then
         // survive into the session that replaced it.
         guard generation == (await session.currentAuthGeneration()) else { return }
+        // Amendment A5: that read is itself a suspension, and everything below it is live state.
+        guard stillCurrentNow(generation) else { return }
         guard !outboundAuthorityLost else { return }
         outboundAuthorityLost = true
         syncEnabled = false
@@ -685,6 +708,9 @@ public actor SyncPlaybackCoordinator {
     private func runApplyNode(id: Int64, generation: Int64, action: @Sendable () async -> Void) async {
         defer { releaseChainNode(id) }
         guard !Task.isCancelled, await stillCurrent(generation) else { return }
+        // Amendment A5: the proof above suspends, so the synchronous mirror is what makes reaching
+        // `action` atomic with having proved it. `action` re-proves for itself as well (A3 Finding B).
+        guard stillCurrentNow(generation) else { return }
         await action()
     }
 
@@ -735,7 +761,10 @@ public actor SyncPlaybackCoordinator {
         let generation = await session.currentAuthGeneration()
         if currentRole == .follower {
             guard await stillCurrent(generation) else { return }
-            // No `await` from here to the enqueue: the actor makes the pair atomic (Finding B).
+            // Amendment A5: and the synchronous mirror, because the proof above is itself a
+            // suspension. No `await` from here to the enqueue: the actor makes the pair atomic
+            // (Finding B).
+            guard stillCurrentNow(generation) else { return }
             let header = PlaybackCommandHeader(
                 commandSeq: PlaybackBounds.unassignedCommandSeq,
                 effectiveAtSessionUs: 0,
@@ -750,9 +779,12 @@ public actor SyncPlaybackCoordinator {
             if !admitted { await onOutboundRefused(.intent, generation: generation) }
             return
         }
-        guard let estimate = await readyEstimate() else { return }
+        guard let estimate = await readyEstimate(generation: generation) else { return }
         guard await stillCurrent(generation), !outboundAuthorityLost else { return }
+        // Amendment A5: `nextSeq` below is the session's own ordering state, and the proof above
+        // suspends — so a boundary landing in it would let this stamp Session B's sequence number.
         // No `await` from here to the enqueue.
+        guard stillCurrentNow(generation) else { return }
         let seq = nextSeq
         let header = PlaybackCommandHeader(
             commandSeq: seq,
@@ -814,6 +846,9 @@ public actor SyncPlaybackCoordinator {
         // peer will act on it, and the only consistent thing this device can do is act on it too.
         // The latch stops *new* authority; it does not un-send what was sent.
         guard await stillCurrent(generation) else { return }
+        // Amendment A5: the two sequence numbers below are exactly what Finding A is about, reached
+        // from the leader's side. No `await` between the synchronous proof and the writes.
+        guard stillCurrentNow(generation) else { return }
         // max, not assignment: these commit on the outbound consumer, in send order, and a monotone
         // write says the same thing without depending on that ordering twice over.
         lastReceivedSeq = max(lastReceivedSeq ?? seq, seq)
@@ -849,6 +884,12 @@ public actor SyncPlaybackCoordinator {
         guard !outboundAuthorityLost else { return }
         syncEnabled = true
         let generation = await session.currentAuthGeneration()
+        // Amendment A5: `playRequestFence.begin()` below supersedes whatever Play is current, so a
+        // press whose session changed inside that read would cancel the live session's own retained
+        // Play. The synchronous proof is also what refuses a press stamped for a generation this
+        // actor has not been told about yet — `resolvePendingPlay` would otherwise issue it into a
+        // session whose state has not been reset.
+        guard stillCurrentNow(generation) else { return }
         // No `await` in this block: the fence, the id and the retained request move together.
         let existing = queueState.items.first { $0.trackHash == contentHash }
         let queueItemId = existing?.queueItemId ?? nextQueueItemId()

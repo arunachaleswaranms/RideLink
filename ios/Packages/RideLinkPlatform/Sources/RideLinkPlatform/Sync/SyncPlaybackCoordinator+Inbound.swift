@@ -17,7 +17,9 @@ extension SyncPlaybackCoordinator {
         if currentRole == .follower {
             let generation = await session.currentAuthGeneration()
             guard await stillCurrent(generation) else { return }
-            // No `await` from here to the enqueue (Amendment A1 Finding B).
+            // Amendment A5: and its synchronous mirror, because the proof above is itself a
+            // suspension. No `await` from here to the enqueue (Amendment A1 Finding B).
+            guard stillCurrentNow(generation) else { return }
             let admitted = enqueueOutbound(
                 Phase5Outbound(generation: generation, authority: .intent, frame: .queue(queueIntent(mutation)))
             )
@@ -43,6 +45,8 @@ extension SyncPlaybackCoordinator {
     private func applyLeaderMutation(_ mutation: SharedQueueMutation) async {
         let generation = await session.currentAuthGeneration()
         guard await stillCurrent(generation), !outboundAuthorityLost else { return }
+        // Amendment A5: `queueState` below is live state, and both reads above suspend.
+        guard stillCurrentNow(generation) else { return }
         let outcome = SharedQueue.apply(state: queueState, mutation: mutation)
         guard outcome.rejection == nil, outcome.changed else { return }
         // Amendment A2 Finding A / §7: the candidate state is computed first and becomes
@@ -99,6 +103,9 @@ extension SyncPlaybackCoordinator {
         guard role == .leader, !outboundAuthorityLost else { return }
         let generation = await session.currentAuthGeneration()
         guard await stillCurrent(generation) else { return }
+        // Amendment A5: an advisory frame enqueued into the session that replaced this one still
+        // moves that session's outbound counters, and A3 §D settled that this is not an exemption.
+        guard stillCurrentNow(generation) else { return }
         // ADVISORY (Amendment A2): it carries no new revision and no new `command_seq`. It re-states
         // authority the peer has already been told about, and PROTOCOL §9's "the snapshot always
         // wins" makes the next one subsume this one, so a failure here is a missed reconciliation
@@ -183,9 +190,14 @@ extension SyncPlaybackCoordinator {
     /// emphatically true.
     func onPlaybackMessage(_ message: PlaybackMessage, generation: Int64) async {
         guard await stillCurrent(generation) else { return }
+        // Amendment A5: the proof above suspends, so this is what makes reaching the dispatch below
+        // atomic with having taken it. Each handler proves for itself as well (A3 Finding B).
+        guard stillCurrentNow(generation) else { return }
         switch message {
         case .positionReport(let trackHash, let positionMs, let atSessionUs, _, _):
-            await onPeerPositionReport(trackHash: trackHash, positionMs: positionMs, atSessionUs: atSessionUs)
+            await onPeerPositionReport(
+                trackHash: trackHash, positionMs: positionMs, atSessionUs: atSessionUs, generation: generation
+            )
         case .playbackState(let commandSeq, let queueRevision, let trackHash, let queueItemId, let positionMs, let playing, let atSessionUs):
             await onPeerPlaybackState(
                 PlaybackStateSnapshotFields(
@@ -201,6 +213,8 @@ extension SyncPlaybackCoordinator {
 
     func onQueueMessage(_ message: QueueMessage, generation: Int64) async {
         guard await stillCurrent(generation) else { return }
+        // Amendment A5, as in `onPlaybackMessage`.
+        guard stillCurrentNow(generation) else { return }
         switch message {
         case .snapshot(let revision, let items, let currentIndex):
             await adoptSnapshot(revision: revision, items: items, currentIndex: currentIndex, generation: generation)
@@ -261,6 +275,7 @@ extension SyncPlaybackCoordinator {
             // PROTOCOL §5 rule 3's "the issuer refreshes": the leader re-broadcasts authoritative
             // state rather than waiting to be asked, which needs no message type §3 does not list.
             guard await stillCurrent(generation) else { return }
+            guard stillCurrentNow(generation) else { return } // Amendment A5
             enqueueOutbound(
                 Phase5Outbound(generation: generation, authority: .advisory, frame: .queue(snapshotMessage()))
             )
@@ -316,12 +331,26 @@ extension SyncPlaybackCoordinator {
     /// estimator that was momentarily untrusted spent the sequence number and applied nothing, and
     /// the leader's replay of that same command was then correctly dropped as a duplicate. The
     /// command was lost permanently, on a clock condition that resolves itself in milliseconds.
+    ///
+    /// **ADR-024 Amendment A5 Finding A: `estimate()` suspends, and everything below it is live
+    /// ordering state.** `sessionClockEstimate()` and `rttP95Us()` are both cross-actor reads, and
+    /// on an actor every `await` is a re-entrancy point — so a boundary could land inside that read
+    /// and the resumed continuation would then write Session A's `command_seq` into Session B's
+    /// `lastReceivedSeq`, append Session A's command to Session B's held stream, or latch Session
+    /// B's desynchronised flags. `applyAuthoritative`'s own proof is no defence: it runs *after*
+    /// those writes, so it refused a command whose damage was already done, and Session B's own
+    /// `command_seq` 1 was then correctly refused as stale by `CommandOrderGate` for the rest of the
+    /// session. The proof is therefore taken before the *admission is acted on*, not before the
+    /// apply, and there is no `await` between it and any of the three branches' writes.
     private func admitAuthoritativeCommand(
         _ message: PlaybackMessage,
         header: PlaybackCommandHeader,
         generation: Int64
     ) async {
         let estimate = await estimate()
+        guard await stillCurrent(generation) else { return }
+        // No `await` from here to any branch's writes below.
+        guard stillCurrentNow(generation) else { return }
         let admission = PendingCommandGate.decide(
             clockReady: estimate?.ready == true,
             deferredCount: deferredEvents.count,
@@ -444,9 +473,17 @@ extension SyncPlaybackCoordinator {
                 publishDiagnostics()
                 return
             }
+            // Amendment A5: the proof above suspends. If a boundary landed in it, `resetForNewSession`
+            // has already cleared this buffer, so there is nothing of the old session's left to drop —
+            // and removing from it below would be indexing state the new session owns.
+            guard stillCurrentNow(held.generation) else { return }
             switch held {
             case .command(let message, let generation):
                 guard let estimate = await estimate(), estimate.ready else { return }
+                // Amendment A5 Finding A's shape one function along: `estimate()` suspends and the
+                // very next statements index, remove from and write the held stream.
+                guard await stillCurrent(generation) else { return }
+                guard stillCurrentNow(generation), !deferredEvents.isEmpty else { return }
                 let heldHeader = Self.headerOf(message)
                 if let heldHeader, heldHeader.queueRevision != queueState.revision {
                     deferredEvents.removeFirst()
@@ -487,12 +524,16 @@ extension SyncPlaybackCoordinator {
             diagnostics.staleRevisionCount += 1
             publishDiagnostics()
             guard await stillCurrent(generation) else { return }
+            guard stillCurrentNow(generation) else { return } // Amendment A5
             enqueueOutbound(
                 Phase5Outbound(generation: generation, authority: .advisory, frame: .queue(snapshotMessage()))
             )
             return
         }
         guard await stillCurrent(generation), !outboundAuthorityLost else { return }
+        // Amendment A5: `playRequestFence.begin()` below **supersedes** whatever Play is current, so
+        // a retired intent resuming here would cancel the live session's own retained Play.
+        guard stillCurrentNow(generation) else { return }
         syncEnabled = true
         if case .play(_, let trackHash, _, let queueItemId) = message {
             // Amendment A1 Finding E, the other user's half: the leader retains the follower's Play
@@ -611,6 +652,7 @@ extension SyncPlaybackCoordinator {
     /// actor that is not fastidiousness: every `await` below is a re-entrancy point.
     func applyAuthoritative(_ message: PlaybackMessage, generation: Int64, estimate: SessionClockEstimate) async {
         guard await stillCurrent(generation) else { return }
+        guard stillCurrentNow(generation) else { return } // Amendment A5
         switch message {
         case .play(let header, let trackHash, let positionMs, let queueItemId):
             await applyPlay(header, trackHash: trackHash, queueItemId: queueItemId, positionMs: positionMs,
@@ -647,8 +689,12 @@ extension SyncPlaybackCoordinator {
         // entry so a Play that only *starts* after a boundary does no work, and again below because
         // the resolve suspends.
         guard await stillCurrent(generation) else { return }
+        guard stillCurrentNow(generation) else { return } // Amendment A5
         let playable = await content.resolve(trackHash)
         guard await stillCurrent(generation) else { return }
+        // Amendment A5: `epoch.begin()` below retires whatever playback epoch is current, which is
+        // A3 Finding C's catastrophe — so the proof adjacent to it has to be the synchronous one.
+        guard stillCurrentNow(generation) else { return }
         guard let playable else {
             // PROTOCOL §5 rule 4: do not start, request the transfer, let the leader reschedule.
             diagnostics.syncState = .waitingForContent
@@ -709,6 +755,7 @@ extension SyncPlaybackCoordinator {
         positionMs: Int64
     ) async {
         guard await stillCurrent(generation) else { return }
+        guard stillCurrentNow(generation) else { return } // Amendment A5
         let token = currentEpochToken
         timeline = timeline?.reanchored(positionMs: positionMs, sessionUs: header.effectiveAtSessionUs, playing: playing)
         // Amendment A4 Finding A: these are two effects, and they used to sit inside one closure
@@ -730,6 +777,7 @@ extension SyncPlaybackCoordinator {
         estimate: SessionClockEstimate
     ) async {
         guard await stillCurrent(generation) else { return }
+        guard stillCurrentNow(generation) else { return } // Amendment A5
         let token = currentEpochToken
         timeline = timeline?.reanchored(positionMs: targetPositionMs, sessionUs: header.effectiveAtSessionUs)
         scheduleAt(
@@ -750,6 +798,7 @@ extension SyncPlaybackCoordinator {
         // `epoch.begin()`, which **retired the live session's playback epoch** and silently stopped
         // its scheduled start from ever firing.
         guard await stillCurrent(generation) else { return }
+        guard stillCurrentNow(generation) else { return } // Amendment A5
         let step = SharedQueue.step(state: queueState, delta: delta)
         queueState = step.state
         publishQueue()
@@ -838,9 +887,12 @@ extension SyncPlaybackCoordinator {
     ) async {
         defer { releaseChainNode(id) }
         guard !Task.isCancelled, await owns(generation: generation, token: token) else { return }
+        guard ownsNow(generation: generation, token: token) else { return } // Amendment A5
         if let deadlineUs {
             await sleeper.sleep(untilLocalMonoUs: deadlineUs)
             guard !Task.isCancelled, await owns(generation: generation, token: token) else { return }
+            // Amendment A5: no `await` between this proof and A3 Finding C's measurement below.
+            guard ownsNow(generation: generation, token: token) else { return }
             recordScheduleError(deadlineUs: deadlineUs)
         }
         if await runOwnedSteps(steps, generation: generation, token: token) {
@@ -860,6 +912,7 @@ extension SyncPlaybackCoordinator {
     /// ownership proof is taken **again** here, because `action` suspended (Finding F).
     private func markSyncedAndPublish(generation: Int64, token: Int64) async {
         guard await owns(generation: generation, token: token) else { return }
+        guard ownsNow(generation: generation, token: token) else { return } // Amendment A5
         markSynced()
         publishDiagnostics()
     }
@@ -912,9 +965,17 @@ extension SyncPlaybackCoordinator {
         // enqueued was correctly refused at the wire, still moved the new session's outbound
         // counters. A3 §D already settled that "diagnostics only" is not an exemption.
         guard await stillCurrent(generation) else { return }
+        // Amendment A5: the proof above suspends, and `timeline` and `currentEpochToken` below have
+        // to be read as one — they are what every measurement in this tick is taken against.
+        guard stillCurrentNow(generation) else { return }
         guard let active = timeline else { return }
         let token = currentEpochToken
-        guard let estimate = await estimate(), estimate.ready else {
+        let estimate = await estimate()
+        // Amendment A5 Finding B, first window: `estimate()` suspends and the "not ready" branch
+        // below publishes. A retired tick announced `clockUnready` on the session that replaced it.
+        guard await owns(generation: generation, token: token) else { return }
+        guard ownsNow(generation: generation, token: token) else { return }
+        guard let estimate, estimate.ready else {
             // brief §41: a dubious clock stops correction, and local playback simply continues.
             if !diagnostics.ingressDesynchronized { diagnostics.syncState = .clockUnready }
             diagnostics.clockReady = false
@@ -923,6 +984,13 @@ extension SyncPlaybackCoordinator {
         }
         let nowSessionUs = estimate.sessionUs(localMonoUs: monotonicNowUs())
         let state = await player.playerState()
+        // Amendment A5 Finding B, second window: the enqueue below used to happen *before* any
+        // post-suspension proof — the `owns` check sat after it. The frame was correctly refused at
+        // the wire, because it carries Session A's generation, but enqueueing and counting it moved
+        // three of Session B's outbound counters, and A3 §D settled that "it never reached the peer"
+        // is not an exemption. No `await` from here to the enqueue.
+        guard await owns(generation: generation, token: token) else { return }
+        guard ownsNow(generation: generation, token: token) else { return }
         let durationMs: Int64? = state.durationMs > 0 ? state.durationMs : nil
         // ADVISORY (Amendment A2): one diagnostics number on the peer's screen. A failed report is
         // one missing sample, superseded by the next tick 5 s later — never a divergence.
@@ -937,8 +1005,13 @@ extension SyncPlaybackCoordinator {
                 playbackRate: state.rate
             ))
         ))
-        guard await owns(generation: generation, token: token) else { return }
         let transitioning = await routeState.isRouteTransitioning()
+        // Amendment A5 Finding B, third window: `driftState` and six diagnostics fields follow, and
+        // ADR-004's ladder is evaluated from values this tick sampled — so a retired tick resuming
+        // here restated the live session's drift, clock offset, RTT and correction from a dead
+        // session's measurements. No `await` from here to those writes.
+        guard await owns(generation: generation, token: token) else { return }
+        guard ownsNow(generation: generation, token: token) else { return }
         let drift = active.driftMs(actualPositionMs: state.positionMs, atSessionUs: nowSessionUs, durationMs: durationMs)
         let outcome = DriftController.evaluate(
             state: driftState,
@@ -964,6 +1037,7 @@ extension SyncPlaybackCoordinator {
         // session incremented the *live* session's `correctionTickCount` when its parked rate call
         // finally returned. A superseded operation has zero effects, diagnostics included.
         guard await owns(generation: generation, token: token) else { return }
+        guard ownsNow(generation: generation, token: token) else { return } // Amendment A5
         // Last, so the counter means "this tick finished" rather than "this tick began".
         diagnostics.correctionTickCount += 1
         publishDiagnostics()
@@ -983,6 +1057,7 @@ extension SyncPlaybackCoordinator {
         case .nudge(let rate):
             guard await runOwnedSteps([.setRate(rate)], generation: generation, token: token) else { return }
             guard await owns(generation: generation, token: token) else { return }
+            guard ownsNow(generation: generation, token: token) else { return } // Amendment A5
             diagnostics.lastCorrection = .nudge
             diagnostics.playbackRate = rate
         case .restoreRate:
@@ -990,11 +1065,13 @@ extension SyncPlaybackCoordinator {
                 [.setRate(DriftController.rateNormal)], generation: generation, token: token
             ) else { return }
             guard await owns(generation: generation, token: token) else { return }
+            guard ownsNow(generation: generation, token: token) else { return } // Amendment A5
             diagnostics.lastCorrection = .restoreRate
             diagnostics.playbackRate = DriftController.rateNormal
         case .hardSeek(let positionMs):
             guard await runOwnedSteps([.seek(positionMs)], generation: generation, token: token) else { return }
             guard await owns(generation: generation, token: token) else { return }
+            guard ownsNow(generation: generation, token: token) else { return } // Amendment A5
             diagnostics.lastCorrection = .hardSeek
             diagnostics.hardSeekCount += 1
             // Amendment A2 Finding E: the correction's *own* generation and epoch, carried to the
@@ -1007,6 +1084,7 @@ extension SyncPlaybackCoordinator {
                 [.setRate(DriftController.rateNormal)], generation: generation, token: token
             ) else { return }
             guard await owns(generation: generation, token: token) else { return }
+            guard ownsNow(generation: generation, token: token) else { return } // Amendment A5
             diagnostics.playbackRate = DriftController.rateNormal
             diagnostics.lastCorrection = .syncFailed
             diagnostics.syncState = .syncFailed
@@ -1025,9 +1103,7 @@ extension SyncPlaybackCoordinator {
     func emitCurrentPlaybackState() async {
         guard role == .leader else { return }
         let generation = await session.currentAuthGeneration()
-        await emitPlaybackStateFrame(generation: generation) { [weak self] in
-            await self?.stillCurrent(generation) ?? false
-        }
+        await emitPlaybackStateFrame(generation: generation, token: nil)
     }
 
     /// PROTOCOL §5's authoritative snapshot, emitted **as a consequence of a correction**, and
@@ -1047,15 +1123,26 @@ extension SyncPlaybackCoordinator {
     /// of the reads above it is a hole in it.
     func emitPlaybackStateIfOwned(generation: Int64, token: Int64) async {
         guard role == .leader else { return }
-        await emitPlaybackStateFrame(generation: generation) { [weak self] in
-            await self?.owns(generation: generation, token: token) ?? false
-        }
+        await emitPlaybackStateFrame(generation: generation, token: token)
     }
 
-    private func emitPlaybackStateFrame(generation: Int64, stillOwned: () async -> Bool) async {
+    /// The two emits' shared body.
+    ///
+    /// **ADR-024 Amendment A5** replaced the `stillOwned` closure this took with `token`, for a
+    /// reason the closure could not express: the proof it held was `async`, so taking it was itself a
+    /// re-entrancy point and "no `await` from here to the enqueue" was true of the statements and
+    /// false of the guard. A token — present for a correction's snapshot, absent for the leader's
+    /// "state as of now" re-broadcast — lets both halves of the proof be taken here, adjacently.
+    private func emitPlaybackStateFrame(generation: Int64, token: Int64?) async {
         guard !outboundAuthorityLost, let estimate = await estimate() else { return }
         let state = await player.playerState()
-        guard await stillOwned() else { return }
+        if let token {
+            guard await owns(generation: generation, token: token) else { return }
+            guard ownsNow(generation: generation, token: token) else { return }
+        } else {
+            guard await stillCurrent(generation) else { return }
+            guard stillCurrentNow(generation) else { return }
+        }
         // No `await` from here to the enqueue: the actor makes the proof and the hand-off atomic.
         // ADVISORY (Amendment A2): PROTOCOL §5 calls this "the full authoritative snapshot … the
         // reconciliation anchor, not an incremental update", so the next one subsumes it and a
@@ -1081,10 +1168,30 @@ extension SyncPlaybackCoordinator {
     /// (brief §32) without adding a generation field to the wire.
     ///
     /// It is never a command and can never outrank one — the only thing it produces is a number on
-    /// the diagnostics screen.
-    private func onPeerPositionReport(trackHash: ContentHash, positionMs: Int64, atSessionUs: Int64) async {
+    /// the diagnostics screen. **ADR-024 Amendment A5 Finding C: that is not the same as producing
+    /// nothing.** This carried no `generation` at all, so after `player.playerState()` suspended
+    /// there was nothing it *could* prove — and a report admitted under Session A wrote FR-023's
+    /// observed-peer-drift figure, computed against Session A's anchor for a track Session B is not
+    /// playing, onto Session B's diagnostics screen.
+    ///
+    /// The epoch the report was admitted against is **retained**, not re-read. `active` and
+    /// `currentEpochToken` are captured together before the suspension, because the report's meaning
+    /// is "the peer's position minus what *this* timeline expects at that instant" — the timeline its
+    /// `track_hash` and `at_session_us` were just matched against. Re-reading would silently answer a
+    /// different question about a different track; proving the captured epoch is still current, and
+    /// otherwise producing nothing, is the honest answer.
+    private func onPeerPositionReport(
+        trackHash: ContentHash,
+        positionMs: Int64,
+        atSessionUs: Int64,
+        generation: Int64
+    ) async {
         guard let active = timeline, trackHash == active.trackHash, atSessionUs >= active.anchorSessionUs else { return }
+        let token = currentEpochToken
         let state = await player.playerState()
+        guard await owns(generation: generation, token: token) else { return }
+        // No `await` from here to the write.
+        guard ownsNow(generation: generation, token: token) else { return }
         let durationMs: Int64? = state.durationMs > 0 ? state.durationMs : nil
         let expected = active.expectedPositionMs(atSessionUs: atSessionUs, durationMs: durationMs)
         diagnostics.peerDriftMs = positionMs - expected
@@ -1122,6 +1229,8 @@ extension SyncPlaybackCoordinator {
         // numbers, the held stream, the timeline — and this is reached through the hold gate or the
         // deferred drain, both of which suspend before getting here.
         guard await stillCurrent(generation) else { return }
+        // Amendment A5: the two sequence numbers, the held stream and the timeline all follow.
+        guard stillCurrentNow(generation) else { return }
         let commandSeq = fields.commandSeq
         if lastReceivedSeq == nil || commandSeq > (lastReceivedSeq ?? 0) {
             lastReceivedSeq = commandSeq
@@ -1154,6 +1263,8 @@ extension SyncPlaybackCoordinator {
         // Amendment A3 Finding B: the nil-track branch below supersedes the playback epoch and clears
         // the timeline, so it needs the same pre-mutation proof `applyStep` needs.
         guard await stillCurrent(generation) else { return }
+        // Amendment A5: `epoch.supersede()` in the branch below retires the live playback epoch.
+        guard stillCurrentNow(generation) else { return }
         guard let trackHash = fields.trackHash, let queueItemId = fields.queueItemId else {
             // "Nothing is loaded" is a representable authoritative state (ADR-024 §4). Every
             // scheduled effect from the epoch we lost track of is superseded, and nothing replaces it.
@@ -1164,7 +1275,7 @@ extension SyncPlaybackCoordinator {
             publishDiagnostics()
             return
         }
-        guard let estimate = await readyEstimate() else { return }
+        guard let estimate = await readyEstimate(generation: generation) else { return }
         let header = PlaybackCommandHeader(
             commandSeq: fields.commandSeq, effectiveAtSessionUs: fields.atSessionUs, issuedBy: localPeerId,
             queueRevision: fields.queueRevision
