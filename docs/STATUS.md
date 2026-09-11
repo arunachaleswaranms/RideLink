@@ -3814,6 +3814,25 @@ missed `with 1 failure`, reporting a false green for one iteration. The correcte
 produced every number above. Recorded because a stress harness that cannot see a single failure is
 worse than no stress harness.
 
+### Gates run for A4
+
+- **Android (JDK 21):** `:core:test`, all unit tests, `ktlintCheck`, `detekt`, `lint`,
+  `assembleDebug`, `assembleRelease` — all green. **Instrumented on the real `RideLink_API36`
+  emulator:** 49 tests across `:audio` (11), `:data` (34) and `:app` (4), including the new
+  `aPlayerCommandFromTheMainDispatcherDoesNotSuspend`.
+- **iOS:** `RideLinkCore` 284 tests, `RideLinkPlatform` 385 tests, Debug and Release unsigned
+  simulator builds — all green. `swiftlint`/`swiftformat` are **not installed on this machine and
+  are not in CI**; CLAUDE.md lists them but the workflow has never run them, so they are not
+  claimed here.
+- **Vectors:** all thirteen generators re-run; `git status protocol/` empty. The wire did not move.
+- **CI:** run **34567225931** (run number **36**, **attempt 1**, `01b28b62e407cf7d0c05c05d9d5d21f8cc792df3`)
+  — **green on both platforms, first attempt, nothing re-run.** Android: core unit tests, all unit
+  tests, ktlint, detekt, lint, `assembleDebug`, `assembleRelease` all success. iOS: `RideLinkCore`
+  tests, `RideLinkPlatform` tests, Debug and Release unsigned simulator builds all success.
+  `connectedDebugAndroidTest` is deliberately not in CI (no emulator on the runner); the 49
+  instrumented tests above ran locally. CI tested the **docs** commit `01b28b6`, which contains the
+  functional commits `039bc2d` (production) and `d376ee2` (tests) beneath it.
+
 ### What is still not true
 
 **Nothing in this session ran on a phone, and no audio reached a speaker or a Bluetooth endpoint.**
