@@ -138,6 +138,21 @@ class FakeSyncSession : SyncSessionPort {
     fun deliver(message: PlaybackMessage) = playback.playbackSink?.submit(message, currentAuthGeneration)
 
     fun deliver(message: QueueMessage) = playback.queueSink?.submit(message, currentAuthGeneration)
+
+    /**
+     * Delivers a frame tagged with a generation the caller chooses — the read loop still producing
+     * under a session that has already ended, which is the interleaving ADR-024 Amendment A6 is
+     * about. Mirrors the iOS fake's overload of the same name.
+     */
+    fun deliver(
+        message: PlaybackMessage,
+        generation: Long,
+    ) = playback.playbackSink?.submit(message, generation)
+
+    fun deliver(
+        message: QueueMessage,
+        generation: Long,
+    ) = playback.queueSink?.submit(message, generation)
 }
 
 /** Records every player call in order — the whole assertion surface for "what did the audio do". */
