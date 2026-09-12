@@ -197,6 +197,112 @@ class Phase5FrameQueueTest {
             )
         }
 
+    // --- Amendment A7: the loss ledger under non-monotonic generation arrival --------------------
+
+    /**
+     * **The ledger defect A7 found, in full.**
+     *
+     * A6 bucketed losses by *adjacency* — a new bucket whenever the incoming generation differed
+     * from the newest one — and, once past eight buckets, evicted the oldest **by arrival** and
+     * folded its counts into the next oldest by arrival. Both steps rested on one written
+     * assumption: that generations arrive monotonically, so the two oldest buckets are both
+     * retired.
+     *
+     * A7 makes that assumption false, and does so as a *consequence of its own fix*. Binding each
+     * inbound frame to the connection that authorised its read means a read loop whose session has
+     * ended still dispatches the frame it had already read — after the successor session's read
+     * loop has begun offering. `A, B, A` reaches [Phase5FrameQueue.offer], so buckets alternate,
+     * nine buckets can be as few as **two** generations, and the fold target is then the newest
+     * generation — which may be **live**.
+     *
+     * The consequence is not cosmetic. A follower answers a live-generation loss by latching
+     * `playbackDesynchronized`/`queueDesynchronized`, which decide whether incremental authoritative
+     * commands are applied at all. Folding a dead session's loss into the live generation is
+     * therefore the *exact* cross-session halt A6 existed to remove, re-entering through the
+     * ledger's back door.
+     *
+     * Against the A6 fold this asserts `0` retired losses attributed to generation 9 and observes
+     * all eight of generation 1's folded onto it.
+     */
+    @Test
+    fun `an alternating generation run never folds a retired loss onto the live generation`() =
+        runTest(StandardTestDispatcher()) {
+            val subject = queue(capacity = 1)
+            subject.offer(Frame("occupant"))
+
+            // Nine distinct generations' worth of refusals, but delivered *alternating* with the
+            // newest one — the arrival order A7's own fix makes reachable.
+            val live = 9L
+            for (generation in 1L..8L) {
+                repeat(2) { assertEquals(IngressAdmission.OVERFLOW, subject.offer(Frame("old", generation = generation))) }
+                assertEquals(IngressAdmission.OVERFLOW, subject.offer(Frame("live", generation = live)))
+            }
+
+            val losses = subject.drainLosses()
+            // The correctness property first, because it is the one that halts a ride: the live
+            // generation must own its own eight refusals and not one of anybody else's.
+            assertEquals(
+                8,
+                losses.filter { it.generation == live }.sumOf { it.overflowCount },
+                "a retired generation's loss was folded onto the live one — the A6 cross-session halt, via the ledger",
+            )
+            assertTrue(
+                losses.filter { it.generation != live }.all { it.generation < live },
+                "everything a fold could target is strictly older than the live generation",
+            )
+            assertEquals(
+                24,
+                losses.sumOf { it.overflowCount },
+                "and nothing is discarded — every refusal is still accounted for somewhere",
+            )
+            assertTrue(
+                losses.size <= Phase5FrameQueue.MAX_LOSS_GENERATIONS,
+                "the ledger stays bounded: ${losses.size} buckets",
+            )
+            assertEquals(
+                losses.size,
+                losses.map { it.generation }.distinct().size,
+                "one bucket per generation — the bound must count generations, not adjacency runs",
+            )
+        }
+
+    /**
+     * The same-generation half the fix must not weaken: a generation's own events accumulate into
+     * its own bucket wherever they arrive, so ordering within a generation is preserved as the
+     * counts it is expressed by, and a late arrival never opens a second bucket for a generation
+     * that already has one.
+     */
+    @Test
+    fun `a late arrival joins its own generation's bucket rather than opening a second`() =
+        runTest(StandardTestDispatcher()) {
+            val subject = queue(capacity = 1)
+            subject.offer(Frame("occupant"))
+
+            subject.offer(Frame("a1", generation = 1))
+            subject.offer(Frame("b1", generation = 2))
+            subject.offer(Frame("a2", generation = 1)) // the read loop of the ended session, late
+
+            val losses = subject.drainLosses()
+            assertEquals(listOf(1L, 2L), losses.map { it.generation }, "two generations, in first-arrival order")
+            assertEquals(2, losses.first { it.generation == 1L }.overflowCount, "both of generation 1's are its own")
+            assertEquals(1, losses.first { it.generation == 2L }.overflowCount, "and generation 2 keeps only its own")
+        }
+
+    /** Coalescing obeys the same ownership rule as overflow — it is an event, and it has an owner. */
+    @Test
+    fun `coalescing is attributed by generation under non-monotonic arrival too`() =
+        runTest(StandardTestDispatcher()) {
+            val subject = queue(capacity = 1)
+            assertEquals(IngressAdmission.ADMIT, subject.offer(Frame("r0", family = "REPORT", generation = 1)))
+            assertEquals(IngressAdmission.COALESCE, subject.offer(Frame("r1", family = "REPORT", generation = 2)))
+            assertEquals(IngressAdmission.COALESCE, subject.offer(Frame("r2", family = "REPORT", generation = 1)))
+
+            val losses = subject.drainLosses()
+            assertEquals(1, losses.first { it.generation == 1L }.coalescedCount, "the late generation 1 event is generation 1's")
+            assertEquals(1, losses.first { it.generation == 2L }.coalescedCount)
+            assertEquals(0, losses.sumOf { it.overflowCount }, "a coalesce is not a refusal")
+        }
+
     private suspend fun drainAll(subject: Phase5FrameQueue<Frame>): List<String> {
         val drained = mutableListOf<String>()
         while (true) {

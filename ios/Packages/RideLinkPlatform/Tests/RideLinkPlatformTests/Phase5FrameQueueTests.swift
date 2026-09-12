@@ -155,6 +155,103 @@ final class Phase5FrameQueueTests: XCTestCase {
         }
     }
 
+    // MARK: - Amendment A7: the loss ledger under non-monotonic generation arrival
+
+    /// **The ledger defect A7 found, in full.**
+    ///
+    /// A6 bucketed losses by *adjacency* — a new bucket whenever the incoming generation differed
+    /// from the newest one — and, once past eight buckets, evicted the oldest **by arrival** and
+    /// folded its counts into the next oldest by arrival. Both steps rested on one written
+    /// assumption: that generations arrive monotonically, so the two oldest buckets are both
+    /// retired.
+    ///
+    /// A7 makes that assumption false, and does so as a *consequence of its own fix*. Binding each
+    /// inbound frame to the connection that authorised its read means a read loop whose session has
+    /// ended still dispatches the frame it had already read — after the successor session's read
+    /// loop has begun offering. `A, B, A` reaches `offer`, so buckets alternate, nine buckets can be
+    /// as few as **two** generations, and the fold target is then the newest generation — which may
+    /// be **live**.
+    ///
+    /// The consequence is not cosmetic. A follower answers a live-generation loss by latching
+    /// `playbackDesynchronized`/`queueDesynchronized`, which decide whether incremental
+    /// authoritative commands are applied at all. Folding a dead session's loss into the live
+    /// generation is therefore the *exact* cross-session halt A6 existed to remove, re-entering
+    /// through the ledger's back door.
+    ///
+    /// Against the A6 fold this observes generation 1's refusals folded onto generation 9.
+    func testAnAlternatingGenerationRunNeverFoldsARetiredLossOntoTheLiveGeneration() {
+        let queue = makeQueue(capacity: 1)
+        _ = queue.offer(Frame("occupant"))
+
+        // Nine distinct generations' worth of refusals, but delivered *alternating* with the newest
+        // one — the arrival order A7's own fix makes reachable.
+        let live: Int64 = 9
+        for generation in Int64(1) ... 8 {
+            for _ in 0 ..< 2 {
+                XCTAssertEqual(queue.offer(Frame("old", generation: generation)), .overflow)
+            }
+            XCTAssertEqual(queue.offer(Frame("live", generation: live)), .overflow)
+        }
+
+        let losses = queue.drainLosses()
+        // The correctness property first, because it is the one that halts a ride: the live
+        // generation must own its own eight refusals and not one of anybody else's.
+        XCTAssertEqual(
+            losses.filter { $0.generation == live }.reduce(0) { $0 + $1.overflowCount }, 8,
+            "a retired generation's loss was folded onto the live one — the A6 cross-session halt, via the ledger"
+        )
+        XCTAssertTrue(
+            losses.filter { $0.generation != live }.allSatisfy { $0.generation < live },
+            "everything a fold could target is strictly older than the live generation"
+        )
+        XCTAssertEqual(
+            losses.reduce(0) { $0 + $1.overflowCount }, 24,
+            "and nothing is discarded — every refusal is still accounted for somewhere"
+        )
+        XCTAssertLessThanOrEqual(
+            losses.count, Phase5FrameQueue<Frame>.maxLossGenerations,
+            "the ledger stays bounded: \(losses.count) buckets"
+        )
+        XCTAssertEqual(
+            losses.count, Set(losses.map(\.generation)).count,
+            "one bucket per generation — the bound must count generations, not adjacency runs"
+        )
+    }
+
+    /// The same-generation half the fix must not weaken: a generation's own events accumulate into
+    /// its own bucket wherever they arrive, so ordering within a generation is preserved as the
+    /// counts it is expressed by, and a late arrival never opens a second bucket for a generation
+    /// that already has one.
+    func testALateArrivalJoinsItsOwnGenerationsBucketRatherThanOpeningASecond() {
+        let queue = makeQueue(capacity: 1)
+        _ = queue.offer(Frame("occupant"))
+
+        _ = queue.offer(Frame("a1", generation: 1))
+        _ = queue.offer(Frame("b1", generation: 2))
+        _ = queue.offer(Frame("a2", generation: 1)) // the read loop of the ended session, late
+
+        let losses = queue.drainLosses()
+        XCTAssertEqual(losses.map(\.generation), [1, 2], "two generations, in first-arrival order")
+        XCTAssertEqual(losses.first { $0.generation == 1 }?.overflowCount, 2, "both of generation 1's are its own")
+        XCTAssertEqual(losses.first { $0.generation == 2 }?.overflowCount, 1, "and generation 2 keeps only its own")
+    }
+
+    /// Coalescing obeys the same ownership rule as overflow — it is an event, and it has an owner.
+    func testCoalescingIsAttributedByGenerationUnderNonMonotonicArrivalToo() {
+        let queue = makeQueue(capacity: 1)
+        XCTAssertEqual(queue.offer(Frame("r0", family: "REPORT", generation: 1)), .admit)
+        XCTAssertEqual(queue.offer(Frame("r1", family: "REPORT", generation: 2)), .coalesce)
+        XCTAssertEqual(queue.offer(Frame("r2", family: "REPORT", generation: 1)), .coalesce)
+
+        let losses = queue.drainLosses()
+        XCTAssertEqual(
+            losses.first { $0.generation == 1 }?.coalescedCount, 1,
+            "the late generation 1 event is generation 1's"
+        )
+        XCTAssertEqual(losses.first { $0.generation == 2 }?.coalescedCount, 1)
+        XCTAssertEqual(losses.reduce(0) { $0 + $1.overflowCount }, 0, "a coalesce is not a refusal")
+    }
+
     /// Concurrent producers never lose an accepted frame and never exceed the bound.
     func testConcurrentProducersNeverExceedTheBoundAndNeverLoseAnAcceptedFrame() async {
         let queue = makeQueue(capacity: 64)
