@@ -34,14 +34,22 @@ struct MainScreen: View {
                 Text(connectionLabel(coordinator.state.status))
                     .font(.body)
 
-                Button(coordinator.state.status == .discovering ? "Stop Discovery" : "Start Discovery") {
-                    if coordinator.state.status == .discovering {
-                        coordinator.cancelDiscovery()
-                    } else {
-                        coordinator.startDiscovery()
+                // One button, four meanings, decided by `SessionFsm`'s own legal transitions rather
+                // than by this screen (`docs/STATUS.md` §4 problem 53). Before this pass it only ever
+                // offered Start/Stop Discovery, and `.startDiscovery` is legal only from `IDLE` — so
+                // once a session had ended or the reconnect budget was spent, pressing it did nothing
+                // at all and the ride could only be restarted by force-quitting the app.
+                if let action = sessionAction(coordinator.state.status) {
+                    Button(action.label) {
+                        switch action {
+                        case .start: coordinator.startDiscovery()
+                        case .stopDiscovery: coordinator.cancelDiscovery()
+                        case .end: coordinator.endSession()
+                        case .retry: coordinator.retryDiscovery()
+                        }
                     }
+                    .buttonStyle(.borderedProminent)
                 }
-                .buttonStyle(.borderedProminent)
 
                 TransportBanner(transportLabel: coordinator.controlDiagnostics.transportLabel)
 
@@ -268,6 +276,44 @@ private struct DiagnosticsCard: View {
             Text(label).font(.caption).foregroundStyle(.secondary)
             Text(value).font(.body)
         }
+    }
+}
+
+/// What the one session button does from a given state — the UI half of `docs/STATUS.md` §4 problem
+/// 53. Every case maps to an event `SessionFsm` accepts from that state, so the button is never
+/// offered for a transition the FSM would reject.
+///
+/// `nil` for `PAIRING`, `CONNECTING` and `ENDING`: the first two are waiting on two humans or a
+/// handshake and have no FSM event to abandon them, and `ENDING` is a teardown in progress — offering
+/// a button there would invite exactly the successor race this pass closes.
+///
+/// `nil` for `ERROR` too, and for a different reason: its only exit is `.errorAcknowledged`, and
+/// nothing in the app emits `.fatalError`, so the state cannot be entered. Wiring a button to a state
+/// no production path reaches would be dead code; the remaining gap is recorded in `docs/STATUS.md`
+/// §4 rather than papered over here.
+private enum SessionAction {
+    case start
+    case stopDiscovery
+    case end
+    case retry
+
+    var label: String {
+        switch self {
+        case .start: return "Start Discovery"
+        case .stopDiscovery: return "Stop Discovery"
+        case .end: return "End Session"
+        case .retry: return "Retry"
+        }
+    }
+}
+
+private func sessionAction(_ status: SessionStatus) -> SessionAction? {
+    switch status {
+    case .idle: return .start
+    case .discovering: return .stopDiscovery
+    case .connected, .rideActive, .reconnecting: return .end
+    case .disconnected: return .retry
+    case .pairing, .connecting, .ending, .error: return nil
     }
 }
 

@@ -105,11 +105,7 @@ fun MainScreen(
             Text("Connection:")
             Text(connectionLabel(state.status), style = MaterialTheme.typography.bodyLarge)
 
-            Button(onClick = {
-                if (state.status == SessionStatus.DISCOVERING) coordinator.cancelDiscovery() else coordinator.startDiscovery()
-            }) {
-                Text(if (state.status == SessionStatus.DISCOVERING) "Stop Discovery" else "Start Discovery")
-            }
+            SessionActionButton(status = state.status, coordinator = coordinator)
 
             TransportBanner(diagnostics.transportLabel)
 
