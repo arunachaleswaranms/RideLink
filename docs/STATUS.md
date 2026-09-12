@@ -4585,7 +4585,9 @@ the same unreachable path: `ENDING -> IDLE` needs `TeardownComplete`, which **no
 emits** (§4 problem 53, found by exactly this), so the trailing `releaseVoice()` can never meet a
 successor in production — it is problem 46's shape, kept unreachable by an unrelated gap. Post-fix
 stress: **12 consecutive Android runs and 20 consecutive iOS runs, all clean**, plus a full clean
-`test`+analysis+`assembleRelease` sweep. The counts were raised from 5 after failures three and four
+`test`+analysis+`assembleRelease` sweep, plus **three consecutive green CI runs on the same commit**
+(`5c76fb3`, run `34711592500`) — re-run twice deliberately, because a suite that has already failed CI
+twice earns more than one green before it is called stable. The counts were raised from 5 after failures three and four
 showed 5 was not enough to see them — **the honest lesson of this session's test work is that five
 local runs is not a stress test**. The second failure is also what caught this session's own over-claim about
 problem 47's reachability — recorded above.
