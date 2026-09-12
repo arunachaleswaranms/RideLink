@@ -207,8 +207,11 @@ an event collector observes `Connected`, so it would trade a permanent loss for 
   tested there; the wiring around it is proven on Android and mirrored by inspection. This is stated
   rather than smoothed over.
 - `ERROR` remains unreachable — nothing emits `FatalError` — so `ErrorAcknowledged` is still a
-  transition no production code triggers. That is the **remaining** instance of problem 53's class
-  and is recorded as such rather than papered over with a button for a state that cannot occur.
+  transition no production code triggers. The same grep that confirmed problem 53 found the same of
+  `StartRide`/`EndRide`, which makes **`RIDE_ACTIVE` unreachable too** — it is Phase 7's to wire, and
+  until then every `RIDE_ACTIVE` row in TEST_PLAN is untested-because-unreachable rather than
+  covered. Both pairs are recorded as `docs/STATUS.md` §4 problem 55 rather than papered over with
+  buttons for states that cannot occur.
 
 ## Alternatives considered
 
