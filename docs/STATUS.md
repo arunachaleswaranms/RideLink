@@ -4066,6 +4066,18 @@ so the structural property is asserted rather than assumed.
   the transition.
 - **Vectors:** all thirteen generators re-run; `git status protocol/` empty. The wire did not move —
   no message type, field, encoding, bound, `command_seq` or `queue_revision` changed.
+- **Emulator:** `connectedDebugAndroidTest` on the real `RideLink_API36` AVD — **49 instrumented
+  tests, 0 failures**. Run this session **because Android production code changed**, unlike A5. It
+  re-proves all four Phase 5 `SyncScheduledPlaybackTest` cases against a real `ExoPlayer`, including
+  A4's `aPlayerCommandFromTheMainDispatcherDoesNotSuspend`, which is what keeps Android's
+  structural-safety claims measured rather than assumed.
+- **CI:** run **34674305912** (run number **38**, **attempt 1**, `213c850db929a1a4318e271fc1ae955daef0d160`)
+  — **green on both platforms, first attempt, nothing re-run.** Android: core unit tests, all unit
+  tests, ktlint, detekt, lint, `assembleDebug`, `assembleRelease` all success. iOS: `RideLinkCore`
+  tests, `RideLinkPlatform` tests, Debug and Release unsigned simulator builds all success.
+  `connectedDebugAndroidTest` is deliberately not in CI (no emulator on the runner); it was run
+  locally instead, above. CI tested the **docs** commit `213c850`, which contains the functional
+  commit `bee58e3` and the test commit `2715733` beneath it.
 
 ### What is still not true
 
