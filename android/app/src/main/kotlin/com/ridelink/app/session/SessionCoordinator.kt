@@ -9,6 +9,7 @@ import com.ridelink.core.audiopolicy.VoiceFailure
 import com.ridelink.core.logging.LogSink
 import com.ridelink.core.logging.StructuredLogger
 import com.ridelink.core.model.DiscoveredPeer
+import com.ridelink.core.protocol.AudioStateEpoch
 import com.ridelink.core.protocol.AudioStateMessage
 import com.ridelink.core.protocol.AudioStatePublisher
 import com.ridelink.core.security.TrustedPeer
@@ -203,6 +204,16 @@ class SessionCoordinator(
      */
     private val audioStatePublisher = AudioStatePublisher(AudioStateEpochGenerator.generate())
     private val peerAudioStateInbox = AudioStateInboxHolder()
+
+    /**
+     * The sender lifetime every `AUDIO_STATE` this device emits is currently stamped with.
+     *
+     * `internal` for the same reason [handleControlEvent] and [applyEvent] are: it is the seam a test
+     * needs to assert that [startDiscovery] begins a *new* lifetime and that a control reconnect
+     * begins *no* lifetime, which is the whole of ADR-021 Amendment A7's sending side and is
+     * otherwise observable only by owning both phones. Read-only, and nothing in the app reads it.
+     */
+    internal val audioStateSenderEpoch: AudioStateEpoch get() = audioStatePublisher.currentEpoch
 
     /**
      * **The readiness gate, as a pure decision** (ARCHITECTURE §6.4, `RideStartPolicy`).
