@@ -95,7 +95,7 @@ class SharedLibraryCoordinatorProviderAuthorizationTest {
             newCoordinator(scope, session, contentResolver, bulkTransport)
             contentResolver.resolution = found()
 
-            session.transfer.sink!!.submit(TransferMessage.Request(hashX, transferX))
+            session.transfer.sink!!.submit(TransferMessage.Request(hashX, transferX), session.readGeneration())
             advanceUntilIdle()
             assertEquals(1, contentResolver.resolveCallCount)
 
@@ -134,7 +134,7 @@ class SharedLibraryCoordinatorProviderAuthorizationTest {
             newCoordinator(scope, session, contentResolver, bulkTransport)
             contentResolver.resolution = found()
 
-            session.transfer.sink!!.submit(TransferMessage.Request(hashX, transferX))
+            session.transfer.sink!!.submit(TransferMessage.Request(hashX, transferX), session.readGeneration())
             advanceUntilIdle()
 
             assertEquals(0, bulkTransport.ensureListeningCallCount)
@@ -163,7 +163,7 @@ class SharedLibraryCoordinatorProviderAuthorizationTest {
             newCoordinator(scope, session, contentResolver, bulkTransport)
             contentResolver.resolution = found()
 
-            session.transfer.sink!!.submit(TransferMessage.Request(hashX, transferX))
+            session.transfer.sink!!.submit(TransferMessage.Request(hashX, transferX), session.readGeneration())
             advanceUntilIdle()
             assertEquals(1, bulkTransport.ensureListeningCallCount) // gate acquired, now parked in ensureListening()
 
@@ -213,7 +213,7 @@ class SharedLibraryCoordinatorProviderAuthorizationTest {
             newCoordinator(scope, session, contentResolver, bulkTransport)
             contentResolver.resolution = found()
 
-            session.transfer.sink!!.submit(TransferMessage.Request(hashX, transferX))
+            session.transfer.sink!!.submit(TransferMessage.Request(hashX, transferX), session.readGeneration())
             advanceUntilIdle()
             assertEquals(1, bulkTransport.ensureListeningCallCount) // gate acquired, now parked in ensureListening()
 
@@ -245,7 +245,7 @@ class SharedLibraryCoordinatorProviderAuthorizationTest {
             newCoordinator(scope, session, contentResolver, bulkTransport)
             contentResolver.resolution = found()
 
-            session.transfer.sink!!.submit(TransferMessage.Request(hashX, transferX))
+            session.transfer.sink!!.submit(TransferMessage.Request(hashX, transferX), session.readGeneration())
             advanceUntilIdle()
             assertEquals(1, bulkTransport.ensureListeningCallCount)
 
@@ -276,7 +276,7 @@ class SharedLibraryCoordinatorProviderAuthorizationTest {
             newCoordinator(scope, session, contentResolver, bulkTransport)
             contentResolver.resolution = found()
 
-            session.transfer.sink!!.submit(TransferMessage.Request(hashX, transferX))
+            session.transfer.sink!!.submit(TransferMessage.Request(hashX, transferX), session.readGeneration())
             advanceUntilIdle()
 
             assertTrue(bulkTransport.issuedTokenCalls.isEmpty())
@@ -284,7 +284,7 @@ class SharedLibraryCoordinatorProviderAuthorizationTest {
 
             // The slot really is free: a second request, with a working listener, serves normally.
             bulkTransport.ensureListeningFailure = null
-            session.transfer.sink!!.submit(TransferMessage.Request(hashX, transferY))
+            session.transfer.sink!!.submit(TransferMessage.Request(hashX, transferY), session.readGeneration())
             advanceUntilIdle()
             assertEquals(listOf(transferY), bulkTransport.serveCalls)
         }
@@ -301,12 +301,12 @@ class SharedLibraryCoordinatorProviderAuthorizationTest {
             newCoordinator(scope, session, contentResolver, bulkTransport)
             contentResolver.resolution = found()
 
-            session.transfer.sink!!.submit(TransferMessage.Request(hashX, transferX))
+            session.transfer.sink!!.submit(TransferMessage.Request(hashX, transferX), session.readGeneration())
             advanceUntilIdle()
             assertEquals(1, bulkTransport.serveCalls.size) // the real transfer is active
 
             // A cancel for an unrelated transfer_id must be a no-op.
-            session.transfer.sink!!.submit(TransferMessage.Cancel(transferY, "user_cancelled"))
+            session.transfer.sink!!.submit(TransferMessage.Cancel(transferY, "user_cancelled"), session.readGeneration())
             advanceUntilIdle()
 
             assertEquals(0, bulkTransport.cancelActiveCallCount)
@@ -330,15 +330,15 @@ class SharedLibraryCoordinatorProviderAuthorizationTest {
             newCoordinator(scope, session, contentResolver, bulkTransport)
             contentResolver.resolution = found()
 
-            session.transfer.sink!!.submit(TransferMessage.Request(hashX, transferX))
+            session.transfer.sink!!.submit(TransferMessage.Request(hashX, transferX), session.readGeneration())
             advanceUntilIdle()
             assertEquals(1, bulkTransport.serveCalls.size) // genuinely mid-flight, still holding the gate
 
-            session.transfer.sink!!.submit(TransferMessage.Cancel(transferY, "user_cancelled"))
+            session.transfer.sink!!.submit(TransferMessage.Cancel(transferY, "user_cancelled"), session.readGeneration())
             advanceUntilIdle()
             assertTrue(bulkTransport.cancelActiveCalls.isEmpty(), "a cancel for a foreign id must never reach the transport")
 
-            session.transfer.sink!!.submit(TransferMessage.Cancel(transferX, "user_cancelled"))
+            session.transfer.sink!!.submit(TransferMessage.Cancel(transferX, "user_cancelled"), session.readGeneration())
             advanceUntilIdle()
             assertEquals(listOf(transferX), bulkTransport.cancelActiveCalls)
         }
@@ -358,7 +358,7 @@ class SharedLibraryCoordinatorProviderAuthorizationTest {
             val coordinator = newCoordinator(scope, session, contentResolver, bulkTransport)
             contentResolver.resolution = found()
 
-            session.transfer.sink!!.submit(TransferMessage.Request(hashX, transferX))
+            session.transfer.sink!!.submit(TransferMessage.Request(hashX, transferX), session.readGeneration())
             advanceUntilIdle()
             assertEquals(1, bulkTransport.serveCalls.size) // provider now holds the one shared slot, genuinely mid-flight
 

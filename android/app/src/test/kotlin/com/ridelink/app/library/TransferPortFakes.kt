@@ -229,6 +229,21 @@ class FakeTransferSessionPort(
     override var currentPeerSpki: SpkiHash? = peerSpki
     override var currentPeerHost: String? = peerHost
 
+    /**
+     * ADR-025 §1. Derived from [currentAuthGeneration] so that every scenario written before this
+     * seam existed keeps meaning exactly what it meant — "move the session" is still one
+     * assignment — while [linkDown] models the one state the two properties genuinely disagree
+     * about: the link has gone and no session is authenticated, but the last generation assigned is
+     * still the last generation assigned.
+     */
+    override val liveAuthenticatedGeneration: Long? get() = if (linkDown) null else currentAuthGeneration
+
+    /** True between a link loss and the next authenticated session. See [liveAuthenticatedGeneration]. */
+    var linkDown: Boolean = false
+
+    /** The generation an inbound frame read **now** would carry, for a test that is not exercising staleness. */
+    fun readGeneration(): Long = currentAuthGeneration
+
     /** Simulates a session boundary the same way production does: bump the live view, then emit
      *  the event [SharedLibraryCoordinator]'s own `init`-installed collector reacts to. */
     fun emitEvent(event: ControlEvent) {

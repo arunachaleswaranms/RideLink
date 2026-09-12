@@ -124,6 +124,7 @@ class SharedLibraryCoordinatorCancellationTest {
     ) {
         session.transfer.sink!!.submit(
             TransferMessage.Offer(transferId, OFFER_SIZE_BYTES, CHUNK_SIZE, CHUNK_COUNT, BULK_PORT, "fake-bulk-token"),
+            session.readGeneration(),
         )
     }
 

@@ -178,10 +178,18 @@ class ManifestTransferAuthenticationGateTest {
 
     private class ManifestSpy : ManifestSink {
         private val log = CopyOnWriteArrayList<ManifestMessage>()
+        private val generationLog = CopyOnWriteArrayList<Long>()
         val received: List<ManifestMessage> get() = log.toList()
 
-        override fun submit(message: ManifestMessage) {
+        /** ADR-025 §1: which session authorised each message's read, recorded alongside it. */
+        val generations: List<Long> get() = generationLog.toList()
+
+        override fun submit(
+            message: ManifestMessage,
+            generation: Long,
+        ) {
             log.add(message)
+            generationLog.add(generation)
         }
     }
 

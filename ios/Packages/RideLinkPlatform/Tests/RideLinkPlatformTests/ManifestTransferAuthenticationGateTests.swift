@@ -167,6 +167,7 @@ private final class GateClock: @unchecked Sendable {
 private final class ManifestSpy: ManifestSink, @unchecked Sendable {
     private let lock = NSLock()
     private var log: [ManifestMessage] = []
+    private var generationLog: [Int64] = []
 
     var received: [ManifestMessage] {
         lock.lock()
@@ -174,16 +175,25 @@ private final class ManifestSpy: ManifestSink, @unchecked Sendable {
         return log
     }
 
-    func submit(_ message: ManifestMessage) {
+    /// ADR-025 §1: which session authorised each message's read, recorded alongside it.
+    var generations: [Int64] {
+        lock.lock()
+        defer { lock.unlock() }
+        return generationLog
+    }
+
+    func submit(_ message: ManifestMessage, generation: Int64) {
         lock.lock()
         defer { lock.unlock() }
         log.append(message)
+        generationLog.append(generation)
     }
 }
 
 private final class TransferSpy: TransferSink, @unchecked Sendable {
     private let lock = NSLock()
     private var log: [TransferMessage] = []
+    private var generationLog: [Int64] = []
 
     var received: [TransferMessage] {
         lock.lock()
@@ -191,9 +201,17 @@ private final class TransferSpy: TransferSink, @unchecked Sendable {
         return log
     }
 
-    func submit(_ message: TransferMessage) {
+    /// ADR-025 §1: which session authorised each message's read, recorded alongside it.
+    var generations: [Int64] {
+        lock.lock()
+        defer { lock.unlock() }
+        return generationLog
+    }
+
+    func submit(_ message: TransferMessage, generation: Int64) {
         lock.lock()
         defer { lock.unlock() }
         log.append(message)
+        generationLog.append(generation)
     }
 }
