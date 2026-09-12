@@ -405,8 +405,7 @@ sentence, and without it "per sender per session" is a rule only the sender can 
 
 §4.4.1 says the `revision` is per sender per *session* and survives a control reconnect. Both halves
 are deliberate, and together they leave a gap the receiver cannot close on its own: when the sender's
-session genuinely **does** end — its process restarted, or its user left and re-entered discovery —
-its counter restarts at 1, and a receiver that kept the old floor refuses every genuine message until
+session genuinely **does** end — its process restarted — its counter restarts at 1, and a receiver that kept the old floor refuses every genuine message until
 the new counter climbs past a number from a session that no longer exists. Nothing else on the wire
 distinguishes the two cases: `peer_id` is durable across a restart, `session_id` is negotiated per
 handshake and therefore moves on an ordinary reconnect the counter survives, and `conn_tiebreak`

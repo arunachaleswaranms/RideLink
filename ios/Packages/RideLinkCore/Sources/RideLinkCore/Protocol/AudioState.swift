@@ -444,8 +444,10 @@ public struct AudioStatePublisher: Sendable {
 /// control-session boundary — §4.4's `revision` keeps climbing across a reconnect, and keeping the floor
 /// is what makes a delayed frame from *before* that reconnect still refusable. But the floor says nothing
 /// at all about a sender whose counter restarted, and before this amendment it was applied to one anyway:
-/// a peer that restarted its process, or merely left and re-entered discovery, came back at `revision` 1
-/// and had every genuine message dropped until it climbed past the dead lifetime's number. So:
+/// a peer that restarted its process came back at `revision` 1 and had every genuine message dropped
+/// until it climbed past the dead lifetime's number.
+///
+/// So:
 ///
 /// - **same epoch** — §4.4's rule, unchanged: strictly greater, or dropped as stale.
 /// - **an epoch never seen** — a new sender lifetime. Accepted, and the epoch it replaces is recorded as

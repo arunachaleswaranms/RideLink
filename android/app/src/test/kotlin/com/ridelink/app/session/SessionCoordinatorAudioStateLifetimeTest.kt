@@ -87,12 +87,12 @@ class SessionCoordinatorAudioStateLifetimeTest {
 
     @Test
     fun `each discovery session begins a sender lifetime that has never been used before`() =
-        withCoordinator { coordinator, _ ->
+        withCoordinator { coordinator, manager ->
             val first = coordinator.audioStateSenderEpoch
 
-            coordinator.restartDiscovery()
+            coordinator.restartDiscovery(manager)
             val second = coordinator.audioStateSenderEpoch
-            coordinator.restartDiscovery()
+            coordinator.restartDiscovery(manager)
             val third = coordinator.audioStateSenderEpoch
 
             assertNotEquals(first, second, "a new discovery session must announce a new lifetime")
@@ -168,7 +168,7 @@ class SessionCoordinatorAudioStateLifetimeTest {
             coordinator.settle()
             assertEquals(1L, coordinator.peerAudioState.value?.revision, "the straggler was refused")
 
-            coordinator.restartDiscovery()
+            coordinator.restartDiscovery(manager)
             assertNull(coordinator.peerAudioState.value, "the peer's state belonged to the old session")
 
             // A fresh local session tracks nothing, so it has no standing to call that lifetime dead.
@@ -255,11 +255,28 @@ class SessionCoordinatorAudioStateLifetimeTest {
      * Ends this session and starts a new discovery one — the production path a user takes by leaving
      * and re-entering discovery, and the only thing that begins a new sender lifetime.
      */
-    private fun SessionCoordinator.restartDiscovery() {
+    private suspend fun SessionCoordinator.restartDiscovery(manager: ControlSessionManager) {
         assertTrue(applyEvent(SessionEvent.LinkLost(FsmLinkLossReason.BYE)))
+        // `ENDING`'s effect releases audio in a **launched** coroutine, and that release is what
+        // clears the `AUDIO_STATE` sink. `TeardownComplete` means "that finished", so waiting for it
+        // to actually have finished is what the event says rather than a stabilisation: driving the
+        // transition first would let Session A's trailing teardown clear the sink the *next* session
+        // installs. (On a laptop the launch wins the race every time; on a loaded CI agent it does
+        // not — which is the only reason this is written down rather than assumed.)
+        awaitTrue("the ENDING release to finish") { manager.audioState.sink == null }
         assertTrue(applyEvent(SessionEvent.TeardownComplete))
         assertEquals(SessionStatus.IDLE, state.value.status)
         reachConnected()
+    }
+
+    private suspend fun awaitTrue(
+        what: String,
+        condition: () -> Boolean,
+    ) {
+        withTimeout(TIMEOUT_MS) {
+            while (!condition()) delay(POLL_MS)
+        }
+        assertTrue(condition(), "timed out waiting for $what")
     }
 
     private suspend fun SessionCoordinator.awaitPeerRevision(revision: Long) {

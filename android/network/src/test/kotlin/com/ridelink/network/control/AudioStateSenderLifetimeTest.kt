@@ -366,6 +366,13 @@ class AudioStateSenderLifetimeTest {
             withTimeout(FsmSession.TIMEOUT_MS) {
                 while (session.countOf { it is ControlEvent.Connected } <= before) delay(POLL_MS)
             }
+            // **Both** ends, not one. The receiver's `Connected` says the receiver activated; the
+            // sender activates independently and `send` refuses until it has, so waiting only on the
+            // receiver leaves a window that is wide on a loaded build agent and invisible on a
+            // laptop. This is the same shape as `c1ca688`'s "wait for both pairing prompts".
+            withTimeout(FsmSession.TIMEOUT_MS) {
+                while (target.liveAuthenticatedGeneration == null) delay(POLL_MS)
+            }
         }
 
         suspend fun awaitRevision(revision: Long) {

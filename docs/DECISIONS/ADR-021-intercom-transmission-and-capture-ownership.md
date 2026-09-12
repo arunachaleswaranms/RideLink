@@ -1028,9 +1028,14 @@ restarted publisher comes back at `revision` 1, and every genuine message it sen
 stale until its counter climbs past a number belonging to a session that no longer exists. The
 receiver goes on showing — and **acting on** — the dead session's last word.
 
-**Reachable more cheaply than problem 47 recorded.** Problem 47 described a remote *process* restart.
-`resetForNewSession` is called from exactly one place, `SessionCoordinator.startDiscovery`, so the
-same state is reached by a peer tapping Stop Discovery and then Start Discovery. No crash is needed.
+**Reachable exactly as problem 47 recorded, and no more cheaply.** An earlier draft of this amendment
+claimed a peer could also reach it by leaving and re-entering discovery. **That is wrong and is
+corrected here rather than quietly dropped.** `resetForNewSession` is called only from
+`SessionCoordinator.startDiscovery`, `StartDiscovery` is legal only from `IDLE`, and *no production
+code on either platform emits the `TeardownComplete` or `RetryRequested` events that are the only
+routes back to `IDLE`/`DISCOVERING` from a session that has ended (recorded as `docs/STATUS.md` §4
+problem 53)*. So the reachable trigger is the one problem 47 named: the peer's process restarts — an
+OS kill of a foreground service, a force-stop, a crash or a reboot, none of them exotic on a ride.
 
 **And it is not only a stale diagnostics row.** `AppContainer.routeTransitioning` on Android and
 `SessionRouteStatePort.isRouteTransitioning()` on iOS read the peer's last `AUDIO_STATE.route_state`
