@@ -1583,3 +1583,247 @@ closed is the *next* mutation and the *next* effect.
 **And still does not run on a phone.** Every figure here is a software figure. The <100 ms product
 target and the <50 ms stretch target remain unmeasured, no alignment figure exists, and TEST_PLAN
 §5.2's S-01…S-12 are what will change that.
+
+---
+
+## Amendment A7 — 12 September 2026 — the inbound generation's origin, and the loss ledger's arrival order
+
+**Status:** Accepted · appended, nothing above rewritten. Amendments A1, A2, A3, A4, A5 and A6 are
+unchanged.
+
+A6 bound every Phase 5 *loss* to the generation that caused it, so that a frame refused under
+Session A could never halt Session B. Independent verification of A6 accepted that work and then
+asked the question A6 had not: **where does the generation a frame arrives with actually come
+from?**
+
+It came from live state. Every consumer downstream took it as a *value* — `ControlRelays.deliver`,
+`PlaybackRelay.deliverPlayback`/`deliverQueue`, `PlaybackSink.submit`, `SyncPlaybackCoordinator`'s
+guard, and A6's own `Phase5FrameQueue.generationOf` — and `PlaybackSink.submit`'s doc comment stated
+the contract in so many words: *"the authentication generation that was live **when the frame was
+read off the wire**"*. But `ControlSessionManager.handleFrame` produced that value by reading its own
+live `authenticationGeneration` field at **dispatch** time, which is not the same instant as the
+read. The whole chain's contract was never met at its origin.
+
+So A7 is A3's sentence applied one layer above everything A1–A6 touched:
+
+**A frame is authorised by the connection it was read from, and by that connection's authentication
+epoch. No later session transition may give it a newer one.**
+
+### A. The reachable interleaving, before the fix
+
+`endConnection` does **not** cancel the read loop on either platform — only `shutdown` does — and
+the loop's next step after a completed read is a scheduling point on both:
+
+- **Android.** `ControlSocket.readFrame()` runs its body in `withContext(Dispatchers.IO)`. Returning
+  from it resumes the read-loop coroutine on the manager scope's own dispatcher, and that resumption
+  is queued, not immediate. `endConnection` is reachable concurrently — `keepaliveLoop` is a separate
+  coroutine and a pong timeout calls it.
+- **iOS.** `ControlSessionManager` is an actor, so `await socket.readFrame()` is a re-entrancy point
+  by construction: while that task is suspended, every other actor-isolated call runs to completion.
+
+```
+1. Session A authenticates                      authenticationGeneration = 1
+2. Session A's read loop reads a valid PAUSE off socket A; its continuation is queued
+3. the keepalive loop times out -> endConnection: activeSocket = null, socket A closed
+4. the reconnect completes; Session B authenticates
+                                                authenticationGeneration = 2
+5. the parked continuation finally runs handleFrame, and reads `authenticationGeneration` -> 2
+```
+
+Session A's frame is now, to everything below, Session B's authority: `CommandOrderGate` considers
+it against Session B's floor, `lastReceivedSeq`/`lastAppliedSeq` may move for it, and any refusal it
+causes is charged to Session B. A6's retired-loss accounting cannot help — the frame was relabelled
+**before** it ever reached `Phase5FrameQueue`.
+
+**Measured, not argued.** `StaleReadGenerationTest` / `StaleReadGenerationTests` run against
+`a0b81c1` production sources (the A6 closure commit) with only the A7 guard reverted, and record the
+`PAUSE` arriving at the sink tagged generation **2** where it must be **1**, on both platforms, with
+three of the four cases failing.
+
+**Both platforms are affected, equally.** There is no structural accident here of the kind that
+spared Android in A4 and A5: neither read loop is cancelled at the boundary, and both resume across
+a scheduling point.
+
+### B. Why A6's own suite could not see it
+
+Every A6 regression supplies the generation itself — `session.deliver(message, generation = 1)`
+against a `FakeSyncSession`. That is exactly the right seam for asserting **what the coordinator does
+with a generation**, and exactly blind to **where the number comes from**. The defect lives entirely
+above it. The same is true of A1–A5: all six audits worked at or below the sink, and the sink's
+argument was the thing that was wrong.
+
+### C. The fix: an immutable `(connection, generation)` record, and a per-frame binding
+
+Two small types, one per platform, mirrored (`ReadFrameBinding.kt` / `ReadFrameBinding.swift`):
+
+- **`AuthenticatedConnection(socket, generation)`** — created once in
+  `activateAuthenticatedSession`, never mutated, discarded whole at the boundary. It **replaces** the
+  `authenticated` boolean rather than sitting beside it; `authenticated` is now a derived read, so
+  the two cannot disagree. There is still exactly **one** generation counter
+  (`authenticationGeneration`), and this record copies from it — A7 adds no second source.
+- **`ReadFrameBinding(socket, sessionId, generation?)`**, built by `ReadFrameBinding.of(...)` in
+  `readLoop`, immediately after the read returns and before anything else can run. `handleFrame`
+  takes the binding instead of a socket and a session id, and:
+  - the pre-authentication gate asks `binding.generation == null` rather than `!authenticated` — the
+    question is now "was **this** frame's own connection an authenticated session when it was read",
+    never "is *some* session authenticated now";
+  - the generation handed to the relays is `binding.generation`, never a live read.
+
+Identity comparison is against the *record's* socket, not against `activeSocket`: the record and its
+generation are created together and discarded together, so a connection either is the authenticated
+connection under the exact generation its own activation assigned, or is not an authenticated
+connection at all. A retired socket's binding resolves to `null` — never to the successor's number.
+
+Both permitted outcomes from the brief occur, and both are pinned:
+
+- a frame **read while its session was live** and dispatched after the boundary keeps generation A
+  and is retired downstream exactly as A6 designed;
+- a frame **read after the boundary** — Android's read loop genuinely runs once more, and a frame
+  already buffered inside `BufferedInputStream` survives `socket.close()` — carries no
+  authorisation, so the pre-authentication gate refuses and counts it, by the same construction that
+  refuses an unpaired peer's `PAUSE`.
+
+**What must not happen, and does not:** a frame dispatched late *within its own still-live session*
+is still delivered, tagged that session's generation. Being late is not being stale, and a fix that
+dropped every scheduling delay would be worse than the defect. "a frame dispatched late within the
+same live session is still delivered normally" is that assertion, on both platforms.
+
+`ReadFrameBinding` lives in its own file rather than inside `ControlSessionManager` because detekt
+fired `TooManyFunctions` (35 against a threshold of 34) and `config/detekt/detekt.yml` records that
+the answer is to extract rather than raise the number again — the discipline Phase 2a followed for
+`VoiceSignalRelay` and Phase 5 for `ControlRelays`. iOS is mirrored for shape, not for a ceiling.
+
+### D. The consequence for A6's loss ledger: arrival is **not** monotonic in the generation
+
+A7's own fix makes an assumption A6 wrote down become false. Once a frame keeps its own session's
+generation instead of inheriting the live one, a read loop whose session has ended still dispatches
+the frame it had already read — and does so *after* the successor session's read loop has begun
+offering. **`A, B, A` reaches `Phase5FrameQueue.offer`.** This is not a theoretical ordering: it is
+the exact interleaving §A describes, and it is what the new regressions drive.
+
+A6's ledger bucketed by **adjacency** — a new bucket whenever the incoming generation differed from
+the *newest* one — and, once past eight buckets, evicted the oldest **by arrival**, folding its
+counts into the next oldest by arrival. Its written justification was "generations strictly increase
+per authentication, so both of the two oldest are retired". Under an alternating run that is wrong
+twice over:
+
+- the cap counted **buckets**, not generations, so nine buckets can be as few as two generations —
+  `A, B, A, B, …`;
+- the fold target is then the **newest** generation, which may be **live**.
+
+And the consequence is not a diagnostics one. A follower answers a *live*-generation loss by latching
+`playbackDesynchronized`/`queueDesynchronized`, which decide whether incremental authoritative
+commands are applied at all. Folding a dead session's refusal into the live generation is therefore
+**the exact cross-session halt A6 existed to remove, re-entering through the ledger's own
+compaction.**
+
+**Measured, not argued.** With A6's `recordLoss` restored and everything else at A7,
+`SyncPlaybackReadGenerationAuditTest` / `...Tests` record, on a Session B whose own ingress refused
+nothing: `ingressDesynchronized` **true**, `syncState` **DESYNCHRONIZED**, `inboundOverflowCount`
+**1**. The longer run records `inboundRetiredLossCount` **20** for a session that caused twelve
+refusals — the counts slosh between generations on every eviction, in both directions.
+
+**The correction.** One bucket per **distinct generation**, in the order each generation first caused
+an event; eviction removes the bucket with the **smallest** generation and folds its counts into the
+next smallest. The safety argument no longer depends on arrival order at all:
+
+> Generations strictly increase per authentication (ADR-023 §3), so a frame can only ever carry a
+> generation ≤ the live one. Any bucket whose generation is live is therefore the **largest**
+> generation present. With one bucket per generation, the fold target — the smallest generation that
+> remains — is never the largest, and eviction only fires with at least two buckets remaining.
+
+Which gives, exactly:
+
+- the ledger stays **bounded** (≤ 8 buckets, and `MAX_LOSS_GENERATIONS` now bounds what its name
+  says it bounds);
+- **no retired loss is ever reclassified into the live generation**;
+- **no live-generation loss is silently discarded** — the live generation is the maximum and is never
+  the one evicted;
+- the total is preserved exactly; nothing is dropped;
+- same-generation ordering is intact, expressed as the counts it has always been expressed as, and a
+  late arrival joins its own generation's bucket rather than opening a second.
+
+Cross-generation *arrival* order is no longer preserved across buckets, and does not need to be: the
+consumer (`observeIngressStats`) asks only whether each record's generation is `stillCurrent`, and
+A1 Finding C's real ordering property — a loss is observed **before** the frame behind it is
+dispatched, within one generation — is untouched and re-asserted.
+
+### E. A7 adds no vector table
+
+For A3's reason, restated by A4, A5 and A6: read-loop and connection lifetime is not a distributed
+decision. Nothing about the wire, the ordering algebra, the drift ladder or the queue algebra
+changed, so `protocol/vectors/` is untouched — and every generator was re-run to prove it produces
+byte-identical output.
+
+### F. Regressions
+
+Deterministic, mirrored, no sleeps in the assertions:
+
+| Test | Proves |
+|---|---|
+| `StaleReadGenerationTest` / `StaleReadGenerationTests` (4 cases each) | A Session A frame is never delivered as Session B's generation; a retired socket rebinds to `null`, never to the successor's number; a late frame of a still-live session is still delivered; a frame read after the boundary is refused and counted; Session B's own frame carries Session B's generation |
+| `Phase5FrameQueueTest` / `Phase5FrameQueueTests` (3 new cases each) | The alternating run never folds a retired loss onto the live generation; the ledger stays bounded with one bucket per generation; a late arrival joins its own bucket; coalescing obeys the same ownership rule |
+| `SyncPlaybackReadGenerationAuditTest` / `...Tests` (3 cases each) | Through the real coordinator: the first compaction never hands the live session a refusal it did not have; a long alternating run keeps every event with the generation that caused it; the live session's **own** refusal still halts it amid a retired session's noise |
+
+**How the park is produced.** Nothing a test controls can suspend a coroutine or task between
+`readFrame()` returning and the dispatch that follows it — which is the point of the fix. So the two
+halves of that one step are called as two statements with a **real** session boundary between them:
+`currentReadBinding()` is the capture `readLoop` performs, and `handleFrame(binding, frame)` is the
+very function it calls. Both are `internal`, reachable only from each platform's own tests, and hold
+the same standing `writeRawFrame` already has and for the same recorded reason. Everything else is
+production: two real TLS 1.3 sessions on one real `ControlSessionManager`, the real trust gate, the
+real allowlist, the real codec, the real relay.
+
+### G. A6 Finding B is untouched, and re-verified
+
+iOS `failClosedOutbound` still writes **every** coordinator and diagnostics field — including
+`diagnostics.playbackRate` — before `await restoreRate()`, and `restoreRate()` is still the last
+statement in the function with nothing after it. Android's three `restoreRate` callers all still
+`scope.launch { restoreRate() }` rather than awaiting it. Same-session fail-closed still produces
+`outboundAuthorityLost = true`, sync mode exited, `syncState = transportFailed`, deferred work
+cleared, drift state reset, rate restored to exactly 1.0, and local music **not** stopped. A7 does
+not touch `SyncPlaybackCoordinator` on either platform.
+
+### H. What A7 deliberately does not do
+
+No wire change of any kind — no new message type, no changed field, encoding or bound;
+`protocol/vectors/` is byte-identical under regeneration. No change to `command_seq`,
+`queue_revision`, `ContentHash` semantics, the ADR-010 leader rules or Phase 4 transfer behaviour. No
+second coordinator, player, queue, `MediaSession`, RTT tracker or `ClockSync`. No second
+authentication-generation source — `authenticationGeneration` remains the one counter, and the new
+record copies from it. No weakening of any A1–A6 guard. No Phase 6 or Phase 7 work. No claim about
+audio.
+
+**What it deliberately does not close**, restating A3 §E and A4 §C: a frame already *delivered* under
+Session A is not un-delivered, and an indivisible platform effect already dispatched may still
+complete. What is closed is the *labelling* of the next frame.
+
+### I. An open finding this amendment does **not** fix — Phase 4's identical origin
+
+While sweeping for other live-generation derivations, the same defect was found in **Phase 4's**
+manifest/transfer dispatch, on both platforms, and is recorded here rather than fixed because
+correcting it means threading a generation through `ManifestRelay`/`TransferRelay` — an ADR-023
+change this Phase 5 pass is explicitly scoped out of.
+
+`SharedLibraryCoordinator`'s `ManifestSink`/`TransferSink` lambdas are invoked **synchronously from
+`handleFrame`**, and each reads a live value at that moment: `controlSessionManager
+.currentAuthGeneration` on Android, `sessionEpoch.current()` on iOS. Android's own doc comment makes
+exactly the claim A7 disproved for Phase 5 — *"`currentAuthGeneration` as it was the moment this
+message was read off the wire"*. It is not: `handleFrame` can legitimately be entered with a
+**retired** binding (that is the window §A describes and the new regressions drive), and the live
+read inside the sink then returns the **successor's** number. `handleManifestMessage`'s re-check
+`if (generation != controlSessionManager.currentAuthGeneration) return` passes spuriously, and a
+Session A `MANIFEST_PAGE` can mutate Session B's catalogue — the precise thing ADR-023 Amendment A2
+Finding S exists to prevent.
+
+This is **pre-existing and not introduced by A7**; A7 narrows the window (a frame read *after* the
+boundary is now refused outright) but does not close it. `binding.generation` is the value those two
+sinks should receive. **Phase 5 software closure is therefore not claimed by this amendment** — see
+`docs/STATUS.md` §4.
+
+### J. And still does not run on a phone
+
+Every figure in this amendment is a software figure produced by unit tests on a laptop. The <100 ms
+product target and the <50 ms stretch target remain unmeasured, no alignment figure exists, no audio
+has reached a speaker or a Bluetooth endpoint, and TEST_PLAN §5.2's S-01…S-12 remain the only things
+that will change that.

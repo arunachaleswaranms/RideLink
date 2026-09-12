@@ -1,18 +1,37 @@
 # RideLink — Status
 
-**Updated:** 12 September 2026 (Phase 5 closure audit A6, thirtieth session — see §2ag)
+**Updated:** 12 September 2026 (Phase 5 closure audit A7, thirty-first session — see §2ah)
 **Current milestone:** M1 (Private voice link) is **software-complete with no known defect** — its
 hardware gate is the only thing left open. M2 (local music) is implementation-complete and
-closure-audited (§2q/§2r). Phase 4 is closure-audited **five** times (§2v–§2z). **M4 (Synced ride
-music) now has its software half, and it has been audited six times**: Phase 5 is closure-audited
-A1 (§2ab), A2 (§2ac), A3 (§2ad), A4 (§2ae), A5 (§2af) and A6 (§2ag), with its real-device gate open.
-**Current phase:** Phase 5 — synchronized playback, **closure-audited six times** (this session,
-§2ag; the earlier audits are §2ab, §2ac, §2ad, §2ae and §2af, the implementation §2aa).
+closure-audited (§2q/§2r). Phase 4 is closure-audited **five** times (§2v–§2z) **and has one open
+defect A7 found and did not fix — see §4 problem 44.** **M4 (Synced ride music) now has its software
+half, and it has been audited seven times**: Phase 5 is closure-audited A1 (§2ab), A2 (§2ac),
+A3 (§2ad), A4 (§2ae), A5 (§2af), A6 (§2ag) and A7 (§2ah), with its real-device gate open.
+**Current phase:** Phase 5 — synchronized playback, **closure-audited seven times** (this session,
+§2ah; the earlier audits are §2ab, §2ac, §2ad, §2ae, §2af and §2ag, the implementation §2aa).
 Clock-scheduled `PLAY`/`PAUSE`/`RESUME`/`SEEK`/`NEXT`/`PREVIOUS`, a replicated shared queue, drift
 measurement and the ADR-004 correction ladder, all on top of the Phase 1a clock layer and the
 Phase 3 player.
 **Phase 6 (intercom/music coexistence) and Phase 7 (Ride Mode) are untouched.**
-**Phase 5 status: SOFTWARE CLOSURE A6 COMPLETE — REAL-DEVICE SYNCHRONIZED-PLAYBACK GATE PENDING.**
+**Phase 5 status: A7's own findings are fixed and green on both platforms, but SOFTWARE CLOSURE IS
+NOT CLAIMED** — A7's sweep found the same defect class still live in Phase 4's manifest/transfer
+dispatch (§4 problem 44), which is an ADR-023 change this Phase 5 pass was scoped out of. The
+real-device synchronized-playback gate also remains pending.
+
+**A7 in one paragraph.** A6 bound every Phase 5 *loss* to the generation that caused it. A7 asked
+where the generation a frame arrives with comes from, and the answer was **live state**: every
+consumer downstream took it as a value — `PlaybackSink.submit`'s own doc says it is "the generation
+that was live when the frame was read off the wire" — but `handleFrame` produced that value by
+reading the manager's live `authenticationGeneration` at *dispatch* time, which is not the same
+instant as the read. `endConnection` cancels neither read loop, and both resume across a scheduling
+point (a dispatcher hop on Android, actor re-entrancy on iOS), so a Session A frame whose
+continuation resumed after a reconnect arrived stamped as **Session B's authority** — measured, on
+both platforms. Every frame is now bound at the read to an immutable `(connection, generation)`
+record created once at activation, and a retired socket rebinds to `null`, never to the successor's
+number. That fix makes generation arrival **non-monotonic** (`A, B, A` now reaches the queue), which
+made A6's loss ledger unsafe: its eight-bucket fold evicted by *arrival* and could re-attribute a
+dead session's refusal to the **live** one — recreating A6's own cross-session halt through the
+ledger's back door. The ledger is now one bucket per generation, evicting the smallest.
 
 **A6 in one paragraph.** A5 fenced what a resuming *continuation* may mutate. A6 is the same
 sentence one level further out: **something that outlives a session must not carry that session's
@@ -4090,6 +4109,113 @@ S-01…S-12 are what will change that. The iOS scheduled-start path still has no
 Nor is A6 "final". Five Phase 4 closure audits and now six Phase 5 ones have each found real defects
 in code that was already CI-green; assume a seventh would find something too.
 
+## 2ah. Phase 5 closure audit A7 — the inbound generation's origin, and the loss ledger's arrival order (12 September 2026 session, thirty-first)
+
+**Phase 5 status: A7's findings fixed and green on both platforms — SOFTWARE CLOSURE NOT CLAIMED
+(see Finding C below), REAL-DEVICE SYNCHRONIZED-PLAYBACK GATE PENDING.**
+
+An independent verification *of A6*. A6's coordinator-side work holds and is unchanged. What
+independent verification then named is the one layer every audit from A1 to A6 worked beneath:
+
+> A frame is authorised by **the connection it was read from**, and by that connection's
+> authentication epoch. No later session transition may give it a newer one.
+
+Full reasoning: [ADR-024 Amendment A7](DECISIONS/ADR-024-synchronized-playback-integration.md).
+
+### The findings
+
+| # | Finding | Verdict | Fix |
+|---|---|---|---|
+| **A** | `ControlSessionManager.handleFrame` derived each inbound Phase 5 frame's generation by reading the manager's **live** `authenticationGeneration` at *dispatch* time. `endConnection` cancels neither read loop, and both resume across a scheduling point — a dispatcher hop on Android, actor re-entrancy on iOS — so a Session A frame whose continuation resumed after a reconnect was delivered stamped as **Session B's** authority. A6's retired-loss accounting cannot help: the frame was relabelled before it reached `Phase5FrameQueue`. Both platforms | **CONFIRMED** | `readLoop` builds an immutable `ReadFrameBinding` the instant the read returns, from an immutable `(connection, generation)` record created once at activation. `handleFrame` takes the binding; the pre-auth gate asks `binding.generation == null`, and the relays get `binding.generation`, never a live read |
+| **B** | A's fix makes generation arrival **non-monotonic** — `A, B, A` now reaches `Phase5FrameQueue.offer`, because a dead session's read loop still dispatches the frame it had already read. A6's ledger bucketed by *adjacency* and evicted the oldest **by arrival**, so on an alternating run nine buckets could be two generations and the fold target was the **newest** — which may be live. A dead session's refusal was re-attributed to the live one, and a follower answers a live-generation loss by halting incremental authority: **A6's own cross-session halt, through the ledger's back door** | **CONFIRMED** (reachable *because of* A's fix) | one bucket per **distinct** generation; eviction removes the **smallest** generation and folds into the next smallest. Safe without any arrival-order assumption: the live generation is always the largest present, so the fold target is never it |
+| **C** | The same origin defect is still live in **Phase 4's** manifest/transfer dispatch. `SharedLibraryCoordinator`'s `ManifestSink`/`TransferSink` lambdas run synchronously inside `handleFrame` and read a live value there (`currentAuthGeneration` on Android, `sessionEpoch.current()` on iOS). Android's doc comment makes exactly the claim A7 disproved. `handleFrame` can legitimately be entered with a **retired** binding, so a Session A `MANIFEST_PAGE` can mutate Session B's catalogue — what ADR-023 A2 Finding S exists to prevent. Both platforms | **CONFIRMED · NOT FIXED** | out of scope: fixing it means threading a generation through `ManifestRelay`/`TransferRelay`, an ADR-023 change this Phase 5 pass was explicitly scoped out of. Recorded as **§4 problem 44** |
+
+**Finding A was measured, not argued.** With only the A7 guard reverted against `a0b81c1`
+production sources, the new regressions record the `PAUSE` arriving tagged generation **2** where it
+must be **1** — three of four cases failing on Android, three of four on iOS.
+
+**Finding B was measured too.** With A6's `recordLoss` restored and everything else at A7, the new
+coordinator regression records `ingressDesynchronized` **true**, `syncState` **DESYNCHRONIZED** and
+`inboundOverflowCount` **1** on a Session B whose own ingress refused nothing; the longer run records
+`inboundRetiredLossCount` **20** for a session that caused twelve refusals.
+
+**Both platforms are equally affected by A.** Unlike A4 and A5, there is no structural accident that
+spared Android: neither read loop is cancelled at the boundary, and both resume across a scheduling
+point.
+
+**What must not break, and does not.** A frame dispatched late *within its own still-live session* is
+still delivered, tagged that session's generation — being late is not being stale. That is asserted
+on both platforms, because a fix that dropped every scheduling delay would be worse than the defect.
+
+### Why A1–A6's suites could not see Finding A
+
+Every one of them supplies the generation itself (`session.deliver(message, generation = 1)` against
+a `FakeSyncSession`). That is the right seam for asserting what the coordinator *does* with a
+generation, and blind to where the number comes from. All six audits worked at or below the sink, and
+the sink's argument was the thing that was wrong.
+
+### The regressions
+
+Deterministic and mirrored, with no sleeps in the assertions:
+
+- `StaleReadGenerationTest` / `StaleReadGenerationTests` — 4 cases each, over **two real TLS 1.3
+  sessions on one real `ControlSessionManager`**;
+- `Phase5FrameQueueTest` / `Phase5FrameQueueTests` — 3 new cases each, on the ledger directly;
+- `SyncPlaybackReadGenerationAuditTest` / `SyncPlaybackReadGenerationAuditTests` — 3 cases each,
+  through the real coordinator.
+
+**How the park is produced.** Nothing a test controls can suspend a coroutine or task between
+`readFrame()` returning and the dispatch that follows it — that is the point of the fix. So the two
+halves of that one step are called as two statements with a **real** session boundary between them:
+`currentReadBinding()` is the capture `readLoop` performs, and `handleFrame(binding, frame)` is the
+very function it calls. Both are `internal`, reachable only from each platform's own tests, holding
+the same standing `writeRawFrame` already has and for the same recorded reason.
+
+### Structure
+
+`ReadFrameBinding` lives in its own file on both platforms. On Android that was forced: detekt fired
+`TooManyFunctions` (35 against 34) and `config/detekt/detekt.yml` records that the answer is to
+extract rather than raise the number again. iOS is mirrored for shape.
+
+`authenticated` is now a **derived** read of the new record rather than a second boolean beside it,
+so the two cannot disagree. There is still exactly **one** generation counter.
+
+### A6 Finding B is untouched and re-verified
+
+iOS `failClosedOutbound` still writes every coordinator and diagnostics field — `diagnostics
+.playbackRate` included — **before** `await restoreRate()`, which is still the last statement with
+nothing after it. Android's three `restoreRate` callers all still `scope.launch { restoreRate() }`.
+A7 does not touch `SyncPlaybackCoordinator` on either platform.
+
+### Validation
+
+Both platforms, this session, on this machine:
+
+- Android — `:core:test`, `test` (all unit tests), `ktlintCheck`, `detekt`, `lint`, `assembleDebug`,
+  `assembleRelease`: **all green**.
+- iOS — `swift test` on `RideLinkCore` (284 tests) and `RideLinkPlatform` (411 tests, up from 401),
+  plus Debug and Release `xcodebuild` simulator builds: **all green**.
+- Stress: the Android stale-read suite 10/10 clean with `--rerun-tasks`; all Android
+  `com.ridelink.app.sync.*` suites (A1–A7, drift, coordinator, two-peer, queue) 10/10 clean; the
+  three iOS A7 suites 15/15 clean.
+- `protocol/vectors/` — every generator re-run; **byte-identical output, no wire change**.
+
+`connectedDebugAndroidTest` was not run this session: A7 touches no Android platform I/O path, and
+the emulator scheduled-start evidence from §2ag stands unchanged.
+
+### What is still not true
+
+**Nothing in this session ran on a phone, and no audio reached a speaker or a Bluetooth endpoint.**
+Every figure here is a software figure. **No alignment figure exists**, and the <100 ms product
+target and the <50 ms stretch target must not be described as approached. TEST_PLAN §5.2's
+S-01…S-12 are what will change that. The iOS scheduled-start path still has not run on a simulator
+(§4 problem 41), and `AVAudioUnitVarispeed` has still never changed a real rate.
+
+**And A7 is explicitly not closure.** Finding C is a real, reachable, confirmed defect of the same
+class that this pass deliberately did not fix. Five Phase 4 closure audits and now seven Phase 5 ones
+have each found real defects in code that was already CI-green; assume an eighth would find something
+too.
+
 ## 3. Tests passed / pending
 
 **Passed and verified in the Phase 5 closure audit A6 session (12 September 2026, thirtieth), by
@@ -4603,6 +4729,8 @@ as of this write-up — see §7.
 | 41 | **Phase 5's scheduled start has run on the Android emulator but not on the iOS simulator.** `SyncScheduledPlaybackTest` proves the pre-roll, the monotonic-deadline start and the real `setPlaybackParameters` nudge/restore against a real `ExoPlayer` on `RideLink_API36` (measured sleeper wake error 1.4–3.1 ms). The iOS half — `AVAudioEnginePlayer` started at a deadline, and `AVAudioUnitVarispeed` actually changing a rate — has **not** run anywhere. **Unlike problem 22, nothing prevents it**: the simulator exists and already runs Phase 3 media tests | Medium | **Still open after closure audit A1** (§2ab), which was scoped to seven correctness findings in the integration layer rather than to new device coverage. It is now §7 step 2. TEST_PLAN §5.2's S-01…S-12 remain the device gate beyond it either way |
 | 42 | **Recovery from a Phase 5 ingress desynchronisation is unbounded in time** (ADR-024 Amendment A1 Finding C, §2ab). An explicit, counted refusal in the bounded post-transport handoff halts a follower's application of incremental commands — nothing incoherent is ever applied, and local music keeps playing — but the halt ends only when the leader next emits authoritative state or the session ends, and **nothing prompts it**. `STATE_REQUEST` is catalogued in PROTOCOL §3 and unimplemented. Reaching the bound at all requires a peer flooding frames that cannot be superseded (latest-wins coalescing absorbs an ordinary 5 s report cadence), so this is a pathological-peer path, not a busy-link one | Medium | Implement §10's resync properly — `STATE_REQUEST` → authoritative state — as **reconnect** work, not as a Phase 5 patch. Deliberately not done blind in A1: it is a wire addition, and A1's whole claim is that the wire did not move |
 | 43 | **Phase 5's session-boundary lifecycle is proven with two coordinators on Android only.** ADR-024 Amendment A3's race — an apply-chain node created under Session A waking in Session B — is pinned on both platforms by `SyncPlaybackLifecycleAuditTest[s]` (9 cases each, 7 verified to fail pre-fix), and by one Android **coordinator-pair** scenario on clocks 7.5 s apart. iOS has no two-peer equivalent: that harness is real TLS end-to-end and bumping the authentication generation in it needs a genuine re-pairing the harness cannot currently drive. The iOS single-coordinator proof is the *stronger* positioning for this particular race — the coordinator is an `actor`, so every `await` is a real re-entrancy point, and the iOS pre-fix evidence was sharper than Android's — but it is one coordinator, not two | Low | Either teach the iOS TLS harness to re-pair (which also unblocks iOS reconnect testing generally), or accept the asymmetry as the Android/iOS harness division already recorded in TEST_PLAN §3.1c. Not a blocker: the fence itself is pinned on both platforms |
+| 44 | **Phase 4's manifest/transfer dispatch derives its generation from live state, exactly as Phase 5's did before ADR-024 Amendment A7** (§2ah Finding C). `SharedLibraryCoordinator`'s `ManifestSink`/`TransferSink` lambdas are invoked **synchronously from `ControlSessionManager.handleFrame`**, and each reads a live value *there*: `controlSessionManager.currentAuthGeneration` on Android, `sessionEpoch.current()` on iOS. Android's own doc comment claims the value is "`currentAuthGeneration` as it was the moment this message was read off the wire" — A7 disproved precisely that claim for Phase 5. `handleFrame` can legitimately be entered with a **retired** binding (the window A7 §A describes and A7's regressions drive), so the live read returns the **successor's** number, `handleManifestMessage`'s re-check passes spuriously, and a Session A `MANIFEST_PAGE` can mutate Session B's catalogue — the thing ADR-023 Amendment A2 Finding S exists to prevent. **Pre-existing; not introduced by A7.** A7 *narrows* the window (a frame read after the boundary is now refused outright) but does not close it | Medium | **Not fixed in A7**, deliberately: the fix is to hand those two sinks `binding.generation` instead, which means threading a generation through `ManifestRelay`/`TransferRelay` — an ADR-023 change this Phase 5 pass was explicitly scoped out of. It is a small, well-understood change of exactly the shape `PlaybackRelay` already has. **This is why §2ah does not claim Phase 5 software closure.** Do it as an ADR-023 Amendment A6, with the same two-statement park regression A7 used |
+| 45 | **`VoiceControllerIntercomTest > switching from full duplex to PTT stops transmitting` is flaky.** Observed failing **once** in a full `:network:test` run during the A7 session, and never again in 5 targeted `--rerun-tasks` runs, a second full-suite run or the final CI-equivalent sweep. The test awaits `!diagnostics.transmitting` and then asserts `fakes.engine.muted == true`; `muted` is a plain non-`@Volatile` `var` on a test fake, written from a coroutine and read from the test thread, so the assertion can observe a stale value. **Pre-existing and test-only** — the test constructs no `ControlSessionManager` and touches no `Phase5FrameQueue`, and it passes on unmodified `a0b81c1` | Low | Make the fake's `muted` field `@Volatile` (or await it rather than the diagnostics field). Recorded rather than fixed here: A7 is a Phase 5 pass and this is Phase 2b test scaffolding |
 | 26 | **APK/IPA size.** The Android AAR adds ~48 MB of native code across four ABIs; the Apple XCFramework is ~96 MB expanded and embedded in the app bundle. No ABI filtering or slice stripping is applied — the default is the safe configuration and a sideloaded personal build has no size gate | Low | Revisit if install time becomes annoying. Recorded rather than forgotten |
 | 21 | **Diagnostics now show `CONNECTING` while a six-digit code is on screen**, where they previously showed `CONNECTED`. This is deliberate and more honest (ADR-019 §5), but it is a user-visible change that has never been looked at on a real screen | Low | Confirm it reads sensibly during I-02 on the two phones; the FR-023 diagnostics screen is one of the things I-02 exercises anyway |
 | 32 | **FIXED (twelfth session, §2o, ADR-021 Amendment A2 Finding 3).** `Effect.ReleaseAudioAndStopForegroundService`'s name promised an Android foreground-service stop `SessionCoordinator.runEffect` never actually performed — confirmed exactly as originally recorded here. Fixed with a `ForegroundServiceController` seam (no `Context` inside `SessionCoordinator`) and one owner: `runEffect` awaits capture release (`StopReleaseResult`) before calling `foregroundService.stop()` — never on a timeout — and always tears down the control session afterward. `SessionCoordinatorEndingEffectTest` (new) proves the order at the integration boundary, including that a peer BYE, a timed-out release, a `NETWORK` link loss and a repeated `ENDING` all behave correctly. Kept in this table with its resolution noted rather than deleted, per this file's own discipline | ~~Medium~~ Fixed | ~~Give `SessionCoordinator` a way to reach `RideForegroundService.stop()`...~~ Done — see §2o |
@@ -4648,21 +4776,44 @@ Not blocking Phase 1. Answers needed before Phase 6.
 
 ## 7. Next exact task
 
-**Phase 5 — synchronized playback. SOFTWARE CLOSURE A6 COMPLETE — REAL-DEVICE SYNCHRONIZED-PLAYBACK
-GATE PENDING (§2ag).** Every laptop-runnable gate is green on both platforms; the audit §7 previously
-asked for has now run six times, and all twenty-eight findings (A1's seven, A2's six, A3's three,
-A4's six, A5's four, A6's two) are fixed with regressions each verified to fail against the pre-fix
-behaviour. Every pre-existing vector set regenerates byte-for-byte identically: the wire did not move
-in any of the six passes.
+**Phase 5 — synchronized playback. SOFTWARE CLOSURE IS *NOT* CLAIMED (§2ah). REAL-DEVICE
+SYNCHRONIZED-PLAYBACK GATE PENDING.** Every laptop-runnable gate is green on both platforms; the
+audit §7 previously asked for has now run seven times, and all thirty findings (A1's seven, A2's six,
+A3's three, A4's six, A5's four, A6's two, A7's two) are fixed with regressions each verified to fail
+against the pre-fix behaviour. Every pre-existing vector set regenerates byte-for-byte identically:
+the wire did not move in any of the seven passes.
 
-**"A6" is not "final", and the wording is deliberate.** §2y dropped "final" from Phase 4 after five
+**Why closure is withheld.** A7's sweep confirmed a **third** finding it deliberately did not fix:
+the same generation-origin defect is still live in Phase 4's manifest/transfer dispatch on both
+platforms (§4 problem 44). It is reachable, it is confirmed, and it is one small ADR-023 change of a
+shape `PlaybackRelay` already demonstrates. **The next exact task is that fix**, as an ADR-023
+Amendment A6, using the same two-statement park regression A7 used. Phase 5's own software closure
+should be claimed only once a pass finds nothing.
+
+**"A7" is not "final", and the wording is deliberate.** §2y dropped "final" from Phase 4 after five
 audits each found real defects in code that was already CI-green. A1 found seven; verifying A1 found
 five more plus a sixth while fixing them; verifying A2 found three more; verifying A3 found six more;
 verifying A4 found four more plus a crash and two more adjacent instances while sweeping for them;
 verifying A5 confirmed all of A5 and then found two more that A5's sweep structurally could not
-reach. That is evidence *for* auditing again, not against it. The next audit should re-derive its
-findings from the production code rather than from this file, and should look hardest at the places
-these six deliberately stopped short:
+reach; verifying A6 accepted all of A6 and then found that **the generation A6 was so careful to
+attribute had itself been read from live state one layer above**, plus the ledger consequence that
+followed from fixing it, plus the unfixed Phase 4 instance. That is evidence *for* auditing again,
+not against it. The next audit should re-derive its findings from the production code rather than
+from this file, and should look hardest at the places these seven deliberately stopped short:
+
+- **A7 swept for other live-generation derivations and found one it did not fix** (§4 problem 44).
+  It did **not** ask the same question of `VoiceController`/`VoiceSignalRelay` or of `AudioStateRelay`
+  — neither carries a generation at all, and whether that is safe or merely unexamined is open. The
+  A7 shape is a *class*: **any value a dispatch path reads live rather than receives as an argument
+  is a candidate**, and `handleFrame` is entered with a retired binding often enough to matter.
+- **A7 changed the loss ledger's bucketing, not the consumer.** `observeIngressStats` still judges
+  each record with `stillCurrent`, which is right. But A7's safety argument rests on "the live
+  generation is always the largest present". That is true because generations only increase; if a
+  future change ever makes a generation reusable or resettable, the fold becomes unsafe again and
+  nothing would say so.
+- **A7's park is produced by two `internal` calls, not by a real parked coroutine.** That is
+  deliberate and argued (nothing a test controls can suspend between the read and the dispatch, which
+  is the fix), but it means the *timing* of the real window is asserted by reasoning, not measured.
 
 - **A6 swept exactly two paths and said so**: the ingress loss-accounting path and
   `restoreRate`'s three callers. It did **not** re-sweep every `await` in the coordinators — A5 did

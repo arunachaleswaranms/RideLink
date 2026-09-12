@@ -51,6 +51,7 @@ Read these before changing anything. They are authoritative; this file is a summ
 | 17 | **The intercom transmission gate never touches the capture device.** PTT, VOX and mute gate the *outbound WebRTC audio track* (`AudioTrack.setEnabled` / `RTCAudioTrack.isEnabled`); the capture device and platform audio session are opened once, while foreground-visible, and stay open for the whole ride segment. Every decision lives in the pure, mirrored `IntercomTransmission` table (ADR-021), whose action vocabulary has **no** capture case — that absence *is* the enforcement, and `protocol/vectors/intercom/` pins it. `AUDIO_STATE` is absent from the pre-authentication allowlist for the same reason `VOICE_*` is | Never open or close capture per utterance; never route a PTT press to `VoiceAudioSession`; never rebuild the `PeerConnection` for a mute; never branch on a mode id; never flip `confidence` off `assumed` without A-12/A-13 |
 | 15 | **`ControlEvent.Connected` means "the surviving connection passed the RideLink trust gate"** (ADR-019). `PAIRING -> CONNECTING` opens only on `PeerTrusted` (stored pin matched) or `PairingSucceeded` (both users confirmed and the pin was written). The gate table is `SessionGate` on both platforms, pinned by `vectors/session-gate/` | Never read "TLS and HELLO succeeded" as authentication; never let `Connected` imply pairing success; never start a task that presumes an authenticated peer just because a socket exists |
 | 18 | **Phase 5 decides nothing in a coordinator.** Ordering is `CommandOrderGate`, deadline mapping is `ScheduledCommand`, correction is `DriftController`, queue algebra is `SharedQueue`, timing is `SessionClock` — all pure, mirrored and pinned by `protocol/vectors/{ordering,drift,queue,session-clock}/`. The **leader alone** assigns `command_seq`; a follower sends the *same message type* with `command_seq: 0` (ADR-024 §3), and an authoritative `command_seq` arriving at the leader is a role violation. Scheduling is session/monotonic time only, never wall-clock. Every audible effect goes through the ONE `MusicCoordinator`; the system media controls enter that same leader-ordered path through its gate | Never let a coordinator decide ordering or correction; never let a follower allocate a `command_seq`; never add a second player, queue, `MediaSession` or RTT tracker; never leave a drift nudge behind — correction always ends at exactly 1.0; **never let one `SyncPlayerPort` method perform two externally visible effects**, and never express a scheduled action as a closure that could hide a second `await` (ADR-024 A4) |
+| 19 | **An authenticated inbound frame is permanently bound to the connection that authorised its read, and to that connection's authentication epoch** (ADR-024 Amendment A7). `readLoop` builds an immutable `ReadFrameBinding` the instant `readFrame()` returns, from an immutable `(connection, generation)` record created once at `activateAuthenticatedSession`; `handleFrame` takes that binding, the pre-authentication gate asks *"was **this** frame's connection an authenticated session when it was read"*, and every generation handed downstream is the binding's. `endConnection` cancels neither read loop, and both resume across a scheduling point — so a frame whose dispatch runs after a reconnect must keep its own generation or be refused, never acquire the successor's | Never re-read `authenticationGeneration` (or any live epoch) at dispatch time to label a frame that has already been read; never add a second generation source; never infer a frame's session from what is live when its work happens to run |
 
 Reasoning: `docs/DECISIONS/ADR-001…024`.
 
@@ -201,19 +202,37 @@ resume are deferred, but the chunk and page framing keep both possible.
 
 ## Current phase
 
-**Phase 5 — synchronized playback. Software closure A6 complete; the real-device
-synchronized-playback gate is open. Phase 6 and Phase 7 have not started.**
+**Phase 5 — synchronized playback. Closure-audited seven times; A7's own findings are fixed and
+green on both platforms, but software closure is *not* claimed — A7 confirmed the same defect class
+still live in Phase 4's manifest/transfer dispatch and deliberately did not fix it (`docs/STATUS.md`
+§4 problem 44, which is the exact next task). The real-device synchronized-playback gate is also
+still open. Phase 6 and Phase 7 have not started.**
 
 `docs/STATUS.md` is the authority on this and is kept current; the sections below are the
 architectural summary for phases 1a–2b and remain accurate for *those* phases. Phase 3 (local music
 player, ADR-022), Phase 4 (shared catalogue + `ContentHash`-keyed transfer on a second session-bound
 TLS connection, ADR-023) and Phase 5 (clock-scheduled playback, drift correction and a replicated
 queue, ADR-004 + ADR-024) all landed after this section was last rewritten and are implementation-
-complete on both platforms with their real-device gates open — see `docs/STATUS.md` §2q–§2ag.
+complete on both platforms with their real-device gates open — see `docs/STATUS.md` §2q–§2ah.
+
+**Amendment A7 is the shortest standing lesson of the seven, and it is rule 19 above: a frame's
+generation must come from the connection it was read from, never from whatever session is live when
+its dispatch happens to run.** Six audits — A1 through A6 — all worked at or below the Phase 5 sink,
+and every one of them correctly treated the generation as a *value* it was handed; A6 in particular
+went to great lengths to attribute losses to it. A7 found that the value itself had been read from
+live state one layer above, so a Session A frame whose read-loop continuation resumed after a
+reconnect arrived stamped as Session B's authority, on **both** platforms. Fixing that then made
+generation arrival **non-monotonic** (`A, B, A` now reaches the ingress queue), which made A6's
+eight-bucket loss ledger unsafe — its fold could re-attribute a dead session's refusal to the live
+one and recreate A6's own cross-session halt. The ledger is now one bucket per generation, evicting
+the smallest, and the safety argument no longer depends on arrival order at all. **A7 also confirmed
+a third finding it did not fix** — Phase 4's manifest/transfer dispatch has the identical
+live-generation origin — which is why Phase 5 software closure is withheld.
 
 **Phase 4 has been closure-audited five times** (ADR-023 Amendments A1–A5), each pass finding real
 integration/lifecycle defects in code that was already CI-green: eighteen, then two, then two, then
-four, then three. **Phase 5 has now been closure-audited six times** — A1 (ADR-024 Amendment A1):
+four, then three — **and A7 found a sixth that is still open (`docs/STATUS.md` §4 problem 44).**
+**Phase 5 has now been closure-audited seven times** — A1 (ADR-024 Amendment A1):
 six findings given, all six confirmed, plus a seventh found by stress-running one of the new
 regressions; then A2 (Amendment A2), an independent verification *of A1*, which found five more,
 confirmed all five, and found a sixth while fixing the fourth; then A3 (Amendment A3), a verification
@@ -222,7 +241,10 @@ A3*, which found four and then two more while building their regressions; then A
 verification *of A4*, which found three more, plus a crash and a generalisation of A4's own fix while
 sweeping for adjacent instances of them; then A6 (Amendment A6), a verification *of A5*, which
 confirmed every A5 finding and then found two A5's sweep could not reach, because neither is a
-*continuation* resuming. Read all of that as the standing lesson it is — on this codebase, "CI-green" and "correct" are different claims, and the gap
+*continuation* resuming; then A7 (Amendment A7), a verification *of A6*, which accepted all of A6 and
+then found that the generation A6 was so careful to attribute had itself been read from **live state
+one layer above**, plus the loss-ledger consequence of fixing it, plus a third instance in Phase 4 it
+deliberately left open. Read all of that as the standing lesson it is — on this codebase, "CI-green" and "correct" are different claims, and the gap
 between them has consistently been in session lifetime, cancellation ownership, ordering across
 suspensions and platform I/O contracts rather than in the wire format or the pure domain layer.
 Nothing here is "final"; assume another audit would find something.
@@ -231,7 +253,7 @@ Phase 0 (hardware feasibility) is complete; do **not** repeat it. Phases 1a, 1b,
 are all implementation-complete and green on both platforms. **The overall "2 Intercom" milestone is
 not complete** — its hardware gates (TEST_PLAN A-01, A-02, A-04, A-09 and V-01…V-11) have not run.
 
-**Phase 5** (ADR-004, ADR-024, `docs/STATUS.md` §2aa and the audits in §2ab–§2ae) turned the Phase 1a clock
+**Phase 5** (ADR-004, ADR-024, `docs/STATUS.md` §2aa and the audits in §2ab–§2ah) turned the Phase 1a clock
 layer and the Phase 3 player into synchronised playback:
 
 - **Every distributed decision is a pure, mirrored, vector-pinned table** — `CommandOrderGate`, `ScheduledCommand`, `PlaybackTimeline`, `DriftController`, `SharedQueue`, `SessionClock`. The coordinators are wiring and lifetime, never policy. That is ADR-019's direct lesson (rule 18 above).

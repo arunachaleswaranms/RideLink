@@ -485,6 +485,62 @@ transition it publishes one hop later, so under full-suite load the baseline was
 phone, no audio reached a speaker or a Bluetooth endpoint, and no alignment figure exists.
 S-01…S-12 remain the gate.
 
+**Added by the read-generation audit (ADR-024 Amendment A7).** Independent verification of A6
+accepted A6's coordinator-side work and then asked the one question six audits had not: **where does
+the generation an inbound frame arrives with actually come from?** It came from live state, one layer
+above everything A1–A6 touched.
+
+> `ControlSessionManager.handleFrame` derived each Phase 5 frame's generation by reading its own live
+> `authenticationGeneration` at **dispatch** time, which is not the instant of the read. Neither
+> platform cancels its read loop at `endConnection`, and both resume across a scheduling point — a
+> dispatcher hop on Android, actor re-entrancy on iOS. So a Session A frame whose continuation
+> resumed after a reconnect was delivered stamped as **Session B's authority**, and A6's retired-loss
+> accounting could not help: the frame was relabelled before it ever reached `Phase5FrameQueue`.
+
+| Finding | What the regression proves | Where |
+|---|---|---|
+| A — a frame must never acquire a newer generation | Captured on a live Session A (generation 1), a real `BYE` boundary, a second real TLS session authenticates as generation 2, and only then does the parked dispatch run: the `PAUSE` arrives tagged **1**, and asking production what socket A's generation is now returns **null** — never 2. Pre-fix: tagged **2** | `StaleReadGenerationTest[s]` |
+| A — being late is not being stale | A frame dispatched late *within its own still-live session* is still delivered, tagged that session's own generation. A fix that dropped every scheduling delay would be worse than the defect | `StaleReadGenerationTest[s]` |
+| A — the successor is clean | Session B's own frame carries **2**, both frames pass through the real codec and relay, nothing is counted as a pre-authentication drop and nothing as a codec rejection. Pre-fix: `[2, 2]` where `[1, 2]` is required | `StaleReadGenerationTest[s]` |
+| A — the read *after* the boundary | The read loop genuinely runs once more (a frame already inside `BufferedInputStream` survives `socket.close()`), and that frame carries no authorisation at all: refused by the pre-authentication gate and counted, by the same construction that refuses an unpaired peer's `PAUSE`. Pre-fix: delivered, tagged **2** | `StaleReadGenerationTest[s]` |
+| B — the ledger under non-monotonic arrival | Eight retired generations' refusals interleaved with a live one, past the eight-bucket bound: the live generation owns exactly its own **8** and not one of anybody else's, everything a fold could target is strictly older than it, the total stays exactly **24**, and the ledger stays **≤ 8** buckets with one bucket per generation. Pre-fix: the live generation owns **4** | `Phase5FrameQueueTest[s]` |
+| B — a late arrival has an owner | `A, B, A` produces two buckets, not three; generation 1 keeps both of its own and generation 2 keeps only its own. Coalescing obeys the identical rule. Pre-fix: `[1, 2, 1]` | `Phase5FrameQueueTest[s]` |
+| B — through the real coordinator | At the first compaction, a Session B whose own ingress refused **nothing** stays un-halted: `ingressDesynchronized` **false**, `syncState` never `DESYNCHRONIZED`, `inboundOverflowCount` **0**, every one of the retired session's refusals surfaced as `inboundRetiredLossCount`, and Session B still commands from its own floor. Pre-fix: **true**, **DESYNCHRONIZED**, **1** | `SyncPlaybackReadGenerationAuditTest[s]` |
+| B — a long run keeps the books straight | Twelve alternations: exactly **12** retired refusals and exactly **12** live coalesces. Pre-fix: **20** retired for a session that caused twelve | `SyncPlaybackReadGenerationAuditTest[s]` |
+| B — the property it must not weaken | The live session's **own** refusal still halts it, still before the frame behind it is applied, even with a retired generation's events interleaved throughout. This is A1 Finding C re-asserted under A7's arrival order | `SyncPlaybackReadGenerationAuditTest[s]` |
+
+**Pre-fix evidence.** Each finding was re-run against production code with exactly **one** thing
+reverted — the generation source in `handleFrame`, then `recordLoss`'s bucketing — the same isolation
+technique A4, A5 and A6 used. Finding A: **Android 3 of 4 fail, iOS 3 of 4 fail**. Finding B:
+**Android 2 of 3 and 2 of 3, iOS 2 of 3 and 2 of 3** across the queue and coordinator suites. Every
+failure is one of the rows above.
+
+**Both platforms are equally affected.** Unlike A4 and A5 there is no structural accident sparing
+Android: neither read loop is cancelled at the boundary, and both resume across a scheduling point.
+
+**How the park is produced, and why that is honest.** Nothing a test controls can suspend a coroutine
+or task between `readFrame()` returning and the dispatch that follows it — that is precisely what the
+fix removes. So the two halves of that one step are called as two statements with a **real** session
+boundary between them: `currentReadBinding()` is the capture `readLoop` performs, and
+`handleFrame(binding, frame)` is the very function it calls, both `internal` and holding the same
+standing `writeRawFrame` already has. Everything else is production: two real TLS 1.3 sessions on one
+real `ControlSessionManager`, the real trust gate, the real allowlist, the real codec, the real
+relay. What this does **not** measure is the *timing* of the real window; that remains argued.
+
+**Stress.** The Android `StaleReadGenerationTest` **10×** with `--rerun-tasks`, 0 failures; every
+Android `com.ridelink.app.sync.*` suite (A1–A7, drift, coordinator, two-peer, queue) **10×**, 0
+failures; the three iOS A7 suites **15×**, 0 failures. One pre-existing, test-only flake was observed
+once and is recorded rather than papered over — `docs/STATUS.md` §4 problem 45.
+
+**What A7 found and did **not** fix.** The same generation-origin defect is still live in Phase 4's
+manifest/transfer dispatch on both platforms (`docs/STATUS.md` §4 problem 44). It is confirmed and
+reachable; fixing it is an ADR-023 change this Phase 5 pass was scoped out of. **Phase 5 software
+closure is therefore not claimed.**
+
+**Still not proven by any of it.** Every figure A7 adds is a *software* figure. Nothing ran on a
+phone, no audio reached a speaker or a Bluetooth endpoint, and no alignment figure exists.
+S-01…S-12 remain the gate.
+
 ### 3.1a Phase 2a voice — what is proven on a laptop, and what is not
 
 **Proven, and it is real media rather than a mock.** `VoiceEngineLoopbackTests` (iOS package, runs
