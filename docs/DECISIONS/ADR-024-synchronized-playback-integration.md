@@ -1336,3 +1336,250 @@ complete after the session ends. What is closed is the *next* mutation and the *
 **And still does not run on a phone.** Every figure here is a software figure. The <100 ms product
 target and the <50 ms stretch target remain unmeasured, no alignment figure exists, and TEST_PLAN
 §5.2's S-01…S-12 are what will change that.
+
+## Amendment A6 — 12 September 2026 — generation-scoped ingress loss and terminal cleanup lifetime
+
+**Status:** Accepted · appended, nothing above rewritten. Amendments A1, A2, A3, A4 and A5 are
+unchanged.
+
+A5 closed the class where an old session's continuation resumes and mutates live coordinator state.
+Independent verification of A5 confirmed every one of its findings and then named two things A5's
+sweep did not reach, because neither is a *continuation* resuming:
+
+> 1. A **fact recorded by an object that deliberately outlives sessions**, carrying no generation, so
+>    whichever session reads it next is charged with it.
+> 2. A terminal cleanup path whose one deliberately **unfenced** player call was read as licensing
+>    everything written after it.
+
+Both are the same sentence one level further out than A5's:
+
+**Something that outlives a session must not carry that session's verdict into the next one.**
+
+### A. Why the queue's lifetime may exceed a session's
+
+`Phase5FrameQueue` is created once per coordinator and torn down only by `shutdown()`/`close()`. That
+is deliberate and A6 does **not** change it. The inbound instance is referenced by the two sinks the
+authenticated control read loop calls (`PlaybackForwarder`/`QueueForwarder` on iOS, the two `Sink`
+lambdas on Android); it owns the one parked consumer's continuation or channel signal; and the
+outbound instance owns every frame this device has stamped but not yet written. Destroying and
+recreating it at each authentication boundary would mean re-wiring the read loop's sinks, ending and
+restarting the one ordered consumer, and deciding what happens to frames in flight at that instant —
+a far larger change than the one below, and one that would reintroduce exactly the "who owns this
+frame" ambiguity A2 Finding B closed. **A session boundary is expressed by the generation each frame
+carries, not by tearing the pipe down**, and that remains true.
+
+### B. Why the *identity* of a loss may not exceed a session's
+
+What the queue recorded was two cumulative `Int`s — `overflows` and `coalesces` — which the consumer
+diffed against its own two baselines at the top of each drain iteration. A difference is not a fact
+about a session; it is a fact about a counter. So:
+
+```
+Session A, follower:
+  one inbound handler is parked in an await
+  the control read loop keeps accepting frames
+  the bounded ingress fills
+  another Session-A authoritative command arrives
+  offer() refuses it            <- a real loss, under generation A
+  the global overflow counter increments
+
+Session A dies. resetForNewSession() clears both desync latches.
+Session B authenticates as a follower. Clean.
+
+The parked work releases. The consumer's next iteration calls observeIngressStats():
+  overflowCount - reportedOverflowCount > 0
+  -> onIngressOverflow() with the CURRENT role
+  -> playbackDesynchronized = true
+  -> queueDesynchronized = true
+```
+
+Session B is halted because Session A dropped something. The Session-A frames still queued behind it
+then fail their own generation proofs correctly (A3 Finding B) — but the damage was done *before*
+dispatch, by the observation itself.
+
+**This is not a diagnostics bug.** `playbackDesynchronized`/`queueDesynchronized` decide whether an
+incremental authoritative command is applied at all: while either is set a follower applies only
+authoritative full state. A session halted by another session's loss stays halted until its peer
+happens to send a `PLAYBACK_STATE` or `QUEUE_SNAPSHOT`.
+
+**A baseline reset at the boundary is not a fix**, which is why one was not adopted. `offer` runs on
+the control read loop; at the instant `resetForNewSession` sampled a new baseline, the read loop may
+still be producing frames tagged with the old generation, and any refusal microseconds later would be
+read back as the new session's. Correctness would rest on a timing assumption. Generation binding
+does not.
+
+### C. How overflow and coalescing are now generation-bound
+
+`Phase5FrameQueue` takes a fourth constructor argument, `generationOf`, and records an ordered ledger
+of `IngressLoss { generation, overflowCount, coalescedCount }` instead of two counters. A loss is
+attributed to **the generation of the frame that caused it**: the refused frame's own for an
+overflow, the arriving frame's own for a coalescing (it is the frame whose arrival produced the
+event). Nothing is inferred from `currentAuthGeneration` at observation time — that inference *is* the
+defect — and nothing is inferred from the next successfully dequeued frame, which need not share the
+loss's generation at all.
+
+Consecutive events from one generation share a bucket, so the ledger's length is the number of
+generation changes the consumer has not drained across, not the number of events. It is hard-capped
+at **8 buckets**; on eviction the oldest bucket's counts are folded into the next oldest rather than
+dropped. With more than one bucket present, generations being strictly increasing per authentication
+(ADR-023 §3) makes both of the two oldest strictly older than the newest and therefore both already
+retired, so the total is preserved exactly and the only thing merged is which *dead* generation two
+retired losses belong to. **No loss is ever silently discarded.**
+
+`observeIngressStats` drains the ledger — it does not diff it — and judges each record against the
+generation it carries:
+
+- **live** (`stillCurrent` on Android, `stillCurrentNow` on iOS) ⇒ `inboundOverflowCount` /
+  `inboundCoalescedCount`, and an overflow latches the halt exactly as A1 Finding C specified;
+- **retired** ⇒ the new `inboundRetiredLossCount`, and nothing else. There is no live incremental
+  authority left to distrust, so there is nothing to halt — but the event happened, and it is
+  surfaced as what it was.
+
+The whole function is synchronous on both platforms. There is no suspension between reading the
+records, deciding whose they are and acting on them, so the decision cannot be overtaken by a
+boundary the way A5's three sites were — which is why iOS uses `stillCurrentNow` alone here rather
+than A5's `await stillCurrent` + `stillCurrentNow` pair. Adding the `await` would manufacture the
+very re-entrancy point that pairing exists to defend against.
+
+The **outbound** queue receives the same `generationOf` for symmetry, and deliberately never drains
+its ledger: its producer is `enqueueOutbound`, which is *answered* synchronously by `offer` and acts
+on the refusal there and then (A2 Finding A). That direction never had this defect.
+
+### D. Same-generation ordering: loss is still observed before later work
+
+A1 Finding C's property is unchanged and is asserted in its own test on both platforms: within one
+generation, a refusal is observed at the top of the drain iteration that follows it, **before** the
+next frame is dispatched. A `PAUSE` queued behind a refused `PLAY` is never applied as coherent
+state, no `command_seq` is spent, and only authoritative full state ends the halt. Fixing §B by
+moving the observation after dispatch, or by weakening the halt, would have been no fix at all.
+
+### E. Cross-generation rule
+
+A loss recorded under generation A can affect **only** generation A. It can never desynchronize a
+later session, halt its queue or its playback, spend one of its sequence numbers, or appear in its
+`inboundOverflowCount`/`inboundCoalescedCount`. Generation B's own loss still affects B, exactly
+once, and both facts are asserted in the same test so that "scoped" is distinguishable from
+"suppressed".
+
+### F. The queue object still survives sessions
+
+Unchanged, per §A. `close()`/`finish()` remain process/coordinator teardown only, the read loop's
+sinks are wired once, and the one ordered consumer per direction is unchanged. What changed is one
+constructor argument and what the ledger holds.
+
+### G. `failClosedOutbound`: the rate restore stays unfenced
+
+`restoreRate` is the one player call in this phase that is deliberately not fenced (A4 §D). Its three
+callers — `resetForNewSession`, `failClosedOutbound` and `leaveSynchronizedMode` — are all the
+*ending* of an authority, so there is no generation left to prove; it names an absolute 1.0 rather
+than a relative change, it is idempotent, and ADR-004 says the music keeps playing. **That exemption
+is unchanged and was not narrowed away.** An old authority may still finish restoring 1.0.
+
+### H. What the exemption never covered: the writes after it
+
+On iOS, `failClosedOutbound` proved its generation, mutated its own fail-closed state, then did:
+
+```swift
+await restoreRate()               // the deliberately unfenced player effect
+diagnostics.syncState = .transportFailed
+diagnostics.outboundAuthorityLost = true
+diagnostics.deferredCommandCount = 0
+diagnostics.localDriftMs = nil
+diagnostics.peerDriftMs = nil
+diagnostics.cancelledPendingPlayCount += cancelled
+publishDiagnostics()
+```
+
+A boundary landing inside `player.setRate` therefore had Session A's fail-closed verdict overwrite
+Session B's live diagnostics: `.transportFailed` and `outboundAuthorityLost` on a session whose
+transport was working perfectly, with `localDriftMs`/`peerDriftMs` cleared under it.
+
+The fix is ordering, not a new guard: **every write happens before the one suspension, and nothing
+follows it.** Recording the restored rate moved from inside `restoreRate` into each of its three
+callers for the same reason — `diagnostics.playbackRate = 1.0` after `await player.setRate(1.0)` is
+itself a coordinator-state write from a dead session. What remains in `restoreRate` is one player
+call with nothing behind it. The identical shape in `leaveSynchronizedMode` and `resetForNewSession`
+was swept at the same time, since it is the same three lines.
+
+### I. Android classification
+
+**Finding A: affected, and fixed identically.** The queue, the counters and the diff were mirrored,
+and so was the defect — the Android pre-fix probe records `ingressDesynchronized=true`,
+`inboundOverflowCount=1`, `syncState=DESYNCHRONIZED` on a Session B that lost nothing.
+
+**Finding B: structurally safe, and now asserted rather than assumed.** All three Android callers
+*launch* `restoreRate` (`scope.launch { restoreRate() }`) rather than awaiting it, so the entire
+fail-closed verdict is written in one uninterrupted synchronous block and the player call is the only
+thing that outlives it. Android's `restoreRate` is given the same shape anyway — the two
+implementations must agree, and a future caller that awaited it would otherwise reintroduce the
+window silently. `SyncPlaybackIngressLifetimeAuditTest` lands a real boundary strictly inside the
+parked rate restore and proves nothing of Session A's reaches Session B, so the structural property
+is a test rather than a belief.
+
+`inboundProcessedCount` is examined and **left alone**: it is the pipe's own accounting, counts what
+the one ordered consumer has finished considering (refusals included), and `resetForNewSession`
+deliberately does not reset it — `SyncPlaybackSessionStateAuditTests` already normalises it out of
+its whole-state snapshots for exactly that reason. Its doc comment on both platforms now says
+"process-lifetime, not session-lifetime" explicitly instead of leaving it to be inferred.
+
+### J. Pre-fix regression evidence
+
+Every value below was **run**, not reasoned about.
+
+| Case | Platform | Pre-fix observation |
+|---|---|---|
+| Session-A overflow, boundary, Session B follower | Android | `ingressDesynchronized` false → **true**; `inboundOverflowCount` 0 → **1**; `syncState` → **DESYNCHRONIZED** |
+| Same | iOS | `ingressDesynchronized` false → **true**; `inboundOverflowCount` 0 → **1**; `syncState` → **.desynchronized**; Session B's own next command then never applies (`lastAppliedCommandSeq` nil, not 1) |
+| Session-A coalescing, boundary | iOS | Session B inherits **2** coalescings it never made; its own later pair then reads **4** |
+| Generation A and B each lose one | iOS | A's loss reaches B, and B's own is then miscounted |
+| `failClosedOutbound` parked in `setRate`, boundary, Session B follower playing | iOS | Session B `syncState` **.synced → .transportFailed**; `outboundAuthorityLost` **false → true** |
+| Same | Android | **no contamination** — the verdict is written before the launched restore can suspend |
+
+The committed regressions were additionally re-run against production code with exactly one thing
+reverted — the generation check in `observeIngressStats`, and the statement order in
+`failClosedOutbound` — the same isolation technique A4 and A5 used. Android: 3 of 8 fail. iOS: 4 of
+8 fail, and each failure is one of the rows above.
+
+### K. Regression evidence and stress
+
+`SyncPlaybackIngressLifetimeAuditTest` / `…Tests` (8 tests each, mirrored): the cross-session
+overflow, the same-generation halt and its authoritative reconciliation, per-generation ownership of
+two separate losses, coalescing attribution in both directions, the parked-fail-closed boundary, the
+same-session fail-closed control, a 200-permutation queue sweep, and the ledger bound. Deterministic
+throughout — a virtual clock, an injected ingress bound of 1, and existing gates that park the
+consumer inside a decoder call or the rate restore. Nothing sleeps.
+
+**Stress:** the new suite 200/200 with zero failures on iOS (which includes the fail-closed
+stale-continuation case, so that case is 200/200 rather than the 100 asked for);
+`SyncPlaybackSessionStateAuditTests` (A5) 100/100; `SyncPlaybackOperationLifetimeAuditTests` (A4),
+`SyncPlaybackLifecycleAuditTests` (A3), `SyncPlaybackDeliveryAuditTests` (A2),
+`SyncPlaybackClosureAuditTests` (A1), `SyncPlaybackTwoPeerTests`, `SyncPlaybackDriftTests`,
+`SyncPlaybackCoordinatorTests` and `Phase5FrameQueueTests` 50/50 each. Zero failures. One harness
+defect was found and fixed by the full-suite run rather than by rerunning until green: the new
+fail-closed test read its Session-B baseline after the frame was *considered* rather than after the
+`.synced` transition it publishes one hop later, so under full-suite load the baseline was
+`.inactive`. The wait is now on the transition.
+
+**Adds:** `generationOf` on `Phase5FrameQueue` (both platforms), its `IngressLoss` ledger and
+`drainLosses()` in place of `stats`, `generation` on `Phase5Inbound`/`Inbound`,
+`SyncPlaybackDiagnostics.inboundRetiredLossCount`, a generation-tagged `deliver` on Android's
+`FakeSyncSession`, and one eight-test regression suite per platform.
+
+**Does not:** change the wire format, any message type, any field, any encoding, any bound,
+`command_seq`, `queue_revision`, or any vector — all thirteen generators reproduce byte-identical
+output; block or slow the authenticated control read loop (`offer` still never suspends and still
+never waits on a lock held across I/O); unbound the queue; change the queue's lifetime; add a gate
+table (loss lifetime is lifetime, not a distributed decision — A3 §E, A4 and A5 argued this already);
+weaken any A1, A2, A3, A4 or A5 guarantee; change ordering, admission, delivery-bound authority, the
+held authoritative stream, the drift ladder, `LEAD`, or the epoch/fence semantics; add a second
+player, queue, `MediaSession`, coordinator or RTT tracker; implement `STATE_REQUEST`; touch Phase 6
+or Phase 7; or make any claim about audio.
+
+**What it deliberately does not close**, restating A4 §C and A5 once more: a mutation already
+*performed* under Session A is not rolled back, and an indivisible platform effect already dispatched
+— including `restoreRate`'s own `setRate(1.0)` — may still complete after the session ends. What is
+closed is the *next* mutation and the *next* effect.
+
+**And still does not run on a phone.** Every figure here is a software figure. The <100 ms product
+target and the <50 ms stretch target remain unmeasured, no alignment figure exists, and TEST_PLAN
+§5.2's S-01…S-12 are what will change that.

@@ -436,6 +436,55 @@ any kind, in production or in the harnesses.
 phone, no audio reached a speaker or a Bluetooth endpoint, and no alignment figure exists.
 S-01…S-12 remain the gate.
 
+**Added by the ingress-lifetime audit (ADR-024 Amendment A6).** Independent verification of A5
+confirmed all of A5's findings and then named two A5's sweep could not reach, because neither is a
+*continuation* resuming. Both are one sentence: **something that outlives a session must not carry
+that session's verdict into the next one.**
+
+> `Phase5FrameQueue` deliberately survives an authentication boundary. Its loss accounting was two
+> cumulative counters the consumer **diffed** — and a difference carries no generation. A frame
+> refused under Session A, observed after Session B activated, therefore told Session B that *it*
+> had lost a frame; a follower answers that by latching `playbackDesynchronized`/
+> `queueDesynchronized`, which gate whether incremental authoritative commands are applied at all.
+> Session B was halted because Session A dropped something.
+
+| Finding | What the regression proves | Where |
+|---|---|---|
+| A — a loss outlived the session that suffered it | Session A's consumer parked, its bound reached, one authoritative frame genuinely refused; then a real boundary and a clean Session B. Session B's `ingressDesynchronized` stays **false**, its `syncState` never reaches `DESYNCHRONIZED`, its `inboundOverflowCount` does not move, no Session-A command reaches the player, its queue revision stays **0**, and its own next command still applies. Pre-fix: **false → true**, `inboundOverflowCount` **0 → 1**, `syncState` **→ DESYNCHRONIZED** on both platforms, and on iOS Session B's own next command then never applied at all | `SyncPlaybackIngressLifetimeAuditTest[s]` |
+| A — the same-generation property it must not weaken | A loss in the **live** session still halts it *before* the frame behind the refusal is dispatched: the `PAUSE` is never applied, `lastReceived` stays at 1, a later incremental command still changes nothing, and only `QUEUE_SNAPSHOT` + `PLAYBACK_STATE` end the halt. This is A1 Finding C, re-asserted so that A6 cannot have been "fixed" by moving the observation after dispatch | `SyncPlaybackIngressLifetimeAuditTest[s]` |
+| A — scoped, not suppressed | Generation A loses one and generation B loses one. A's is counted **once**, as retired; B's is counted **once**, as live, and halts B. No double counting, no lost accounting | `SyncPlaybackIngressLifetimeAuditTest[s]` |
+| A — coalescing belongs to the same lifetime class | Session A's two superseded `POSITION_REPORT`s never appear as Session B's, Session B's own two do, and coalescing never halts either session. Pre-fix (iOS) Session B inherited **2** it never made, and its own later pair then read **4** | `SyncPlaybackIngressLifetimeAuditTest[s]` |
+| A — the ledger is bounded and folds | Forty refusals across forty generations behind one parked consumer leave **≤ 8** buckets and a total of exactly **40**: eviction folds the oldest into the next oldest rather than dropping it, so no loss is silently discarded. Plus a 200-permutation sweep over capacity 1 and 2, overflow and coalescing, and observations landing both before and after a boundary | `SyncPlaybackIngressLifetimeAuditTest[s]` |
+| B — `failClosedOutbound` wrote after the unfenced rate restore | Session A fails closed and parks inside `setRate(1.0)`; Session B then authenticates, plays and reaches `.synced`. When Session A resumes, Session B's `syncState`, `outboundAuthorityLost`, `deferredCommandCount`, both drift figures, `playbackRate`, `cancelledPendingPlayCount`, `lastAppliedCommandSeq` and timeline are all unchanged, the absolute 1.0 restore is **still allowed to complete**, and Session B still commands. Pre-fix (iOS): `.synced → .transportFailed`, `outboundAuthorityLost` **false → true** | `SyncPlaybackIngressLifetimeAuditTests` (iOS), and the Android mirror asserting the structural property |
+| B — control | With **no** boundary, fail-closed still latches authority lost, still shows `TRANSPORT_FAILED`, still leaves synchronised mode, still restores exactly 1.0, and still does **not** stop local music | `SyncPlaybackIngressLifetimeAuditTest[s]` |
+
+**Pre-fix evidence.** Both findings were first reproduced with throwaway probes against literally
+unmodified `2836695e`, using only the pre-A6 API, and the recorded values are the ones above. The
+committed regressions were then re-run against production code with exactly **one** thing reverted —
+the generation check in `observeIngressStats`, and the statement order in `failClosedOutbound` — the
+same isolation technique A4 and A5 used: **Android 3 of 8 fail, iOS 4 of 8 fail**, and every failure
+is one of the rows above.
+
+**Android is affected by A and structurally safe on B.** The queue, the counters and the diff were
+mirrored, and so was the defect. Finding B cannot occur there because all three `restoreRate` callers
+*launch* it rather than awaiting it, so the whole fail-closed verdict is one uninterrupted
+synchronous block — but the shape is mirrored anyway, and the Android test lands a real boundary
+strictly inside the parked rate restore so the structural property is asserted rather than assumed.
+
+**Stress.** The A6 suite **200×**, 0 failures — which covers the fail-closed stale-continuation case
+200 times rather than the 100 asked for, since it lives in the same suite.
+`SyncPlaybackSessionStateAuditTests` (A5) **100×**; `SyncPlaybackOperationLifetimeAuditTests` (A4),
+`SyncPlaybackLifecycleAuditTests` (A3), `SyncPlaybackDeliveryAuditTests` (A2),
+`SyncPlaybackClosureAuditTests` (A1), `SyncPlaybackTwoPeerTests`, `SyncPlaybackDriftTests`,
+`SyncPlaybackCoordinatorTests` and `Phase5FrameQueueTests` **50× each**. 0 failures. One harness
+defect was found by the full-suite run and fixed rather than re-run until green: the new fail-closed
+test read its Session-B baseline after the frame was *considered* rather than after the `.synced`
+transition it publishes one hop later, so under full-suite load the baseline was `.inactive`.
+
+**Still not proven by any of it.** Every figure A6 adds is a *software* figure. Nothing ran on a
+phone, no audio reached a speaker or a Bluetooth endpoint, and no alignment figure exists.
+S-01…S-12 remain the gate.
+
 ### 3.1a Phase 2a voice — what is proven on a laptop, and what is not
 
 **Proven, and it is real media rather than a mock.** `VoiceEngineLoopbackTests` (iOS package, runs
