@@ -172,9 +172,8 @@ class PlaybackRelay internal constructor(
         droppedPreAuthentication += 1
     }
 
-    fun reset() {
-        playbackSink = null
-        queueSink = null
+    /** See [com.ridelink.network.control.ControlRelays.resetCounters]: the counters, never the sinks. */
+    fun resetCounters() {
         playbackRejections.clear()
         queueRejections.clear()
         droppedPreAuthentication = 0

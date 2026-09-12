@@ -92,7 +92,13 @@ sealed class Effect {
         val trigger: SessionEvent,
     ) : Effect()
 
-    /** Only ENDING may release the audio session and stop the foreground service (ARCHITECTURE §3 rule 3). */
+    /**
+     * Only a **deliberate end** may release the audio session and stop the foreground service
+     * (ARCHITECTURE §3 rule 3). There are exactly two, and [transition] is the only thing that says
+     * so: entering [SessionStatus.ENDING], and the user's explicit retry out of
+     * [SessionStatus.DISCONNECTED], which ends the exhausted ride segment before starting a new
+     * discovery session. A link blip ([SessionStatus.RECONNECTING]) is neither.
+     */
     object ReleaseAudioAndStopForegroundService : Effect()
 }
 
@@ -238,10 +244,32 @@ object SessionFsm {
         val effects =
             buildList {
                 add(Effect.LogTransition(from, to, trigger))
-                if (to.status == SessionStatus.ENDING) {
+                if (isDeliberateEnd(from, to, trigger)) {
                     add(Effect.ReleaseAudioAndStopForegroundService)
                 }
             }
         return FsmResult.Transitioned(to, effects)
     }
+
+    /**
+     * ARCHITECTURE §3 rule 3's two deliberate ends, and the reason the rule is phrased that way
+     * rather than as "only `ENDING`" (`docs/STATUS.md` §4 problem 53, ADR-026).
+     *
+     * The rule exists to stop a **link blip** releasing capture: `RECONNECTING` keeps the microphone
+     * and the foreground service, because ARCHITECTURE §6.4 gives no second chance to reopen a
+     * microphone once the screen is locked. `DISCONNECTED -> DISCOVERING` is the opposite case. The
+     * reconnect budget is spent, the peer is gone, the user has explicitly asked to start looking
+     * for one again, and they are by definition looking at the screen to have asked — so the ride
+     * segment is over, and holding the duplex Bluetooth profile open (ADR-016's central risk) for a
+     * peer that is not there is exactly what should not happen. Keeping the old
+     * `VoiceController` instead would be worse still: its `isLocalLeader` belongs to the session
+     * that ended, and ADR-020 makes the offerer role a property of *this* session's leader.
+     */
+    private fun isDeliberateEnd(
+        from: FsmState,
+        to: FsmState,
+        trigger: SessionEvent,
+    ): Boolean =
+        to.status == SessionStatus.ENDING ||
+            (trigger is SessionEvent.RetryRequested && from.status == SessionStatus.DISCONNECTED)
 }

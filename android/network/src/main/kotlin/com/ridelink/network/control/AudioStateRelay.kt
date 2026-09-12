@@ -151,8 +151,8 @@ class AudioStateRelay internal constructor(
         droppedPreAuthentication += 1
     }
 
-    fun reset() {
-        sink = null
+    /** See [ControlRelays.resetCounters]: the diagnostics counters, never [sink]. */
+    fun resetCounters() {
         rejections.clear()
         droppedPreAuthentication = 0
         droppedRetiredGeneration = 0

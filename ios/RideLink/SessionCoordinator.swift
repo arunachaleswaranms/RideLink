@@ -95,19 +95,42 @@ public final class SessionCoordinator {
     private var connectAttempted = false
     private var lastPeerHost: String?
     private var lastPeerPort: UInt16?
-    private var sessionTask: Task<Void, Never>?
+
+    /// **Every unstructured `Task` one discovery session starts**, so a teardown can cancel all of
+    /// them and then *await* all of them — the Swift mirror of Android's one `SupervisorJob`.
+    ///
+    /// An unstructured `Task` has no parent to cancel, which is why the set is tracked explicitly;
+    /// `SyncPlaybackCoordinator.sessionChainNodes` is the same idiom one layer down (ADR-024
+    /// Amendment A3). Two things it does that a bare cancel cannot:
+    ///
+    /// - **awaiting `task.value` is completion**, and cancellation is only a request. Nothing here is
+    ///   allowed to assume a cancelled continuation has stopped, because several of them park in
+    ///   `await`s on the `ControlSessionManager` actor that ignore cancellation entirely.
+    /// - **the dictionary *is* the ownership token.** A retirement empties it synchronously, so a
+    ///   continuation that has suspended can ask `ownsSessionWork(id)` afterwards and get "no" — on
+    ///   the main actor, atomically with whatever statement follows. No separate generation counter
+    ///   is invented, because this answers the same question and cannot drift from it.
+    private var sessionWork: [Int64: Task<Void, Never>] = [:]
+    private var nextSessionWorkId: Int64 = 0
+
+    /// True from the moment a discovery session asks the control plane to start until its teardown
+    /// has shut it down again. Deliberately not inferred from anything else: a teardown must know
+    /// whether to call `ControlSessionManager.shutdown()` at all, and shutting down a manager that
+    /// was never started would publish `.ended` over a cold `IDLE` app.
+    private var controlPlaneStarted = false
+
+    /// The single owner of teardown ordering and completion — see `SessionTeardownOwner`.
+    private let teardown = SessionTeardownOwner()
 
     /// Ordered delivery for `ControlEvent`/`PairingPrompt` (see `OrderedEventChannel`): each gets
-    /// its own channel plus exactly one long-lived consumer `Task`, replacing a
+    /// its own channel plus exactly one long-lived consumer, replacing a
     /// `Task { @MainActor in ... }` per event, which only preserved *creation* order, not the
-    /// *execution* order the trust gate depends on. Both are recreated per `startDiscovery()` and
-    /// torn down in `teardownSession()`, so a stale event from a torn-down session cannot mutate
-    /// the next one: the old channel is finished (further sends become no-ops) and the old
-    /// consumer task is cancelled before a new pair is created.
+    /// *execution* order the trust gate depends on. Both are recreated per `beginDiscoverySession`
+    /// and torn down in `retireSession`, so a stale event from a torn-down session cannot mutate the
+    /// next one: the old channel is finished synchronously (further sends become no-ops) and its
+    /// consumer is one of the `sessionWork` tasks the teardown cancels *and awaits*.
     private var controlEventChannel: OrderedEventChannel<ControlEvent>?
-    private var controlEventTask: Task<Void, Never>?
     private var pairingPromptChannel: OrderedEventChannel<PairingPrompt?>?
-    private var pairingPromptTask: Task<Void, Never>?
 
     /// Phase 2a. Built per authenticated session by `attachVoice` and torn down with it, so there is
     /// exactly one per two-person session and none at all before the trust gate has passed
@@ -124,10 +147,9 @@ public final class SessionCoordinator {
     /// those tasks were *created* in, not the order they run in. Since `AUDIO_STATE.revision` is derived
     /// from the diagnostics sequence (`publishAudioState` below), an out-of-order delivery could make a
     /// stale route or transmission snapshot the one the peer sees as authoritative. Recreated per
-    /// `attachVoice` and finished in `releaseVoice`, so a diagnostics callback still in flight from a
+    /// `attachVoice` and finished in `retireSession`, so a diagnostics callback still in flight from a
     /// torn-down controller lands as a no-op `send` rather than mutating the session that replaced it.
     private var voiceDiagnosticsChannel: OrderedEventChannel<VoiceDiagnostics>?
-    private var voiceDiagnosticsTask: Task<Void, Never>?
 
     /// Assembles the security wiring, and nothing else does: the Keychain identity (ADR-017), the
     /// one production `ControlChannel` — TLS 1.3 — and the trusted-peer store the SPKI pin is
@@ -256,7 +278,10 @@ public final class SessionCoordinator {
     /// The user's answer on the pairing screen. Both peers must answer before any pin is written.
     public func confirmPairing(accepted: Bool) {
         let manager = controlSessionManager
-        Task { await manager.confirmPairing(accepted: accepted) }
+        // Session-owned: a confirm whose `Task` had not yet run when its session was retired must not
+        // supply the *successor's* PROTOCOL §4.5 gate — the local mirror of the retired-connection
+        // `PAIR_CONFIRM` ADR-025 closed on the wire.
+        launchInSession { _ in await manager.confirmPairing(accepted: accepted) }
     }
 
     public func forgetPeer(_ peer: TrustedPeer) {
@@ -268,8 +293,48 @@ public final class SessionCoordinator {
         securityAlert = nil
     }
 
+    /// ARCHITECTURE §3's `IDLE -> DISCOVERING`. Rejected from every other state by `SessionFsm`,
+    /// which is the point: this is the *only* way a first session starts.
     public func startDiscovery() {
-        guard applyEvent(.startDiscovery) else { return }
+        beginDiscoverySession(.startDiscovery, retireHere: true)
+    }
+
+    /// ARCHITECTURE §3's `DISCONNECTED -> DISCOVERING`, and the second half of `docs/STATUS.md` §4
+    /// problem 53: `SessionFsm` has always had this transition and **nothing ever emitted
+    /// `.retryRequested`**, so a rider whose reconnect budget ran out had no way back to discovery
+    /// short of force-quitting the app.
+    ///
+    /// **Deliberately a user action, never an automatic one.** PROTOCOL §10's ladder is the app's one
+    /// reconnect loop and it has a 120 s budget on purpose; re-entering discovery by itself once that
+    /// budget is spent would be an unbounded background loop wearing the radio for a peer that may
+    /// simply be switched off. `DISCONNECTED` is ARCHITECTURE §3's "awaiting user", and this is the
+    /// user.
+    ///
+    /// The retirement is not done *here*: `.retryRequested` is one of ARCHITECTURE §3 rule 3's two
+    /// deliberate ends, so `SessionFsm` emits `.releaseAudioAndStopForegroundService` for it and
+    /// `runEffect` has already retired the session by the time this resumes — which is why it passes
+    /// `retireHere: false`. One owner, reached two ways, never two owners.
+    public func retryDiscovery() {
+        beginDiscoverySession(.retryRequested, retireHere: false)
+    }
+
+    /// The user ending the ride from **this** phone (ARCHITECTURE §3's `.userEnded`), as opposed to
+    /// the peer's `BYE` that `SessionGate` already turns into the same `ENDING`.
+    ///
+    /// Legal from `CONNECTED`, `RIDE_ACTIVE`, `RECONNECTING` and `DISCONNECTED`; rejected and logged
+    /// anywhere else. Everything after the transition is `ENDING`'s one effect (see `runEffect`).
+    public func endSession() {
+        _ = applyEvent(.userEnded)
+    }
+
+    private func beginDiscoverySession(_ event: SessionEvent, retireHere: Bool) {
+        guard applyEvent(event) else { return }
+        // `.startDiscovery` carries no FSM effect, so the (from a cold `IDLE`, empty) retirement
+        // happens here; `.retryRequested` carries the deliberate-end effect and `runEffect` has
+        // already done it, synchronously, inside the `applyEvent` above. Either way the successor
+        // waits on the one owner's latest task rather than on a reference of its own.
+        if retireHere { retireSession(.discoveryRestart) }
+        let previousSession = teardown.pending
         connectAttempted = false
         discoveredPeers = []
         discoveryCount = 0
@@ -295,8 +360,7 @@ public final class SessionCoordinator {
         // from `ControlSessionManager`'s actor-isolated `emit`/`updatePairingPrompt`.
         let events = OrderedEventChannel<ControlEvent>()
         controlEventChannel = events
-        controlEventTask?.cancel()
-        controlEventTask = Task { @MainActor [weak self] in
+        launchInSession { [weak self] _ in
             for await event in events.stream {
                 await self?.handleControlEvent(event)
             }
@@ -304,60 +368,157 @@ public final class SessionCoordinator {
 
         let prompts = OrderedEventChannel<PairingPrompt?>()
         pairingPromptChannel = prompts
-        pairingPromptTask?.cancel()
-        pairingPromptTask = Task { @MainActor [weak self] in
+        launchInSession { [weak self] _ in
             for await prompt in prompts.stream {
                 self?.pairingPrompt = prompt
             }
         }
 
-        Task { await manager.setOnEvent { event in events.send(event) } }
-        Task { await manager.setOnPairingPromptChanged { prompt in prompts.send(prompt) } }
-        Task { [weak self] in
-            await manager.setOnDiagnosticsChanged { diagnostics in
-                Task { @MainActor in self?.controlDiagnostics = diagnostics }
-            }
-        }
-
-        sessionTask = Task { [weak self] in
-            guard (try? await manager.startListening(local: identity)) != nil else { return }
-            if let listener = await manager.underlyingListener() {
-                discoverySession.startAdvertising(on: listener) { advertiseState in
-                    Task { @MainActor in self?.logger.debug("SessionCoordinator", "advertise: \(advertiseState)") }
+        controlPlaneStarted = true
+        launchInSession { [weak self] id in
+            // **Nothing shared is touched until the previous session is terminal.** The control
+            // manager, the Bonjour advertiser and the browser are one instance each for the whole
+            // process, so a teardown still in flight would otherwise un-latch what this session has
+            // just latched — `shutdown()` setting `isShutDown` and closing the listener that
+            // `startListening` below had already bound is the worst of them, and it leaves the new
+            // session permanently unable to accept a connection.
+            await previousSession?.value
+            guard let self, self.ownsSessionWork(id) else { return }
+            await manager.setOnEvent { event in events.send(event) }
+            await manager.setOnPairingPromptChanged { prompt in prompts.send(prompt) }
+            await manager.setOnDiagnosticsChanged { [weak self] diagnostics in
+                Task { @MainActor in
+                    guard let self, self.ownsSessionWork(id) else { return }
+                    self.controlDiagnostics = diagnostics
                 }
             }
-            discoverySession.startBrowsing { event in
-                Task { @MainActor in self?.handleDiscoveryEvent(event) }
+            guard self.ownsSessionWork(id), (try? await manager.startListening(local: identity)) != nil else { return }
+            guard self.ownsSessionWork(id) else { return }
+            if let listener = await manager.underlyingListener() {
+                discoverySession.startAdvertising(on: listener) { [weak self] advertiseState in
+                    Task { @MainActor in
+                        guard let self, self.ownsSessionWork(id) else { return }
+                        self.logger.debug("SessionCoordinator", "advertise: \(advertiseState)")
+                    }
+                }
+            }
+            discoverySession.startBrowsing { [weak self] event in
+                Task { @MainActor in
+                    guard let self, self.ownsSessionWork(id) else { return }
+                    self.handleDiscoveryEvent(event)
+                }
             }
         }
     }
 
     public func cancelDiscovery() {
-        _ = applyEvent(.cancelDiscovery)
-        teardownSession()
+        guard applyEvent(.cancelDiscovery) else { return }
+        retireSession(.discoveryRestart)
         discoveredPeers = []
     }
 
-    private func teardownSession() {
-        releaseVoice()
-        sessionTask?.cancel()
-        sessionTask = nil
-        // Cancel the consumer, then finish the channel: cancellation is the cooperative signal,
-        // finishing is what actually ends the `for await` loop and turns any subsequent `send`
-        // from a not-yet-updated `ControlSessionManager` callback into a no-op rather than a stale
-        // mutation of the next session's state.
-        controlEventTask?.cancel()
-        controlEventTask = nil
+    /// Why a session is being retired: the two facts that differ between the paths, and nothing else.
+    /// The teardown *steps* are identical in all three — that is the point of there being one owner.
+    private enum SessionEnd {
+        /// `ENDING`: a peer `BYE`, the user ending the ride, or an acknowledged fatal error.
+        case ending
+        /// `DISCONNECTED -> DISCOVERING`: ARCHITECTURE §3 rule 3's *other* deliberate end.
+        case userRetry
+        /// Stop Discovery, and the (normally empty) retirement a cold Start Discovery performs.
+        case discoveryRestart
+
+        /// Only `ENDING` has an `IDLE` to reach, so only `ENDING` has a `.teardownComplete` to emit.
+        var signalsTeardownComplete: Bool { self == .ending }
+    }
+
+    /// Reserves an identity for one unit of session-owned work. Monotonic, so a retired unit's own
+    /// cleanup can never remove one the *next* session created.
+    private func claimSessionWorkId() -> Int64 {
+        nextSessionWorkId += 1
+        return nextSessionWorkId
+    }
+
+    /// Whether the session that authorised this unit of work is still the current one. See
+    /// `sessionWork`: the registry is the token, and this read is synchronous on the main actor, so
+    /// it is atomic with the statement that follows it.
+    private func ownsSessionWork(_ id: Int64) -> Bool { sessionWork[id] != nil }
+
+    @discardableResult
+    private func launchInSession(_ body: @escaping @MainActor (_ id: Int64) async -> Void) -> Task<Void, Never> {
+        let id = claimSessionWorkId()
+        let task = Task { @MainActor [weak self] in
+            await body(id)
+            self?.sessionWork[id] = nil
+        }
+        sessionWork[id] = task
+        return task
+    }
+
+    /// **Retires the current session and returns the task that completes when it is terminal.**
+    ///
+    /// Everything above the `teardown.retire` call runs **synchronously**, on the caller's stack,
+    /// before this returns: after it, no field this coordinator holds belongs to the session being
+    /// retired, so nothing the asynchronous half does can reach a *successor's* voice controller,
+    /// channels, work registry or diagnostics. Each captured reference is the ownership token for its
+    /// own object — no counter is invented, because the reference itself already answers "whose?"
+    /// exactly (ADR-024 Amendment A3's lesson, at the session layer).
+    ///
+    /// The asynchronous half then, in order: cancels and **awaits** every continuation this session
+    /// started; releases the voice controller and detaches its two relay sinks; and shuts the control
+    /// plane down. Only when all three have returned may `.teardownComplete` be emitted, and
+    /// `SessionTeardownOwner` is what makes "only when" mean something — a successor awaits the same
+    /// task.
+    @discardableResult
+    private func retireSession(_ end: SessionEnd) -> Task<Void, Never> {
+        let endingVoice = voice
+        if endingVoice != nil {
+            voice = nil
+            voiceDiagnostics = VoiceDiagnostics()
+        }
+        // Cancel the consumers and finish the channels here, synchronously: cancellation is only the
+        // cooperative signal, and finishing is what turns a later `send` from a not-yet-torn-down
+        // callback into a no-op rather than a mutation of whatever session replaces this one.
+        voiceDiagnosticsChannel?.finish()
+        voiceDiagnosticsChannel = nil
         controlEventChannel?.finish()
         controlEventChannel = nil
-        pairingPromptTask?.cancel()
-        pairingPromptTask = nil
         pairingPromptChannel?.finish()
         pairingPromptChannel = nil
+        let endingWork = sessionWork
+        sessionWork.removeAll()
+        let endingControlPlane = controlPlaneStarted
+        controlPlaneStarted = false
+        // Synchronous on `BonjourDiscovery`, and deliberately before the suspension below: the
+        // browser and the advertiser are one instance for the whole process, so stopping them after
+        // a successor had started them would stop the successor's.
         discovery.stopBrowsing()
         discovery.stopAdvertising()
         let manager = controlSessionManager
-        Task { await manager.shutdown() }
+
+        return teardown.retire { [weak self] in
+            for task in endingWork.values { task.cancel() }
+            for task in endingWork.values { await task.value }
+            // Re-read *after* every continuation of this session is terminal, which is the one point
+            // at which re-reading is correct rather than the ADR-025 defect: a retired `attachVoice`
+            // may legitimately have finished installing its controller between the synchronous
+            // capture above and its cancellation taking effect, and at this instant nothing can write
+            // the field — the session that could is over, and the successor that will cannot have
+            // started, because it is awaiting this very task.
+            let controller = endingVoice ?? self?.voice
+            self?.voice = nil
+            if controller != nil {
+                await manager.voiceRelay().setSink(nil)
+                await manager.audioStateRelay().setSink(nil)
+            }
+            await controller?.shutdown()
+            if endingControlPlane { await manager.shutdown() }
+            if end.signalsTeardownComplete {
+                // The event name is now literally true: every effect above has returned, and the only
+                // references to any of them were captured synchronously above, so no continuation of
+                // this session exists to mutate whatever starts next.
+                _ = self?.applyEvent(.teardownComplete)
+            }
+        }
     }
 
     private func handleDiscoveryEvent(_ event: DiscoveryEvent) {
@@ -389,7 +550,7 @@ public final class SessionCoordinator {
         _ = applyEvent(.peerSelected)
         let manager = controlSessionManager
         let identity = localIdentity
-        Task { await manager.connectTo(host: peer.host, port: port, local: identity) }
+        launchInSession { _ in await manager.connectTo(host: peer.host, port: port, local: identity) }
     }
 
     // MARK: - Phase 2a voice (PROTOCOL §7)
@@ -491,7 +652,7 @@ public final class SessionCoordinator {
             return
         }
         let manager = controlSessionManager
-        Task { @MainActor [weak self] in
+        launchInSession { [weak self] id in
             // The relay is actor-isolated on the manager, so it is awaited rather than read: it captures
             // the manager's `activeSocket`/`authenticated`, which is what makes its writer non-nil only
             // past the trust gate (PROTOCOL §7.1).
@@ -505,9 +666,14 @@ public final class SessionCoordinator {
                 // the wire inside the SDP, so it must not carry a device name.
                 localTrackId: "ridelink-voice"
             )
-            guard let self else { return }
+            // Every `await` below is a point at which this session can be retired, and every statement
+            // below *installs* something — a controller, a diagnostics consumer, two relay sinks. A
+            // retired install would hand the successor this session's voice subsystem, which is why
+            // ownership is re-proved before each one rather than once at the top.
+            guard let self, self.ownsSessionWork(id) else { return }
             self.voice = controller
             await controller.attach()
+            guard self.ownsSessionWork(id) else { return }
             controller.selectPolicy(self.intercomPolicy)
 
             // Exactly one consumer, draining in a single `for await` loop — see `OrderedEventChannel`'s
@@ -516,8 +682,7 @@ public final class SessionCoordinator {
             // invoke directly from the controller actor's `onDiagnosticsChanged` callback.
             let diagnosticsChannel = OrderedEventChannel<VoiceDiagnostics>()
             self.voiceDiagnosticsChannel = diagnosticsChannel
-            self.voiceDiagnosticsTask?.cancel()
-            self.voiceDiagnosticsTask = Task { @MainActor [weak self] in
+            self.launchInSession { [weak self] _ in
                 for await diagnostics in diagnosticsChannel.stream {
                     guard let self else { return }
                     self.voiceDiagnostics = diagnostics
@@ -530,34 +695,14 @@ public final class SessionCoordinator {
             await controller.setOnDiagnosticsChanged { diagnostics in
                 diagnosticsChannel.send(diagnostics)
             }
+            guard self.ownsSessionWork(id) else { return }
             await relay.setSink(controller)
             let audioRelay = await manager.audioStateRelay()
-            await audioRelay.setSink(PeerAudioStateSink { message in
-                Task { @MainActor in self.acceptPeerAudioState(message) }
+            guard self.ownsSessionWork(id) else { return }
+            await audioRelay.setSink(PeerAudioStateSink { [weak self] message in
+                Task { @MainActor in self?.acceptPeerAudioState(message) }
             })
             self.logger.info("SessionCoordinator", "voice subsystem attached (offerer=\(isLocalLeader))")
-        }
-    }
-
-    /// ARCHITECTURE §3 rule 3: only a deliberate end releases the audio session. Called on `BYE` and
-    /// from the `ENDING` effect, never on a link blip.
-    private func releaseVoice() {
-        guard let controller = voice else { return }
-        voice = nil
-        voiceDiagnostics = VoiceDiagnostics()
-        // Cancel the consumer, then finish the channel — cancellation is the cooperative signal,
-        // finishing is what actually ends the `for await` loop and turns any later `send` from a
-        // not-yet-torn-down controller callback into a no-op rather than a stale mutation of whatever
-        // session replaces this one.
-        voiceDiagnosticsTask?.cancel()
-        voiceDiagnosticsTask = nil
-        voiceDiagnosticsChannel?.finish()
-        voiceDiagnosticsChannel = nil
-        let manager = controlSessionManager
-        Task {
-            await manager.voiceRelay().setSink(nil)
-            await manager.audioStateRelay().setSink(nil)
-            await controller.shutdown()
         }
     }
 
@@ -589,7 +734,10 @@ public final class SessionCoordinator {
         }
         guard let message else { return }
         let manager = controlSessionManager
-        Task { @MainActor [weak self] in
+        // Session-owned, so the send is one of the continuations a teardown awaits rather than one it
+        // merely outlives. The epoch fence below still stands on its own — it is what covers a publish
+        // raised outside any session at all, e.g. a mode change from `IDLE`.
+        launchInSession { [weak self] _ in
             // ADR-021 Amendment A7 §4, which is ADR-024 Amendment A3/A5's rule applied outbound:
             // **authorised to build is not authorised to send.** The revision above was committed
             // synchronously, but this `Task` is a suspension point, and `startDiscovery()` can land in
@@ -671,13 +819,19 @@ public final class SessionCoordinator {
             publishAudioState(force: true)
             await sharedLibrary?.handleConnected()
             await syncPlayback?.handleConnected(isLocalLeader: isLocalLeader)
-        case .linkLost(let reason):
+        case .linkLost:
             // PROTOCOL §7.8: media goes, the capture device stays (ARCHITECTURE §6.3/§6.4), and nothing
             // is retried here — §10's control ladder is the app's only reconnect loop.
             if let voice {
-                Task { await voice.onControlLinkLost() }
+                let controller = voice
+                launchInSession { _ in await controller.onControlLinkLost() }
             }
-            if reason == .bye { releaseVoice() }
+            // A `BYE`'s own release is **not** started here. `handleControlEvent` applies the FSM
+            // transition this same event implies right after this method returns, and `BYE` always
+            // drives CONNECTED/RIDE_ACTIVE/RECONNECTING to `ENDING`, whose effect is the **one** owner
+            // of the release -> teardown order (`retireSession`). The eager release that used to be
+            // here was a second owner, and once `ENDING -> IDLE` became reachable it was a second
+            // owner whose fire-and-forget tail could clear the *successor's* sinks.
             await sharedLibrary?.handleLinkLost()
             await syncPlayback?.handleLinkLost()
         case .duplicateConnectionClosed, .reconnectBudgetExhausted:
@@ -689,7 +843,7 @@ public final class SessionCoordinator {
         guard let host = lastPeerHost, let port = lastPeerPort, state.status == .reconnecting else { return }
         let manager = controlSessionManager
         let identity = localIdentity
-        Task { await manager.beginReconnect(local: identity, host: host, port: port) }
+        launchInSession { _ in await manager.beginReconnect(local: identity, host: host, port: port) }
     }
 
     @discardableResult
@@ -697,7 +851,7 @@ public final class SessionCoordinator {
         switch SessionFsm.transition(state, event) {
         case .transitioned(let newState, let effects):
             state = newState
-            effects.forEach(runEffect)
+            effects.forEach { runEffect($0, newState: newState) }
             return true
         case .rejected:
             logger.warn("SessionCoordinator", "rejected \(event) from \(state.status)")
@@ -708,14 +862,22 @@ public final class SessionCoordinator {
         }
     }
 
-    private func runEffect(_ effect: Effect) {
+    /// - Parameter newState: the state this transition produced. Passed rather than re-read: which
+    ///   deliberate end a `.releaseAudioAndStopForegroundService` belongs to is a property of *this*
+    ///   transition, and asking a mutable field for it later is the shape ADR-024 Amendment A7 and
+    ///   ADR-025 are both about.
+    private func runEffect(_ effect: Effect, newState: FsmState) {
         switch effect {
         case .logTransition(let from, let to, let trigger):
             logger.info("SessionCoordinator", "\(from.status) -> \(to.status) (\(trigger))")
         case .releaseAudioAndStopForegroundService:
+            // iOS has no microphone foreground service — a background-audio app keeps its session —
+            // so the effect's second half is Android's alone. The first half, and the ordering around
+            // it, is shared: `retireSession` is the one owner, and `.teardownComplete` is emitted as
+            // the last statement of the same task that performs the teardown (`docs/STATUS.md` §4
+            // problem 53).
             logger.info("SessionCoordinator", "release audio session")
-            releaseVoice()
-            teardownSession()
+            retireSession(newState.status == .ending ? .ending : .userRetry)
         }
     }
 }

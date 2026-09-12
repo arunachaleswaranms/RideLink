@@ -58,12 +58,14 @@ class SessionFsmVectorTest {
                 assertEquals(expectedTo, transitioned.newState)
 
                 val expectedEffects = v["effects"]?.jsonArray?.map { it.jsonPrimitive.content } ?: emptyList()
-                if ("RELEASE_AUDIO_AND_STOP_FOREGROUND_SERVICE" in expectedEffects) {
-                    assertTrue(
-                        transitioned.effects.any { it is Effect.ReleaseAudioAndStopForegroundService },
-                        "expected the audio-release effect on entering ${expectedTo.status}",
-                    )
-                }
+                // Asserted in **both** directions. Presence alone would let a future edit attach the
+                // release effect to every transition and still pass — including to `RECONNECTING`,
+                // which is the one thing ARCHITECTURE §3 rule 3 exists to forbid.
+                assertEquals(
+                    "RELEASE_AUDIO_AND_STOP_FOREGROUND_SERVICE" in expectedEffects,
+                    transitioned.effects.any { it is Effect.ReleaseAudioAndStopForegroundService },
+                    "the audio-release effect on ${from.status} -> ${expectedTo.status} must match the vector exactly",
+                )
                 assertTrue(
                     transitioned.effects.any { it is Effect.LogTransition },
                     "every real transition must be logged (ARCHITECTURE §3 rule 5)",

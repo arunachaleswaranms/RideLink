@@ -67,6 +67,14 @@ public actor PlaybackRelay {
         self.currentAuthGeneration = currentAuthGeneration
     }
 
+
+    /// Read-only, `internal`, for the tests that assert **whose** sink this is — see
+    /// `SessionTeardownOwnershipTests` and `docs/STATUS.md` §4 problem 54. Android's equivalent field
+    /// is a plain `var`, so this only restores the readability the mirror already had.
+    var playbackSinkForTest: (any PlaybackSink)? { playbackSink }
+
+    var queueSinkForTest: (any QueueSink)? { queueSink }
+
     public func setPlaybackSink(_ sink: (any PlaybackSink)?) { playbackSink = sink }
 
     public func setQueueSink(_ sink: (any QueueSink)?) { queueSink = sink }
@@ -152,9 +160,8 @@ public actor PlaybackRelay {
         preAuthenticationDrops += 1
     }
 
-    public func reset() {
-        playbackSink = nil
-        queueSink = nil
+    /// See `AudioStateRelay.resetCounters()`: the counters, never the sinks.
+    public func resetCounters() {
         playbackRejections.removeAll()
         queueRejections.removeAll()
         preAuthenticationDrops = 0

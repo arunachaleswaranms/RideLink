@@ -12,7 +12,7 @@
     { "name": "reconnecting-success-returns-to-ride-active", "from": { "status": "RECONNECTING", "returnTo": "RIDE_ACTIVE" }, "event": { "kind": "ReconnectSucceeded" }, "to": { "status": "RIDE_ACTIVE" } },
     { "name": "reconnecting-budget-spent-to-disconnected-from-connected",   "from": { "status": "RECONNECTING", "returnTo": "CONNECTED" },   "event": { "kind": "ReconnectBudgetExhausted" }, "to": { "status": "DISCONNECTED" } },
     { "name": "reconnecting-budget-spent-to-disconnected-from-ride-active", "from": { "status": "RECONNECTING", "returnTo": "RIDE_ACTIVE" }, "event": { "kind": "ReconnectBudgetExhausted" }, "to": { "status": "DISCONNECTED" } },
-    { "name": "disconnected-retry-to-discovering", "from": { "status": "DISCONNECTED" }, "event": { "kind": "RetryRequested" }, "to": { "status": "DISCOVERING" } },
+    { "name": "disconnected-retry-to-discovering", "from": { "status": "DISCONNECTED" }, "event": { "kind": "RetryRequested" }, "to": { "status": "DISCOVERING" }, "effects": ["RELEASE_AUDIO_AND_STOP_FOREGROUND_SERVICE"] },
     { "name": "connected-start-ride-to-ride-active", "from": { "status": "CONNECTED" },   "event": { "kind": "StartRide" }, "to": { "status": "RIDE_ACTIVE" } },
     { "name": "ride-active-end-ride-to-connected",   "from": { "status": "RIDE_ACTIVE" }, "event": { "kind": "EndRide" },   "to": { "status": "CONNECTED" } },
     { "name": "connected-link-lost-network-to-reconnecting",   "from": { "status": "CONNECTED" },   "event": { "kind": "LinkLost", "reason": "NETWORK" }, "to": { "status": "RECONNECTING", "returnTo": "CONNECTED" } },

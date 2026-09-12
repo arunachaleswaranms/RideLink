@@ -418,7 +418,14 @@ public actor ControlSessionManager {
     public func startListening(local: LocalHandshakeIdentity) async throws -> UInt16 {
         isShutDown = false
         localIdentity = local
-        updateDiagnostics { $0.transportLabel = self.channel.transportLabel }
+        // A **whole** fresh diagnostics row, not an edit of the previous session's: `shutdown()` leaves
+        // `.ended` behind, and carrying it forward made a brand-new session report the *previous* one's
+        // ending on the transport banner until a connection happened to promote it. Invisible until
+        // `docs/STATUS.md` §4 problem 53 made a second session reachable at all.
+        updateDiagnostics { diagnostics in
+            diagnostics = ControlDiagnostics()
+            diagnostics.transportLabel = self.channel.transportLabel
+        }
         let bound = try await channel.bind()
         listener = bound
         acceptTask = Task {
@@ -1198,19 +1205,26 @@ public actor ControlSessionManager {
         isShutDown = true
         pairing = nil
         authenticatedConnection = nil
-        // This manager is reused across sessions, so a sink still attached from the previous one must
-        // not survive into the next — the same hazard STATUS §2h fixed for control events, applied to
-        // the voice sink. The coordinator also detaches it, and doing both is deliberate: neither
-        // teardown path may depend on the other having run.
-        await voice.reset()
-        await audioState.reset()
-        await manifest.reset()
-        await transfer.reset()
-        await playback.reset()
+        // Counters only — see `AudioStateRelay.resetCounters()`. This used to detach every relay sink,
+        // which silently killed Phase 4 and Phase 5 for the rest of the process (STATUS §4 problem 54):
+        // their sinks are installed once per process by coordinators that deliberately outlive a
+        // control-session boundary, and nothing re-installs them. The two per-session sinks (`voice`,
+        // `audioState`) are detached by `SessionCoordinator`, synchronously, at the instant it retires
+        // the session — before this ever runs.
+        await voice.resetCounters()
+        await audioState.resetCounters()
+        await manifest.resetCounters()
+        await transfer.resetCounters()
+        await playback.resetCounters()
         pendingActivation = nil
         updatePairingPrompt(nil)
         endedDeliberately = true
         await reconnectController.cancel()
+        // …and reset, not merely cancel: `cancel()` leaves the attempt count and the spent budget where
+        // the previous session left them. `promote` resets them too, so this is not reachable today, but
+        // an exhausted 120 s budget handed to the next session is exactly the class of defect this pass
+        // exists to close — session-lifetime state surviving into a successor.
+        await reconnectController.reset()
         acceptTask?.cancel()
         keepaliveTask?.cancel()
         clockSyncTask?.cancel()

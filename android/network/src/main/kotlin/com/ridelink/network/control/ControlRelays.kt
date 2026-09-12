@@ -127,15 +127,32 @@ class ControlRelays internal constructor(
     }
 
     /**
-     * A session boundary. Every sink attached by the previous session is detached, so a coordinator
-     * still holding one cannot receive a frame belonging to the next — the hazard `docs/STATUS.md`
-     * §2h fixed for control events, applied to every relay at once.
+     * A control-session boundary: the per-session diagnostics counters go back to zero. **No sink is
+     * detached here, and that is the fix** (`docs/STATUS.md` §4 problem 54).
+     *
+     * This used to null all seven sinks, on the reasoning that "a sink attached by the previous
+     * session must not survive into the next". That is true of exactly two of the five families and
+     * false of the other three, and the difference is *who installed the sink*:
+     *
+     * - [voice] and [audioState] are installed per authenticated session by `SessionCoordinator`,
+     *   which also detaches them — synchronously, at the instant the session is retired, before its
+     *   teardown suspends for the first time. They are its sinks to remove, and it removes them.
+     * - [manifest], [transfer] and [playback] are installed **once per process**, in the
+     *   constructors of `SharedLibraryCoordinator` and `SyncPlaybackCoordinator`. Those coordinators
+     *   deliberately outlive a control-session boundary — that is what ADR-023 §3's and ADR-025's
+     *   per-frame generation is *for* — and nothing ever re-installs their sinks. Detaching them
+     *   here therefore disabled Phase 4 and Phase 5 silently and permanently for the rest of the
+     *   process, from the first Stop Discovery onward.
+     *
+     * So the rule this type now keeps is the narrow one that was always true: **a sink belongs to
+     * whoever installed it, and only its installer may remove it.** Counters are this object's own
+     * and are still cleared.
      */
-    fun reset() {
-        voice.reset()
-        audioState.reset()
-        manifest.reset()
-        transfer.reset()
-        playback.reset()
+    fun resetCounters() {
+        voice.resetCounters()
+        audioState.resetCounters()
+        manifest.resetCounters()
+        transfer.resetCounters()
+        playback.resetCounters()
     }
 }
