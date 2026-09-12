@@ -330,6 +330,9 @@ class SyncPlaybackCoordinator(
             capacity = inboundCapacity,
             kindOf = Inbound::kind,
             coalesceKeyOf = Inbound::coalesceKey,
+            // Amendment A6: the generation a refusal belongs to is the refused frame's own, never
+            // whichever session happens to be live when the consumer gets round to observing it.
+            generationOf = Inbound::generation,
         )
 
     /**
@@ -355,6 +358,10 @@ class SyncPlaybackCoordinator(
             // Never coalesced: a frame this device has already stamped may not be superseded.
             kindOf = { Phase5FrameKind.COMMAND },
             coalesceKeyOf = { null },
+            // Recorded for symmetry only: this direction's producer is [enqueueOutbound], which is
+            // *answered* synchronously by `offer` and acts on the refusal there and then
+            // (Amendment A2 Finding A), so its loss ledger is never drained.
+            generationOf = Outbound::generation,
         )
 
     init {
@@ -384,9 +391,15 @@ class SyncPlaybackCoordinator(
         /** The latest-wins family this frame belongs to, or null when it is an authoritative command. */
         abstract val coalesceKey: String?
 
+        /**
+         * The authentication generation live when the read loop produced this frame — and therefore
+         * the generation that owns any ingress loss this frame causes (Amendment A6).
+         */
+        abstract val generation: Long
+
         data class Playback(
             val message: PlaybackMessage,
-            val generation: Long,
+            override val generation: Long,
         ) : Inbound() {
             override val kind: Phase5FrameKind
                 get() =
@@ -407,7 +420,7 @@ class SyncPlaybackCoordinator(
 
         data class Queue(
             val message: QueueMessage,
-            val generation: Long,
+            override val generation: Long,
         ) : Inbound() {
             override val kind: Phase5FrameKind
                 get() = if (message is QueueMessage.Snapshot) Phase5FrameKind.LATEST_WINS else Phase5FrameKind.COMMAND
@@ -496,34 +509,51 @@ class SyncPlaybackCoordinator(
      * Called from the control read loop. It must not block and must not do work, so it does exactly
      * one thing: hand the frame to the bounded queue. The *consequences* of a refusal are observed
      * by the consumer, at the top of its next iteration, which is where they belong — see
-     * [Phase5FrameQueue.stats].
+     * [Phase5FrameQueue.drainLosses].
      */
     private fun enqueue(item: Inbound) {
         inbound.offer(item)
     }
 
-    private var reportedInboundOverflows = 0
-    private var reportedInboundCoalesces = 0
-
     /**
-     * Reconciles the queue's admission statistics into diagnostics, and latches the halt if a frame
-     * was refused. Called once per drained frame, **before** that frame is dispatched, so a refusal
-     * can never be followed by an applied command.
+     * Attributes the queue's ingress losses to the generations that caused them, and latches the
+     * halt if a frame **of the live session** was refused. Called once per drained frame,
+     * **before** that frame is dispatched, so a refusal can never be followed by an applied command.
+     *
+     * **Amendment A6.** This used to diff two cumulative counters and act on the difference with
+     * whatever role and session were live at that instant. The pipe deliberately outlives sessions,
+     * so that read "Session A lost a frame" as "*we* lost a frame" — and since a follower answers a
+     * loss by setting [playbackDesynchronized]/[queueDesynchronized], a refusal in a dead session
+     * halted the live one. Each record now carries its own generation and is judged against that.
+     *
+     * Fully synchronous, deliberately: there is no suspension between reading the records, deciding
+     * whose they are and acting on them, so the decision cannot be overtaken by a boundary the way
+     * Amendment A5's three sites were. [stillCurrent] is the same predicate every other path proves.
      */
     private fun observeIngressStats() {
-        val stats = inbound.stats
-        val newOverflows = stats.overflowCount - reportedInboundOverflows
-        val newCoalesces = stats.coalescedCount - reportedInboundCoalesces
-        if (newOverflows == 0 && newCoalesces == 0) return
-        reportedInboundOverflows = stats.overflowCount
-        reportedInboundCoalesces = stats.coalescedCount
+        val losses = inbound.drainLosses()
+        if (losses.isEmpty()) return
+        var overflows = 0
+        var coalesces = 0
+        var retired = 0
+        for (loss in losses) {
+            if (stillCurrent(loss.generation)) {
+                overflows += loss.overflowCount
+                coalesces += loss.coalescedCount
+            } else {
+                // Never silently discarded: a loss belonging to a session that has ended is a real
+                // event that simply has no live session to halt, and it is surfaced as exactly that.
+                retired += loss.overflowCount + loss.coalescedCount
+            }
+        }
         _diagnostics.update {
             it.copy(
-                inboundOverflowCount = it.inboundOverflowCount + newOverflows,
-                inboundCoalescedCount = it.inboundCoalescedCount + newCoalesces,
+                inboundOverflowCount = it.inboundOverflowCount + overflows,
+                inboundCoalescedCount = it.inboundCoalescedCount + coalesces,
+                inboundRetiredLossCount = it.inboundRetiredLossCount + retired,
             )
         }
-        if (newOverflows > 0) onIngressOverflow()
+        if (overflows > 0) onIngressOverflow()
     }
 
     /**
@@ -727,6 +757,7 @@ class SyncPlaybackCoordinator(
                 deferredCommandCount = 0,
                 localDriftMs = null,
                 peerDriftMs = null,
+                playbackRate = DriftController.RATE_NORMAL,
                 cancelledPendingPlayCount = it.cancelledPendingPlayCount + cancelled,
             )
         }
@@ -1382,6 +1413,7 @@ class SyncPlaybackCoordinator(
                 localDriftMs = null,
                 peerDriftMs = null,
                 deferredCommandCount = 0,
+                playbackRate = DriftController.RATE_NORMAL,
                 cancelledPendingPlayCount = it.cancelledPendingPlayCount + cancelled,
             )
         }
@@ -1390,9 +1422,25 @@ class SyncPlaybackCoordinator(
     /** Whether a synchronised session currently owns transport control (brief §39/§40). */
     fun isSynchronizedModeActive(): Boolean = syncEnabled && role != null
 
+    /**
+     * Brief §38's "correction always ends at exactly 1.0", and the one player call in this phase
+     * that is deliberately **not** fenced (ADR-024 Amendment A4 §D).
+     *
+     * Its three callers — [resetForNewSession], [failClosedOutbound] and [leaveSynchronizedMode] —
+     * are all the *ending* of an authority, so there is no generation left to prove and fencing it
+     * would leave the previous session's nudge in force on music ADR-004 says keeps playing. It is
+     * idempotent, it names an absolute rate rather than a relative one, and 1.0 is what the next
+     * session would set anyway, so a late one cannot fight a live correction into a wrong value.
+     *
+     * **Amendment A6 §H: the exemption is for the player effect and nothing else.** This used to
+     * write `playbackRate` *after* `setRate` returned — a coordinator-state write from a dead
+     * session, which is exactly the class A5 closed everywhere else. Each caller now records the
+     * rate itself, before the suspension, so the exemption is one player call with no write behind
+     * it. Android was never observably defective here (all three callers launch this rather than
+     * awaiting it), but the shape is what the iOS mirror has to be, and the two must agree.
+     */
     private suspend fun restoreRate() {
         player.setRate(DriftController.RATE_NORMAL)
-        _diagnostics.update { it.copy(playbackRate = DriftController.RATE_NORMAL) }
     }
 
     // --- receiving ------------------------------------------------------------------------------

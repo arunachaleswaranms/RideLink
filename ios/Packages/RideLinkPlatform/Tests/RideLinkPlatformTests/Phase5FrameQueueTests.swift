@@ -18,10 +18,14 @@ final class Phase5FrameQueueTests: XCTestCase {
     private struct Frame: Sendable {
         let name: String
         let family: String?
+        /// The authentication generation this frame was produced under — what Amendment A6 makes any
+        /// loss it causes belong to.
+        let generation: Int64
 
-        init(_ name: String, family: String? = nil) {
+        init(_ name: String, family: String? = nil, generation: Int64 = 1) {
             self.name = name
             self.family = family
+            self.generation = generation
         }
     }
 
@@ -29,8 +33,18 @@ final class Phase5FrameQueueTests: XCTestCase {
         Phase5FrameQueue(
             capacity: capacity,
             kindOf: { $0.family == nil ? .command : .latestWins },
-            coalesceKeyOf: { $0.family }
+            coalesceKeyOf: { $0.family },
+            generationOf: { $0.generation }
         )
+    }
+
+    /// Every loss the queue is holding, flattened — the shape the pre-A6 `stats` property reported
+    /// without saying whose the losses were.
+    private func totals(_ queue: Phase5FrameQueue<Frame>) -> (overflow: Int, coalesced: Int) {
+        queue.drainLosses().reduce(into: (overflow: 0, coalesced: 0)) {
+            $0.overflow += $1.overflowCount
+            $0.coalesced += $1.coalescedCount
+        }
     }
 
     func testFramesAreHandedToTheConsumerInArrivalOrder() async {
@@ -48,7 +62,7 @@ final class Phase5FrameQueueTests: XCTestCase {
         XCTAssertEqual(queue.offer(Frame("a")), .admit)
         XCTAssertEqual(queue.offer(Frame("b")), .admit)
         XCTAssertEqual(queue.offer(Frame("c")), .overflow)
-        XCTAssertEqual(queue.stats.overflowCount, 1)
+        XCTAssertEqual(totals(queue).overflow, 1)
         XCTAssertEqual(queue.count, 2, "the bound is real: a refusal never grows the queue")
 
         var drained: [String] = []
@@ -61,8 +75,9 @@ final class Phase5FrameQueueTests: XCTestCase {
         XCTAssertEqual(queue.offer(Frame("report-1", family: "REPORT")), .admit)
         XCTAssertEqual(queue.offer(Frame("command")), .admit)
         XCTAssertEqual(queue.offer(Frame("report-2", family: "REPORT")), .coalesce)
-        XCTAssertEqual(queue.stats.coalescedCount, 1)
-        XCTAssertEqual(queue.stats.overflowCount, 0)
+        let counted = totals(queue)
+        XCTAssertEqual(counted.coalesced, 1)
+        XCTAssertEqual(counted.overflow, 0)
 
         var drained: [String] = []
         for _ in 0 ..< 2 { drained.append(await queue.take()?.name ?? "-") }

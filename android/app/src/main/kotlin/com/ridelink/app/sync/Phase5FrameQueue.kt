@@ -44,17 +44,31 @@ import kotlinx.coroutines.channels.Channel
  * that also carries `PING`/`PONG`, so blocking it would manufacture a false link loss. Genuine
  * TCP backpressure is therefore not available to us, and the explicit refusal is what replaces it.
  *
+ * **Amendment A6: this pipe outlives sessions; the *identity* of what it lost does not.** The queue
+ * object deliberately survives an authentication boundary (see [close]) — the boundary is expressed
+ * by the generation each frame carries, not by tearing the pipe down. Its loss accounting used to
+ * be two cumulative `Int`s the consumer diffed, which carried no such generation at all: a frame
+ * refused under Session A, observed after Session B activated, told Session B it had lost a frame
+ * and halted it. That is not a diagnostics defect — `playbackDesynchronized`/`queueDesynchronized`
+ * decide whether incremental authoritative commands are applied at all. So every loss is now
+ * recorded against **the refused frame's own generation** ([generationOf]) and handed to the
+ * consumer as [IngressLoss] records, which it drains and attributes itself. Inferring the
+ * generation from whatever is live at observation time is precisely the bug.
+ *
  * @param capacity injectable so a deterministic test can force the edge at 1 or 2 rather than
  *   racing 256 frames against a sleep.
  * @param kindOf whether a frame is an authoritative command or a latest-wins frame.
  * @param coalesceKeyOf the latest-wins family a frame belongs to, or null for a command. Two frames
  *   coalesce only when their keys are equal, so a `POSITION_REPORT` never supersedes a
  *   `PLAYBACK_STATE`.
+ * @param generationOf the authentication generation the frame was produced under — the generation
+ *   that **owns** any loss this frame causes (Amendment A6).
  */
 internal class Phase5FrameQueue<T>(
     private val capacity: Int,
     private val kindOf: (T) -> Phase5FrameKind,
     private val coalesceKeyOf: (T) -> String?,
+    private val generationOf: (T) -> Long,
 ) {
     private val lock = Any()
     private val items = ArrayDeque<T>()
@@ -68,22 +82,21 @@ internal class Phase5FrameQueue<T>(
 
     private var closed = false
 
-    private var overflows = 0
-    private var coalesces = 0
+    /**
+     * Loss and coalescing events, in arrival order, each owned by the generation that caused it
+     * (Amendment A6). Consecutive events from one generation share a bucket, so the list length is
+     * the number of *generation changes* the consumer has not yet drained across, not the number of
+     * events.
+     */
+    private val losses = ArrayDeque<MutableLoss>()
+
+    private class MutableLoss(
+        val generation: Long,
+        var overflowCount: Int = 0,
+        var coalescedCount: Int = 0,
+    )
 
     val size: Int get() = synchronized(lock) { items.size }
-
-    /**
-     * Cumulative admission statistics, read by the **consumer** rather than reported to the
-     * producer.
-     *
-     * That direction is deliberate. [offer] is called from the control read loop, which cannot
-     * suspend into a coordinator and must not do work; and reading the counters at the top of each
-     * drain iteration puts the observation exactly where it has to be — *before* the next frame is
-     * dispatched, so a halt takes effect ahead of any command that follows a refusal rather than
-     * one frame late.
-     */
-    val stats: Stats get() = synchronized(lock) { Stats(overflows, coalesces) }
 
     /**
      * True when nothing is buffered — the mirror of `RideLinkPlatform.Phase5FrameQueue`'s
@@ -92,7 +105,12 @@ internal class Phase5FrameQueue<T>(
      */
     val isIdle: Boolean get() = synchronized(lock) { items.isEmpty() }
 
-    data class Stats(
+    /**
+     * One generation's ingress losses, as the consumer must consider them: **whose** they are is
+     * part of the fact, not something to be inferred later.
+     */
+    data class IngressLoss(
+        val generation: Long,
         val overflowCount: Int,
         val coalescedCount: Int,
     )
@@ -101,7 +119,7 @@ internal class Phase5FrameQueue<T>(
         val admission =
             synchronized(lock) {
                 if (closed) {
-                    overflows += 1
+                    recordLoss(generationOf(item), overflow = true)
                     return@synchronized IngressAdmission.OVERFLOW
                 }
                 val key = coalesceKeyOf(item)
@@ -115,14 +133,66 @@ internal class Phase5FrameQueue<T>(
                         val index = items.indexOfFirst { coalesceKeyOf(it) == key }
                         if (index >= 0) items.removeAt(index)
                         items.addLast(item)
-                        coalesces += 1
+                        // Attributed to the *incoming* frame's generation: it is the frame whose
+                        // arrival caused the event, and the one whose session is being told about it.
+                        recordLoss(generationOf(item), overflow = false)
                     }
-                    IngressAdmission.OVERFLOW -> overflows += 1
+                    IngressAdmission.OVERFLOW -> recordLoss(generationOf(item), overflow = true)
                 }
                 decision
             }
         if (admission != IngressAdmission.OVERFLOW) signal.trySend(Unit)
         return admission
+    }
+
+    /**
+     * Takes every loss recorded so far, in arrival order, and clears them.
+     *
+     * Read by the **consumer** rather than reported to the producer. That direction is deliberate:
+     * [offer] is called from the control read loop, which cannot suspend into a coordinator and must
+     * not do work; and draining at the top of each iteration puts the observation exactly where it
+     * has to be — *before* the next frame is dispatched, so a halt takes effect ahead of any command
+     * that follows a refusal rather than one frame late.
+     *
+     * Draining rather than diffing a cumulative total is Amendment A6's other half. A baseline the
+     * consumer re-samples at a session boundary cannot be correct: the read loop is still producing
+     * under the *old* generation at that instant, so a loss recorded microseconds after the baseline
+     * was taken would be read back as the new session's. Each record carries its own generation, so
+     * there is nothing to infer and no window to lose.
+     */
+    fun drainLosses(): List<IngressLoss> =
+        synchronized(lock) {
+            if (losses.isEmpty()) return emptyList()
+            val drained = losses.map { IngressLoss(it.generation, it.overflowCount, it.coalescedCount) }
+            losses.clear()
+            drained
+        }
+
+    /**
+     * Appends to the newest bucket when it belongs to the same generation, and opens a new one
+     * otherwise. Called only with [lock] held.
+     *
+     * The bucket count is hard-capped so a consumer that never drains cannot grow this without
+     * bound. Eviction folds the oldest bucket into the next oldest rather than dropping it: with
+     * more than one bucket present, generations being strictly increasing per authentication
+     * (ADR-023 §3) makes both of the two oldest strictly older than the newest, hence both already
+     * retired — so the total is preserved exactly and the only thing merged is *which* dead
+     * generation two retired losses are attributed to. Nothing is silently discarded.
+     */
+    private fun recordLoss(
+        generation: Long,
+        overflow: Boolean,
+    ) {
+        val bucket =
+            losses.lastOrNull()?.takeIf { it.generation == generation }
+                ?: MutableLoss(generation).also { losses.addLast(it) }
+        if (overflow) bucket.overflowCount += 1 else bucket.coalescedCount += 1
+        while (losses.size > MAX_LOSS_GENERATIONS) {
+            val evicted = losses.removeFirst()
+            val next = losses.first()
+            next.overflowCount += evicted.overflowCount
+            next.coalescedCount += evicted.coalescedCount
+        }
     }
 
     /** @return the next frame in arrival order, or null once [close] has been called and the queue is drained. */
@@ -145,5 +215,15 @@ internal class Phase5FrameQueue<T>(
     fun close() {
         synchronized(lock) { closed = true }
         signal.close()
+    }
+
+    private companion object {
+        /**
+         * How many distinct generations' losses may be held undrained at once. The consumer drains
+         * on every iteration, so reaching this at all means it has been parked across eight
+         * authentications — far beyond anything a ride produces, and the bound is here so that
+         * "far beyond" is a fact rather than an expectation.
+         */
+        const val MAX_LOSS_GENERATIONS = 8
     }
 }

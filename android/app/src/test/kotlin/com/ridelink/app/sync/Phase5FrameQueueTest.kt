@@ -27,6 +27,11 @@ class Phase5FrameQueueTest {
     private data class Frame(
         val name: String,
         val family: String? = null,
+        /**
+         * The authentication generation this frame was produced under — what Amendment A6 makes any
+         * loss it causes belong to.
+         */
+        val generation: Long = 1,
     )
 
     private fun queue(capacity: Int) =
@@ -34,7 +39,17 @@ class Phase5FrameQueueTest {
             capacity = capacity,
             kindOf = { if (it.family == null) Phase5FrameKind.COMMAND else Phase5FrameKind.LATEST_WINS },
             coalesceKeyOf = { it.family },
+            generationOf = { it.generation },
         )
+
+    /**
+     * Every loss the queue is holding, flattened — the shape the pre-A6 `stats` property reported
+     * without saying whose the losses were.
+     */
+    private fun totals(subject: Phase5FrameQueue<Frame>): Pair<Int, Int> {
+        val losses = subject.drainLosses()
+        return losses.sumOf { it.overflowCount } to losses.sumOf { it.coalescedCount }
+    }
 
     @Test
     fun `frames are handed to the consumer in arrival order`() =
@@ -57,7 +72,7 @@ class Phase5FrameQueueTest {
             assertEquals(IngressAdmission.ADMIT, subject.offer(Frame("a")))
             assertEquals(IngressAdmission.ADMIT, subject.offer(Frame("b")))
             assertEquals(IngressAdmission.OVERFLOW, subject.offer(Frame("c")))
-            assertEquals(1, subject.stats.overflowCount)
+            assertEquals(1, totals(subject).first)
             assertEquals(2, subject.size, "the bound is real: a refusal never grows the queue")
 
             val drained = async { listOf(subject.take(), subject.take()) }
@@ -73,8 +88,9 @@ class Phase5FrameQueueTest {
             assertEquals(IngressAdmission.ADMIT, subject.offer(Frame("report-1", family = "REPORT")))
             assertEquals(IngressAdmission.ADMIT, subject.offer(Frame("command")))
             assertEquals(IngressAdmission.COALESCE, subject.offer(Frame("report-2", family = "REPORT")))
-            assertEquals(1, subject.stats.coalescedCount)
-            assertEquals(0, subject.stats.overflowCount)
+            val counted = totals(subject)
+            assertEquals(1, counted.second)
+            assertEquals(0, counted.first)
 
             val drained = async { listOf(subject.take(), subject.take()) }
             runCurrent()

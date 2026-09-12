@@ -593,19 +593,41 @@ extension SyncPlaybackCoordinator {
         }
     }
 
-    /// Reconciles the queue's admission statistics into diagnostics, and latches the halt if a frame
-    /// was refused. Called once per drained frame, **before** that frame is dispatched, so a refusal
-    /// can never be followed by an applied command.
+    /// Attributes the queue's ingress losses to the generations that caused them, and latches the
+    /// halt if a frame **of the live session** was refused. Called once per drained frame,
+    /// **before** that frame is dispatched, so a refusal can never be followed by an applied command.
+    ///
+    /// **Amendment A6.** This used to diff two cumulative counters and act on the difference with
+    /// whatever role and session were live at that instant. The pipe deliberately outlives sessions,
+    /// so that read "Session A lost a frame" as "*we* lost a frame" — and since a follower answers a
+    /// loss by setting `playbackDesynchronized`/`queueDesynchronized`, a refusal in a dead session
+    /// halted the live one. Each record now carries its own generation and is judged against that.
+    ///
+    /// Fully synchronous, deliberately: there is no `await` between reading the records, deciding
+    /// whose they are and acting on them, so the decision cannot be overtaken by a boundary the way
+    /// Amendment A5's three sites were. `stillCurrentNow` is therefore both necessary and
+    /// sufficient — A5's `await stillCurrent` pairing exists for work that *has* suspended, and
+    /// adding an `await` here would manufacture the very re-entrancy point it defends against.
     func observeIngressStats() {
-        let stats = inbound.stats
-        let newOverflows = stats.overflowCount - reportedInboundOverflows
-        let newCoalesces = stats.coalescedCount - reportedInboundCoalesces
-        guard newOverflows != 0 || newCoalesces != 0 else { return }
-        reportedInboundOverflows = stats.overflowCount
-        reportedInboundCoalesces = stats.coalescedCount
-        diagnostics.inboundOverflowCount += newOverflows
-        diagnostics.inboundCoalescedCount += newCoalesces
-        if newOverflows > 0 { onIngressOverflow() }
+        let losses = inbound.drainLosses()
+        guard !losses.isEmpty else { return }
+        var overflows = 0
+        var coalesces = 0
+        var retired = 0
+        for loss in losses {
+            if stillCurrentNow(loss.generation) {
+                overflows += loss.overflowCount
+                coalesces += loss.coalescedCount
+            } else {
+                // Never silently discarded: a loss belonging to a session that has ended is a real
+                // event that simply has no live session to halt, and it is surfaced as exactly that.
+                retired += loss.overflowCount + loss.coalescedCount
+            }
+        }
+        diagnostics.inboundOverflowCount += overflows
+        diagnostics.inboundCoalescedCount += coalesces
+        diagnostics.inboundRetiredLossCount += retired
+        if overflows > 0 { onIngressOverflow() }
         publishDiagnostics()
     }
 
@@ -1292,6 +1314,14 @@ extension SyncPlaybackCoordinator {
 enum Phase5Inbound: Sendable {
     case playback(PlaybackMessage, generation: Int64)
     case queue(QueueMessage, generation: Int64)
+
+    /// The authentication generation live when the read loop produced this frame — and therefore
+    /// the generation that owns any ingress loss this frame causes (Amendment A6).
+    var generation: Int64 {
+        switch self {
+        case .playback(_, let generation), .queue(_, let generation): return generation
+        }
+    }
 
     /// Whether a strictly newer frame of the same kind can replace this one without losing anything
     /// (ADR-024 Amendment A1 Finding C). A command never can.

@@ -214,9 +214,6 @@ public actor SyncPlaybackCoordinator {
     var playbackDesynchronized = false
     var queueDesynchronized = false
 
-    var reportedInboundOverflows = 0
-    var reportedInboundCoalesces = 0
-
     /// The bounded, **lossless**, arrival-ordered handoff from the control read loop
     /// (Amendment A1 Finding C, replacing the `.bufferingNewest` stream this originally was).
     let inbound: Phase5FrameQueue<Phase5Inbound>
@@ -264,13 +261,20 @@ public actor SyncPlaybackCoordinator {
         inbound = Phase5FrameQueue(
             capacity: inboundCapacity,
             kindOf: { $0.kind },
-            coalesceKeyOf: { $0.coalesceKey }
+            coalesceKeyOf: { $0.coalesceKey },
+            // Amendment A6: the generation a refusal belongs to is the refused frame's own, never
+            // whichever session happens to be live when the consumer gets round to observing it.
+            generationOf: { $0.generation }
         )
         outbound = Phase5FrameQueue(
             capacity: outboundCapacity,
             // Never coalesced: a frame this device has already stamped may not be superseded.
             kindOf: { _ in .command },
-            coalesceKeyOf: { _ in nil }
+            coalesceKeyOf: { _ in nil },
+            // Recorded for symmetry only: this direction's producer is `enqueueOutbound`, which is
+            // *answered* synchronously by `offer` and acts on the refusal there and then
+            // (Amendment A2 Finding A), so its loss ledger is never drained.
+            generationOf: { $0.generation }
         )
     }
 
@@ -386,7 +390,6 @@ public actor SyncPlaybackCoordinator {
         playbackDesynchronized = false
         queueDesynchronized = false
         queueState = SharedQueueState()
-        await restoreRate()
         diagnostics.syncState = .inactive
         diagnostics.lastAppliedCommandSeq = nil
         diagnostics.lastReceivedCommandSeq = nil
@@ -412,6 +415,9 @@ public actor SyncPlaybackCoordinator {
         diagnostics.cancelledPendingPlayCount += cancelled
         publishQueue()
         publishDiagnostics()
+        // Amendment A6 Finding B, swept: the third caller. Last, so nothing this reset decides can
+        // be overtaken by a second boundary landing inside the rate restore.
+        await restoreRate()
     }
 
     /// ADR-023 §3's guard, re-proved at every transition rather than once at handler entry.
@@ -673,14 +679,27 @@ public actor SyncPlaybackCoordinator {
         deferredDrainTask?.cancel()
         deferredDrainTask = nil
         driftState = DriftController.reset()
-        await restoreRate()
+        // Amendment A6 Finding B: **every** coordinator write this path makes happens here, before
+        // the one suspension it takes, and nothing follows that suspension.
+        //
+        // The shape it replaces read `await restoreRate()` and *then* wrote these seven fields. The
+        // rate restore is deliberately unfenced (see `restoreRate`) because it is the ending of an
+        // authority — but "the player call may still happen" was silently taken to mean "and so may
+        // everything after it". A boundary landing inside `player.setRate` therefore had Session A's
+        // fail-closed verdict overwrite Session B's live diagnostics: `.transportFailed` and
+        // `outboundAuthorityLost` on a session whose transport was working perfectly.
+        //
+        // Recording the rate here rather than inside `restoreRate` is the same rule one level down:
+        // the call below is now one player effect with no write behind it.
         diagnostics.syncState = .transportFailed
         diagnostics.outboundAuthorityLost = true
         diagnostics.deferredCommandCount = 0
         diagnostics.localDriftMs = nil
         diagnostics.peerDriftMs = nil
+        diagnostics.playbackRate = DriftController.rateNormal
         diagnostics.cancelledPendingPlayCount += cancelled
         publishDiagnostics()
+        await restoreRate()
     }
 
     /// Runs a leader's own authoritative apply, in commit order (Amendment A2 Finding A).
@@ -959,13 +978,16 @@ public actor SyncPlaybackCoordinator {
         deferredDrainTask = nil
         timeline = nil
         driftState = DriftController.reset()
-        await restoreRate()
+        // Amendment A6 Finding B, swept: the identical post-`restoreRate` write shape, in the second
+        // of that call's three callers. Every write first, the unfenced player effect last.
         diagnostics.syncState = .inactive
         diagnostics.localDriftMs = nil
         diagnostics.peerDriftMs = nil
         diagnostics.deferredCommandCount = 0
+        diagnostics.playbackRate = DriftController.rateNormal
         diagnostics.cancelledPendingPlayCount += cancelled
         publishDiagnostics()
+        await restoreRate()
     }
 
     /// Whether a synchronised session currently owns transport control (brief §39/§40).
@@ -979,9 +1001,15 @@ public actor SyncPlaybackCoordinator {
     /// would leave the previous session's nudge in force on music ADR-004 says keeps playing. It is
     /// idempotent, it names an absolute rate rather than a relative one, and 1.0 is what the next
     /// session would set anyway, so a late one cannot fight a live correction into a wrong value.
+    ///
+    /// **Amendment A6 §H: the exemption is for the player effect and nothing else.** This used to
+    /// write `diagnostics.playbackRate` *after* `setRate` returned — a coordinator-state write from
+    /// a dead session, which is exactly the class A5 closed everywhere else, and the one the three
+    /// callers were guilty of on a larger scale. Each caller now records the rate itself, before
+    /// this is called, so what remains here is one player call with nothing behind it: an old
+    /// authority may still finish restoring 1.0, and may write nothing while doing it.
     func restoreRate() async {
         await player.setRate(DriftController.rateNormal)
-        diagnostics.playbackRate = DriftController.rateNormal
     }
 
     func publishDiagnostics() { onDiagnosticsChanged?(diagnostics) }

@@ -37,7 +37,19 @@ import RideLinkCore
 /// `PING`/`PONG`, so blocking it would manufacture a false link loss. Genuine TCP backpressure is
 /// therefore not available to us, and the explicit refusal is what replaces it.
 ///
-/// `@unchecked Sendable` with one `NSLock` covering every access to all three fields, for the same
+/// **Amendment A6: this pipe outlives sessions; the *identity* of what it lost does not.** The
+/// queue object deliberately survives an authentication boundary (see `finish()`) — the boundary is
+/// expressed by the generation each frame carries, not by tearing the pipe down. Its loss
+/// accounting used to be two cumulative counters the consumer diffed, which carried no such
+/// generation at all: a frame refused under Session A, observed after Session B activated, told
+/// Session B it had lost a frame and halted it. That is not a diagnostics defect —
+/// `playbackDesynchronized`/`queueDesynchronized` decide whether incremental authoritative commands
+/// are applied at all. So every loss is now recorded against **the refused frame's own generation**
+/// (`generationOf`) and handed to the consumer as `IngressLoss` records, which it drains and
+/// attributes itself. Inferring the generation from whatever is live at observation time is
+/// precisely the bug.
+///
+/// `@unchecked Sendable` with one `NSLock` covering every access to all four fields, for the same
 /// reason `FakeMonotonicClock` is: `offer` must be callable synchronously from a non-isolated
 /// producer, which an `actor` cannot serve.
 final class Phase5FrameQueue<Element: Sendable>: @unchecked Sendable {
@@ -47,8 +59,11 @@ final class Phase5FrameQueue<Element: Sendable>: @unchecked Sendable {
     /// hand a frame straight across without touching the buffer.
     private var waiter: CheckedContinuation<Element?, Never>?
     private var finished = false
-    private var overflows = 0
-    private var coalesces = 0
+    /// Loss and coalescing events, in arrival order, each owned by the generation that caused it
+    /// (Amendment A6). Consecutive events from one generation share a bucket, so the array length is
+    /// the number of *generation changes* the consumer has not yet drained across, not the number of
+    /// events.
+    private var losses: [IngressLoss] = []
 
     /// Injectable so a deterministic test can force the edge at 1 or 2 rather than racing 256 frames.
     let capacity: Int
@@ -56,28 +71,29 @@ final class Phase5FrameQueue<Element: Sendable>: @unchecked Sendable {
     /// The latest-wins family a frame belongs to, or nil for a command. Two frames coalesce only
     /// when their keys are equal, so a `POSITION_REPORT` never supersedes a `PLAYBACK_STATE`.
     private let coalesceKeyOf: @Sendable (Element) -> String?
+    /// The authentication generation the frame was produced under — the generation that **owns** any
+    /// loss this frame causes (Amendment A6).
+    private let generationOf: @Sendable (Element) -> Int64
+
+    /// How many distinct generations' losses may be held undrained at once. The consumer drains on
+    /// every iteration, so reaching this at all means it has been parked across eight
+    /// authentications — far beyond anything a ride produces, and the bound is here so that
+    /// "far beyond" is a fact rather than an expectation.
+    private static var maxLossGenerations: Int { 8 }
 
     init(
         capacity: Int,
         kindOf: @escaping @Sendable (Element) -> Phase5FrameKind,
-        coalesceKeyOf: @escaping @Sendable (Element) -> String?
+        coalesceKeyOf: @escaping @Sendable (Element) -> String?,
+        generationOf: @escaping @Sendable (Element) -> Int64
     ) {
         self.capacity = capacity
         self.kindOf = kindOf
         self.coalesceKeyOf = coalesceKeyOf
+        self.generationOf = generationOf
     }
 
     var count: Int { lock.withLock { items.count } }
-
-    /// Cumulative admission statistics, read by the **consumer** rather than reported to the
-    /// producer.
-    ///
-    /// That direction is deliberate. `offer` is called from the control read loop, which cannot
-    /// suspend into an actor and must not do work; and reading the counters at the top of each drain
-    /// iteration puts the observation exactly where it has to be — *before* the next frame is
-    /// dispatched, so a halt takes effect ahead of any command that follows a refusal rather than
-    /// one frame late.
-    var stats: Stats { lock.withLock { Stats(overflowCount: overflows, coalescedCount: coalesces) } }
 
     /// True when a consumer is parked waiting for work — which, because a waiter is only ever stored
     /// while the buffer is empty, means **the consumer has finished dispatching everything offered so
@@ -86,9 +102,12 @@ final class Phase5FrameQueue<Element: Sendable>: @unchecked Sendable {
     /// takes.
     var isConsumerWaiting: Bool { lock.withLock { waiter != nil } }
 
-    struct Stats: Sendable, Equatable {
-        let overflowCount: Int
-        let coalescedCount: Int
+    /// One generation's ingress losses, as the consumer must consider them: **whose** they are is
+    /// part of the fact, not something to be inferred later.
+    struct IngressLoss: Sendable, Equatable {
+        let generation: Int64
+        var overflowCount: Int
+        var coalescedCount: Int
     }
 
     @discardableResult
@@ -105,7 +124,9 @@ final class Phase5FrameQueue<Element: Sendable>: @unchecked Sendable {
             switch admission {
             case .admit, .coalesce:
                 if admission == .coalesce {
-                    coalesces += 1
+                    // Attributed to the *incoming* frame's generation: it is the frame whose arrival
+                    // caused the event, and the one whose session is being told about it.
+                    recordLoss(generationOf(item), overflow: false)
                     if let key, let index = items.firstIndex(where: { coalesceKeyOf($0) == key }) {
                         // Remove the *oldest* sibling and append this one, so the newest frame keeps
                         // the newest arrival position relative to the commands around it.
@@ -119,16 +140,37 @@ final class Phase5FrameQueue<Element: Sendable>: @unchecked Sendable {
                     items.append(item)
                 }
             case .overflow:
-                overflows += 1
+                recordLoss(generationOf(item), overflow: true)
             }
         } else {
-            overflows += 1
+            recordLoss(generationOf(item), overflow: true)
         }
         lock.unlock()
         // Resumed outside the lock: resuming a continuation can run the consumer synchronously, and
         // that consumer may call straight back into `count`.
         if let (continuation, value) = handoff { continuation.resume(returning: value) }
         return admission
+    }
+
+    /// Takes every loss recorded so far, in arrival order, and clears them.
+    ///
+    /// Read by the **consumer** rather than reported to the producer. That direction is deliberate:
+    /// `offer` is called from the control read loop, which cannot suspend into an actor and must not
+    /// do work; and draining at the top of each iteration puts the observation exactly where it has
+    /// to be — *before* the next frame is dispatched, so a halt takes effect ahead of any command
+    /// that follows a refusal rather than one frame late.
+    ///
+    /// Draining rather than diffing a cumulative total is Amendment A6's other half. A baseline the
+    /// consumer re-samples at a session boundary cannot be correct: the read loop is still producing
+    /// under the *old* generation at that instant, so a loss recorded microseconds after the baseline
+    /// was taken would be read back as the new session's. Each record carries its own generation, so
+    /// there is nothing to infer and no window to lose.
+    func drainLosses() -> [IngressLoss] {
+        lock.withLock {
+            let drained = losses
+            losses.removeAll()
+            return drained
+        }
     }
 
     /// - Returns: the next frame in arrival order, or nil once `finish()` has been called and the
@@ -162,5 +204,30 @@ final class Phase5FrameQueue<Element: Sendable>: @unchecked Sendable {
         waiter = nil
         lock.unlock()
         parked?.resume(returning: nil)
+    }
+
+    /// Appends to the newest bucket when it belongs to the same generation, and opens a new one
+    /// otherwise. Called only with `lock` held.
+    ///
+    /// The bucket count is hard-capped so a consumer that never drains cannot grow this without
+    /// bound. Eviction folds the oldest bucket into the next oldest rather than dropping it: with
+    /// more than one bucket present, generations being strictly increasing per authentication
+    /// (ADR-023 §3) makes both of the two oldest strictly older than the newest, hence both already
+    /// retired — so the total is preserved exactly and the only thing merged is *which* dead
+    /// generation two retired losses are attributed to. Nothing is silently discarded.
+    private func recordLoss(_ generation: Int64, overflow: Bool) {
+        if losses.last?.generation != generation {
+            losses.append(IngressLoss(generation: generation, overflowCount: 0, coalescedCount: 0))
+        }
+        if overflow {
+            losses[losses.count - 1].overflowCount += 1
+        } else {
+            losses[losses.count - 1].coalescedCount += 1
+        }
+        while losses.count > Self.maxLossGenerations {
+            let evicted = losses.removeFirst()
+            losses[0].overflowCount += evicted.overflowCount
+            losses[0].coalescedCount += evicted.coalescedCount
+        }
     }
 }

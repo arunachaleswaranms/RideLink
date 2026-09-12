@@ -136,6 +136,11 @@ data class SyncPlaybackDiagnostics(
      * How many inbound Phase 5 frames this coordinator has finished considering — applied, or
      * deliberately refused as duplicate/stale/role-violating. A real FR-023 figure, and the precise
      * signal a test needs instead of guessing how many scheduler turns a frame takes.
+     *
+     * **Process-lifetime, not session-lifetime** (ADR-024 Amendment A6 §I). It counts what the
+     * *pipe* has handled, and the pipe deliberately outlives sessions, so a frame produced under a
+     * session that has since ended still counts as considered when the consumer finally reaches it
+     * and refuses it. `resetForNewSession` deliberately does not reset it.
      */
     val inboundProcessedCount: Int = 0,
     /**
@@ -146,13 +151,29 @@ data class SyncPlaybackDiagnostics(
      * `BufferOverflow.DROP_OLDEST`, and `trySend` on such a channel returns *success* — so every
      * eviction was silent and this figure was structurally always zero. Nothing is evicted now; a
      * refusal is returned to the caller, counted here, and latches [ingressDesynchronized].
+     *
+     * Cumulative across the process, like every other counter here — but ADR-024 Amendment A6 made
+     * every *increment* attributable: a refusal only lands here while the generation that caused it
+     * is still the live one. One that arrives late is [inboundRetiredLossCount] instead.
      */
     val inboundOverflowCount: Int = 0,
+    /**
+     * How many of those refusals and coalescings belonged to an authentication generation that had
+     * already ended by the time the one ordered consumer reached them (ADR-024 Amendment A6).
+     *
+     * A loss is owned by the generation whose frame caused it. When that session is gone there is
+     * no incremental authority left to distrust and nothing to halt — but the event still happened,
+     * so it is surfaced here rather than dropped. This counter existing is what makes
+     * [inboundOverflowCount] and [inboundCoalescedCount] mean "attributed to a session that was
+     * still live", rather than "everything the pipe ever refused, charged to whoever was unlucky".
+     */
+    val inboundRetiredLossCount: Int = 0,
     /**
      * How many latest-wins frames (`POSITION_REPORT`, `PLAYBACK_STATE`, `QUEUE_SNAPSHOT`) were
      * coalesced onto a newer sibling because the handoff was full. Lossless by construction —
      * applying only the newest of such a run reaches the same state — and the reason
-     * [inboundOverflowCount] stays at zero under a peer's ordinary 5 s report cadence.
+     * [inboundOverflowCount] stays at zero under a peer's ordinary 5 s report cadence. Attributed
+     * to a live generation, on the same rule as [inboundOverflowCount] (Amendment A6).
      */
     val inboundCoalescedCount: Int = 0,
     /**
