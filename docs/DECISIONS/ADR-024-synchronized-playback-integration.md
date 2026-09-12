@@ -1821,6 +1821,35 @@ boundary is now refused outright) but does not close it. `binding.generation` is
 sinks should receive. **Phase 5 software closure is therefore not claimed by this amendment** — see
 `docs/STATUS.md` §4.
 
+### I2. A watch item, deliberately *not* called a defect
+
+The final adversarial pass over the control layer's own lifecycle found one more thing worth writing
+down, and it is recorded here at the strength the evidence actually supports — which is lower than
+§I's.
+
+`endConnection` clears `activeSocket` **inside** `stateLock` and then performs eight further writes
+**outside** it — `authenticatedConnection`, `pendingActivation`, `pairing`, the pairing prompt, and
+`cancel()` on the keepalive and clock-sync jobs — none of which re-prove that the session they are
+tearing down is still the one that owns those fields. `promote` needs only `activeSocket == null` to
+claim the manager, and the accept loop is an independent `scope.launch` that does not wait for the
+`LinkLost` this function emits at its *end*. So in principle a concurrently promoted and activated
+Session B could have its authenticated record nulled and its keepalive and clock-sync jobs cancelled
+by Session A's trailing teardown — the A3/A5 shape, one layer below Phase 5.
+
+**It is not being claimed as reachable, for a measured structural reason on each platform.** On iOS
+`endConnection` contains **no `await` at all**, so the whole teardown is atomic with respect to every
+other actor-isolated call and the race cannot occur. On Android there is no suspension point between
+`withLock`'s return and those writes either, so reaching it needs the OS to deschedule that thread
+for as long as a complete TLS + `HELLO` handshake takes on another — far narrower than §A's window,
+which needs only a dispatcher queue hop.
+
+**What makes it worth recording anyway** is that on both platforms the safety is *incidental* rather
+than stated: a single future `await` anywhere in either tail — making `socket.close()` async, awaiting
+a transport teardown, awaiting the job cancellations — opens it immediately, and nothing today would
+say so. It is **pre-existing**: every one of those writes predates A7, which only renamed
+`authenticated = false` to `authenticatedConnection = null` on one of those lines. Recorded as
+`docs/STATUS.md` §4 problem 46.
+
 ### J. And still does not run on a phone
 
 Every figure in this amendment is a software figure produced by unit tests on a laptop. The <100 ms
