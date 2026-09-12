@@ -582,6 +582,15 @@ point between the binding capture and the sink's live read.
 then `handleFrame(binding, frame)` with a **real** session boundary between them. What it does **not**
 measure is the *timing* of the real window; that remains argued.
 
+**One harness defect was found by CI and not by this machine** (run `34697787287`). The *positive
+control* `the live connection's own PAIR_CONFIRM still completes pairing` waited only for **this**
+device's pairing prompt before telling the peer to confirm — and `confirmPairing` silently returns
+when no exchange exists yet, which is right for production (a user cannot tap confirm before the six
+digits appear) and wrong for a harness driving the API faster than a user. On a slower runner the
+peer's `beginPairing` had not yet run, so its `PAIR_CONFIRM` was never sent and the case timed out.
+Both platforms now wait for **both** prompts. No production code changed, and the three stale-frame
+cases — what ADR-025 is actually about — passed that CI run unmodified.
+
 **Stress.** The two Android real-TLS suites **10×** with `--rerun-tasks`, 14/14 cases on every
 iteration, 0 failures; `SharedLibraryReadProvenanceTest` **3×** at 5/5; the two iOS suites **5×** at
 14/14. These suites open real loopback TCP listeners and use fixed `peer_id`s, so **two concurrent

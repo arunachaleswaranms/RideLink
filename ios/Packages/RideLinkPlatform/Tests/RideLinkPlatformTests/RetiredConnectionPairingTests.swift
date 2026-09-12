@@ -156,6 +156,15 @@ final class RetiredConnectionPairingTests: XCTestCase {
         await unknownManager.connectTo(host: "127.0.0.1", port: port, local: c.local)
         _ = try await session.awaitPairingPrompt()
         try await session.awaitEvent { if case .pairingRequired = $0 { return true } else { return false } }
+        // **Both** sides must be armed before the body runs, not just this one. PROTOCOL §4.5 needs
+        // two humans, and `confirmPairing` silently returns when there is no exchange to decide
+        // about — which is right for production, where a user cannot tap confirm before the six
+        // digits are on screen, and wrong for a harness that drives the API faster than a user
+        // could. Waiting only for *this* device's prompt let `unknownManager.confirmPairing` land
+        // before peer C's own `beginPairing` had run, so C never sent its `PAIR_CONFIRM` and the
+        // live-pairing control waited out its full timeout. The Android mirror failed exactly that
+        // way on CI run `34697787287`; iOS passed that run by luck, not by construction.
+        try await poll { await unknownManager.pairingPrompt != nil }
 
         let sut = Sut(
             manager: manager, session: session, parked: parked,

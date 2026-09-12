@@ -205,6 +205,19 @@ class RetiredConnectionPairingTest {
                 session.awaitPairingPrompt()
                 session.awaitEvent { it is ControlEvent.PairingRequired }
                 assertTrue(manager.currentReadBinding() != null, "session 2 must have a connection")
+                // **Both** sides must be armed before the body runs, not just this one. PROTOCOL
+                // §4.5 needs two humans, and `confirmPairing` silently returns when there is no
+                // exchange to decide about — which is right for production, where a user cannot tap
+                // confirm before the six digits are on screen, and wrong for a harness that drives
+                // the API faster than a user could. Waiting only for *this* device's prompt let
+                // `unknownManager.confirmPairing` land before peer C's own `beginPairing` had run,
+                // so C never sent its `PAIR_CONFIRM` and the live-pairing control below waited out
+                // its full 15 s. That is exactly what failed on CI run `34697787287` while passing
+                // 10/10 here: the two promotions land microseconds apart on this machine and
+                // measurably further apart on a slower runner.
+                withTimeout(FsmSession.TIMEOUT_MS) {
+                    while (unknownManager.pairingPrompt.value == null) delay(POLL_MS)
+                }
 
                 body(
                     Sut(

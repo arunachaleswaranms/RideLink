@@ -4368,6 +4368,24 @@ Both platforms, this session, on this machine:
 - **Stress: the two real-TLS suites 10× with `--rerun-tasks`, 14/14 cases on every iteration, 0
   failures**; `SharedLibraryReadProvenanceTest` 3× at 5/5; the iOS pair 5× at 14/14.
 
+**CI caught one thing this machine could not, and it was in the harness rather than in production
+(run `34697787287`, Android job, `:network:testDebugUnitTest`).** The failing case was the *positive
+control* — `RetiredConnectionPairingTest > the live connection's own PAIR_CONFIRM still completes
+pairing` — which waited out its full 15 s for a `PairingSucceeded` that could not arrive.
+
+`ControlSessionManager.confirmPairing` silently returns when `pairing` is null. That is correct for
+production: a user cannot tap confirm before the six digits are on screen, so an exchange always
+exists by then. It is wrong for a harness that drives the API faster than a user could — and the
+harness waited only for **this** device's prompt before telling peer C to confirm. When C's own
+`beginPairing` had not yet run, C's `confirmPairing` was a no-op, C never sent its `PAIR_CONFIRM`,
+and the test hung. On this machine the two promotions land microseconds apart and the case passed
+10/10; on a slower hosted runner the gap is measurable. The harness now waits for **both** prompts.
+iOS passed that CI run with the identical latent race and is fixed the same way — it passed by luck,
+not by construction, and the mirror says so.
+
+**No production code changed for this.** The three stale-frame cases, which are what ADR-025 is
+about, passed on CI unmodified.
+
 **The stress figure took four attempts to measure honestly, and that is worth recording.** The first
 three runs showed `BUILD FAILED`s that looked like flakes and were not: two monitoring loops were
 invoking Gradle against the same project at once, and the captured causes were
