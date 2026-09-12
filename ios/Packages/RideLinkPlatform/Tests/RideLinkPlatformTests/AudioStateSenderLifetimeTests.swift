@@ -368,6 +368,11 @@ final class AudioStateSenderLifetimeTests: XCTestCase {
             try await poll {
                 self.session.count { if case .connected = $0 { return true } else { return false } } > before
             }
+            // **Both** ends, not one. The receiver's `Connected` says the receiver activated; the sender
+            // activates independently and `send` refuses until it has, so waiting only on the receiver
+            // leaves a window that is wide under load and invisible on a quiet run. Mirrors the Android
+            // harness, and is the same shape as `c1ca688`'s "wait for both pairing prompts".
+            try await poll { target.liveAuthenticatedGeneration() != nil }
         }
 
         func awaitRevision(_ revision: Int64) async throws {
