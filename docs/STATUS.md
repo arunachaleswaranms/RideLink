@@ -4205,6 +4205,20 @@ iOS `failClosedOutbound` still writes every coordinator and diagnostics field â€
 nothing after it. Android's three `restoreRate` callers all still `scope.launch { restoreRate() }`.
 A7 does not touch `SyncPlaybackCoordinator` on either platform.
 
+### Considered and judged not to be findings
+
+Recorded because "we looked and it was fine" and "we did not look" are different facts. Full list in
+ADR-025; the two worth repeating here:
+
+- **`ManifestRelay.send` is not generation-fenced on the way out**, so a serve begun under Session A
+  can finish by writing pages to Session B. Judged harmless and left alone: the content is **our own**
+  library manifest, identical for any peer, and the receiver is authenticated. `TransferRelay.send`'s
+  equivalent path *is* fenced (ADR-023 A3/A5), because a transfer offer is peer-specific and carries a
+  token.
+- **The `PONG` pending-ping completion was already inert** â€” `endConnection` fails every outstanding
+  waiter and the key is a monotonic timestamp. It is the *unconditional* `recordRtt` beside it that
+  was the defect. Checked, not assumed.
+
 ### Validation
 
 Both platforms, this session, on this machine:

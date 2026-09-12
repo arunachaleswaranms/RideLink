@@ -177,6 +177,33 @@ copy of the reasoning per branch is how a future branch gets added without it.
 - `SharedLibraryCoordinator`'s inbound guard is the only Phase 4 behaviour that moved. Every provider
   fence, token, gate and cache rule is byte-for-byte what ADR-023 Amendments A1–A5 left.
 
+## Considered and judged not to be findings
+
+Recorded rather than silently passed over, because "we looked and it was fine" and "we did not look"
+are different facts:
+
+- **`ManifestRelay.send` is not generation-fenced on the way out.** `serveManifestRequest` suspends
+  (`manifestGenerator.generate()`, then one `send` per page), and `authenticatedWriter()` yields a
+  writer for whatever connection is authenticated *now* — so a serve begun under Session A can finish
+  by writing pages to Session B. Judged harmless and left alone: the content is **our own** library
+  manifest, identical for any peer, and the receiving peer is authenticated, so the only effect is an
+  unrequested `MANIFEST_BEGIN`/`PAGE`/`END` that its own `ManifestSyncStateMachine` applies or
+  discards. `TransferRelay.send`'s equivalent path *is* fenced, by ADR-023 Amendments A3/A5's
+  `ProviderSessionContext`/`stillAuthorised`, because a transfer offer is peer-specific and carries a
+  token.
+- **`BYE` and `PING` were already structurally safe.** `endConnection` re-checks `activeSocket !==
+  socket`, and `handlePing` replies only on the connection its frame came from. They pass through §4's
+  gate because one gate in one place is the invariant, not because their behaviour changed.
+- **The `PONG` pending-ping completion was already inert.** `endConnection` fails every outstanding
+  waiter, and the map key is a monotonic timestamp, so a retired `PONG` could not have completed a
+  successor's waiter. It is the *unconditional* `recordRtt` beside it that was the defect — checked,
+  not assumed.
+- **Phase 5's locally-originated work still reads the live generation, and correctly.** `issue`,
+  `playSynchronized`, `mutateQueue`, `applyLeaderMutation`, `rebroadcastAuthoritativeState` and
+  `emitCurrentPlaybackState` all authorise *themselves* against what is live, which is what "now"
+  means for a user action. ADR-024 Amendment A2 §E already drew that line; this sweep re-walked every
+  one of them and found no new instance of the inbound defect.
+
 ## Alternatives considered
 
 | Option | Why not |
