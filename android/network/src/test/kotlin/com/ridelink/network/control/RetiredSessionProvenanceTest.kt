@@ -266,7 +266,7 @@ class RetiredSessionProvenanceTest {
             assertEquals(RTT_WINDOW_CAPACITY, sut.manager.retiredConnectionFrames, "each one refused and counted")
             val p95 = sut.manager.clock.rttP95Us
             assertTrue(
-                p95 == null || p95 < PLAUSIBLE_LOOPBACK_CEILING_US,
+                p95 == null || p95 < UNREACHABLE_BY_A_REAL_SAMPLE_US,
                 "Session B's RTT window must hold only Session B's own round trips, was $p95",
             )
         }
@@ -522,7 +522,16 @@ class RetiredSessionProvenanceTest {
 
         /** Absurd on purpose: ~1.4 hours of round trip, which no loopback sample can be confused with. */
         const val ABSURD_RTT_US = 5_000_000_000L
-        const val PLAUSIBLE_LOOPBACK_CEILING_US = 1_000_000L
+
+        /**
+         * 100 seconds — deliberately **not** "a plausible loopback RTT". Production bounds every
+         * sample it can record by its own ping timeout (`PING_TIMEOUT_MS` 3 s for the §7.1 burst,
+         * `KEEPALIVE_INTERVAL_MS` 2 s for keepalive), so no real sample can reach this however
+         * loaded the machine is — while [ABSURD_RTT_US] exceeds it fifty-fold. Asserting against a
+         * ceiling a *real* sample could approach under load would be asserting the build agent's
+         * scheduling, not the gate.
+         */
+        const val UNREACHABLE_BY_A_REAL_SAMPLE_US = 100_000_000L
 
         const val MANIFEST_ID = "01J9Z4M3RT8V2W5X7Y9Z1A3B5C"
         const val TRANSFER_ID = "01J9Z4M3RT8V2W5X7Y9Z1A3B5D"

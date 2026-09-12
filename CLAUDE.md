@@ -23,7 +23,7 @@ Read these before changing anything. They are authoritative; this file is a summ
 | What's on the wire? | `docs/PROTOCOL.md` |
 | How do we verify? | `docs/TEST_PLAN.md` |
 | State now / exact next task | `docs/STATUS.md` |
-| Why this way? | `docs/DECISIONS/` (ADR-001…024) |
+| Why this way? | `docs/DECISIONS/` (ADR-001…025) |
 | What was actually measured? | `docs/test-results/` — including the Phase 1b security spike |
 | What did the hardware do? | `docs/PHASE0_RESULTS.md` (awaiting user input) |
 

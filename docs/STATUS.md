@@ -269,8 +269,8 @@ either pass.
 | **Phase 2a — voice transport foundation** | ✅ **IMPLEMENTATION COMPLETE — REAL-DEVICE AUDIO GATE PENDING** | WebRTC pinned and reviewed on both platforms, PROTOCOL §7 specified in full, the negotiation table shared and vector-pinned, the pre-authentication `VOICE_*` refusal proven over real TLS on both platforms, and **real DTLS-SRTP/Opus media measured on this machine** (§2i, [ADR-020](DECISIONS/ADR-020-webrtc-voice-foundation.md)). No audio captured or played anywhere; the Android media path is untested even locally |
 | **Phase 2b — intercom integration / audio lifecycle** | ✅ **FINAL SOFTWARE CLOSURE COMPLETE — REAL-DEVICE INTERCOM GATE PENDING** | The five modes as one interpreted policy object; transmission gated at the audio track and never at the capture device; `AUDIO_STATE` implemented with no wire change; the platform audio lifecycle as a shared pure reducer; readiness as a shared pure decision; setup-timing instrumentation (§2m, [ADR-021](DECISIONS/ADR-021-intercom-transmission-and-capture-ownership.md)). The Phase 3 closure audit's one confirmed-not-fixed defect (`stopAndAwaitRelease`/`shutdown` timeout ownership) is fixed (§2s, ADR-021 Amendment A4); a second, narrower gap in that same fix (a proven-complete release still reporting its own stale timeout, orphaning the foreground service) is fixed (§2t, ADR-021 Amendment A5) — no other known software defect remains. Nothing ran on a phone; VOX has no level source; no latency figure exists |
 | **Phase 3 — local music player** | ✅ **IMPLEMENTATION COMPLETE — REAL-DEVICE LOCAL-MUSIC GATE PENDING** | Library indexing, two-tier hashing, database/search, ExoPlayer/AVAudioEngine player, local queue, Android `MediaSession` (ADR-022), iOS `MPNowPlayingInfoCenter`/`MPRemoteCommandCenter`, all on both platforms (§2q, and this session's closure-audit hardening pass). Real-emulator instrumented evidence exists for the indexer/database/player (§2q, TEST_PLAN §4.3); nothing has run on a physical phone |
-| **Phase 4 — shared library + peer file transfer** | ✅ **SOFTWARE CLOSURE COMPLETE — REAL-DEVICE SHARED-LIBRARY/TRANSFER GATE PENDING** | Catalogue paging, `ContentHash`-keyed transfer over a second session-bound TLS connection, the two-phase verified cache, availability display, verified-cache-only local playback and a Shared Library screen on both platforms (§2u, [ADR-023](DECISIONS/ADR-023-bulk-transfer-session-binding.md)). **Closure-audited five times** — §2v (18 findings), §2w (2), §2x (2), §2y (3, one `CRITICAL`), §2z (3 lifecycle races, two of them gaps A4 had documented rather than closed) — Amendments A1–A5. "Software closure" is the narrow claim that every laptop gate passes and every named finding is fixed; the word "final" stays deliberately absent, since five consecutive audits have each found real defects in already-CI-green code. Real loopback-TLS multi-chunk transfer, a real emulator smoke check and a real simulator smoke check exist; **no phone-to-phone transfer, no real Wi-Fi/hotspot topology, no storage/battery figure** |
-| **Phase 5 — synchronized playback** | ✅ **SOFTWARE CLOSURE A5 COMPLETE — REAL-DEVICE SYNCHRONIZED-PLAYBACK GATE PENDING** | Clock-scheduled `PLAY`/`PAUSE`/`RESUME`/`SEEK`/`NEXT`/`PREVIOUS`, a replicated shared queue, drift measurement and the ADR-004 correction ladder, every distributed decision a pure mirrored vector-pinned table (§2aa, [ADR-024](DECISIONS/ADR-024-synchronized-playback-integration.md)). Closure-audited **five** times — A1 (§2ab), A2 (§2ac), A3 (§2ad), A4 (§2ae), A5 (§2af) — each finding real defects in already-CI-green code. Nothing ran on a phone; no alignment figure exists |
+| **Phase 4 — shared library + peer file transfer** | ✅ **SOFTWARE CLOSURE COMPLETE — REAL-DEVICE SHARED-LIBRARY/TRANSFER GATE PENDING** | Catalogue paging, `ContentHash`-keyed transfer over a second session-bound TLS connection, the two-phase verified cache, availability display, verified-cache-only local playback and a Shared Library screen on both platforms (§2u, [ADR-023](DECISIONS/ADR-023-bulk-transfer-session-binding.md)). **Closure-audited six times** — §2v (18 findings), §2w (2), §2x (2), §2y (3, one `CRITICAL`), §2z (3 lifecycle races, two of them gaps A4 had documented rather than closed) and §2ai (the inbound generation's origin, found by ADR-024 Amendment A7 and fixed as ADR-023 Amendment A6 / ADR-025 §1) — Amendments A1–A6. **This row read "software closure complete" while §4 problem 44 was open against it**, between §2ah and §2ai; that was wrong, and the gap is recorded rather than quietly closed. "Software closure" is the narrow claim that every laptop gate passes and every named finding is fixed; the word "final" stays deliberately absent, since six consecutive audits have each found real defects in already-CI-green code. Real loopback-TLS multi-chunk transfer, a real emulator smoke check and a real simulator smoke check exist; **no phone-to-phone transfer, no real Wi-Fi/hotspot topology, no storage/battery figure** |
+| **Phase 5 — synchronized playback** | ⚠️ **IMPLEMENTATION COMPLETE, SOFTWARE CLOSURE *NOT* CLAIMED — REAL-DEVICE SYNCHRONIZED-PLAYBACK GATE PENDING** | Clock-scheduled `PLAY`/`PAUSE`/`RESUME`/`SEEK`/`NEXT`/`PREVIOUS`, a replicated shared queue, drift measurement and the ADR-004 correction ladder, every distributed decision a pure mirrored vector-pinned table (§2aa, [ADR-024](DECISIONS/ADR-024-synchronized-playback-integration.md)). Closure-audited **seven** times — A1 (§2ab), A2 (§2ac), A3 (§2ad), A4 (§2ae), A5 (§2af), A6 (§2ag), A7 (§2ah) — each finding real defects in already-CI-green code, and A7 confirmed one it did not fix (§4 problem 44, now closed in §2ai, which then found three more of the same class). **This row said "SOFTWARE CLOSURE A5 COMPLETE" through A6 and A7, both of which found real defects; that was wrong and is corrected here rather than quietly updated.** Nothing ran on a phone; no alignment figure exists |
 | Phases 6–8 | ⬜ Not started | The earlier commits named "init phase 2a" and "phase 2a" (`d709c45`, `90cbe12`) were Phase 1b work under a misleading name. Phase 2a proper is the sixth session, §2i |
 
 `protocol/schema/` and `protocol/vectors/` now exist (§2c). `android/` is a real five-module
@@ -4296,9 +4296,10 @@ Three reachable consequences, in ascending order of seriousness:
    the six digits, a pin was written for a peer whose user never confirmed anything.
 
 **Measured, not argued.** With only ADR-025's guards reverted on unmodified `326a145` production
-sources, `RetiredConnectionPairingTest`'s `PAIR_CONFIRM` case fails with the trust store containing
-**peer C** — `TrustedPeer(peerId: peer:cccccc…, identitySpkiSha256: spki:1b555f…)` on Android and the
-same on iOS.
+sources, `RetiredConnectionPairingTest[s]`'s `PAIR_CONFIRM` case fails on **both** platforms with the
+trust store containing **peer C** — `TrustedPeer(peerId: peer:cccccc…, …)`, a pin written for a peer
+whose user was never asked. (The SPKI in that record is a freshly generated test identity and differs
+per run; the `peer_id` is the fixed one the harness uses.)
 
 ### The model, in two names
 
@@ -4364,6 +4365,21 @@ Both platforms, this session, on this machine:
 - `swiftlint`/`swiftformat` were **not** run: neither is installed on this machine and neither is in
   `.github/workflows/ci.yml`. CLAUDE.md lists them as iOS gates; that is aspirational rather than
   enforced, and saying so is more useful than implying they passed. Recorded as §4 problem 49.
+- **Stress: the two real-TLS suites 10× with `--rerun-tasks`, 14/14 cases on every iteration, 0
+  failures**; `SharedLibraryReadProvenanceTest` 3× at 5/5; the iOS pair 5× at 14/14.
+
+**The stress figure took four attempts to measure honestly, and that is worth recording.** The first
+three runs showed `BUILD FAILED`s that looked like flakes and were not: two monitoring loops were
+invoking Gradle against the same project at once, and the captured causes were
+`java.io.IOException: Unable to delete directory '.../compileDebugKotlin/classes'` and
+`Execution failed for task ':network:compileDebugUnitTestKotlin'` — the Kotlin compiler, not a test.
+One of those runs used `--continue`, which turned that compile failure into *every* test in
+`:network` reporting FAILED, `TlsControlChannelTest` and `BulkTokenTableTest` included, neither of
+which this change touches. When the two loops genuinely overlapped they also produced real
+**test**-level failures, which is expected rather than surprising: these suites open real loopback
+TCP listeners and use fixed `peer_id`s, so two concurrent copies of the same suite cross-connect.
+That is equally true of the pre-existing `StaleReadGenerationTest`, and it is a property of the
+harness, not of the fix. **Run serially with nothing else touching Gradle, 10 of 10 are clean.**
 
 ### What is still not true
 

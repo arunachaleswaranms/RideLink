@@ -582,6 +582,15 @@ point between the binding capture and the sink's live read.
 then `handleFrame(binding, frame)` with a **real** session boundary between them. What it does **not**
 measure is the *timing* of the real window; that remains argued.
 
+**Stress.** The two Android real-TLS suites **10×** with `--rerun-tasks`, 14/14 cases on every
+iteration, 0 failures; `SharedLibraryReadProvenanceTest` **3×** at 5/5; the two iOS suites **5×** at
+14/14. These suites open real loopback TCP listeners and use fixed `peer_id`s, so **two concurrent
+copies of the same suite cross-connect** — a property of the harness that `StaleReadGenerationTest`
+shares, and the reason the figure above is a *serial* one. Measuring it took four attempts: three
+were invalidated by a second Gradle invocation running against the same project, whose captured
+causes were `Unable to delete directory '.../compileDebugKotlin/classes'` and a
+`:network:compileDebugUnitTestKotlin` failure — the compiler, not a test.
+
 **What this does not cover.** `ios/RideLink/SharedLibraryCoordinator.swift` has no coordinator-level
 regression because iOS has no app-target test bundle (§4 problem 48) — on iOS the defect is pinned at
 the relay instead. `swiftlint`/`swiftformat` did not run, because neither is installed here nor in CI

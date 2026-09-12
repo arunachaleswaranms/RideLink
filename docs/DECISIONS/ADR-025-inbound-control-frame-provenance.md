@@ -227,11 +227,12 @@ Deterministic and mirrored, no sleeps in any assertion:
 **Measured against the pre-fix behaviour**, by reverting only this ADR's guards on unmodified
 production sources:
 
-- 8 of 10 in `RetiredSessionProvenanceTest` fail (the two that pass are the positive controls, which
-  must pass both ways); iOS 8 of 10, identically, with `generations` recording `[1, 1, 1, 2]` where it
-  must record `[2]`;
-- all 3 stale cases in `RetiredConnectionPairingTest[s]` fail. The `PAIR_CONFIRM` one fails with the
-  trust store containing **peer C** — the pin written without C's user ever confirming;
+- 8 of 10 in `RetiredSessionProvenanceTest` fail on **each** platform (the two that pass are the
+  positive controls, which must pass both ways). iOS's `generations` spy records `[1, 1, 1, 2]` where
+  it must record `[2]`;
+- 3 of 4 in `RetiredConnectionPairingTest[s]` fail on **each** platform — every stale case, with the
+  fourth (the live pairing still completing) passing both ways, as it must. The `PAIR_CONFIRM` one
+  fails with the trust store containing **peer C**: a pin written without C's user ever confirming;
 - 3 of 5 in `SharedLibraryReadProvenanceTest` fail: a Session A `MANIFEST_PAGE` becomes Session B's
   catalogue, and a Session A `TRANSFER_REQUEST` is resolved and served under Session B.
 

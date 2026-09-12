@@ -213,7 +213,7 @@ final class RetiredSessionProvenanceTests: XCTestCase {
             XCTAssertEqual(refused, Self.rttWindowCapacity, "each one refused and counted")
             let p95 = await sut.manager.sessionClockRttP95Us()
             XCTAssertTrue(
-                p95 == nil || p95! < Self.plausibleLoopbackCeilingUs,
+                p95 == nil || p95! < Self.unreachableByARealSampleUs,
                 "Session B's RTT window must hold only Session B's own round trips, was \(String(describing: p95))"
             )
         }
@@ -467,7 +467,13 @@ final class RetiredSessionProvenanceTests: XCTestCase {
 
     /// Absurd on purpose: ~1.4 hours of round trip, which no loopback sample can be confused with.
     private static let absurdRttUs: Int64 = 5_000_000_000
-    private static let plausibleLoopbackCeilingUs: Int64 = 1_000_000
+
+    /// 100 seconds — deliberately **not** "a plausible loopback RTT". Production bounds every sample
+    /// it can record by its own ping timeout (3 s for the §7.1 burst, 2 s for keepalive), so no real
+    /// sample can reach this however loaded the machine is — while `absurdRttUs` exceeds it
+    /// fifty-fold. Asserting against a ceiling a *real* sample could approach under load would be
+    /// asserting the build agent's scheduling, not the gate.
+    private static let unreachableByARealSampleUs: Int64 = 100_000_000
 }
 
 /// Records **which generation** each message arrived with — the fact this amendment is about.
