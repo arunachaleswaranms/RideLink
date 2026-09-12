@@ -45,7 +45,7 @@ class AudioStateVectorTest {
     // --- the field set ------------------------------------------------------------------------
 
     /**
-     * §4.4 has eleven fields and this codec must produce exactly those eleven. The assertion is
+     * §4.4 has twelve fields and this codec must produce exactly those twelve. The assertion is
      * against the shared file rather than against a Kotlin list, so adding a field on one platform
      * only cannot pass.
      */

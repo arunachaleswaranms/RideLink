@@ -144,7 +144,7 @@ what "everything difficult lives there" means in practice for Phase 2b:
 | `IntercomTransmission` | whether outbound audio leaves this phone ([ADR-021](DECISIONS/ADR-021-intercom-transmission-and-capture-ownership.md) §4) |
 | `AudioSessionLifecycle` | the platform audio session's route transitions, interruptions, resets and generation guard (ADR-021 §5) |
 | `RideStartPolicy` | whether an intercom start is legal (§6.4) |
-| `AudioStatePublisher` / `AudioStateInbox` | PROTOCOL §4.4's monotonic `revision`, on both sides |
+| `AudioStatePublisher` / `AudioStateInbox` | PROTOCOL §4.4's monotonic `revision`, on both sides — and §4.4.2's `revision_epoch`, which says *which* of a sender's counters a revision came from |
 | `VoiceSetupTimeline` | software setup timings — **not** latency (ADR-021 §9) |
 
 Every one of them is driven by inputs and a caller-supplied monotonic clock, and every one has a
@@ -580,7 +580,8 @@ rule on both sides, and `protocol/vectors/audio-state/` running on both platform
 | Absent from PROTOCOL §4.1's pre-authentication frame list, so an unauthenticated peer's frame never reaches the app | `ControlSessionManager`'s allowlist, with the refusal *counted*; proven over real TLS with two real unpaired peers |
 | A malformed frame is dropped and the control connection survives | `AudioStateCodec` — total and non-throwing, mirroring `VoiceSignalCodec` |
 | `revision` strictly increasing per sender per session, **not** reset by a reconnect or a voice rebuild | `AudioStatePublisher`, which returns nothing when the state is unchanged — so `revision` means "the state changed", not "a callback fired" |
-| A lower or equal revision is dropped | `AudioStateInbox` |
+| When a sender session genuinely *does* end, the receiver is told: `revision_epoch` is re-minted by the same step that restarts the counter, and by nothing else (§4.4.2, ADR-021 Amendment A7) | `AudioStatePublisher.resetForNewSession(epoch)`, called only from `SessionCoordinator.startDiscovery` |
+| A lower or equal revision is dropped **within one `revision_epoch`**; a revision from a *replaced* sender lifetime is dropped and counted separately, and a lifetime the receiver has never held is adopted however low its revision | `AudioStateInbox` |
 | No platform vocabulary on the wire | The codec has an explicit field list, and both platforms' tests scan the shared vector data for `a2dp`, `hfp`, `sco`, `AVAudioSession`, `AudioManager`, a device name and a headset model |
 
 **A route change is observable state with a measured duration.** The

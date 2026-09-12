@@ -339,6 +339,7 @@ edges of a route transition.
 ```json
 {
   "revision": 7,
+  "revision_epoch": "9f2c41e08b7d63a5c0e4917b2d85f36a",
   "endpoint_class": "bluetooth",
   "microphone_open": true,
   "effective_output_profile": "duplex_wideband",
@@ -354,7 +355,8 @@ edges of a route transition.
 
 | Field | Values / type | Notes |
 |---|---|---|
-| `revision` | uint64, strictly increasing per sender per session, and **bounded at `MAX_AUDIO_STATE_REVISION`** | Receiver drops a lower **or equal** revision — an equal one is a retransmit. Reordering cannot resurrect a stale route. `revision` counts *observable changes*, not callbacks: a sender that has nothing new to say does not move it (§4.4.1). |
+| `revision` | uint64, strictly increasing per sender per session, and **bounded at `MAX_AUDIO_STATE_REVISION`** | Receiver drops a lower **or equal** revision — an equal one is a retransmit — **when `revision_epoch` matches what it holds**. Reordering cannot resurrect a stale route. `revision` counts *observable changes*, not callbacks: a sender that has nothing new to say does not move it (§4.4.1). |
+| `revision_epoch` | string, exactly 32 lowercase hex characters | **Which of the sender's `revision` namespaces this `revision` belongs to** (§4.4.2, [ADR-021 Amendment A7](DECISIONS/ADR-021-intercom-transmission-and-capture-ownership.md#amendment-a7--12-september-2026--an-audio_state-revision-floor-belongs-to-one-sender-lifetime)). 16 CSPRNG bytes, minted when the sender's publisher begins a lifetime and constant for all of it. Two revisions are comparable **only** when their epochs are equal. Uppercase hex is **rejected**, not normalised — one canonical form, as for `voice_session_id` (§7.5). |
 | `microphone_open` | bool | Whether the capture device is *open*, not whether speech is being transmitted. PTT and VOX gate transmission, not the device (ARCHITECTURE §6.4). |
 | `effective_*_profile` | profile enum (§4.3.1) | What is *actually* active, after any coupling has taken effect |
 | `effective_*_sample_rate_hz` | int, or `null` if unknown | |
@@ -396,6 +398,45 @@ are easy to get wrong in the other direction:
 The revision is **not** reset by a duplicate-connection resolution, a control reconnect or a voice
 rebuild — it is per sender per *session* — so a peer can always order two reports it receives.
 
+**And when the sender's session does end, the receiver is told.** §4.4.2 is the other half of this
+sentence, and without it "per sender per session" is a rule only the sender can apply.
+
+#### 4.4.2 `revision_epoch` — which sender session a `revision` belongs to
+
+§4.4.1 says the `revision` is per sender per *session* and survives a control reconnect. Both halves
+are deliberate, and together they leave a gap the receiver cannot close on its own: when the sender's
+session genuinely **does** end — its process restarted, or its user left and re-entered discovery —
+its counter restarts at 1, and a receiver that kept the old floor refuses every genuine message until
+the new counter climbs past a number from a session that no longer exists. Nothing else on the wire
+distinguishes the two cases: `peer_id` is durable across a restart, `session_id` is negotiated per
+handshake and therefore moves on an ordinary reconnect the counter survives, and `conn_tiebreak`
+(§4.2) scopes duplicate-connection resolution rather than this.
+
+`revision_epoch` closes it. **The rule is one sentence: a `revision` floor belongs to exactly one
+`revision_epoch`.**
+
+| The received `revision_epoch` is… | The receiver | Because |
+|---|---|---|
+| the first one it has seen | accepts | there is no floor yet |
+| equal to the held one | applies §4.4.1's rule unchanged: strictly greater, or dropped | the two numbers are from one counter and are comparable |
+| one it has never held | **accepts**, and records the epoch it replaces as superseded | a new sender session; the old floor describes a counter that no longer exists |
+| one it has already superseded | **drops, and counts the drop** | a straggler from a session that is over cannot replace the one that replaced it |
+
+A receiver remembers a **bounded** number of superseded epochs (8 — the same bound ADR-024 Amendment
+A6's loss ledger uses, and for the same reason: the values come from a peer). A straggler from a
+session old enough to have been evicted is no longer refused by *this* rule; it is still refused by
+[ADR-025](DECISIONS/ADR-025-inbound-control-frame-provenance.md)'s generation gate, because a new
+sender session can only begin after that sender has torn its control connection down.
+
+**Sender rules.** A sender mints a fresh `revision_epoch` in the same operation that restarts its
+`revision`, and in no other — an epoch that moved without the counter restarting, or a counter that
+restarted without the epoch moving, each break the receiving rule above. A frame naming an epoch is
+only put on the wire while that epoch is the sender's live one.
+
+**This is not a restatement of ADR-025.** That rule asks which *connection* authorised a frame; this
+one asks which of the sender's *counters* a number came from. A frame can be perfectly live by the
+first rule and belong to a dead session by the second, which is precisely the case §4.4.1 left open.
+
 **`AUDIO_STATE` is absent from §4.1's pre-authentication frame list, and that absence is its access
 control** — the same construction §7.1 gives `VOICE_*`. A connection that has completed TLS but not
 passed the RideLink trust gate ([ADR-019](DECISIONS/ADR-019-connected-means-authenticated.md)) drops
@@ -405,8 +446,8 @@ authenticated has no business telling this device what its audio is doing, and �
 diagram already puts `AUDIO_STATE` on the trusted path.
 
 A **malformed** `AUDIO_STATE` is dropped and the control connection **survives**: a missing field, a
-wrong JSON type, a negative revision or an out-of-range sample rate makes the message unusable, not
-the connection — exactly as for a malformed `PING` (§6) or `VOICE_*` (§7.4). An **unrecognised**
+wrong JSON type, a negative revision, a `revision_epoch` that is not 32 lowercase hex, or an
+out-of-range sample rate makes the message unusable, not the connection — exactly as for a malformed `PING` (§6) or `VOICE_*` (§7.4). An **unrecognised**
 enum value is tolerated as `unknown` (or `stable`, for `route_state`) per §4.3.1's
 forward-compatibility rule, and is not malformed.
 
@@ -1273,7 +1314,7 @@ incompatibility a laptop-side test failure instead of a roadside mystery
 | `identity/*.json` | SPKI hash formatting, pin match / mismatch, certificate re-issue with unchanged SPKI ⇒ still trusted |
 | `dedup/*.json` | `conn_tiebreak` pairs ⇒ which side's initiated connection survives; equal-value tie ⇒ both close |
 | `session-gate/*.json` | the complete trust-gate table (ADR-019): every `ControlEvent` × every session status ⇒ the `SessionEvent` it implies, including the row that must never exist — `Connected` implying pairing success |
-| `audio-state/*.json` | `AUDIO_STATE` encode against §4.4's representable-states table, every field missing and every field wrong-typed, both bounds at and past their edges, explicit-null versus absent nullable fields, derived `media_quality` for every profile value, unknown enum tolerated as `unknown`, the publisher's monotonic `revision` (including the states that must **not** move it), and the receiver dropping anything not strictly greater. Also scanned by both platforms for platform audio vocabulary, which must appear nowhere in it (§4.4.1, ADR-016) |
+| `audio-state/*.json` | `AUDIO_STATE` encode against §4.4's representable-states table, every field missing and every field wrong-typed, both bounds at and past their edges, explicit-null versus absent nullable fields, derived `media_quality` for every profile value, unknown enum tolerated as `unknown`, the publisher's monotonic `revision` (including the states that must **not** move it), the `revision_epoch` that scopes it (§4.4.2) — minted only by the same step that restarts the counter, and on the receiving side: a new epoch accepted over a higher floor, a superseded one refused and counted, and the 8-epoch bound's evicted lifetime read as new again — and the receiver dropping anything not strictly greater **within one epoch**. Also scanned by both platforms for platform audio vocabulary, which must appear nowhere in it (§4.4.1, ADR-016). 98 rows |
 | `intercom/*.json` | ARCHITECTURE §6.3's transmission gate: `(policy, state, input) -> (state, actions)` across all five modes, the five presets field for field, both wire-mode mappings, and the invariant that **no action can open or close capture** (ADR-021 §4) |
 | `voice-signal/*.json` | `VOICE_*` parse/reject: every required field, wrong types, `voice_session_id` format, oversize SDP and candidate, mline-index range, nullable `sdp_mid`, unknown `state`/`mode` tolerated (§7.4, §7.5) |
 | `voice-fsm/*.json` | the complete `(role, status, input) -> (actions, new status)` negotiation table: offerer rule, glare, duplicate offer/answer, ICE before and after the remote description, teardown, generation mismatch (§7.3, §7.8) |

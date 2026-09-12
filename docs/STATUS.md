@@ -1,22 +1,28 @@
 # RideLink — Status
 
-**Updated:** 12 September 2026 (control-plane provenance closure, ADR-025, thirty-second session — see §2ai)
+**Updated:** 12 September 2026 (`AUDIO_STATE` sender-lifetime closure, ADR-021 Amendment A7, thirty-third session — see §2aj. **This one moved the wire:** `AUDIO_STATE` gains `revision_epoch`)
 **Current milestone:** M1 (Private voice link) is **software-complete with no known defect** — its
 hardware gate is the only thing left open. M2 (local music) is implementation-complete and
 closure-audited (§2q/§2r). Phase 4 is closure-audited **six** times (§2v–§2z, §2ai) and **§4 problem
 44 is now fixed** (ADR-023 Amendment A6 / ADR-025 §1). **M4 (Synced ride music) has its software
 half, and it has been audited seven times**: Phase 5 is closure-audited A1 (§2ab), A2 (§2ac),
 A3 (§2ad), A4 (§2ae), A5 (§2af), A6 (§2ag) and A7 (§2ah), with its real-device gate open.
-**Current phase:** Phase 5 — synchronized playback. This session did **not** advance Phase 5; it
-closed the cross-phase control-plane defect A7 confirmed and deliberately did not fix (§2ai, ADR-025),
-which is what §7 named as the next exact task.
+**Current phase:** Phase 5 — synchronized playback. The thirty-second session did **not** advance
+Phase 5; it closed the cross-phase control-plane defect A7 confirmed and deliberately did not fix
+(§2ai, ADR-025). The thirty-third session (§2aj) did not advance Phase 5 either: it closed **§4
+problem 47**, one of the four watch items ADR-025's sweep left behind, and it **moved the wire** to do
+it — `AUDIO_STATE` gains `revision_epoch` (PROTOCOL §4.4.2, ADR-021 Amendment A7), because no existing
+field named a sender's `revision` namespace and reinterpreting one that did not fit was refused.
 **Phase 6 (intercom/music coexistence) and Phase 7 (Ride Mode) are untouched.**
 **Phase 5 status: software closure is now claimable on the grounds A7 withheld it for — problem 44 is
 fixed — but it is still NOT claimed here.** ADR-025's own sweep found three further confirmed,
 reachable instances of the same class (`VOICE_*`, `AUDIO_STATE`, and the pre-authentication family's
-`PONG`/`PAIR_CONFIRM`), all now fixed, plus four new watch items (§4 problems 47–50). Eight passes
-have each found something in code that was already CI-green; assume a ninth would too. The
-real-device synchronized-playback gate also remains pending.
+`PONG`/`PAIR_CONFIRM`), all now fixed, plus four new watch items (§4 problems 47–50), of which 47 is
+now closed. **Nine** passes have each found something in code that was already CI-green — and the
+ninth found that problem 47, filed as "Low", was reachable by an ordinary Stop/Start Discovery on the
+peer and could suspend Phase 5's drift ladder. Assume a tenth would find something too. The
+real-device synchronized-playback gate also remains pending, and Phase 5's own open rows (§4 problems
+41, 42, 43) are untouched by §2aj.
 
 **ADR-025 in one paragraph.** A7 proved that an inbound frame's authority must come from **the
 connection it was read from**, built `ReadFrameBinding` to carry it, and threaded it through Phase 5
@@ -1281,7 +1287,7 @@ output and is **pending**.
 | `AudioSessionLifecycle` + `RouteTransitionTracker` | the platform audio session: `stable -> transitioning -> stable` with a measured duration, `shouldResume`, a media-services reset, and a strict generation guard | `AudioSessionLifecycleTest[s]` |
 | `RideStartPolicy` | ARCHITECTURE §6.4's readiness sequence as one decision, with `Allowed` carrying the service and capture flags **separately** because the order between them is the platform rule | `RideStartPolicyTest[s]`, over the whole 2^7 cross-product |
 | `VoiceFailure` | ten named failure reasons instead of one "connection failed" bucket | every suite above |
-| `AudioStateMessage` / `AudioStateCodec` / `AudioStatePublisher` / `AudioStateInbox` | PROTOCOL §4.4 in full: the field set, both bounds, the monotonic `revision` on the sending side and the drop-anything-not-greater rule on the receiving side | `protocol/vectors/audio-state/` — 74 rows across five groups |
+| `AudioStateMessage` / `AudioStateCodec` / `AudioStatePublisher` / `AudioStateInbox` | PROTOCOL §4.4 in full: the field set, both bounds, the monotonic `revision` on the sending side and the drop-anything-not-greater rule on the receiving side — and, since §2aj, the `revision_epoch` that says which sender lifetime a `revision` belongs to (§4.4.2) | `protocol/vectors/audio-state/` — 98 rows across five groups (74 at the time of writing) |
 | `VoiceSetupTimeline` / `VoiceSetupTimer` | software setup timings, first-write-wins per milestone, monotonic microseconds only | `VoiceSetupTimelineTest[s]` |
 
 **One addition to the Phase 2a negotiation table:** `VoiceInput.ModeSelected`, so
@@ -4414,7 +4420,157 @@ before it was done, one of them in the pairing gate, and left four watch items b
 audit should re-derive from production code rather than from this file, and should look hardest at
 where this one stopped short — §7 lists those.
 
+
+## 2aj. `AUDIO_STATE` sender-lifetime closure — ADR-021 Amendment A7 (12 September 2026 session, thirty-third)
+
+**Scope: §4 problem 47 only.** No Phase 6, no Phase 7, no Phase 4/5 behaviour change, nothing in
+ADR-025 undone or weakened. Baseline `c1ca6889ce64e69bc261de5308750f17fea18bc2`, verified against
+`origin/main` before anything was touched.
+
+**This session changed the wire.** It is the first Phase 2b change to do so, the reasoning is
+[ADR-021 Amendment A7](DECISIONS/ADR-021-intercom-transmission-and-capture-ownership.md#amendment-a7--12-september-2026--an-audio_state-revision-floor-belongs-to-one-sender-lifetime),
+and the specification is [PROTOCOL §4.4.2](PROTOCOL.md).
+
+### The defect, and why no existing field could fix it
+
+PROTOCOL §4.4's `revision` is "per sender per session", and §4.4.1 says outright it is **not** reset
+by a control reconnect — so the receiver's inbox keeps its floor across one, on purpose, and that is
+what lets it still refuse a delayed frame from before the blip. A peer whose *publisher* restarted
+comes back at `revision` 1 and had every genuine message dropped as stale until its counter climbed
+past a number from a session that no longer existed.
+
+**Reachable more cheaply than problem 47 recorded.** Problem 47 said "a peer whose process restarted".
+`resetForNewSession` is called from exactly one place — `SessionCoordinator.startDiscovery` — so the
+same state is reached by the peer's user tapping Stop Discovery and then Start Discovery. No crash
+required, and no reliance on the OS choosing a different ephemeral port.
+
+**And it is not only a stale diagnostics row.** `AppContainer.routeTransitioning` (Android) and
+`SessionRouteStatePort.isRouteTransitioning()` (iOS) read the peer's last `AUDIO_STATE.route_state` to
+decide whether ARCHITECTURE §7.3's drift ladder runs at all, so a dead lifetime's `transitioning`
+suspends Phase 5 drift correction for as long as the new counter takes to climb.
+
+The receiver cannot tell the two cases apart from anything it holds — same `peer_id`, same pinned
+SPKI, a generation bump either way. Every existing wire field was checked against the semantics it
+would need and rejected; ADR-021 A7 §2 has the table. The two that look closest are the two that fail
+most clearly: `session_id` is minted per **handshake**, so it moves on exactly the reconnect the
+counter must survive, and `conn_tiebreak` lives for the `ControlSessionManager` instance and is **not**
+re-minted when a discovery session restarts, so the counter can restart under an unchanged tiebreak.
+Reusing either would be the "silently reinterpret a field whose semantics do not fit" mistake.
+
+### What was added
+
+`AUDIO_STATE` gains **`revision_epoch`** (32 lowercase hex, 16 CSPRNG bytes, type `AudioStateEpoch`,
+distinct from `ConnTiebreak` and `VoiceSessionId` for ADR-015's reason). **A `revision` floor belongs
+to exactly one `revision_epoch`**: same epoch → §4.4.1 unchanged; an epoch never held → a new sender
+lifetime, accepted, the replaced epoch recorded as superseded; an already-superseded epoch → dropped
+and counted (`droppedRetiredEpoch`, separate from `droppedStale`). The superseded set is bounded at 8,
+matching ADR-024 A6's ledger and for its reason, and the bound's cost is stated rather than hidden.
+
+The epoch is minted by the **same statement** that restarts the counter and by no other. Outbound,
+`publishAudioState` re-proves the epoch after its dispatch and before the write — ADR-024 A3/A5's rule
+applied outbound — on the **lifetime**, not the control session, because a reconnect does not end a
+lifetime and §4.4.1 requires the sender's state to reach the peer on the new connection.
+
+### ADR-025 is untouched, and both rules now run
+
+They answer different questions. ADR-025 asks which **connection** authorised a frame;
+`revision_epoch` asks which of the sender's **counters** a number came from. A frame can be perfectly
+live by the first and belong to a dead session by the second — which is the case §4.4.1 left open, and
+is asserted directly: `a straggler from a replaced lifetime cannot overwrite its successor` sends the
+dead lifetime's frame on the **live** connection and asserts `droppedRetiredGeneration == 0` alongside
+`droppedRetiredEpoch == 1`, and its sibling asserts the reverse split on the retired connection.
+
+### Evidence
+
+| Claim | How it was established |
+|---|---|
+| The defect is real | Reverting **only** `AudioStateInbox.accept`'s epoch rule fails 5 of 9 `AudioStateSenderLifetimeTest[s]` rows on **each** platform. iOS names it: `Optional(51) is not equal to Optional(2) — the successor's state stands`, and `Optional(50) is not equal to Optional(1)` |
+| The fix does not buy case 2 with case 1 | The 4 rows that pass pre-fix are the positive controls — reconnect continuity, same-lifetime staleness, ADR-025's no-successor refusal, generation-only reconnect — and they pass after the fix too |
+| It is the real lifecycle, not a poked field | Two real `ControlSessionManager`s on real TLS 1.3, real handshake and trust gate, real publisher, real relays on both ends, real read loop, real ADR-025 gate, real codec, real inbox. Nothing calls `AudioStateInbox.reset()`; a lifetime restarts through the same `resetForNewSession` call `startDiscovery` makes |
+| The coordinator's own decisions | `SessionCoordinatorAudioStateLifetimeTest` (5 rows, real FSM): each discovery session mints a lifetime never used before; a reconnect and a mode change mint none; a reconnect keeps the peer's state **and** its floor; a new discovery session drops that state **and** the retired lifetimes with it |
+| The pure rule | `protocol/vectors/audio-state/` 74 → **98** rows, from the generator as an independent third transcription |
+| It does not race | 5 consecutive `--rerun-tasks` runs on Android and 5 on iOS of both new suites: 0 failures |
+
+### The outbound audit, reported honestly
+
+The brief asked for an independent look at outbound `AUDIO_STATE` construction. Result:
+
+- **The deferred-send window is real but not demonstrated reachable.** For a dead epoch to reach the
+  wire the dispatched send would have to stay unscheduled across a teardown, a new discovery session,
+  a TCP connect, a TLS handshake and the trust gate; before that point `send` finds no authenticated
+  writer and returns false harmlessly. The guard is added anyway, because putting the epoch on the
+  wire makes that window's consequence qualitatively worse, and because this shape is what six of the
+  last eight audits found. Classified as defence in depth, **not** as a demonstrated defect.
+- **A same-lifetime payload going out under the successor's `session_id` and writer is correct**, not
+  a defect: §4.4.1 requires it. That distinction is why the guard is on the epoch and not the session.
+- **Two racing `scope.launch`/`Task` sends within one epoch can reorder.** The receiver's own §4.4
+  rule drops the older. Self-correcting; no change made.
+- **Two pre-existing doc-vs-code divergences were found while doing it** and are recorded rather than
+  smuggled in: §4 problems **51** (`session_id` is regenerated on every reconnect, against PROTOCOL
+  §2/§10) and **52** (`seq` never restarts at 1 per session, against PROTOCOL §2). Neither is reachable
+  as a bug today — nothing consumes either field on receipt — and both are outside this pass.
+
+### What is still not true
+
+**Nothing here ran on a phone, and no audio reached a speaker or a Bluetooth endpoint.** No
+real-device gate moved: A-01/A-02/A-04/A-09/A-10 and V-01…V-11 are exactly as open as before, and the
+simulator and emulator results in this repo are **not** device evidence. No latency or alignment
+figure exists. Phase 6 has not started.
+
+**Software closure is still not claimed for Phase 5**, and this session does not change that: its
+scope was one Phase 2b problem, and the Phase 5 rows in §4 that withheld it (41, 42, 43) are untouched.
+This is now the **ninth** consecutive pass to find something in code that was already CI-green, and
+the thing it found was recorded as "Low" severity by the pass before it.
+
 ## 3. Tests passed / pending
+
+### `AUDIO_STATE` sender-lifetime session (12 September 2026, thirty-third) — see §2aj
+
+**Passed and verified this session, by actually running the commands on this machine.** Every Gradle
+command was run with `-Dorg.gradle.java.home=/opt/homebrew/opt/openjdk@21/libexec/openjdk.jdk/Contents/Home`
+(§4 problem 17).
+
+| Gate | Result |
+|---|---|
+| Android `./gradlew :core:test` | green |
+| Android `./gradlew test` (all unit tests) | green — **836** tests, 0 failures, 0 errors, 0 skipped, including the 14 new cases |
+| Android `./gradlew ktlintCheck` | green (three offences in the new tests found and fixed; no rule relaxed) |
+| Android `./gradlew detekt` | green (`ReturnCount` fired on `AudioStateInbox.accept` and was answered with the same reasoned suppression `AudioStateCodec.parse` already carries — one early-out per §4.4 receiving rule, in spec order — because extracting would split one decision table in two) |
+| Android `./gradlew lint` | green |
+| Android `./gradlew assembleDebug` | green |
+| Android `./gradlew assembleRelease` | green |
+| iOS `swift test` `RideLinkCore` | green — **284** tests |
+| iOS `swift test` `RideLinkPlatform` | green — **434** tests (was 425; +9 new) |
+| iOS unsigned **Debug** simulator build | green |
+| iOS unsigned **Release** simulator build | green |
+| `python3 tools/generate_audio_state_vectors.py` | regenerates; 74 → **98** rows, and the generator's own privacy self-check passes |
+
+**ADR-025's regressions re-run explicitly, since this pass must not weaken any of them:**
+
+| Regression | Result |
+|---|---|
+| retired `MANIFEST_PAGE` (`RetiredSessionProvenanceTest[s]`) | green |
+| retired `TRANSFER_OFFER`/`REQUEST`/`CANCEL`/`RESULT` | green |
+| retired `VOICE_STATE { closed }` and `VOICE_OFFER` | green |
+| retired `AUDIO_STATE` provenance | green — unchanged, and now sits beside the new lifetime rule rather than replacing it |
+| retired `PONG` (and the live one still recording) | green |
+| retired `PAIR_CONFIRM`/`PAIR_RESULT`/fatal `ERROR` (`RetiredConnectionPairingTest[s]`) | green |
+| Phase 5 stale-read generation (`StaleReadGenerationTest[s]`) | green |
+| Phase 5 A6 retired-loss ledger (`SyncPlaybackIngressLifetimeAuditTests`) | green |
+| Phase 4 coordinator provenance (`SharedLibraryReadProvenanceTest`) | green |
+
+**Stress / repeat, because both new suites open real sockets:** 5 consecutive Android
+`--rerun-tasks` runs of `AudioStateSenderLifetimeTest` + `SessionCoordinatorAudioStateLifetimeTest`
+(0 failures each) and 5 consecutive iOS runs of `AudioStateSenderLifetimeTests` (9/9 each).
+
+**Pre-fix evidence, recorded because "it passes now" is not evidence:** reverting **only**
+`AudioStateInbox.accept`'s epoch rule — leaving the wire field, the publisher, the coordinators and
+the vectors in place — fails **5 of 9** rows on each platform. Android times out waiting for the
+restarted peer's revision 1; iOS names it: `Optional(51) is not equal to Optional(2) — the
+successor's state stands`. The 4 that still pass are the positive controls.
+
+**Pending, and not moved by this session:** every real-device gate. TEST_PLAN A-01, A-02, A-04, A-09,
+A-10 and V-01…V-11 are exactly as open as they were. Nothing ran on a phone.
 
 ### Control-plane provenance session (12 September 2026, thirty-second) — see §2ai
 
@@ -4965,10 +5121,12 @@ as of this write-up — see §7.
 | 44 | ~~**Phase 4's manifest/transfer dispatch derives its generation from live state, exactly as Phase 5's did before ADR-024 Amendment A7**~~ **Resolved 12 Sep 2026 (§2ai, ADR-025 §1 / ADR-023 Amendment A6).** `ManifestRelay`/`TransferRelay` now take the frame's authorising generation, refuse and count a retired one, and hand it to `submit(message, generation)`; `SharedLibraryCoordinator`'s sink closures read nothing at dispatch time and `handleManifestMessage`/`handleTransferMessage` compare the supplied value against the new `ControlSessionManager.liveAuthenticatedGeneration`. Verified by reverting only that change on unmodified `326a145`: 3 of 5 `SharedLibraryReadProvenanceTest` cases fail, with a Session A `MANIFEST_PAGE` becoming Session B's catalogue and a Session A `TRANSFER_REQUEST` resolved and served under Session B | ~~Medium~~ — | **Residual:** iOS has no app-target test bundle, so the coordinator-level half of that regression is Android-only — folded into problem 48 |
 | 45 | **`VoiceControllerIntercomTest > switching from full duplex to PTT stops transmitting` is flaky.** Observed failing **once** in a full `:network:test` run during the A7 session, and never again in 5 targeted `--rerun-tasks` runs, a second full-suite run or the final CI-equivalent sweep. The test awaits `!diagnostics.transmitting` and then asserts `fakes.engine.muted == true`; `muted` is a plain non-`@Volatile` `var` on a test fake, written from a coroutine and read from the test thread, so the assertion can observe a stale value. **Pre-existing and test-only** — the test constructs no `ControlSessionManager` and touches no `Phase5FrameQueue`, and it passes on unmodified `a0b81c1` | Low | Make the fake's `muted` field `@Volatile` (or await it rather than the diagnostics field). Recorded rather than fixed here: A7 is a Phase 5 pass and this is Phase 2b test scaffolding |
 | 46 | **`ControlSessionManager.endConnection` re-proves nothing after it releases `stateLock`** (§2ah, ADR-024 Amendment A7 §I2). It clears `activeSocket` *inside* the lock and then writes `authenticatedConnection`, `pendingActivation`, `pairing` and the pairing prompt, and calls `cancel()` on the keepalive and clock-sync jobs, all *outside* it — none re-checking that the session being torn down still owns those fields. `promote` needs only `activeSocket == null`, and the accept loop is an independent `scope.launch` that does not wait for the `LinkLost` this function emits at its end, so a concurrently promoted and activated Session B could in principle have its authenticated record nulled and its keepalive/clock-sync jobs cancelled by Session A's trailing teardown. **Not claimed as reachable, and deliberately not called a defect:** iOS `endConnection` contains **no `await` at all**, so it is atomic within the actor and the race cannot occur; Android has no suspension point between `withLock`'s return and those writes either, so it would need the OS to deschedule that thread for as long as a full TLS + `HELLO` handshake takes on another. **Pre-existing** — every one of those writes predates A7 | Low | The safety on both platforms is *incidental*, not stated: one future `await` anywhere in either tail opens it, and nothing would say so. Either re-prove ownership after the lock (`if (activeSocket !== socket && authenticatedConnection?.socket !== socket) return`-style) or move the writes inside the critical section, in a change that is *only* that. Watch item, not a blocker |
-| 47 | **The `AUDIO_STATE` peer inbox and publisher outlive a control-session boundary, and a peer that restarts is then refused as stale** (§2ai, ADR-021 Amendment A6's closing note). PROTOCOL §4.4's `revision` is "per sender per **session**", and `AudioStateInboxHolder`/`AudioStatePublisher` are reset in `SessionCoordinator.startDiscovery` — a *discovery* session — so they deliberately survive a control reconnect. That is right for the ordinary case (the same peer's `revision` keeps climbing) and wrong for a peer whose **process restarted** and reconnected inside our discovery session: its `revision` restarts at 1 and every genuine message is dropped as stale until it climbs past the dead session's floor, leaving a stale route on screen. **Not a provenance defect** — ADR-025 refuses the retired *frame*; this is about the long-lived *object*, which is ADR-024 Amendment A6's class. **Pre-existing**, and not introduced by ADR-025 | Low | Decide what §4.4's "per session" means at a control boundary and reset the inbox there, or make the inbox tolerate a revision that goes backwards *with* a new generation. Either is a §4.4 semantics decision, not a lifetime patch — do it with a vector |
-| 48 | **iOS has no app-target test bundle, so `ios/RideLink/`'s coordinators have no unit tests at all** (§2ai). `RideLinkPlatformTests` covers the SPM package; `SharedLibraryCoordinator`, `SessionCoordinator`, `MusicCoordinator` and `NowPlayingController` all live in the Xcode app target and are reachable from no test. Android's equivalents have suites (`SharedLibraryCoordinator*Test`, `SessionCoordinatorEndingEffectTest`), so every coordinator-level regression this repo has is Android-only, and a mirrored finding gets a mirrored fix but an unmirrored proof. ADR-025's Finding 1 is the concrete instance: its coordinator regression exists on Android and not on iOS. **Pre-existing** | Medium | Either add a test target to `RideLink.xcodeproj` (a build-system change, deliberately not done inside a provenance pass), or move the coordinators into `RideLinkPlatform` where they would be testable — the direction the Phase 5 coordinator already went |
+| 47 | ~~**The `AUDIO_STATE` peer inbox and publisher outlive a control-session boundary, and a peer that restarts is then refused as stale**~~ **Resolved 12 Sep 2026 (§2aj, ADR-021 Amendment A7, PROTOCOL §4.4.2).** `AUDIO_STATE` now carries `revision_epoch`, and a `revision` floor belongs to exactly one of them: the same epoch keeps §4.4.1's rule, an unseen epoch is a new sender lifetime and is adopted, and an already-superseded epoch is refused and counted. **This changed the wire** — no existing field named a sender's `revision` namespace (`session_id` moves on the very reconnect the counter must survive; `conn_tiebreak` does not move when the counter does), and reinterpreting one that did not fit was refused. Found to be reachable more cheaply than this entry said: a peer tapping Stop Discovery then Start Discovery reaches it with no process restart, and because Phase 5's drift ladder reads the peer's `route_state`, a dead lifetime's `transitioning` suspended drift correction. Verified by reverting only `AudioStateInbox.accept`'s epoch rule: 5 of 9 `AudioStateSenderLifetimeTest[s]` rows fail on each platform, with a straggler's revision 51 replacing the successor's 2 | ~~Low~~ — | **Residual:** the coordinator-level half (`SessionCoordinatorAudioStateLifetimeTest`) is Android-only — folded into problem 48 |
+| 48 | **iOS has no app-target test bundle, so `ios/RideLink/`'s coordinators have no unit tests at all** (§2ai). `RideLinkPlatformTests` covers the SPM package; `SharedLibraryCoordinator`, `SessionCoordinator`, `MusicCoordinator` and `NowPlayingController` all live in the Xcode app target and are reachable from no test. Android's equivalents have suites (`SharedLibraryCoordinator*Test`, `SessionCoordinatorEndingEffectTest`), so every coordinator-level regression this repo has is Android-only, and a mirrored finding gets a mirrored fix but an unmirrored proof. ADR-025's Finding 1 is the concrete instance, and §2aj added a second: `SessionCoordinatorAudioStateLifetimeTest` — the only proof that `startDiscovery` mints a *fresh* `AUDIO_STATE` sender lifetime and that a reconnect mints none — exists on Android only, against iOS code that is mirrored line-for-line and unproven. **Pre-existing** | Medium | Either add a test target to `RideLink.xcodeproj` (a build-system change, deliberately not done inside a provenance pass), or move the coordinators into `RideLinkPlatform` where they would be testable — the direction the Phase 5 coordinator already went |
 | 49 | **`swiftlint` and `swiftformat` are named as iOS gates but are installed nowhere and run by nothing.** CLAUDE.md's build/test section lists `swiftlint && swiftformat --lint .`; neither binary exists on this machine, there is no `.swiftlint.yml` or `.swiftformat` in the repo, and `.github/workflows/ci.yml` does not invoke them. Every session that has claimed "iOS gates green" has therefore claimed a gate that does not exist | Low | Either add the configs and the CI step (and fix whatever they then find), or strike them from CLAUDE.md. Recorded rather than silently dropped, because an aspirational gate read as an enforced one is exactly the "CI-green is not correct" gap this file keeps recording |
 | 50 | **A `VOICE_*` signal accepted under a live session can still be reduced after that session's `ControlLinkLost` has reset the negotiation.** `VoiceInputMailbox` polls `TEARDOWN` before `CRITICAL`, so in one drain pass `.controlLinkLost` resets the reducer to `IDLE`/`voiceSessionId = null` and a `VOICE_OFFER` already queued below it is then *accepted*, because that is exactly the state `offerReceived` accepts any generation in. The mailbox's own doc claims anything queued below teardown "becomes inert on its own (the existing `VoiceEngineGeneration`/`voice_session_id` guard)", which holds for ICE and answers but **not** for an offer. **Within one session's frames, so not a control-plane provenance defect** and outside ADR-025's scope; the resulting negotiation has no writer and its `SendAnswer` fails closed. **Not proven reachable in a real run, and no regression written** | Low | A candidate for the next voice-lifetime audit: either drain-and-discard the non-teardown lanes when `ControlLinkLost` is applied, or make `offerReceived` refuse while `localAudioOpen` is true but no live control session exists |
+| 51 | **`session_id` is regenerated on every reconnect, which PROTOCOL §2 and §10 say it must not be.** §2's envelope table says "Regenerated on every fresh `CONNECTING`, **preserved across `RECONNECTING`**", and §10's ladder diagram shows `HELLO { session_id = <previous> }` as what distinguishes resuming from starting over. Both platforms' `ControlHandshake` call `freshSessionId()` unconditionally in the initiator role, and the acceptor mints a fresh one whenever it is leader, so a reconnect produces a **new** `session_id`. Found during §2aj's outbound `AUDIO_STATE` audit while checking whether `session_id` could name a sender lifetime — it cannot, and this is why | Low | **Not reachable as a bug today:** nothing in either codebase reads an inbound `session_id` to decide anything; session continuity is carried by the authentication generation (ADR-023 §3) and by `ControlSessionManager`'s own state, neither of which uses it. So this is a documentation-versus-implementation contradiction, which CLAUDE.md calls a bug in its own right. Resolve it deliberately — either implement §10's resume or correct §2/§10 — in a change that is *only* that, alongside problem 42's `STATE_REQUEST` work, which is the same reconnect story |
+| 52 | **`seq` never restarts at 1 per session**, which PROTOCOL §2 says it does ("Per-sender monotonic counter, starts at 1 per session"). `SeqCounter` is one `AtomicLong(1)` per `ControlSessionManager` — i.e. per process — and neither `promote` nor `shutdown` resets it, so the second session on a manager continues the first's numbering. Found alongside problem 51, in the same audit | Low | **Not reachable as a bug today:** `seq` is write-only across both codebases — no receiver reads it, and §2's stated uses (gap detection, duplicate dropping) are unimplemented. Fix it with problem 51, since both are the same question about what a "session" is on the wire, and both should move with §10's resume rather than piecemeal |
 | 26 | **APK/IPA size.** The Android AAR adds ~48 MB of native code across four ABIs; the Apple XCFramework is ~96 MB expanded and embedded in the app bundle. No ABI filtering or slice stripping is applied — the default is the safe configuration and a sideloaded personal build has no size gate | Low | Revisit if install time becomes annoying. Recorded rather than forgotten |
 | 21 | **Diagnostics now show `CONNECTING` while a six-digit code is on screen**, where they previously showed `CONNECTED`. This is deliberate and more honest (ADR-019 §5), but it is a user-visible change that has never been looked at on a real screen | Low | Confirm it reads sensibly during I-02 on the two phones; the FR-023 diagnostics screen is one of the things I-02 exercises anyway |
 | 32 | **FIXED (twelfth session, §2o, ADR-021 Amendment A2 Finding 3).** `Effect.ReleaseAudioAndStopForegroundService`'s name promised an Android foreground-service stop `SessionCoordinator.runEffect` never actually performed — confirmed exactly as originally recorded here. Fixed with a `ForegroundServiceController` seam (no `Context` inside `SessionCoordinator`) and one owner: `runEffect` awaits capture release (`StopReleaseResult`) before calling `foregroundService.stop()` — never on a timeout — and always tears down the control session afterward. `SessionCoordinatorEndingEffectTest` (new) proves the order at the integration boundary, including that a peer BYE, a timed-out release, a `NETWORK` link loss and a repeated `ENDING` all behave correctly. Kept in this table with its resolution noted rather than deleted, per this file's own discipline | ~~Medium~~ Fixed | ~~Give `SessionCoordinator` a way to reach `RideForegroundService.stop()`...~~ Done — see §2o |
@@ -5026,13 +5184,39 @@ found **three more** confirmed reachable instances of the same class before it w
 `VOICE_*`, `AUDIO_STATE`, and the pre-authentication family's `PONG`/`PAIR_CONFIRM`/`PAIR_RESULT`/
 fatal `ERROR` — one of which let a retired connection's frame supply the remote half of PROTOCOL
 §4.5's two-human pairing gate. All are fixed with regressions verified to fail against the pre-fix
-behaviour. It also left four watch items (§4 problems 47–50). **The next exact task is an independent
-verification of ADR-025 itself**, re-derived from production code rather than from this file.
+behaviour. It also left four watch items (§4 problems 47–50).
 
-**"ADR-025" is not "final", and the wording is deliberate.** Eight passes have now each found real
+**One of those four is now closed, and closing it moved the wire** (§2aj, ADR-021 Amendment A7).
+Problem 47 — filed "Low" — turned out to be reachable by the peer's user tapping Stop Discovery and
+then Start Discovery, with no process restart, and its consequence reached Phase 5: a dead sender
+lifetime's `route_state: transitioning` suspends the drift ladder. Fixing it needed a new field,
+`AUDIO_STATE.revision_epoch` (PROTOCOL §4.4.2), because no existing field named a sender's `revision`
+namespace and the alternatives (`session_id`, `conn_tiebreak`, the local authentication generation)
+each fail on semantics rather than on convenience. **So the "the wire has not moved in any of the
+eight passes" sentence above is true of those eight and no longer true of the ninth.** Problems 48,
+49 and 50 remain open, and 51 and 52 were added by §2aj's outbound audit.
+
+**The next exact task is an independent verification of ADR-025 itself**, re-derived from production
+code rather than from this file — and now also of ADR-021 Amendment A7, whose new question is a
+different one: *which long-lived objects in this codebase hold a verdict from an owner that is
+gone?* §2aj answered it for the `AUDIO_STATE` inbox. `SharedLibraryCoordinator`'s catalogue and
+`VoiceController`'s retained state have still never been asked.
+
+**"ADR-025" is not "final", and the wording is deliberate.** **Nine** passes have now each found real
 defects in code that was already CI-green: A1 seven, A2 six, A3 three, A4 six, A5 four, A6 two, A7
-three (one left open), and ADR-025 four. That is evidence *for* auditing again, not against it. Look
-hardest at where this one stopped short:
+three (one left open), ADR-025 four, and ADR-021 A7 one that ADR-025 had already filed as "Low" and
+under-described. That is evidence *for* auditing again, not against it. Look hardest at where these
+stopped short:
+
+- **ADR-021 A7 changed a wire field and every peer must therefore be rebuilt.** `revision_epoch` is
+  required, so a build from before it and a build after it cannot exchange `AUDIO_STATE` at all —
+  each drops the other's as `MISSING_FIELD` while the connection survives. That is safe by
+  construction and deliberate (an optional field with a default would be a *shared* epoch, the exact
+  state the amendment removes), but it is the first time this repo has made two of its own builds
+  mutually unintelligible on a message, and the next device session must flash both phones.
+- **ADR-021 A7's outbound guard is defence in depth, not a demonstrated fix.** §2aj says so plainly.
+  If it is ever removed as "unreachable", the thing that makes it unreachable is scheduling, not
+  structure.
 
 - **ADR-025 gated four families at the relay and deliberately did not gate Phase 5** (§2ai), on the
   argument that A6's ledger must see a retired frame to attribute it. That argument is correct today

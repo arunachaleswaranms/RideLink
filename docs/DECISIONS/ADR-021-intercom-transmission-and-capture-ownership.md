@@ -1006,3 +1006,133 @@ to the same peer (whose `revision` keeps climbing) and wrong for a peer that res
 whose `revision` restarts at 1 and is then refused as stale until it climbs past the dead session's
 floor. That is ADR-024 Amendment A6's class — a long-lived object carrying a dead session's verdict —
 rather than a provenance defect, and it is `docs/STATUS.md` §4 problem 47.
+**Closed by Amendment A7 below, 12 September 2026** — with a wire change, because nothing already on
+the wire named a sender's `revision` namespace.
+
+## Amendment A7 — 12 September 2026 — an `AUDIO_STATE` revision floor belongs to one sender lifetime
+
+Amendment A6 applied [ADR-025](ADR-025-inbound-control-frame-provenance.md)'s rule to `AUDIO_STATE`
+and closed the provenance half. Its closing note recorded what that did **not** close, as
+`docs/STATUS.md` §4 problem 47. This amendment closes it, and **it moves the wire** — the first
+Phase 2b change that does.
+
+### 1. The defect
+
+PROTOCOL §4.4's `revision` is "per sender per session", and §4.4.1 says outright that it is **not**
+reset by a duplicate-connection resolution, a control reconnect or a voice rebuild. The receiver's
+inbox therefore keeps its floor across a control boundary on purpose: that is what lets it still
+refuse a delayed frame from before the blip.
+
+That is right for a peer whose publisher survived, and wrong for a peer whose publisher did not. A
+restarted publisher comes back at `revision` 1, and every genuine message it sends is dropped as
+stale until its counter climbs past a number belonging to a session that no longer exists. The
+receiver goes on showing — and **acting on** — the dead session's last word.
+
+**Reachable more cheaply than problem 47 recorded.** Problem 47 described a remote *process* restart.
+`resetForNewSession` is called from exactly one place, `SessionCoordinator.startDiscovery`, so the
+same state is reached by a peer tapping Stop Discovery and then Start Discovery. No crash is needed.
+
+**And it is not only a stale diagnostics row.** `AppContainer.routeTransitioning` on Android and
+`SessionRouteStatePort.isRouteTransitioning()` on iOS read the peer's last `AUDIO_STATE.route_state`
+to decide whether ARCHITECTURE §7.3's drift ladder runs at all. A dead lifetime's `transitioning`
+therefore suspends Phase 5 drift correction for as long as the new counter takes to climb.
+
+This is ADR-024 Amendment A6's class, not ADR-025's: **state that outlives an ownership boundary must
+not carry the previous owner's verdict into the successor.** ADR-025's gate cannot see it, because
+the frame is genuinely live — it carries the successor's authentication generation and is admitted,
+correctly. Provenance and revision lifetime are different questions.
+
+### 2. Why this needs the wire, and what was rejected
+
+The receiver cannot distinguish "reconnected to the same publisher" from "a new publisher" using
+anything it has. Both present the same `peer_id`, the same pinned SPKI, and a generation bump. Every
+existing candidate was considered and rejected on **semantics**, not convenience:
+
+| Candidate | Why it does not fit |
+|---|---|
+| `peer_id` | Durable across a process restart (`LocalPeerIdStore`). It does not move when the counter does. |
+| `session_id` | Minted per **handshake** (`freshSessionId()` in both handshake roles), so it moves on an ordinary reconnect — exactly the case §4.4.1 requires the counter to *survive*. It is also negotiated and shared, not per-sender. |
+| `conn_tiebreak` | Lives for the `ControlSessionManager` instance, and is **not** re-minted when a discovery session restarts — so the counter can restart under an unchanged tiebreak. ADR-015 also forbids reusing one random value for two jobs, which this would be. |
+| the receiver's `authenticationGeneration` | A fact about a *connection*. Resetting the floor on it would reset on every reconnect, which §4.4.1 forbids, and would leave the revision rule with no meaning across one. |
+| `voice_session_id` | Identifies a negotiation. Unrelated. |
+
+"Tolerate a revision that goes backwards when the generation changed" — the second option problem 47
+listed — was rejected for the same reason: it makes the floor reset on every reconnect in all but
+name, contradicts §4.4.1's stated purpose ("so a peer can always order two reports it receives"), and
+leaves the anti-resurrection property resting entirely on ADR-025 rather than on the rule that is
+supposed to provide it. A sound ownership model was preferred to a heuristic, per this repo's own
+standing rule that a reinterpreted field whose semantics do not fit is a silent protocol change.
+
+### 3. Decision — `revision_epoch`
+
+`AUDIO_STATE` carries **`revision_epoch`**: 32 lowercase hex characters, 16 CSPRNG bytes, the same
+shape and redaction as `conn_tiebreak` and `voice_session_id` and a **distinct type** from both
+(`AudioStateEpoch`). PROTOCOL §4.4.2 is the specification. The rule is one sentence:
+
+> **A `revision` floor belongs to exactly one `revision_epoch`.**
+
+Receiving: same epoch → §4.4.1's rule unchanged; an epoch never held → a new sender lifetime,
+accepted, and the epoch it replaces recorded as superseded; an already-superseded epoch → **dropped
+and counted**, so buying the restart case cannot resurrect a stale route. The superseded set is
+bounded at **8**, matching ADR-024 Amendment A6's ledger and for its reason — the values come from a
+peer. The bound's honest cost is stated rather than hidden: a straggler from a lifetime old enough to
+have been evicted is no longer refused *here*, and is still refused by ADR-025's generation gate,
+because a new sender lifetime can only begin after that sender has torn its control connection down.
+
+Sending: the epoch is minted by the **same statement** that restarts the counter
+(`resetForNewSession(epoch:)`, called only from `startDiscovery`) and by nothing else. The pure layer
+does not mint it — `AudioStateEpochGenerator` lives beside each platform's relay, because CLAUDE.md
+rule 9 keeps the CSPRNG out of the domain layer and because a supplied epoch is what makes the
+vectors deterministic.
+
+### 4. The outbound half — authorised to build is not authorised to send
+
+`publishAudioState` commits the revision synchronously and writes after a dispatch, so the write
+re-proves the epoch before it happens. This is ADR-024 Amendment A3/A5's rule applied outbound, and
+the check is deliberately on the **lifetime** rather than on the control session: a reconnect does
+not end a lifetime, and §4.4.1 requires the sender's current audio state to reach the peer on the new
+connection. Sending the same lifetime's payload under the successor's `session_id` and authenticated
+writer is therefore **correct and intended**, and is not what this guard refuses.
+
+**Honestly classified: not demonstrated reachable.** For a dead epoch to actually reach the wire, the
+dispatched send would have to remain unscheduled across a full teardown, a new discovery session, a
+TCP connect, a TLS 1.3 handshake and the trust gate. Before that point `send` finds no authenticated
+writer and returns false harmlessly. It is fixed anyway, because putting the epoch on the wire is
+what makes that window's consequence qualitatively worse than it was, and because this exact shape is
+what six of the last eight closure audits found.
+
+### 5. What does **not** move
+
+ADR-025 is untouched and both rules now run: `AudioStateRelay.deliver` still refuses a frame whose
+control session has been replaced, and the inbox refuses a frame whose *sender lifetime* has been
+replaced. `RetiredSessionProvenanceTest[s]`'s `AUDIO_STATE` row still passes unchanged. The
+transmission gate still never touches the capture device, `IntercomTransmission`'s action vocabulary
+still has no capture case, `intercom_mode` is still §3's superset, and `AUDIO_STATE` is still absent
+from the pre-authentication allowlist. `protocol/vectors/intercom/` regenerates byte-identically.
+
+### 6. Compatibility
+
+`revision_epoch` is **required**, not optional: an `AUDIO_STATE` without it is `MISSING_FIELD` and the
+frame is dropped while the connection survives (§4.4.1's malformed rule). There is no deployed peer
+to be compatible with — V1 is two phones, both built from this repository, with no store release
+(CLAUDE.md "What this is") — so a build predating this change and one following it cannot exchange
+`AUDIO_STATE`, and both would drop the other's as malformed rather than misread it. That failure mode
+is safe by construction and is the reason the field is required rather than optional-with-a-default: a
+default would be a shared epoch, which is exactly the state the amendment exists to eliminate.
+
+### 7. Verification
+
+- `protocol/vectors/audio-state/` — 98 rows (was 74), both platforms, from the generator.
+  New: the `revision_epoch` format rules, the publisher invariant that the epoch moves **iff** the
+  counter restarts, and the receiving table including the 8-epoch bound's evicted lifetime.
+- `AudioStateSenderLifetimeTest[s]` — nine mirrored rows each, over two real `ControlSessionManager`s
+  on real TLS with the real publisher, relays, read loop, ADR-025 gate, codec and inbox.
+  **Verify-failing**: reverting only `AudioStateInbox.accept`'s epoch rule fails 5 of 9 on each
+  platform; the 4 that still pass are the positive controls, which is the point.
+- `SessionCoordinatorAudioStateLifetimeTest` — the coordinator's own decisions, through the real FSM.
+  Android only: the iOS coordinator is in the Xcode app target, which has no test bundle
+  (`docs/STATUS.md` §4 problem 48).
+- Stress: 5 consecutive `--rerun-tasks` runs on Android, 5 on iOS. No failures.
+
+**No device gate is closed by this.** TEST_PLAN A-01/A-02/A-04/A-09/A-10 and V-01…V-11 remain open,
+and nothing here has run on a phone or moved audio.
