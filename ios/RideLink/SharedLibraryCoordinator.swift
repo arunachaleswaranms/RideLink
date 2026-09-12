@@ -8,14 +8,13 @@ import RideLinkPlatform
 /// the relay actor and must not block — the same hop-onto-`@MainActor` shape `SessionCoordinator`'s
 /// own `PeerAudioStateSink` already uses.
 private struct ManifestSinkAdapter: ManifestSink {
-    let onMessage: @Sendable (ManifestMessage) -> Void
-    func submit(_ message: ManifestMessage) { onMessage(message) }
+    let onMessage: @Sendable (ManifestMessage, Int64) -> Void
+    func submit(_ message: ManifestMessage, generation: Int64) { onMessage(message, generation) }
 }
 
 private struct TransferSinkAdapter: TransferSink {
     let onMessage: @Sendable (TransferMessage, Int64) -> Void
-    let epoch: @Sendable () -> Int64
-    func submit(_ message: TransferMessage) { onMessage(message, epoch()) }
+    func submit(_ message: TransferMessage, generation: Int64) { onMessage(message, generation) }
 }
 
 /// What the UI shows for one `ContentHash`'s transfer, if any is or ever was in flight this
@@ -68,10 +67,12 @@ private struct PendingOffer {
 /// through `TransferReducer` (brief §16): a superseded transfer operation — cancelled by the user,
 /// invalidated by a session boundary, or replaced by a fresher one — can never again mutate
 /// `downloadStates`/`activeDownload`, no matter how late its own `Task`'s cleanup eventually runs.
-/// Inbound `MANIFEST_*` handling gets the equivalent guard from `sessionEpoch`, a small lock-backed
-/// counter captured at message-dispatch time and re-checked at apply time (Finding S) — a plain
-/// generation read cannot be used there directly since the dispatch closure runs synchronously,
-/// off `@MainActor`, and cannot `await` across into `ControlSessionManager`'s own actor.
+/// Inbound `MANIFEST_*` handling gets the equivalent guard from the authentication generation the
+/// frame was *read* under, handed in by the relay and re-checked against
+/// `ControlSessionManager.liveAuthenticatedGeneration()` at apply time (Finding S, corrected by
+/// ADR-025 §1 — it used to read a live `sessionEpoch` value at dispatch time, which ADR-024
+/// Amendment A7 disproved). The live read is `nonisolated` and synchronous, so the dispatch closure
+/// still never `await`s across into `ControlSessionManager`'s actor.
 ///
 /// **Provider operation ownership (Phase 4 closure-audit follow-up, ADR-023 Amendment A2).**
 /// [bulkGate] replaces the plain `activeServeTransferId` var this pass found insufficient: a
@@ -189,11 +190,12 @@ public final class SharedLibraryCoordinator {
 
     private let transferFence = OperationFence()
 
-    /// Finding S: bumped on every session boundary so a manifest message dispatched under an old
-    /// session — read off the wire and handed to `ManifestSinkAdapter` a moment before the boundary
-    /// — is provably distinguishable from one belonging to whatever session comes after it. See the
-    /// `SessionEpoch` type below for why this cannot simply be `ControlSessionManager.currentAuthGeneration`
-    /// read directly at dispatch time.
+    /// Bumped on every session boundary. Since ADR-025 §1 this is **no longer** the inbound-dispatch
+    /// fence — that is now the frame's own authorising generation, compared against
+    /// `ControlSessionManager.liveAuthenticatedGeneration()`. What remains is the provider-side
+    /// operation fence ADR-023 Amendments A3/A5 built on it: `serveTransferRequest` captures it once
+    /// and `stillAuthorised` re-proves it at every suspension point, which is a different question
+    /// from "which session authorised this frame" and is deliberately unchanged.
     private let sessionEpoch = SessionEpoch()
 
     private static let negotiationTimeoutNs: UInt64 = 10_000_000_000
@@ -225,27 +227,22 @@ public final class SharedLibraryCoordinator {
         self.activeCacheHash = activeCacheHash
 
         let manager = controlSessionManager
-        let epoch = sessionEpoch
         Task { [weak self] in
+            // ADR-025 §1: the generation is the **frame's own**, handed in by the relay from the
+            // `ReadFrameBinding` its read produced — never a live value read here. These two
+            // closures run synchronously from the relay actor, downstream of
+            // `ControlSessionManager.handleFrame`, which ADR-024 Amendment A7 proved can
+            // legitimately be entered with a retired binding; the `epoch.current()` that used to be
+            // here therefore returned the **successor's** number and made `handleManifestMessage`'s
+            // re-check pass spuriously (STATUS §4 problem 44).
             let manifestRelay = await manager.manifestRelay()
-            await manifestRelay.setSink(ManifestSinkAdapter { message in
-                // Finding S: `ManifestSink.submit` is a synchronous, non-async protocol requirement
-                // (it must not block the relay actor's read loop), so it cannot `await` across into
-                // `ControlSessionManager`'s own actor to read a generation directly. `epoch.current()`
-                // is the same lock-protected-counter pattern `ReceivedCounter` already uses elsewhere
-                // in this file for exactly this "safely read from outside MainActor" need — captured
-                // here, at message-dispatch time, and re-checked once the scheduled `@MainActor` Task
-                // below actually runs.
-                let capturedEpoch = epoch.current()
-                Task { @MainActor in self?.handleManifestMessage(message, epoch: capturedEpoch) }
+            await manifestRelay.setSink(ManifestSinkAdapter { message, generation in
+                Task { @MainActor in self?.handleManifestMessage(message, authorisingGeneration: generation) }
             })
             let transferRelay = await manager.transferRelay()
-            await transferRelay.setSink(TransferSinkAdapter(
-                onMessage: { message, capturedEpoch in
-                    Task { @MainActor in self?.handleTransferMessage(message, epoch: capturedEpoch) }
-                },
-                epoch: { epoch.current() }
-            ))
+            await transferRelay.setSink(TransferSinkAdapter { message, generation in
+                Task { @MainActor in self?.handleTransferMessage(message, authorisingGeneration: generation) }
+            })
         }
         // Brief §12: nothing partial ever survives a process restart as a candidate to resume.
         storage.sweepIncomplete()
@@ -304,8 +301,9 @@ public final class SharedLibraryCoordinator {
     /// must invalidate. `bulkTransport.close()` (ADR-023 §1) tears down the listener *and* clears
     /// every outstanding token; `transferFence` supersedes so a stale transfer completion dispatched
     /// just before this boundary can't mutate whatever comes after it (brief §17), and `sessionEpoch`
-    /// bumping gives manifest handling the equivalent protection (brief §23); the active download's
-    /// Task is cancelled, its `.part` removed and its state marked terminal rather than left dangling.
+    /// bumping invalidates every provider operation this session authorised (brief §23; since
+    /// ADR-025 §1 inbound *dispatch* is fenced by the frame's own generation instead); the active
+    /// download's Task is cancelled, its `.part` removed and its state marked terminal rather than left dangling.
     ///
     /// **ADR-023 Amendment A3 — `await`ed, not fire-and-forget.** This used to schedule
     /// `Task { await transport.close() }` and immediately, synchronously, invalidate `bulkGate` —
@@ -425,14 +423,20 @@ public final class SharedLibraryCoordinator {
 
     // MARK: - manifest: both roles, since both peers are symmetric
 
-    /// Closure-audit Finding S: `epoch` is `sessionEpoch`'s value as it was the moment this message
-    /// was read off the wire, captured in the `sink` closure at `init`. If a session boundary has
-    /// since bumped `sessionEpoch` by the time this `Task` actually runs, the message is a stale
-    /// artefact of a torn-down session and is dropped before it can touch
-    /// `syncState`/`remoteEntries` — the concrete mechanism behind "a late PAGE/END from session A
-    /// must never mutate session B's catalogue."
-    private func handleManifestMessage(_ message: ManifestMessage, epoch: Int64) {
-        guard epoch == sessionEpoch.current() else { return }
+    /// Closure-audit Finding S, corrected by ADR-025 §1: `authorisingGeneration` is the
+    /// authentication generation that owned **the connection this message's frame was read from, at
+    /// the moment of the read** — handed to the `sink` closure by `ManifestRelay`, never looked up
+    /// there. If a different session is authenticated by the time this `Task` actually runs — or
+    /// none is — the message is a stale artefact of a torn-down session and is dropped before it can
+    /// touch `syncState`/`remoteEntries`. That is the concrete mechanism behind "a late PAGE/END
+    /// from session A must never mutate session B's catalogue", and it is the *comparison* against
+    /// live state that is correct here; deriving the value itself from live state was the defect.
+    ///
+    /// `liveAuthenticatedGeneration()` is `nonisolated` and synchronous, so this stays a
+    /// non-`async` `@MainActor` function: the guard and everything after it run in one
+    /// `@MainActor` step, with no suspension a boundary could land in between them.
+    private func handleManifestMessage(_ message: ManifestMessage, authorisingGeneration: Int64) {
+        guard controlSessionManager.liveAuthenticatedGeneration() == authorisingGeneration else { return }
         switch message {
         case .request(let sinceRevision, let maxPageBytes):
             serveManifestRequest(sinceRevision: sinceRevision, maxPageBytes: maxPageBytes)
@@ -631,18 +635,26 @@ public final class SharedLibraryCoordinator {
 
     // MARK: - transfer: provider side
 
-    /// Closure-audit Finding B: `epoch` is `sessionEpoch`'s value as it was the moment this message
-    /// was read off the wire, captured in the `sink` closure at `init` — exactly the guard
-    /// `handleManifestMessage` already had. Every `TRANSFER_REQUEST`/`TRANSFER_OFFER`/
+    /// Closure-audit Finding B, corrected by ADR-025 §1: `authorisingGeneration` is the
+    /// authentication generation that owned **the connection this message's frame was read from, at
+    /// the moment of the read**, handed in by `TransferRelay` — exactly the guard
+    /// `handleManifestMessage` has, and now with the value that guard always claimed. Every `TRANSFER_REQUEST`/`TRANSFER_OFFER`/
     /// `TRANSFER_PROGRESS`/`TRANSFER_RESULT`/`TRANSFER_CANCEL` dispatched under a session that has
     /// since been superseded is dropped here, before it can touch `bulkGate`,
     /// `pendingOfferTransferId`, or any provider/requester state — a stale `REQUEST` cannot be
     /// served under the new peer's SPKI/generation, a stale `OFFER` cannot satisfy a new session's
     /// pending request, and a stale `CANCEL` cannot cancel a new session's transfer.
-    private func handleTransferMessage(_ message: TransferMessage, epoch: Int64) {
-        guard epoch == sessionEpoch.current() else { return }
+    private func handleTransferMessage(_ message: TransferMessage, authorisingGeneration: Int64) {
+        guard controlSessionManager.liveAuthenticatedGeneration() == authorisingGeneration else { return }
         switch message {
         case .request(let contentHash, let transferId):
+            // `sessionEpoch` is read **here**, on `@MainActor`, after the provenance guard above has
+            // proved this request belongs to the live session — rather than in the sink closure, as
+            // it was before ADR-025. The provider-side re-authorisation chain
+            // (`ProviderSessionContext`/`stillAuthorised`, ADR-023 Amendments A3/A5) is otherwise
+            // untouched: it asks a different question — "is the operation I already started still
+            // authorised" — and `sessionEpoch` is still the fence that answers it.
+            let epoch = sessionEpoch.current()
             Task { await serveTransferRequest(contentHash: contentHash, transferId: transferId, authorisingEpoch: epoch) }
         case .offer(let transferId, let sizeBytes, _, _, let bulkPort, let bulkToken):
             if pendingOfferTransferId == transferId {
@@ -690,8 +702,9 @@ public final class SharedLibraryCoordinator {
         Task { await transport.cancelActive(transferId: transferId) }
     }
 
-    /// ADR-023 Amendment A3: `authorisingEpoch` is the same value [handleTransferMessage] already
-    /// checked against [sessionEpoch] at dispatch time — not re-read here — because this whole
+    /// ADR-023 Amendment A3: `authorisingEpoch` is `sessionEpoch`'s value as [handleTransferMessage]
+    /// read it, on `@MainActor`, once that request had been proved to belong to the live session
+    /// (ADR-025 §1) — not re-read here — because this whole
     /// function is riddled with suspension points (every `await`, including the actor hops just to
     /// read `currentPeerSpki`/`currentAuthGeneration`, plus `bulkTransport.ensureListening` and
     /// `transferRelay().send`) a session boundary can land inside. Amendment A2's dispatch-entry
@@ -833,11 +846,10 @@ public final class SharedLibraryCoordinator {
     }
 }
 
-/// Closure-audit Finding S: a tiny thread-safe counter, mirroring `ReceivedCounter` below, so the
-/// non-async `ManifestSinkAdapter` closure (called synchronously from `ManifestRelay`'s own actor,
-/// which cannot `await` back into `ControlSessionManager`) can read "which session is this message
-/// being dispatched under" without an actor hop, then have the scheduled `@MainActor` `Task`
-/// re-check it once it actually runs.
+/// A tiny thread-safe counter, mirroring `ReceivedCounter` below. Since ADR-025 §1 it is read only
+/// on `@MainActor`, and only by the provider-side operation fence (`serveTransferRequest` /
+/// `stillAuthorised`, ADR-023 Amendments A3/A5); the inbound-dispatch use it was introduced for is
+/// gone, because a frame now carries its own authorising generation.
 private final class SessionEpoch: @unchecked Sendable {
     private let lock = NSLock()
     private var value: Int64 = 0

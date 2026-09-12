@@ -47,6 +47,13 @@ class AudioStateRelay internal constructor(
     private val nextSeq: () -> Long,
     private val activeSessionId: () -> SessionId,
     private val authenticatedWriter: () -> AuthenticatedFrameWriter?,
+    /**
+     * ADR-025's liveness half: the generation owning the connection that is an authenticated session
+     * **right now**, or null when none is. A frame's own authorising generation is *compared*
+     * against it and never replaced by it — reading a live value to label a frame is ADR-024
+     * Amendment A7's defect.
+     */
+    private val liveGeneration: () -> Long?,
 ) {
     @Volatile
     var sink: AudioStateSink? = null
@@ -55,6 +62,16 @@ class AudioStateRelay internal constructor(
 
     @Volatile
     var droppedPreAuthentication: Int = 0
+        private set
+
+    /**
+     * How many frames were dropped because the control session that authorised their read had
+     * already been replaced (ADR-025 §2). Distinct from [droppedPreAuthentication]: that one counts
+     * a peer that was never authenticated, this one counts a peer that *was*, on a connection that
+     * is gone.
+     */
+    @Volatile
+    var droppedRetiredGeneration: Int = 0
         private set
 
     val rejectionCounts: Map<AudioStateRejection, Int> get() = rejections.toMap()
@@ -81,8 +98,22 @@ class AudioStateRelay internal constructor(
      * malformed `PING` (§6) or `VOICE_*` (§7.4).
      *
      * Called only from the read loop's authenticated dispatch.
+     *
+     * **ADR-025 §2.** [generation] is the frame's own authority — the generation that owned the
+     * connection it was read from, at the moment of the read. A frame whose session has since been
+     * replaced is refused, because [AudioStateInboxHolder] deliberately outlives a control-session
+     * boundary (it is reset per *discovery* session, PROTOCOL §4.4's "per sender per session"), so a
+     * stale message whose `revision` happens to exceed the held one would otherwise be published as
+     * the **successor** session's peer audio state.
      */
-    fun deliver(payload: JsonObject) {
+    fun deliver(
+        payload: JsonObject,
+        generation: Long,
+    ) {
+        if (generation != liveGeneration()) {
+            droppedRetiredGeneration += 1
+            return
+        }
         when (val result = AudioStateCodec.parse(payload)) {
             is AudioStateCodec.Result.Parsed -> sink?.submit(result.message)
             is AudioStateCodec.Result.Rejected -> rejections.merge(result.reason, 1) { a, b -> a + b }
@@ -102,6 +133,7 @@ class AudioStateRelay internal constructor(
         sink = null
         rejections.clear()
         droppedPreAuthentication = 0
+        droppedRetiredGeneration = 0
     }
 }
 

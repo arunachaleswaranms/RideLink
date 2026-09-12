@@ -72,11 +72,12 @@ data class DownloadState(
  * through [com.ridelink.core.transfer.TransferReducer] (brief §16): a superseded transfer
  * operation — cancelled by the user, invalidated by a session boundary, or replaced by a fresher
  * one — can never again mutate [downloadStates]/[activeDownload], no matter how late its own
- * coroutine's cleanup eventually runs. Inbound `MANIFEST_*` handling gets the equivalent guard for
- * free from [ControlSessionManager.currentAuthGeneration] itself, captured at message-dispatch
- * time and re-checked at apply time (Finding S). [bulkTransport] is closed on every session
- * boundary (Finding B) and the bulk-token generation supplied to it is re-read live at consumption
- * time, never captured at issuance (Finding A).
+ * coroutine's cleanup eventually runs. Inbound `MANIFEST_*` handling gets the equivalent guard from
+ * the authentication generation the frame was *read* under, handed in by the relay and re-checked
+ * against [TransferSessionPort.liveAuthenticatedGeneration] at apply time (Finding S, corrected by
+ * ADR-025 §1 — it used to read a live value at dispatch time, which A7 disproved). [bulkTransport]
+ * is closed on every session boundary (Finding B) and the bulk-token generation supplied to it is
+ * re-read live at consumption time, never captured at issuance (Finding A).
  *
  * **Provider operation ownership (Phase 4 closure-audit follow-up, ADR-023 Amendment A2).**
  * [bulkGate] replaces the plain `activeServeTransferId` var this pass found insufficient: a second
@@ -88,8 +89,8 @@ data class DownloadState(
  * `fetch` across both roles onto one real socket at a time (Finding A's cross-role counterpart,
  * brief §17/§18).
  *
- * **Inbound `TRANSFER_*` session binding (Finding B).** [handleTransferMessage] is now guarded by
- * the same live-generation check [handleManifestMessage] already had — every `TRANSFER_REQUEST`/
+ * **Inbound `TRANSFER_*` session binding (Finding B).** [handleTransferMessage] is guarded by
+ * the same read-generation check [handleManifestMessage] has — every `TRANSFER_REQUEST`/
  * `TRANSFER_OFFER`/`TRANSFER_PROGRESS`/`TRANSFER_RESULT`/`TRANSFER_CANCEL` dispatched under a
  * session that has since been superseded is dropped before it can touch [bulkGate],
  * [pendingOfferTransferId], or any provider state.
@@ -215,18 +216,16 @@ class SharedLibraryCoordinator(
     private val transferFence = OperationFence()
 
     init {
+        // ADR-025 §1: the generation is the **frame's own**, handed in by the relay from the
+        // `ReadFrameBinding` its read produced — never `currentAuthGeneration` read here. These two
+        // lambdas run synchronously inside `ControlSessionManager.handleFrame`, which ADR-024
+        // Amendment A7 proved can legitimately be entered with a retired binding, so the live read
+        // that used to be here returned the **successor's** number and made
+        // `handleManifestMessage`'s re-check pass spuriously (STATUS §4 problem 44).
         controlSessionManager.manifest.sink =
-            ManifestSink { message ->
-                val generation = controlSessionManager.currentAuthGeneration
-                scope.launch { handleManifestMessage(message, generation) }
-            }
+            ManifestSink { message, generation -> scope.launch { handleManifestMessage(message, generation) } }
         controlSessionManager.transfer.sink =
-            TransferSink { message ->
-                // Finding B: captured here, at dispatch time, exactly like ManifestSink above —
-                // re-checked once the launched coroutine actually runs (handleTransferMessage).
-                val generation = controlSessionManager.currentAuthGeneration
-                scope.launch { handleTransferMessage(message, generation) }
-            }
+            TransferSink { message, generation -> scope.launch { handleTransferMessage(message, generation) } }
         scope.launch {
             controlSessionManager.events.collect { event ->
                 when (event) {
@@ -397,18 +396,25 @@ class SharedLibraryCoordinator(
     // --- manifest: both roles, since both peers are symmetric --------------------------------------
 
     /**
-     * Closure-audit Finding S: [generation] is [ControlSessionManager.currentAuthGeneration] as it
-     * was the moment this message was read off the wire, captured in the `sink` lambda at [init].
-     * If the session has since moved on to a new authenticated generation by the time this
-     * coroutine actually runs, the message is a stale artefact of a torn-down session and is
-     * dropped before it can touch [syncMachine]/[remoteEntries] — the concrete mechanism behind
-     * "a late PAGE/END from session A must never mutate session B's catalogue."
+     * Closure-audit Finding S, corrected by ADR-025 §1: [generation] is the authentication
+     * generation that owned **the connection this message's frame was read from, at the moment of
+     * the read** — handed to the `sink` lambda at [init] by [com.ridelink.network.manifest.ManifestRelay],
+     * never looked up there. If a different session is authenticated by the time this coroutine
+     * actually runs — or none is — the message is a stale artefact of a torn-down session and is
+     * dropped before it can touch [syncMachine]/[remoteEntries]. That is the concrete mechanism
+     * behind "a late PAGE/END from session A must never mutate session B's catalogue", and it is
+     * the *comparison* against live state that is correct here; deriving the value itself from live
+     * state was the defect (ADR-024 Amendment A7's class).
+     *
+     * [TransferSessionPort.liveAuthenticatedGeneration] rather than `currentAuthGeneration`: the
+     * latter keeps reporting the last number it assigned after the link drops, so a Session A frame
+     * dispatched between the link loss and the reconnect would still have matched it.
      */
     private suspend fun handleManifestMessage(
         message: ManifestMessage,
         generation: Long,
     ) {
-        if (generation != controlSessionManager.currentAuthGeneration) return
+        if (generation != controlSessionManager.liveAuthenticatedGeneration) return
         when (message) {
             is ManifestMessage.Request -> serveManifestRequest(message)
             is ManifestMessage.Begin -> {
@@ -667,9 +673,10 @@ class SharedLibraryCoordinator(
     // --- transfer: provider side ----------------------------------------------------------------
 
     /**
-     * Closure-audit Finding B: [generation] is [ControlSessionManager.currentAuthGeneration] as it
-     * was the moment this message was read off the wire, captured in the `sink` lambda at [init] —
-     * exactly the guard [handleManifestMessage] already had. Every `TRANSFER_REQUEST`/
+     * Closure-audit Finding B, corrected by ADR-025 §1: [generation] is the authentication
+     * generation that owned **the connection this message's frame was read from, at the moment of
+     * the read**, handed in by [com.ridelink.network.transfer.TransferRelay] — exactly the guard
+     * [handleManifestMessage] already had, and now with the value that guard always claimed. Every `TRANSFER_REQUEST`/
      * `TRANSFER_OFFER`/`TRANSFER_PROGRESS`/`TRANSFER_RESULT`/`TRANSFER_CANCEL` dispatched under a
      * session that has since been superseded is dropped here, before it can touch [bulkGate],
      * [pendingOfferTransferId], or any provider/requester state — a stale `REQUEST` cannot be
@@ -680,7 +687,7 @@ class SharedLibraryCoordinator(
         message: TransferMessage,
         generation: Long,
     ) {
-        if (generation != controlSessionManager.currentAuthGeneration) return
+        if (generation != controlSessionManager.liveAuthenticatedGeneration) return
         when (message) {
             is TransferMessage.Request -> serveTransferRequest(message, generation)
             is TransferMessage.Offer -> onOfferReceived(message)

@@ -257,6 +257,41 @@ class ControlSessionManager(
     /** Whether the trust gate has passed on [activeSocket]. Derived, so it cannot disagree. */
     private val authenticated: Boolean get() = authenticatedConnection != null
 
+    /**
+     * The generation that owns the connection which is an authenticated session **right now**, or
+     * null when none is (ADR-025).
+     *
+     * This is the *liveness* half of the provenance model, and it is deliberately a different
+     * question from [ReadFrameBinding.generation]: that one says which session authorised a given
+     * frame's read and never changes; this one says which session is current and changes at every
+     * boundary. Comparing the two is what lets a consumer refuse a retired session's work — reading
+     * *this* one to **label** a frame is ADR-024 Amendment A7's defect, and the reason the two have
+     * deliberately different names.
+     *
+     * Derived from the one [authenticatedConnection] record rather than kept beside it, for A7's
+     * reason: two fields would be two answers to one question.
+     *
+     * It differs from [currentAuthGeneration] in exactly one way, and that difference is the point:
+     * this goes **null** when the link drops, whereas [currentAuthGeneration] keeps reporting the
+     * last number it assigned. A frame authorised by a session that has ended has no live owner, and
+     * saying so is what stops it being applied to whatever comes next.
+     */
+    val liveAuthenticatedGeneration: Long? get() = authenticatedConnection?.generation
+
+    /**
+     * How many inbound frames were refused because the connection they were **read from** was no
+     * longer the surviving connection (ADR-025 §4).
+     *
+     * Counted rather than merely dropped, for the reason [ControlRelays.countPreAuthenticationDrop]
+     * gives: "it never happened" and "it happened and was refused" are different facts. This one
+     * covers only the pre-authentication family (PROTOCOL §1/§4.5/§4.6), because that family is
+     * exactly the set of types that bypasses the generation gate and so needs its own binding to the
+     * connection.
+     */
+    @Volatile
+    var retiredConnectionFrames: Int = 0
+        private set
+
     @Volatile
     private var authenticationGeneration: Long = 0
 
@@ -307,6 +342,7 @@ class ControlSessionManager(
                 }
             },
             currentAuthGeneration = { authenticationGeneration },
+            liveGeneration = { liveAuthenticatedGeneration },
         )
 
     val voice: VoiceSignalRelay get() = relays.voice
@@ -841,6 +877,23 @@ class ControlSessionManager(
             // refused" are different facts on a diagnostics screen. The same holds for every other
             // family [ControlRelays] owns, which is why the counting lives there with them.
             relays.countPreAuthenticationDrop(frame.envelope.type)
+            return
+        }
+        // ADR-025 §4: the pre-authentication family is the one set of types allowed *past* the gate
+        // above without a generation, so nothing else binds it to a connection. Bind it here. A
+        // `PONG` read from a connection whose session has ended would otherwise refresh the
+        // **successor's** keepalive liveness and push its round trip into the successor's fresh RTT
+        // window; a stale `PAIR_CONFIRM` would satisfy the remote half of PROTOCOL §4.5's two-human
+        // gate for a *different* peer's exchange, which `PairingExchange.onPairConfirm` cross-checks
+        // no SPKI against; a stale fatal `ERROR` would fail the successor's pairing outright.
+        //
+        // The question is ADR-024 Amendment A7's, in the only form available to a family that
+        // carries no generation: **is this frame's own connection still the surviving connection.**
+        // Before the trust gate and throughout pairing that connection *is* the active one, so
+        // `PING`/`PONG` and the pairing exchange keep working exactly as PROTOCOL §1/§4.5 requires
+        // on the connection they belong to.
+        if (frame.envelope.type in PRE_AUTHENTICATION_FRAME_TYPES && socket !== activeSocket) {
+            retiredConnectionFrames += 1
             return
         }
         when (frame.envelope.type) {

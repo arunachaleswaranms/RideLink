@@ -49,18 +49,24 @@ class ControlRelays internal constructor(
     authenticatedWriter: () -> AuthenticatedFrameWriter?,
     /** ADR-023 §3's live authentication generation. Only [playback] needs it — see its doc. */
     currentAuthGeneration: () -> Long,
+    /**
+     * ADR-025's liveness half: the generation owning the connection that is an authenticated
+     * session **right now**, or null when none is. Read at the moment of delivery and only ever
+     * *compared* against a frame's own [ReadFrameBinding.generation] — never used to label one.
+     */
+    liveGeneration: () -> Long?,
 ) {
     val voice: VoiceSignalRelay =
-        VoiceSignalRelay(localPeerId, monotonicNowUs, nextSeq, activeSessionId, authenticatedWriter)
+        VoiceSignalRelay(localPeerId, monotonicNowUs, nextSeq, activeSessionId, authenticatedWriter, liveGeneration)
 
     val audioState: AudioStateRelay =
-        AudioStateRelay(localPeerId, monotonicNowUs, nextSeq, activeSessionId, authenticatedWriter)
+        AudioStateRelay(localPeerId, monotonicNowUs, nextSeq, activeSessionId, authenticatedWriter, liveGeneration)
 
     val manifest: ManifestRelay =
-        ManifestRelay(localPeerId, monotonicNowUs, nextSeq, activeSessionId, authenticatedWriter)
+        ManifestRelay(localPeerId, monotonicNowUs, nextSeq, activeSessionId, authenticatedWriter, liveGeneration)
 
     val transfer: TransferRelay =
-        TransferRelay(localPeerId, monotonicNowUs, nextSeq, activeSessionId, authenticatedWriter)
+        TransferRelay(localPeerId, monotonicNowUs, nextSeq, activeSessionId, authenticatedWriter, liveGeneration)
 
     val playback: PlaybackRelay =
         PlaybackRelay(localPeerId, monotonicNowUs, nextSeq, activeSessionId, authenticatedWriter, currentAuthGeneration)
@@ -89,8 +95,10 @@ class ControlRelays internal constructor(
      * Hands an **authenticated** frame to whichever relay owns its type. Called only from the read
      * loop's post-trust-gate dispatch.
      *
-     * @param generation the authentication generation live when this frame was read off the wire
-     *   (ADR-023 §3), passed through to the Phase 5 sinks rather than looked up by them.
+     * @param generation the authentication generation that owned **the connection this frame was
+     *   read from, at the moment of the read** (ADR-024 Amendment A7's `ReadFrameBinding`). Every
+     *   family below receives it rather than looking one up: a family that looks one up reads
+     *   whatever is live when its own work happens to run, which is the whole of ADR-025.
      * @return false if no family owns [type], which PROTOCOL §2 rule 2 makes a non-fatal "ignore
      *   and log" rather than an error — that rule is what lets a newer peer introduce a message
      *   type against an older build.
@@ -101,10 +109,16 @@ class ControlRelays internal constructor(
         generation: Long,
     ): Boolean {
         when (type) {
-            in VoiceMessageTypes.ALL -> voice.deliver(type, payload)
-            AudioStateMessageTypes.AUDIO_STATE -> audioState.deliver(payload)
-            in ManifestMessageTypes.ALL -> manifest.deliver(type, payload)
-            in TransferMessageTypes.ALL -> transfer.deliver(type, payload)
+            in VoiceMessageTypes.ALL -> voice.deliver(type, payload, generation)
+            AudioStateMessageTypes.AUDIO_STATE -> audioState.deliver(payload, generation)
+            in ManifestMessageTypes.ALL -> manifest.deliver(type, payload, generation)
+            in TransferMessageTypes.ALL -> transfer.deliver(type, payload, generation)
+            // Phase 5 is deliberately **not** gated on liveness here, unlike the four families
+            // above (ADR-025 §3). A retired generation's playback/queue frame has to reach
+            // `Phase5FrameQueue` so that ADR-024 Amendment A6's per-generation loss ledger can
+            // attribute it to the session that caused it and surface it as
+            // `inboundRetiredLossCount`; refusing it at this seam would silently delete exactly the
+            // accounting A6 exists to produce. The generation it carries is what keeps it harmless.
             in PlaybackMessageTypes.ALL -> playback.deliverPlayback(type, payload, generation)
             in QueueMessageTypes.ALL -> playback.deliverQueue(type, payload, generation)
             else -> return false

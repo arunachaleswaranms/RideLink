@@ -65,3 +65,33 @@ struct ReadFrameBinding: Sendable {
         return ReadFrameBinding(connection: connection, sessionId: sessionId, generation: generation)
     }
 }
+
+/// The one `AuthenticatedConnection` record, in a lock-backed box so that a **synchronous,
+/// non-isolated** reader can ask which generation currently owns the connection (ADR-025 §1).
+///
+/// `ControlSessionManager` is an `actor`, so its own state can only be read with an `await` — and an
+/// `await` inserted into a synchronous relay callback purely to query live state is the very class
+/// of timing bug ADR-025 removes. This is the same lock-backed-counter pattern
+/// `SharedLibraryCoordinator` already uses for `ReceivedCounter`, applied to the record A7
+/// introduced.
+///
+/// It is the record's **only** storage, not a mirror of it: `ControlSessionManager`'s
+/// `authenticatedConnection` is a computed property over this box, so there is one source of truth
+/// and no ordering in which two fields could disagree — A7's reason for deriving `authenticated`
+/// from the record rather than keeping a boolean beside it.
+final class AuthenticatedConnectionBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value: AuthenticatedConnection?
+
+    func current() -> AuthenticatedConnection? {
+        lock.lock()
+        defer { lock.unlock() }
+        return value
+    }
+
+    func set(_ newValue: AuthenticatedConnection?) {
+        lock.lock()
+        defer { lock.unlock() }
+        value = newValue
+    }
+}

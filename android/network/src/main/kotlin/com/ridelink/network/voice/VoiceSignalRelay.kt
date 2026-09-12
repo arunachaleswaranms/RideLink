@@ -53,6 +53,13 @@ class VoiceSignalRelay internal constructor(
      * must never hold one across a teardown.
      */
     private val authenticatedWriter: () -> AuthenticatedFrameWriter?,
+    /**
+     * ADR-025's liveness half: the generation owning the connection that is an authenticated session
+     * **right now**, or null when none is. A frame's own authorising generation is *compared*
+     * against it and never replaced by it — reading a live value to label a frame is ADR-024
+     * Amendment A7's defect.
+     */
+    private val liveGeneration: () -> Long?,
 ) : VoiceSignalTransport {
     @Volatile
     var sink: VoiceSignalSink? = null
@@ -61,6 +68,16 @@ class VoiceSignalRelay internal constructor(
 
     @Volatile
     var droppedPreAuthentication: Int = 0
+        private set
+
+    /**
+     * How many `VOICE_*` frames were dropped because the control session that authorised their read
+     * had already been replaced (ADR-025 §2). Distinct from [droppedPreAuthentication]: that one
+     * counts a peer that was never authenticated, this one counts a peer that *was*, on a connection
+     * that is gone.
+     */
+    @Volatile
+    var droppedRetiredGeneration: Int = 0
         private set
 
     val rejectionCounts: Map<VoiceSignalRejection, Int> get() = rejections.toMap()
@@ -88,11 +105,30 @@ class VoiceSignalRelay internal constructor(
      * either.
      *
      * Called only from the read loop's authenticated dispatch.
+     *
+     * **ADR-025 §2.** [generation] is the frame's own authority — the generation that owned the
+     * connection it was read from, at the moment of the read. A frame whose session has since been
+     * replaced is refused here, before it can become a `VoiceInput`, because `VoiceController` is
+     * deliberately **retained across a control reconnect** (the capture device stays open for the
+     * ride segment, ARCHITECTURE §6.3/§6.4) and `VoiceNegotiation`'s own `voice_session_id` guards
+     * prove voice-session ownership, not control-session ownership. Concretely: a stale
+     * `VOICE_STATE { state: "closed" }` carrying no `voice_session_id` is not a generation mismatch
+     * to that table, so it would tear down the *successor* session's live media; and a stale
+     * `VOICE_OFFER` arriving after `ControlLinkLost` has reset the table to `IDLE` would start a
+     * negotiation on the successor's connection.
+     *
+     * This is a refusal rather than a relabelling on purpose: there is no ledger here that a retired
+     * generation's frame has to reach, unlike Phase 5's (ADR-024 Amendment A6).
      */
     fun deliver(
         type: String,
         payload: JsonObject,
+        generation: Long,
     ) {
+        if (generation != liveGeneration()) {
+            droppedRetiredGeneration += 1
+            return
+        }
         when (val result = VoiceSignalCodec.parse(type, payload)) {
             is VoiceSignalCodec.Result.Parsed -> sink?.submit(result.signal)
             is VoiceSignalCodec.Result.Rejected -> rejections.merge(result.reason, 1) { a, b -> a + b }
@@ -113,5 +149,6 @@ class VoiceSignalRelay internal constructor(
         sink = null
         rejections.clear()
         droppedPreAuthentication = 0
+        droppedRetiredGeneration = 0
     }
 }

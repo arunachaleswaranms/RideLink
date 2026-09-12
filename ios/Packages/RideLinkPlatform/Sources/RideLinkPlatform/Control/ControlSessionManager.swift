@@ -165,7 +165,42 @@ public actor ControlSessionManager {
     /// missing. Read by `handleFrame` so that a peer which has completed TLS but not RideLink
     /// authentication cannot invoke anything reserved for an authenticated session. Transport alive
     /// != session authenticated.
-    private var authenticatedConnection: AuthenticatedConnection?
+    ///
+    /// ADR-025 §1: held in `authenticatedRecordBox` rather than in plain actor storage, so the
+    /// relays can read *which generation owns the connection right now* synchronously, without an
+    /// `await` into this actor. One source of truth, not a mirror — see `AuthenticatedConnectionBox`.
+    private var authenticatedConnection: AuthenticatedConnection? {
+        get { authenticatedRecordBox.current() }
+        set { authenticatedRecordBox.set(newValue) }
+    }
+
+    private let authenticatedRecordBox = AuthenticatedConnectionBox()
+
+    /// The generation that owns the connection which is an authenticated session **right now**, or
+    /// nil when none is (ADR-025 §1). `nonisolated`, so a relay's synchronous `deliver` can compare
+    /// a frame's own authorising generation against it without an actor hop.
+    ///
+    /// This is the *liveness* half of the provenance model, and deliberately a different question
+    /// from `ReadFrameBinding.generation`: that one says which session authorised a given frame's
+    /// read and never changes; this one says which session is current and changes at every boundary.
+    /// Comparing the two is what lets a consumer refuse a retired session's work — reading *this*
+    /// one to **label** a frame is ADR-024 Amendment A7's defect, and the reason the two have
+    /// deliberately different names.
+    ///
+    /// It differs from `currentAuthGeneration` in exactly one way, and that difference is the point:
+    /// this goes **nil** when the link drops, whereas `currentAuthGeneration` keeps reporting the
+    /// last number it assigned. A frame authorised by a session that has ended has no live owner,
+    /// and saying so is what stops it being applied to whatever comes next.
+    public nonisolated func liveAuthenticatedGeneration() -> Int64? {
+        authenticatedRecordBox.current()?.generation
+    }
+
+    /// How many inbound frames were refused because the connection they were **read from** was no
+    /// longer the surviving connection (ADR-025 §4). Covers only the pre-authentication family
+    /// (PROTOCOL §1/§4.5/§4.6) — the one set of types that bypasses the generation gate and so needs
+    /// its own binding to a connection. Counted rather than merely dropped, for the reason
+    /// `droppedPreAuthentication` gives.
+    private(set) var retiredConnectionFrames = 0
 
     /// The record above, for this package's own unit tests — the same standing `writeRawFrame` has,
     /// and for the same reason: ADR-024 Amendment A7's regression has to ask **production** what a
@@ -212,7 +247,11 @@ public actor ControlSessionManager {
         monotonicNowUs: monotonicNowUs,
         nextSeq: { [seqCounter] in seqCounter.nextSeq() },
         activeSessionId: { [weak self] in await self?.currentSessionId() ?? SessionId("n/a") },
-        authenticatedWriter: { [weak self] in await self?.authenticatedWriter() }
+        authenticatedWriter: { [weak self] in await self?.authenticatedWriter() },
+        // ADR-025 §1: synchronous and non-isolated on purpose — a relay's `deliver` must never
+        // `await` into this actor just to ask which session is live. nil when this manager is gone,
+        // which matches no frame.
+        liveGeneration: { [weak self] in self?.liveAuthenticatedGeneration() }
     )
 
     /// The `AUDIO_STATE` half of the control plane (PROTOCOL §4.4), extracted for the same reason `voice`
@@ -230,7 +269,11 @@ public actor ControlSessionManager {
         monotonicNowUs: monotonicNowUs,
         nextSeq: { [seqCounter] in seqCounter.nextSeq() },
         activeSessionId: { [weak self] in await self?.currentSessionId() ?? SessionId("n/a") },
-        authenticatedWriter: { [weak self] in await self?.authenticatedWriter() }
+        authenticatedWriter: { [weak self] in await self?.authenticatedWriter() },
+        // ADR-025 §1: synchronous and non-isolated on purpose — a relay's `deliver` must never
+        // `await` into this actor just to ask which session is live. nil when this manager is gone,
+        // which matches no frame.
+        liveGeneration: { [weak self] in self?.liveAuthenticatedGeneration() }
     )
 
     /// The `MANIFEST_*` half of the control plane (PROTOCOL §8.1), extracted for the same reason
@@ -243,7 +286,11 @@ public actor ControlSessionManager {
         monotonicNowUs: monotonicNowUs,
         nextSeq: { [seqCounter] in seqCounter.nextSeq() },
         activeSessionId: { [weak self] in await self?.currentSessionId() ?? SessionId("n/a") },
-        authenticatedWriter: { [weak self] in await self?.authenticatedWriter() }
+        authenticatedWriter: { [weak self] in await self?.authenticatedWriter() },
+        // ADR-025 §1: synchronous and non-isolated on purpose — a relay's `deliver` must never
+        // `await` into this actor just to ask which session is live. nil when this manager is gone,
+        // which matches no frame.
+        liveGeneration: { [weak self] in self?.liveAuthenticatedGeneration() }
     )
 
     /// The `TRANSFER_*` half of the control plane (PROTOCOL §8.2) — the small negotiation messages
@@ -256,7 +303,11 @@ public actor ControlSessionManager {
         monotonicNowUs: monotonicNowUs,
         nextSeq: { [seqCounter] in seqCounter.nextSeq() },
         activeSessionId: { [weak self] in await self?.currentSessionId() ?? SessionId("n/a") },
-        authenticatedWriter: { [weak self] in await self?.authenticatedWriter() }
+        authenticatedWriter: { [weak self] in await self?.authenticatedWriter() },
+        // ADR-025 §1: synchronous and non-isolated on purpose — a relay's `deliver` must never
+        // `await` into this actor just to ask which session is live. nil when this manager is gone,
+        // which matches no frame.
+        liveGeneration: { [weak self] in self?.liveAuthenticatedGeneration() }
     )
 
     /// The Phase 5 half of the control plane (PROTOCOL §5 playback commands and §9 queue
@@ -837,6 +888,23 @@ public actor ControlSessionManager {
             }
             return
         }
+        // ADR-025 §4: the pre-authentication family is the one set of types allowed *past* the guard
+        // above without a generation, so nothing else binds it to a connection. Bind it here. A
+        // `PONG` read from a connection whose session has ended would otherwise refresh the
+        // **successor's** keepalive liveness and push its round trip into the successor's fresh RTT
+        // window; a stale `PAIR_CONFIRM` would satisfy the remote half of PROTOCOL §4.5's two-human
+        // gate for a *different* peer's exchange, which `PairingExchange.onPairConfirm` cross-checks
+        // no SPKI against; a stale fatal `ERROR` would fail the successor's pairing outright.
+        //
+        // The question is ADR-024 Amendment A7's, in the only form available to a family that
+        // carries no generation: **is this frame's own connection still the surviving connection.**
+        // Before the trust gate and throughout pairing that connection *is* the active one, so
+        // `PING`/`PONG` and the pairing exchange keep working exactly as PROTOCOL §1/§4.5 requires
+        // on the connection they belong to.
+        if Self.preAuthenticationFrameTypes.contains(envelope.type), socket !== activeSocket {
+            retiredConnectionFrames += 1
+            return
+        }
         switch envelope.type {
         case "PING":
             guard let t1 = payload["t1_mono_us"]?.int64Value else { return }
@@ -872,17 +940,25 @@ public actor ControlSessionManager {
         // Reachable only past the guard above, so only for an authenticated peer (PROTOCOL §7.1).
         case AudioStateMessageTypes.audioState:
             // Reachable only past the guard above, so only for an authenticated peer (PROTOCOL §4.1).
-            await audioState.deliver(payload: payload)
+            // ADR-025 §1: the generation comes from the binding captured at the read, never from
+            // live state — every family below takes it as an argument for the same reason Phase 5
+            // does. Nil is unreachable (none of these types is in the allowlist), and failing closed
+            // rather than reaching for a live value is the invariant itself.
+            guard let generation = binding.generation else { return }
+            await audioState.deliver(payload: payload, generation: generation)
         case VoiceMessageTypes.offer, VoiceMessageTypes.answer, VoiceMessageTypes.ice, VoiceMessageTypes.state:
-            await voice.deliver(type: envelope.type, payload: envelope.payload)
+            guard let generation = binding.generation else { return }
+            await voice.deliver(type: envelope.type, payload: envelope.payload, generation: generation)
         // Reachable only past the guard above, so only for an authenticated peer (PROTOCOL §8.1).
         case ManifestMessageTypes.request, ManifestMessageTypes.begin, ManifestMessageTypes.page,
             ManifestMessageTypes.end, ManifestMessageTypes.abort:
-            await manifest.deliver(type: envelope.type, payload: envelope.payload)
+            guard let generation = binding.generation else { return }
+            await manifest.deliver(type: envelope.type, payload: envelope.payload, generation: generation)
         // Reachable only past the guard above, so only for an authenticated peer (PROTOCOL §8.2).
         case TransferMessageTypes.request, TransferMessageTypes.offer, TransferMessageTypes.progress,
             TransferMessageTypes.result, TransferMessageTypes.cancel:
-            await transfer.deliver(type: envelope.type, payload: envelope.payload)
+            guard let generation = binding.generation else { return }
+            await transfer.deliver(type: envelope.type, payload: envelope.payload, generation: generation)
         // Reachable only past the guard above, so only for an authenticated peer (PROTOCOL §5).
         case PlaybackMessageTypes.play, PlaybackMessageTypes.pause, PlaybackMessageTypes.resume,
             PlaybackMessageTypes.seek, PlaybackMessageTypes.next, PlaybackMessageTypes.previous,

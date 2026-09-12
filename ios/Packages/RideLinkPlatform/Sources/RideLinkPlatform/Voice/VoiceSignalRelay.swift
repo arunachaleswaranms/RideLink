@@ -36,22 +36,36 @@ public actor VoiceSignalRelay: VoiceSignalTransport {
     /// never hold one across a teardown.
     private let authenticatedWriter: @Sendable () async -> AuthenticatedFrameWriter?
 
+    /// ADR-025's liveness half: the generation owning the connection that is an authenticated
+    /// session **right now**, or nil when none is. Synchronous and non-isolated on purpose — a
+    /// frame's own authorising generation is *compared* against it and never replaced by it, and
+    /// reading a live value to label a frame is ADR-024 Amendment A7's defect.
+    private let liveGeneration: @Sendable () -> Int64?
+
     private var sink: (any VoiceSignalSink)?
     private var rejections: [VoiceSignalRejection: Int] = [:]
     private var preAuthenticationDrops = 0
+
+    /// How many frames were dropped because the control session that authorised their read had
+    /// already been replaced (ADR-025). Distinct from `droppedPreAuthentication`: that one counts a
+    /// peer that was never authenticated, this one counts a peer that *was*, on a connection that
+    /// is gone.
+    private var retiredGenerationDrops = 0
 
     public init(
         localPeerId: PeerId,
         monotonicNowUs: @escaping @Sendable () -> Int64,
         nextSeq: @escaping @Sendable () -> Int64,
         activeSessionId: @escaping @Sendable () async -> SessionId,
-        authenticatedWriter: @escaping @Sendable () async -> AuthenticatedFrameWriter?
+        authenticatedWriter: @escaping @Sendable () async -> AuthenticatedFrameWriter?,
+        liveGeneration: @escaping @Sendable () -> Int64?
     ) {
         self.localPeerId = localPeerId
         self.monotonicNowUs = monotonicNowUs
         self.nextSeq = nextSeq
         self.activeSessionId = activeSessionId
         self.authenticatedWriter = authenticatedWriter
+        self.liveGeneration = liveGeneration
     }
 
     public func setSink(_ sink: (any VoiceSignalSink)?) {
@@ -64,6 +78,9 @@ public actor VoiceSignalRelay: VoiceSignalTransport {
     /// Non-zero means a peer that had completed TLS but not RideLink authentication tried to start
     /// voice, which is exactly the condition PROTOCOL §7.1 exists to make inert.
     public func droppedPreAuthentication() -> Int { preAuthenticationDrops }
+
+    /// See `retiredGenerationDrops`.
+    public func droppedRetiredGeneration() -> Int { retiredGenerationDrops }
 
     public func send(_ signal: VoiceSignal) async -> Bool {
         guard let write = await authenticatedWriter() else { return false }
@@ -83,7 +100,25 @@ public actor VoiceSignalRelay: VoiceSignalTransport {
     /// reaches the media stack, so it cannot make the reader allocate either.
     ///
     /// Called only from the read loop's authenticated dispatch.
-    public func deliver(type: String, payload: [String: JSONValue]) {
+    ///
+    /// **ADR-025 §2.** `generation` is the frame's own authority — the generation that owned the
+    /// connection it was read from, at the moment of the read. A frame whose session has since been
+    /// replaced is refused here, before it can become a `VoiceInput`, because `VoiceController` is
+    /// deliberately **retained across a control reconnect** (the capture device stays open for the
+    /// ride segment, ARCHITECTURE §6.3/§6.4) and `VoiceNegotiation`'s own `voice_session_id` guards
+    /// prove voice-session ownership, not control-session ownership. Concretely: a stale
+    /// `VOICE_STATE { state: "closed" }` carrying no `voice_session_id` is not a generation mismatch
+    /// to that table, so it would tear down the *successor* session's live media; and a stale
+    /// `VOICE_OFFER` arriving after `.controlLinkLost` has reset the table to `.idle` would start a
+    /// negotiation on the successor's connection.
+    ///
+    /// This is a refusal rather than a relabelling on purpose: there is no ledger here that a
+    /// retired generation's frame has to reach, unlike Phase 5's (ADR-024 Amendment A6).
+    public func deliver(type: String, payload: [String: JSONValue], generation: Int64) {
+        guard generation == liveGeneration() else {
+            retiredGenerationDrops += 1
+            return
+        }
         switch VoiceSignalCodec.parse(type: type, payload: payload) {
         case .parsed(let signal):
             sink?.submit(signal)
@@ -104,5 +139,6 @@ public actor VoiceSignalRelay: VoiceSignalTransport {
         sink = nil
         rejections.removeAll()
         preAuthenticationDrops = 0
+        retiredGenerationDrops = 0
     }
 }

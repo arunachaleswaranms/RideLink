@@ -26,6 +26,13 @@ class TransferRelay internal constructor(
     private val nextSeq: () -> Long,
     private val activeSessionId: () -> SessionId,
     private val authenticatedWriter: () -> AuthenticatedFrameWriter?,
+    /**
+     * ADR-025's liveness half: the generation owning the connection that is an authenticated session
+     * **right now**, or null when none is. A frame's own authorising generation is *compared*
+     * against it and never replaced by it — reading a live value to label a frame is ADR-024
+     * Amendment A7's defect.
+     */
+    private val liveGeneration: () -> Long?,
 ) {
     @Volatile
     var sink: TransferSink? = null
@@ -34,6 +41,16 @@ class TransferRelay internal constructor(
 
     @Volatile
     var droppedPreAuthentication: Int = 0
+        private set
+
+    /**
+     * How many frames were dropped because the control session that authorised their read had
+     * already been replaced (ADR-025 §1). Distinct from [droppedPreAuthentication]: that one counts
+     * a peer that was never authenticated, this one counts a peer that *was*, on a connection that
+     * is gone.
+     */
+    @Volatile
+    var droppedRetiredGeneration: Int = 0
         private set
 
     val rejectionCounts: Map<TransferMessageRejection, Int> get() = rejections.toMap()
@@ -58,9 +75,14 @@ class TransferRelay internal constructor(
     fun deliver(
         type: String,
         payload: JsonObject,
+        generation: Long,
     ) {
+        if (generation != liveGeneration()) {
+            droppedRetiredGeneration += 1
+            return
+        }
         when (val result = TransferCodec.parse(type, payload)) {
-            is TransferCodec.Result.Parsed -> sink?.submit(result.message)
+            is TransferCodec.Result.Parsed -> sink?.submit(result.message, generation)
             is TransferCodec.Result.Rejected -> rejections.merge(result.reason, 1) { a, b -> a + b }
         }
     }
@@ -74,10 +96,22 @@ class TransferRelay internal constructor(
         sink = null
         rejections.clear()
         droppedPreAuthentication = 0
+        droppedRetiredGeneration = 0
     }
 }
 
 /** Receives parsed, bounds-checked `TRANSFER_*` messages. Implemented by whatever owns transfer state (`TransferCoordinator`). */
 fun interface TransferSink {
-    fun submit(message: TransferMessage)
+    /**
+     * @param generation the authentication generation that owned **the connection this message's
+     *   frame was read from, at the moment of the read** (ADR-025 §1). See
+     *   [com.ridelink.network.manifest.ManifestSink.submit] for why it is a parameter rather than
+     *   something the receiver looks up.
+     *
+     * Must be **non-suspending and must not block**: it is called from the control read loop.
+     */
+    fun submit(
+        message: TransferMessage,
+        generation: Long,
+    )
 }

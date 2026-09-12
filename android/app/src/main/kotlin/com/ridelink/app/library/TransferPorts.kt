@@ -98,15 +98,26 @@ interface TransferChannelPort {
 /**
  * [SharedLibraryCoordinator]'s exact call surface on [ControlSessionManager]: the `MANIFEST_*`/
  * `TRANSFER_*` channels, the session-lifecycle event stream, and the read-only live-session view
- * ([currentAuthGeneration]/[currentPeerSpki]/[currentPeerHost]) — never the connection-management
- * surface (handshake, pairing, reconnect), which stays [ControlSessionManager]'s alone and has no
- * reason to be fakeable here.
+ * ([currentAuthGeneration]/[liveAuthenticatedGeneration]/[currentPeerSpki]/[currentPeerHost]) —
+ * never the connection-management surface (handshake, pairing, reconnect), which stays
+ * [ControlSessionManager]'s alone and has no reason to be fakeable here.
  */
 interface TransferSessionPort {
     val manifest: ManifestChannelPort
     val transfer: TransferChannelPort
     val events: SharedFlow<ControlEvent>
     val currentAuthGeneration: Long
+
+    /**
+     * ADR-025 §1: the generation owning the connection that is an authenticated session **right
+     * now**, or null when none is. What an inbound `MANIFEST_*`/`TRANSFER_*` message's own
+     * authorising generation is compared against before it is applied.
+     *
+     * Deliberately not [currentAuthGeneration]: that one keeps reporting the last number it
+     * assigned after the link drops, so a frame authorised by a session that has ended would still
+     * match it.
+     */
+    val liveAuthenticatedGeneration: Long?
     val currentPeerSpki: SpkiHash?
     val currentPeerHost: String?
 }
@@ -190,6 +201,7 @@ internal class ControlSessionManagerAdapter(
     override val transfer: TransferChannelPort = TransferRelayAdapter(delegate.transfer)
     override val events: SharedFlow<ControlEvent> get() = delegate.events
     override val currentAuthGeneration: Long get() = delegate.currentAuthGeneration
+    override val liveAuthenticatedGeneration: Long? get() = delegate.liveAuthenticatedGeneration
     override val currentPeerSpki: SpkiHash? get() = delegate.currentPeerSpki
     override val currentPeerHost: String? get() = delegate.currentPeerHost
 }
