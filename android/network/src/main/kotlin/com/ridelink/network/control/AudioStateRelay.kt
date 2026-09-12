@@ -3,6 +3,7 @@ package com.ridelink.network.control
 import com.ridelink.core.model.PeerId
 import com.ridelink.core.model.SessionId
 import com.ridelink.core.protocol.AudioStateCodec
+import com.ridelink.core.protocol.AudioStateEpoch
 import com.ridelink.core.protocol.AudioStateInbox
 import com.ridelink.core.protocol.AudioStateMessage
 import com.ridelink.core.protocol.AudioStateRejection
@@ -10,7 +11,28 @@ import com.ridelink.network.voice.AuthenticatedFrameWriter
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import java.security.SecureRandom
 import java.util.concurrent.ConcurrentHashMap
+
+/**
+ * ADR-021 Amendment A7: 16 CSPRNG bytes as 32 lowercase hex, fresh per **sender lifetime** — i.e. per
+ * discovery session and at process start, exactly when [com.ridelink.core.protocol.AudioStatePublisher]
+ * restarts its counter.
+ *
+ * Lives here rather than in `core` for the reason [ConnTiebreakGenerator] and `VoiceSessionIdGenerator`
+ * do: the domain layer is pure and has no CSPRNG (CLAUDE.md rule 9), so the value is minted at the edge
+ * and handed in.
+ */
+object AudioStateEpochGenerator {
+    private const val BYTES = 16
+    private val random = SecureRandom()
+
+    fun generate(): AudioStateEpoch {
+        val bytes = ByteArray(BYTES)
+        random.nextBytes(bytes)
+        return AudioStateEpoch(bytes.joinToString("") { "%02x".format(it) })
+    }
+}
 
 /** Where an `AUDIO_STATE` frame that has passed the ADR-019 trust gate is delivered. */
 fun interface AudioStateSink {
@@ -180,6 +202,9 @@ class AudioStateInboxHolder {
     val current: AudioStateMessage? get() = synchronized(lock) { inbox.current }
 
     val droppedStale: Int get() = synchronized(lock) { inbox.droppedStale }
+
+    /** See [AudioStateInbox.droppedRetiredEpoch] — a straggler from a replaced sender lifetime. */
+    val droppedRetiredEpoch: Int get() = synchronized(lock) { inbox.droppedRetiredEpoch }
 
     fun reset() = synchronized(lock) { inbox.reset() }
 }

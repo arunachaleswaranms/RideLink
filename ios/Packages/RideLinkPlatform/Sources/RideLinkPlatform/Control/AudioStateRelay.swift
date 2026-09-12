@@ -1,5 +1,21 @@
 import Foundation
 import RideLinkCore
+import Security
+
+/// ADR-021 Amendment A7: 16 CSPRNG bytes as 32 lowercase hex, fresh per **sender lifetime** — i.e. per
+/// discovery session and at process start, exactly when `AudioStatePublisher` restarts its counter.
+///
+/// Lives here rather than in `RideLinkCore` for the reason `ConnTiebreakGenerator` and
+/// `VoiceSessionIdGenerator` do: the domain layer is pure and has no CSPRNG (CLAUDE.md rule 9), so the
+/// value is minted at the edge and handed in.
+public enum AudioStateEpochGenerator {
+    public static func generate() -> AudioStateEpoch {
+        var bytes = [UInt8](repeating: 0, count: 16)
+        let status = SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes)
+        precondition(status == errSecSuccess, "SecRandomCopyBytes failed")
+        return AudioStateEpoch(bytes.map { String(format: "%02x", $0) }.joined())
+    }
+}
 
 /// Where an `AUDIO_STATE` frame that has passed the ADR-019 trust gate is delivered.
 ///

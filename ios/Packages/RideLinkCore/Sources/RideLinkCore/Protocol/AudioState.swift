@@ -5,6 +5,46 @@ public enum AudioStateMessageTypes {
     public static let audioState = "AUDIO_STATE"
 }
 
+private let audioStateEpochRedactedPrefixLen = 6
+
+/// PROTOCOL §4.4 — the identity of one sender's `revision` **namespace**.
+///
+/// 16 CSPRNG bytes as 32 lowercase hex characters, minted when a sender's `AudioStatePublisher` begins a
+/// lifetime and constant for the whole of it. §4.4's `revision` is "per sender per session", and this is
+/// the only thing on the wire that says *which* session — so a `revision` is comparable only against
+/// another one carrying the same epoch.
+///
+/// **Why a new value and not an existing one** (ADR-021 Amendment A7 §2). `peer_id` is durable across a
+/// process restart; `session_id` is minted per *handshake*, so it changes on an ordinary reconnect the
+/// publisher deliberately survives; `conn_tiebreak` lives for the `ControlSessionManager` instance and is
+/// not reset when a discovery session is; and the receiver's own `authenticationGeneration` answers a
+/// question about a *connection*, not about the peer's counter. Reusing one random value for two jobs is
+/// the mistake `ConnTiebreak`'s own documentation warns about, so this is a distinct type as well as a
+/// distinct value.
+///
+/// Never persisted, never derived from `peer_id`, `session_id` or the identity key. Redacted to 6 hex in
+/// logs, exactly as `conn_tiebreak` and `voice_session_id` are.
+public struct AudioStateEpoch: Hashable, Sendable, CustomStringConvertible {
+    public let value: String
+
+    public init(_ value: String) {
+        precondition(AudioStateEpoch.isValid(value), "AudioStateEpoch must be 32 lowercase hex characters")
+        self.value = value
+    }
+
+    public var description: String { "epoch:\(value.prefix(audioStateEpochRedactedPrefixLen))\u{2026}" }
+
+    /// Non-trapping constructor for a value that arrives **off the wire**. Uppercase hex is rejected
+    /// rather than normalised — one canonical form, as for `voice_session_id`.
+    public static func parse(_ value: String) -> AudioStateEpoch? {
+        isValid(value) ? AudioStateEpoch(value) : nil
+    }
+
+    private static func isValid(_ s: String) -> Bool {
+        s.count == 32 && s.allSatisfy { $0.isHexDigit && !$0.isUppercase }
+    }
+}
+
 /// PROTOCOL §4.4 — the **effective duplex state right now**, as a value.
 ///
 /// This is the wire projection of `AudioRouteSnapshot` and is deliberately narrower than it:
@@ -16,8 +56,14 @@ public enum AudioStateMessageTypes {
 /// only place a platform profile name is translated into it is each platform's single route mapper
 /// (PROTOCOL §4.3.1).
 public struct AudioStateMessage: Sendable, Equatable {
-    /// Strictly increasing per sender per session (§4.4). A receiver drops a lower or equal value.
+    /// Strictly increasing per sender per session (§4.4). A receiver drops a lower or equal value — but
+    /// **only against a `revisionEpoch` that matches**, because a number from one sender lifetime orders
+    /// nothing against a number from another.
     public var revision: Int64
+    /// Which of the sender's `revision` namespaces `revision` belongs to (§4.4, ADR-021 Amendment A7).
+    /// Constant for one sender lifetime; a value the receiver has not seen means the sender's counter
+    /// restarted and the old floor no longer applies to it.
+    public var revisionEpoch: AudioStateEpoch
     public var endpointClass: EndpointClass
     /// Whether the capture *device* is open — **not** whether speech is being transmitted. PTT, VOX and
     /// mute gate transmission, not the device (ARCHITECTURE §6.3); `VOICE_STATE.mic_muted` is the field
@@ -35,6 +81,7 @@ public struct AudioStateMessage: Sendable, Equatable {
 
     public init(
         revision: Int64,
+        revisionEpoch: AudioStateEpoch,
         endpointClass: EndpointClass,
         microphoneOpen: Bool,
         effectiveOutputProfile: AudioProfile,
@@ -47,6 +94,7 @@ public struct AudioStateMessage: Sendable, Equatable {
         confidence: AudioConfidence
     ) {
         self.revision = revision
+        self.revisionEpoch = revisionEpoch
         self.endpointClass = endpointClass
         self.microphoneOpen = microphoneOpen
         self.effectiveOutputProfile = effectiveOutputProfile
@@ -63,11 +111,13 @@ public struct AudioStateMessage: Sendable, Equatable {
     /// derivation so the two cannot disagree about what the user is told, on either platform.
     public static func from(
         revision: Int64,
+        revisionEpoch: AudioStateEpoch,
         snapshot: AudioRouteSnapshot,
         intercomMode: IntercomMode
     ) -> AudioStateMessage {
         AudioStateMessage(
             revision: revision,
+            revisionEpoch: revisionEpoch,
             endpointClass: snapshot.endpointClass,
             microphoneOpen: snapshot.microphoneOpen,
             effectiveOutputProfile: snapshot.effectiveOutputProfile,
@@ -88,6 +138,8 @@ public enum AudioStateRejection: String, Sendable, Equatable {
     case wrongFieldType = "WRONG_FIELD_TYPE"
     case revisionOutOfRange = "REVISION_OUT_OF_RANGE"
     case sampleRateOutOfRange = "SAMPLE_RATE_OUT_OF_RANGE"
+    /// `revision_epoch` was present and a string, but not 32 lowercase hex (§4.4, `AudioStateEpoch`).
+    case malformedRevisionEpoch = "MALFORMED_REVISION_EPOCH"
 }
 
 /// Parses, bounds-checks and encodes `AUDIO_STATE` (PROTOCOL §4.4).
@@ -109,6 +161,7 @@ public enum AudioStateCodec {
     }
 
     public static let fieldRevision = "revision"
+    public static let fieldRevisionEpoch = "revision_epoch"
     public static let fieldEndpointClass = "endpoint_class"
     public static let fieldMicrophoneOpen = "microphone_open"
     public static let fieldEffectiveOutputProfile = "effective_output_profile"
@@ -135,6 +188,7 @@ public enum AudioStateCodec {
     /// vocabulary on the wire" test read this, so an added field cannot escape either.
     public static let fields: [String] = [
         fieldRevision,
+        fieldRevisionEpoch,
         fieldEndpointClass,
         fieldMicrophoneOpen,
         fieldEffectiveOutputProfile,
@@ -155,6 +209,7 @@ public enum AudioStateCodec {
     public static func encode(_ message: AudioStateMessage) -> [String: JSONValue] {
         [
             fieldRevision: .number(Double(message.revision)),
+            fieldRevisionEpoch: .string(message.revisionEpoch.value),
             fieldEndpointClass: .string(message.endpointClass.wire),
             fieldMicrophoneOpen: .bool(message.microphoneOpen),
             fieldEffectiveOutputProfile: .string(message.effectiveOutputProfile.wire),
@@ -175,6 +230,13 @@ public enum AudioStateCodec {
             return missingOrWrongType(payload, fieldRevision)
         }
         if revision < 0 || revision > maxRevision { return .rejected(.revisionOutOfRange) }
+
+        guard let epochText = audioStateStringField(payload, fieldRevisionEpoch) else {
+            return missingOrWrongType(payload, fieldRevisionEpoch)
+        }
+        guard let revisionEpoch = AudioStateEpoch.parse(epochText) else {
+            return .rejected(.malformedRevisionEpoch)
+        }
 
         guard let endpointClass = audioStateStringField(payload, fieldEndpointClass) else {
             return missingOrWrongType(payload, fieldEndpointClass)
@@ -216,6 +278,7 @@ public enum AudioStateCodec {
         return .parsed(
             AudioStateMessage(
                 revision: revision,
+                revisionEpoch: revisionEpoch,
                 endpointClass: EndpointClass.parse(endpointClass),
                 microphoneOpen: microphoneOpen,
                 effectiveOutputProfile: AudioProfile.parse(outputProfile),
@@ -287,11 +350,20 @@ private func audioStateBoolField(_ payload: [String: JSONValue], _ key: String) 
 /// `revision` is **strictly increasing and never reset within a session**, including across a route
 /// transition and across a voice rebuild. A receiver drops anything not greater than what it holds
 /// (`AudioStateInbox`), so reordering cannot resurrect a stale route.
+///
+/// **`epoch` is what makes "within a session" checkable by the receiver** (ADR-021 Amendment A7). The
+/// counter restarts only through `resetForNewSession`, which takes a *fresh* epoch, so every message this
+/// publisher has ever produced under one epoch is ordered against every other — and a message from a
+/// previous lifetime is recognisably from a previous lifetime rather than merely numerically small.
+/// Supplying the epoch rather than minting one keeps this type pure (CLAUDE.md rule 9): the CSPRNG lives
+/// in each platform's `AudioStateEpochGenerator`.
 public struct AudioStatePublisher: Sendable {
+    private var epoch: AudioStateEpoch
     private var revision: Int64
     private var last: AudioStateMessage?
 
-    public init(revision: Int64 = 0) {
+    public init(epoch: AudioStateEpoch, revision: Int64 = 0) {
+        self.epoch = epoch
         self.revision = revision
         self.last = nil
     }
@@ -301,6 +373,9 @@ public struct AudioStatePublisher: Sendable {
 
     public var currentRevision: Int64 { revision }
 
+    /// The lifetime every message this publisher produces is currently stamped with.
+    public var currentEpoch: AudioStateEpoch { epoch }
+
     /// - Returns: the message to send, or nil when this state is identical to the last published one apart
     ///   from its revision — in which case nothing is sent and the revision does not move.
     public mutating func next(
@@ -309,6 +384,7 @@ public struct AudioStatePublisher: Sendable {
     ) -> AudioStateMessage? {
         let candidate = AudioStateMessage.from(
             revision: revision + 1,
+            revisionEpoch: epoch,
             snapshot: snapshot,
             intercomMode: intercomMode
         )
@@ -331,6 +407,7 @@ public struct AudioStatePublisher: Sendable {
         revision += 1
         let message = AudioStateMessage.from(
             revision: revision,
+            revisionEpoch: epoch,
             snapshot: snapshot,
             intercomMode: intercomMode
         )
@@ -338,37 +415,107 @@ public struct AudioStatePublisher: Sendable {
         return message
     }
 
-    /// A new control **session**, not a new connection: §4.4's revision is per sender per session.
-    public mutating func resetForNewSession() {
+    /// Begins a new sender lifetime: the counter restarts at 0 and every message from here on names
+    /// `epoch` instead of the old one.
+    ///
+    /// A new **discovery** session, not a new connection — §4.4's `revision` is per sender per session and
+    /// is deliberately *not* reset by a duplicate-connection resolution, a control reconnect or a voice
+    /// rebuild. The epoch moves with the counter and only with it, which is the whole of the contract: two
+    /// messages are comparable exactly when their epochs match.
+    ///
+    /// - Parameter epoch: a value that has never been used before — see each platform's
+    ///   `AudioStateEpochGenerator`. Reusing one would tell a receiver that a restarted counter was a
+    ///   continuation of the old one.
+    public mutating func resetForNewSession(epoch: AudioStateEpoch) {
+        self.epoch = epoch
         revision = 0
         last = nil
     }
 }
 
-/// Owns the receiver's side of PROTOCOL §4.4's revision rule.
+/// Owns the receiver's side of PROTOCOL §4.4's revision rule — **and of which sender lifetime that rule
+/// is being applied within** (ADR-021 Amendment A7).
 ///
 /// "Receiver drops a lower revision" is implemented as "drops anything not strictly greater", which also
 /// drops an exact retransmit. Pure and mirrored, so a reordering bug fails a laptop test rather than
 /// showing up as a peer's route apparently going backwards on a ride.
+///
+/// **A revision floor belongs to exactly one `AudioStateEpoch`.** This object deliberately outlives a
+/// control-session boundary — §4.4's `revision` keeps climbing across a reconnect, and keeping the floor
+/// is what makes a delayed frame from *before* that reconnect still refusable. But the floor says nothing
+/// at all about a sender whose counter restarted, and before this amendment it was applied to one anyway:
+/// a peer that restarted its process, or merely left and re-entered discovery, came back at `revision` 1
+/// and had every genuine message dropped until it climbed past the dead lifetime's number. So:
+///
+/// - **same epoch** — §4.4's rule, unchanged: strictly greater, or dropped as stale.
+/// - **an epoch never seen** — a new sender lifetime. Accepted, and the epoch it replaces is recorded as
+///   superseded.
+/// - **a superseded epoch** — a straggler from a lifetime that has already been replaced. Refused and
+///   counted, so solving the first case cannot resurrect a stale route through the second.
+///
+/// That last rule is *defence in depth*, not the only defence: a new sender lifetime can only begin after
+/// that sender has torn its control session down, so a straggler from the old one is also refused one
+/// layer earlier by ADR-025's generation gate. The two answer different questions — "which connection
+/// authorised this frame" and "which of the sender's counters is this number from" — and this is
+/// deliberately the second one only.
 public struct AudioStateInbox: Sendable {
     public private(set) var current: AudioStateMessage?
     public private(set) var droppedStale = 0
+
+    /// How many frames were refused because they named a sender lifetime that has already been replaced.
+    /// Counted rather than merely dropped: "it never happened" and "it happened and was refused" are
+    /// different facts on a diagnostics screen.
+    public private(set) var droppedRetiredEpoch = 0
+
+    /// See `maxSupersededEpochs`. Matches ADR-024 Amendment A6's loss-ledger bound, for the same reason.
+    public static let maxSupersededEpochs = 8
+
+    /// Epochs this inbox has held and moved on from, oldest first.
+    ///
+    /// Bounded because its contents come from a peer: an unbounded set would let a sender that rotated its
+    /// epoch grow it without limit. `maxSupersededEpochs` is far above what a ride can produce — a new
+    /// epoch costs the sender a full control teardown, re-handshake and re-authentication — and the honest
+    /// cost of the bound is that a straggler from a lifetime old enough to have been evicted is no longer
+    /// refused *here*. ADR-025's generation gate still refuses it.
+    private var superseded: [AudioStateEpoch] = []
 
     public init() {}
 
     /// - Returns: true if `message` was accepted and `current` now holds it.
     @discardableResult
     public mutating func accept(_ message: AudioStateMessage) -> Bool {
-        if let held = current, message.revision <= held.revision {
-            droppedStale += 1
+        guard let held = current else {
+            current = message
+            return true
+        }
+        if message.revisionEpoch == held.revisionEpoch {
+            if message.revision <= held.revision {
+                droppedStale += 1
+                return false
+            }
+            current = message
+            return true
+        }
+        if superseded.contains(message.revisionEpoch) {
+            droppedRetiredEpoch += 1
             return false
         }
+        supersede(held.revisionEpoch)
         current = message
         return true
     }
 
+    private mutating func supersede(_ epoch: AudioStateEpoch) {
+        superseded.append(epoch)
+        while superseded.count > Self.maxSupersededEpochs { superseded.removeFirst() }
+    }
+
+    /// A new *local* session. Everything held belonged to the old one, superseded epochs included — a
+    /// lifetime this device is no longer tracking is not a lifetime it can call retired.
     public mutating func reset() {
         current = nil
         droppedStale = 0
+        droppedRetiredEpoch = 0
+        superseded.removeAll()
     }
 }

@@ -18,6 +18,48 @@ object AudioStateMessageTypes {
 }
 
 /**
+ * PROTOCOL §4.4 — the identity of one sender's `revision` **namespace**.
+ *
+ * 16 CSPRNG bytes as 32 lowercase hex characters, minted when a sender's [AudioStatePublisher]
+ * begins a lifetime and constant for the whole of it. §4.4's `revision` is "per sender per session",
+ * and this is the only thing on the wire that says *which* session — so a `revision` is comparable
+ * only against another one carrying the same epoch.
+ *
+ * **Why a new value and not an existing one** (ADR-021 Amendment A7 §2). `peer_id` is durable across
+ * a process restart; `session_id` is minted per *handshake*, so it changes on an ordinary reconnect
+ * the publisher deliberately survives; `conn_tiebreak` lives for the `ControlSessionManager`
+ * instance and is not reset when a discovery session is; and the receiver's own
+ * `authenticationGeneration` answers a question about a *connection*, not about the peer's counter.
+ * Reusing one random value for two jobs is the mistake [com.ridelink.core.model.ConnTiebreak]'s own
+ * documentation warns about, so this is a distinct type as well as a distinct value.
+ *
+ * Never persisted, never derived from `peer_id`, `session_id` or the identity key. Redacted to 6 hex
+ * in logs, exactly as `conn_tiebreak` and `voice_session_id` are.
+ */
+@JvmInline
+value class AudioStateEpoch(
+    val value: String,
+) {
+    init {
+        require(HEX32.matches(value)) { "AudioStateEpoch must be 32 lowercase hex characters" }
+    }
+
+    override fun toString(): String = "epoch:${value.take(EPOCH_REDACTED_PREFIX_LEN)}\u2026"
+
+    companion object {
+        private val HEX32 = Regex("^[0-9a-f]{32}$")
+
+        /**
+         * Non-throwing constructor for a value that arrives **off the wire**. Uppercase hex is
+         * rejected rather than normalised — one canonical form, as for `voice_session_id`.
+         */
+        fun parse(value: String): AudioStateEpoch? = if (HEX32.matches(value)) AudioStateEpoch(value) else null
+    }
+}
+
+private const val EPOCH_REDACTED_PREFIX_LEN = 6
+
+/**
  * PROTOCOL §4.4 — the **effective duplex state right now**, as a value.
  *
  * This is the wire projection of [AudioRouteSnapshot] and is deliberately narrower than it:
@@ -31,8 +73,18 @@ object AudioStateMessageTypes {
  * mapper (PROTOCOL §4.3.1).
  */
 data class AudioStateMessage(
-    /** Strictly increasing per sender per session (§4.4). A receiver drops a lower or equal value. */
+    /**
+     * Strictly increasing per sender per session (§4.4). A receiver drops a lower or equal value —
+     * but **only against a [revisionEpoch] that matches**, because a number from one sender lifetime
+     * orders nothing against a number from another.
+     */
     val revision: Long,
+    /**
+     * Which of the sender's `revision` namespaces [revision] belongs to (§4.4, ADR-021 Amendment A7).
+     * Constant for one sender lifetime; a value the receiver has not seen means the sender's counter
+     * restarted and the old floor no longer applies to it.
+     */
+    val revisionEpoch: AudioStateEpoch,
     val endpointClass: EndpointClass,
     /**
      * Whether the capture *device* is open — **not** whether speech is being transmitted. PTT, VOX
@@ -57,11 +109,13 @@ data class AudioStateMessage(
          */
         fun from(
             revision: Long,
+            revisionEpoch: AudioStateEpoch,
             snapshot: AudioRouteSnapshot,
             intercomMode: IntercomMode,
         ): AudioStateMessage =
             AudioStateMessage(
                 revision = revision,
+                revisionEpoch = revisionEpoch,
                 endpointClass = snapshot.endpointClass,
                 microphoneOpen = snapshot.microphoneOpen,
                 effectiveOutputProfile = snapshot.effectiveOutputProfile,
@@ -82,6 +136,9 @@ enum class AudioStateRejection {
     WRONG_FIELD_TYPE,
     REVISION_OUT_OF_RANGE,
     SAMPLE_RATE_OUT_OF_RANGE,
+
+    /** `revision_epoch` was present and a string, but not 32 lowercase hex (§4.4, [AudioStateEpoch]). */
+    MALFORMED_REVISION_EPOCH,
 }
 
 /**
@@ -107,6 +164,7 @@ object AudioStateCodec {
     }
 
     const val FIELD_REVISION = "revision"
+    const val FIELD_REVISION_EPOCH = "revision_epoch"
     const val FIELD_ENDPOINT_CLASS = "endpoint_class"
     const val FIELD_MICROPHONE_OPEN = "microphone_open"
     const val FIELD_EFFECTIVE_OUTPUT_PROFILE = "effective_output_profile"
@@ -138,6 +196,7 @@ object AudioStateCodec {
     val FIELDS =
         listOf(
             FIELD_REVISION,
+            FIELD_REVISION_EPOCH,
             FIELD_ENDPOINT_CLASS,
             FIELD_MICROPHONE_OPEN,
             FIELD_EFFECTIVE_OUTPUT_PROFILE,
@@ -161,6 +220,7 @@ object AudioStateCodec {
     fun encode(message: AudioStateMessage): Map<String, Any?> =
         mapOf(
             FIELD_REVISION to message.revision,
+            FIELD_REVISION_EPOCH to message.revisionEpoch.value,
             FIELD_ENDPOINT_CLASS to message.endpointClass.wire,
             FIELD_MICROPHONE_OPEN to message.microphoneOpen,
             FIELD_EFFECTIVE_OUTPUT_PROFILE to message.effectiveOutputProfile.wire,
@@ -177,6 +237,10 @@ object AudioStateCodec {
     fun parse(payload: JsonObject): Result {
         val revision = longField(payload, FIELD_REVISION) ?: return missingOrWrongType(payload, FIELD_REVISION)
         if (revision < 0 || revision > MAX_REVISION) return Result.Rejected(AudioStateRejection.REVISION_OUT_OF_RANGE)
+
+        val epochText = stringField(payload, FIELD_REVISION_EPOCH) ?: return missingOrWrongType(payload, FIELD_REVISION_EPOCH)
+        val revisionEpoch =
+            AudioStateEpoch.parse(epochText) ?: return Result.Rejected(AudioStateRejection.MALFORMED_REVISION_EPOCH)
 
         val endpointClass = stringField(payload, FIELD_ENDPOINT_CLASS) ?: return missingOrWrongType(payload, FIELD_ENDPOINT_CLASS)
         val microphoneOpen = booleanField(payload, FIELD_MICROPHONE_OPEN) ?: return missingOrWrongType(payload, FIELD_MICROPHONE_OPEN)
@@ -200,6 +264,7 @@ object AudioStateCodec {
         return Result.Parsed(
             AudioStateMessage(
                 revision = revision,
+                revisionEpoch = revisionEpoch,
                 endpointClass = EndpointClass.parse(endpointClass),
                 microphoneOpen = microphoneOpen,
                 effectiveOutputProfile = AudioProfile.parse(outputProfile),
@@ -289,8 +354,16 @@ object AudioStateCodec {
  * `revision` is **strictly increasing and never reset within a session**, including across a route
  * transition and across a voice rebuild. A receiver drops anything not greater than what it holds
  * ([AudioStateInbox]), so reordering cannot resurrect a stale route.
+ *
+ * **[epoch] is what makes "within a session" checkable by the receiver** (ADR-021 Amendment A7).
+ * The counter restarts only through [resetForNewSession], which takes a *fresh* epoch, so every
+ * message this publisher has ever produced under one epoch is ordered against every other — and a
+ * message from a previous lifetime is recognisably from a previous lifetime rather than merely
+ * numerically small. Supplying the epoch rather than minting one keeps this type pure (CLAUDE.md
+ * rule 9): the CSPRNG lives in each platform's `AudioStateEpochGenerator`.
  */
 class AudioStatePublisher(
+    private var epoch: AudioStateEpoch,
     private var revision: Long = 0,
 ) {
     private var last: AudioStateMessage? = null
@@ -300,6 +373,9 @@ class AudioStatePublisher(
 
     val currentRevision: Long get() = revision
 
+    /** The lifetime every message this publisher produces is currently stamped with. */
+    val currentEpoch: AudioStateEpoch get() = epoch
+
     /**
      * @return the message to send, or null when this state is identical to the last published one
      *   apart from its revision — in which case nothing is sent and the revision does not move.
@@ -308,7 +384,7 @@ class AudioStatePublisher(
         snapshot: AudioRouteSnapshot,
         intercomMode: IntercomMode,
     ): AudioStateMessage? {
-        val candidate = AudioStateMessage.from(revision + 1, snapshot, intercomMode)
+        val candidate = AudioStateMessage.from(revision + 1, epoch, snapshot, intercomMode)
         val previous = last
         if (previous != null && previous.copy(revision = candidate.revision) == candidate) return null
         revision = candidate.revision
@@ -326,22 +402,56 @@ class AudioStatePublisher(
         intercomMode: IntercomMode,
     ): AudioStateMessage {
         revision += 1
-        return AudioStateMessage.from(revision, snapshot, intercomMode).also { last = it }
+        return AudioStateMessage.from(revision, epoch, snapshot, intercomMode).also { last = it }
     }
 
-    /** A new control **session**, not a new connection: §4.4's revision is per sender per session. */
-    fun resetForNewSession() {
+    /**
+     * Begins a new sender lifetime: the counter restarts at 0 and every message from here on names
+     * [epoch] instead of the old one.
+     *
+     * A new **discovery** session, not a new connection — §4.4's `revision` is per sender per
+     * session and is deliberately *not* reset by a duplicate-connection resolution, a control
+     * reconnect or a voice rebuild. The epoch moves with the counter and only with it, which is the
+     * whole of the contract: two messages are comparable exactly when their epochs match.
+     *
+     * @param epoch a value that has never been used before — see each platform's
+     *   `AudioStateEpochGenerator`. Reusing one would tell a receiver that a restarted counter was a
+     *   continuation of the old one.
+     */
+    fun resetForNewSession(epoch: AudioStateEpoch) {
+        this.epoch = epoch
         revision = 0
         last = null
     }
 }
 
 /**
- * Owns the receiver's side of PROTOCOL §4.4's revision rule.
+ * Owns the receiver's side of PROTOCOL §4.4's revision rule — **and of which sender lifetime that
+ * rule is being applied within** (ADR-021 Amendment A7).
  *
  * "Receiver drops a lower revision" is implemented as "drops anything not strictly greater", which
  * also drops an exact retransmit. Pure and mirrored, so a reordering bug fails a laptop test rather
  * than showing up as a peer's route apparently going backwards on a ride.
+ *
+ * **A revision floor belongs to exactly one [AudioStateEpoch].** This object deliberately outlives a
+ * control-session boundary — §4.4's `revision` keeps climbing across a reconnect, and keeping the
+ * floor is what makes a delayed frame from *before* that reconnect still refusable. But the floor
+ * says nothing at all about a sender whose counter restarted, and before this amendment it was
+ * applied to one anyway: a peer that restarted its process, or merely left and re-entered discovery,
+ * came back at `revision` 1 and had every genuine message dropped until it climbed past the dead
+ * lifetime's number. So:
+ *
+ * - **same epoch** — §4.4's rule, unchanged: strictly greater, or dropped as stale.
+ * - **an epoch never seen** — a new sender lifetime. Accepted, and the epoch it replaces is recorded
+ *   as superseded.
+ * - **a superseded epoch** — a straggler from a lifetime that has already been replaced. Refused and
+ *   counted, so solving the first case cannot resurrect a stale route through the second.
+ *
+ * That last rule is *defence in depth*, not the only defence: a new sender lifetime can only begin
+ * after that sender has torn its control session down, so a straggler from the old one is also
+ * refused one layer earlier by ADR-025's generation gate. The two answer different questions —
+ * "which connection authorised this frame" and "which of the sender's counters is this number
+ * from" — and this is deliberately the second one only.
  */
 class AudioStateInbox {
     var current: AudioStateMessage? = null
@@ -350,19 +460,74 @@ class AudioStateInbox {
     var droppedStale: Int = 0
         private set
 
-    /** @return true if [message] was accepted and [current] now holds it. */
+    /**
+     * How many frames were refused because they named a sender lifetime that has already been
+     * replaced. Counted rather than merely dropped: "it never happened" and "it happened and was
+     * refused" are different facts on a diagnostics screen.
+     */
+    var droppedRetiredEpoch: Int = 0
+        private set
+
+    /**
+     * Epochs this inbox has held and moved on from, oldest first.
+     *
+     * Bounded because its contents come from a peer: an unbounded set would let a sender that
+     * rotated its epoch grow it without limit. [MAX_SUPERSEDED_EPOCHS] is far above what a ride can
+     * produce — a new epoch costs the sender a full control teardown, re-handshake and re-authentication
+     * — and the honest cost of the bound is that a straggler from a lifetime old enough to have been
+     * evicted is no longer refused *here*. ADR-025's generation gate still refuses it.
+     */
+    private val superseded = ArrayDeque<AudioStateEpoch>()
+
+    /**
+     * @return true if [message] was accepted and [current] now holds it.
+     *
+     * One early-out per §4.4 receiving rule, in the order the rules are stated — which is why this
+     * carries the same `ReturnCount` suppression [AudioStateCodec.parse] does. Extracting them would
+     * split one decision table across two functions, which is exactly what a rule set must not be.
+     */
+    @Suppress("ReturnCount")
     fun accept(message: AudioStateMessage): Boolean {
         val held = current
-        if (held != null && message.revision <= held.revision) {
-            droppedStale += 1
+        if (held == null) {
+            current = message
+            return true
+        }
+        if (message.revisionEpoch == held.revisionEpoch) {
+            if (message.revision <= held.revision) {
+                droppedStale += 1
+                return false
+            }
+            current = message
+            return true
+        }
+        if (message.revisionEpoch in superseded) {
+            droppedRetiredEpoch += 1
             return false
         }
+        supersede(held.revisionEpoch)
         current = message
         return true
     }
 
+    private fun supersede(epoch: AudioStateEpoch) {
+        superseded.addLast(epoch)
+        while (superseded.size > MAX_SUPERSEDED_EPOCHS) superseded.removeFirst()
+    }
+
+    /**
+     * A new *local* session. Everything held belonged to the old one, superseded epochs included —
+     * a lifetime this device is no longer tracking is not a lifetime it can call retired.
+     */
     fun reset() {
         current = null
         droppedStale = 0
+        droppedRetiredEpoch = 0
+        superseded.clear()
+    }
+
+    companion object {
+        /** See [superseded]. Matches ADR-024 Amendment A6's loss-ledger bound, for the same reason. */
+        const val MAX_SUPERSEDED_EPOCHS = 8
     }
 }

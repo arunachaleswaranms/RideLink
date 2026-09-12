@@ -13,6 +13,7 @@ import com.ridelink.core.testutil.Vectors
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.jsonArray
@@ -84,6 +85,7 @@ class AudioStateVectorTest {
         val bounds = doc["bounds"]!!.jsonObject
         assertEquals(bounds.long("MAX_SAMPLE_RATE_HZ"), AudioStateCodec.MAX_SAMPLE_RATE_HZ)
         assertEquals(bounds.long("MAX_REVISION"), AudioStateCodec.MAX_REVISION)
+        assertEquals(bounds.long("MAX_SUPERSEDED_EPOCHS"), AudioStateInbox.MAX_SUPERSEDED_EPOCHS.toLong())
     }
 
     /** Every value in §4.3.1's closed vocabularies must round-trip through this platform's enums. */
@@ -118,6 +120,7 @@ class AudioStateVectorTest {
             val message =
                 AudioStateMessage.from(
                     revision = row.long("revision"),
+                    revisionEpoch = AudioStateEpoch(row.string("revision_epoch")),
                     snapshot = snapshot(row["snapshot"]!!.jsonObject),
                     intercomMode = IntercomMode.parse(row.string("intercom_mode")),
                 )
@@ -217,10 +220,20 @@ class AudioStateVectorTest {
         for (element in doc["publisher"]!!.jsonArray) {
             val row = element.jsonObject
             val name = row.string("name")
-            val publisher = AudioStatePublisher()
+            val publisher = AudioStatePublisher(AudioStateEpoch(VECTOR_EPOCH_A))
             var lastRevision = 0L
             for ((index, stepElement) in row["steps"]!!.jsonArray.withIndex()) {
                 val step = stepElement.jsonObject
+                // The one step that may move the epoch is the one that restarts the counter
+                // (ADR-021 Amendment A7). The file's `_invariants` say so; this is that, executed.
+                val resetTo = (step["reset_to_epoch"] as? JsonPrimitive)?.content
+                if (resetTo != null) {
+                    publisher.resetForNewSession(AudioStateEpoch(resetTo))
+                    assertEquals(0L, publisher.currentRevision, "$name step $index must restart the counter")
+                    assertNull(publisher.published, "$name step $index must forget what was published")
+                    lastRevision = 0L
+                    continue
+                }
                 val snap = snapshot(step["snapshot"]!!.jsonObject)
                 val mode = IntercomMode.parse(step.string("intercom_mode"))
                 val produced =
@@ -234,19 +247,36 @@ class AudioStateVectorTest {
                     assertTrue(expected > lastRevision, "$name step $index revision must strictly increase")
                     lastRevision = expected
                 }
+                val expectedEpoch = (step["expect_epoch"] as? JsonPrimitive)?.content
+                if (expectedEpoch != null) {
+                    assertEquals(AudioStateEpoch(expectedEpoch), produced?.revisionEpoch, "$name step $index epoch")
+                }
+                // Every message a publisher emits names the lifetime it is currently in — there is
+                // no path that stamps anything else.
+                if (produced != null) {
+                    assertEquals(publisher.currentEpoch, produced.revisionEpoch, "$name step $index stamped epoch")
+                }
             }
         }
     }
 
     /** A new control session restarts the numbering: §4.4's revision is per sender per session. */
     @Test
-    fun `resetForNewSession restarts the revision`() {
-        val publisher = AudioStatePublisher()
+    fun `resetForNewSession restarts the revision and names the new lifetime`() {
+        val publisher = AudioStatePublisher(AudioStateEpoch(VECTOR_EPOCH_A))
         val snap = AudioRouteSnapshot(endpointClass = EndpointClass.BLUETOOTH)
-        assertEquals(1L, publisher.next(snap, IntercomMode.PTT)?.revision)
-        publisher.resetForNewSession()
+        val first = publisher.next(snap, IntercomMode.PTT)
+        assertEquals(1L, first?.revision)
+        assertEquals(AudioStateEpoch(VECTOR_EPOCH_A), first?.revisionEpoch)
+        publisher.resetForNewSession(AudioStateEpoch(VECTOR_EPOCH_B))
         assertNull(publisher.published, "a reset forgets what was published")
-        assertEquals(1L, publisher.next(snap, IntercomMode.PTT)?.revision, "and numbering starts again")
+        val second = publisher.next(snap, IntercomMode.PTT)
+        assertEquals(1L, second?.revision, "and numbering starts again")
+        assertEquals(
+            AudioStateEpoch(VECTOR_EPOCH_B),
+            second?.revisionEpoch,
+            "under a lifetime the receiver can tell apart — the whole of ADR-021 Amendment A7",
+        )
     }
 
     // --- inbox --------------------------------------------------------------------------------
@@ -257,26 +287,51 @@ class AudioStateVectorTest {
             val row = element.jsonObject
             val name = row.string("name")
             val inbox = AudioStateInbox()
-            val offers = row["offer"]!!.jsonArray.map { it.jsonPrimitive.longOrNull!! }
+            val offers =
+                row["offer"]!!.jsonArray.map { offer ->
+                    val pair = offer.jsonArray
+                    pair[0].jsonPrimitive.longOrNull!! to AudioStateEpoch(pair[1].jsonPrimitive.content)
+                }
             val expected = row["expect_accepted"]!!.jsonArray.map { it.jsonPrimitive.booleanOrNull!! }
             assertEquals(offers.size, expected.size, "$name malformed row")
-            for ((index, revision) in offers.withIndex()) {
+            for ((index, offer) in offers.withIndex()) {
+                val (revision, epoch) = offer
                 assertEquals(
                     expected[index],
-                    inbox.accept(sampleMessage(revision)),
-                    "$name offer $index (revision $revision)",
+                    inbox.accept(sampleMessage(revision, epoch)),
+                    "$name offer $index (revision $revision epoch $epoch)",
                 )
             }
-            assertEquals(row.long("expect_current"), inbox.current?.revision, "$name final revision")
-            assertEquals(expected.count { !it }, inbox.droppedStale, "$name dropped count")
+            val current = row["expect_current"]!!.jsonArray
+            assertEquals(current[0].jsonPrimitive.longOrNull, inbox.current?.revision, "$name final revision")
+            assertEquals(
+                AudioStateEpoch(current[1].jsonPrimitive.content),
+                inbox.current?.revisionEpoch,
+                "$name final lifetime — a revision alone would pass for the wrong one",
+            )
+            // Every refusal is one or the other, never both and never uncounted: a stale revision
+            // within the held lifetime, or a straggler from a lifetime already replaced.
+            val retiredEpoch = row.nullableLong("expect_dropped_retired_epoch")?.toInt()
+            val stale = row.nullableLong("expect_dropped_stale")?.toInt()
+            if (retiredEpoch != null) assertEquals(retiredEpoch, inbox.droppedRetiredEpoch, "$name retired-epoch count")
+            if (stale != null) assertEquals(stale, inbox.droppedStale, "$name stale count")
+            assertEquals(
+                expected.count { !it },
+                inbox.droppedStale + inbox.droppedRetiredEpoch,
+                "$name every refusal must be counted exactly once",
+            )
         }
     }
 
     // --- decoding ----------------------------------------------------------------------------
 
-    private fun sampleMessage(revision: Long = 1): AudioStateMessage =
+    private fun sampleMessage(
+        revision: Long = 1,
+        epoch: AudioStateEpoch = AudioStateEpoch(VECTOR_EPOCH_A),
+    ): AudioStateMessage =
         AudioStateMessage(
             revision = revision,
+            revisionEpoch = epoch,
             endpointClass = EndpointClass.BLUETOOTH,
             microphoneOpen = true,
             effectiveOutputProfile = AudioProfile.DUPLEX_WIDEBAND,
@@ -308,6 +363,7 @@ class AudioStateVectorTest {
     private fun message(spec: JsonObject): AudioStateMessage =
         AudioStateMessage(
             revision = spec.long("revision"),
+            revisionEpoch = AudioStateEpoch(spec.string("revision_epoch")),
             endpointClass = EndpointClass.parse(spec.string("endpoint_class")),
             microphoneOpen = spec.bool("microphone_open"),
             effectiveOutputProfile = AudioProfile.parse(spec.string("effective_output_profile")),
@@ -340,4 +396,14 @@ class AudioStateVectorTest {
     private fun JsonObject.nullableInt(key: String): Int? = this[key]?.takeIf { it !is JsonNull }?.jsonPrimitive?.intOrNull
 
     private fun JsonObject.nullableLong(key: String): Long? = this[key]?.takeIf { it !is JsonNull }?.jsonPrimitive?.longOrNull
+
+    private companion object {
+        /**
+         * The same fabricated values `tools/generate_audio_state_vectors.py` uses. Readable runs of
+         * one hex digit, deliberately not CSPRNG output, so nothing here could be mistaken for a
+         * captured value (CLAUDE.md: vectors carry fabricated test values only).
+         */
+        const val VECTOR_EPOCH_A = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        const val VECTOR_EPOCH_B = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    }
 }

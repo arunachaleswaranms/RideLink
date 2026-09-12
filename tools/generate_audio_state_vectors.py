@@ -2,8 +2,9 @@
 """Generate protocol/vectors/audio-state/audio_state_vectors.json.
 
 PROTOCOL §4.4 / ADR-016 — the `AUDIO_STATE` message: its exact field set, its bounds, its
-`media_quality` derivation, and the monotonic `revision` rule on both the sending and the
-receiving side.
+`media_quality` derivation, the monotonic `revision` rule on both the sending and the receiving
+side, and (ADR-021 Amendment A7) the `revision_epoch` that says *which* sender lifetime a
+`revision` belongs to.
 
 Like every other generator in this directory, this is a **third, independent implementation**,
 written from `docs/PROTOCOL.md` §4.4 and §4.3.1 rather than ported from either platform's codec.
@@ -27,8 +28,13 @@ from pathlib import Path
 MAX_SAMPLE_RATE_HZ = 768_000
 MAX_REVISION = 9_007_199_254_740_991  # 2^53 - 1; see AudioStateCodec.MAX_REVISION for why
 
+# ADR-021 Amendment A7: how many *replaced* sender lifetimes an inbox remembers in order to refuse a
+# straggler from one. Bounded because the values come from a peer. See AudioStateInbox.
+MAX_SUPERSEDED_EPOCHS = 8
+
 FIELD_ORDER = [
     "revision",
+    "revision_epoch",
     "endpoint_class",
     "microphone_open",
     "effective_output_profile",
@@ -53,6 +59,14 @@ PROFILES = [
     "unknown",
 ]
 ROUTE_STATES = ["stable", "transitioning"]
+
+# Fabricated `revision_epoch` values — 32 lowercase hex, as §4.4 requires, and deliberately readable
+# rather than random so a row's *lifetime* is obvious when a vector fails. Nothing here came from a
+# CSPRNG, a device or a capture; see `_test_values_only`.
+EPOCH_A = "a" * 32
+EPOCH_B = "b" * 32
+EPOCH_C = "c" * 32
+EPOCH_D = "d" * 32
 INTERCOM_MODES = ["continuous", "vox", "ptt", "disabled"]
 CONFIDENCES = ["measured", "assumed", "unknown"]
 
@@ -128,9 +142,10 @@ def snapshot(
     }
 
 
-def message_from(revision: int, snap: dict, intercom_mode: str) -> dict:
+def message_from(revision: int, snap: dict, intercom_mode: str, revision_epoch: str = EPOCH_A) -> dict:
     return {
         "revision": revision,
+        "revision_epoch": revision_epoch,
         "endpoint_class": snap["endpoint_class"],
         "microphone_open": snap["microphone_open"],
         "effective_output_profile": snap["effective_output_profile"],
@@ -231,6 +246,7 @@ def build_encode() -> list[dict]:
             {
                 "name": f"encode-{name}",
                 "revision": index,
+                "revision_epoch": EPOCH_A,
                 "snapshot": snap,
                 "intercom_mode": mode,
                 "expect": {"message": message, "payload": dict(message)},
@@ -242,6 +258,7 @@ def build_encode() -> list[dict]:
         {
             "name": "encode-null-sample-rates-are-explicit-json-null",
             "revision": 7,
+            "revision_epoch": EPOCH_A,
             "snapshot": snapshot(
                 effective_output_sample_rate_hz=None,
                 effective_input_sample_rate_hz=None,
@@ -352,6 +369,7 @@ def build_parse() -> list[dict]:
 
     wrong_types = {
         "revision": "5",
+        "revision_epoch": 5,
         "endpoint_class": 3,
         "microphone_open": "true",
         "effective_output_profile": 1,
@@ -381,12 +399,41 @@ def build_parse() -> list[dict]:
                 "expect": {"parsed": valid_payload(**{field: None})},
             }
         )
-    for field in ("endpoint_class", "microphone_open", "revision", "media_quality"):
+    for field in ("endpoint_class", "microphone_open", "revision", "revision_epoch", "media_quality"):
         rows.append(
             {
                 "name": f"parse-explicit-null-{field}-is-rejected",
                 "payload": valid_payload(**{field: None}),
                 "expect": {"rejected": "WRONG_FIELD_TYPE"},
+            }
+        )
+
+    # `revision_epoch` format (ADR-021 Amendment A7). Present and a string, but not 32 lowercase hex,
+    # is its own rejection rather than WRONG_FIELD_TYPE — the JSON type was right and the *value* was
+    # not, exactly the distinction §7.5 draws for `voice_session_id`. Uppercase hex is **rejected**,
+    # not normalised: one canonical form, as for `identity_spki_sha256`.
+    malformed_epochs = {
+        "too-short": "a" * 31,
+        "too-long": "a" * 33,
+        "uppercase-is-rejected-not-normalised": "A" * 32,
+        "non-hex": "g" * 32,
+        "empty": "",
+        "hyphenated-uuid-shape": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+    }
+    for label, value in malformed_epochs.items():
+        rows.append(
+            {
+                "name": f"parse-revision_epoch-{label}-is-rejected",
+                "payload": valid_payload(revision_epoch=value),
+                "expect": {"rejected": "MALFORMED_REVISION_EPOCH"},
+            }
+        )
+    for label, value in {"all-zeroes": "0" * 32, "all-fs": "f" * 32, "mixed": EPOCH_D}.items():
+        rows.append(
+            {
+                "name": f"parse-revision_epoch-{label}-is-legal",
+                "payload": valid_payload(revision_epoch=value),
+                "expect": {"parsed": valid_payload(revision_epoch=value)},
             }
         )
 
@@ -473,7 +520,12 @@ def build_media_quality() -> list[dict]:
 
 
 def build_publisher() -> list[dict]:
-    """The sending side of §4.4's revision rule."""
+    """The sending side of §4.4's revision rule, and of the epoch that scopes it.
+
+    Every row starts a publisher at `EPOCH_A`. A step may carry `"reset_to_epoch"`, which is
+    `resetForNewSession` — the **one** thing that may move the epoch, and the one thing that restarts
+    the counter. That they are a single operation is the invariant the receiving side depends on.
+    """
     music = snapshot()
     intercom = snapshot(
         microphone_open=True,
@@ -565,51 +617,202 @@ def build_publisher() -> list[dict]:
             ],
         }
     )
+
+    # --- ADR-021 Amendment A7: the epoch ------------------------------------------------------------
+    rows.append(
+        {
+            "name": "publisher-stamps-every-message-with-the-lifetime-epoch",
+            "steps": [
+                {"snapshot": music, "intercom_mode": "disabled", "force": False, "expect_revision": 1, "expect_epoch": EPOCH_A},
+                {"snapshot": intercom, "intercom_mode": "ptt", "force": False, "expect_revision": 2, "expect_epoch": EPOCH_A},
+                {"snapshot": music, "intercom_mode": "disabled", "force": True, "expect_revision": 3, "expect_epoch": EPOCH_A},
+            ],
+        }
+    )
+    rows.append(
+        {
+            "name": "publisher-a-new-lifetime-restarts-the-revision-and-changes-the-epoch-together",
+            "steps": [
+                {"snapshot": music, "intercom_mode": "disabled", "force": False, "expect_revision": 1, "expect_epoch": EPOCH_A},
+                {"snapshot": intercom, "intercom_mode": "ptt", "force": False, "expect_revision": 2, "expect_epoch": EPOCH_A},
+                {"reset_to_epoch": EPOCH_B},
+                {"snapshot": music, "intercom_mode": "disabled", "force": False, "expect_revision": 1, "expect_epoch": EPOCH_B},
+            ],
+        }
+    )
+    rows.append(
+        {
+            "name": "publisher-a-reset-clears-the-last-published-state-so-an-identical-snapshot-publishes-again",
+            "steps": [
+                {"snapshot": music, "intercom_mode": "disabled", "force": False, "expect_revision": 1, "expect_epoch": EPOCH_A},
+                {"snapshot": music, "intercom_mode": "disabled", "force": False, "expect_revision": None},
+                {"reset_to_epoch": EPOCH_B},
+                # The same snapshot, and it publishes: a new lifetime's peer has seen nothing of ours.
+                {"snapshot": music, "intercom_mode": "disabled", "force": False, "expect_revision": 1, "expect_epoch": EPOCH_B},
+            ],
+        }
+    )
+    rows.append(
+        {
+            "name": "publisher-three-lifetimes-each-restart-at-1-under-their-own-epoch",
+            "steps": [
+                {"snapshot": music, "intercom_mode": "disabled", "force": False, "expect_revision": 1, "expect_epoch": EPOCH_A},
+                {"reset_to_epoch": EPOCH_B},
+                {"snapshot": intercom, "intercom_mode": "ptt", "force": False, "expect_revision": 1, "expect_epoch": EPOCH_B},
+                {"reset_to_epoch": EPOCH_C},
+                {"snapshot": music, "intercom_mode": "disabled", "force": True, "expect_revision": 1, "expect_epoch": EPOCH_C},
+            ],
+        }
+    )
     return rows
 
 
 def build_inbox() -> list[dict]:
-    """The receiving side: drops anything not strictly greater than what it holds."""
-    return [
-        {"name": "inbox-first-message-is-accepted", "offer": [1], "expect_accepted": [True], "expect_current": 1},
+    """The receiving side: §4.4's revision rule, scoped to one sender lifetime.
+
+    Each `offer` entry is `[revision, revision_epoch]`. The rule, transcribed from §4.4 and ADR-021
+    Amendment A7 rather than read off either platform:
+
+    - nothing held yet          -> accept.
+    - same epoch as held        -> accept iff strictly greater. Equal is a retransmit.
+    - an epoch never held       -> a new sender lifetime: accept, and record the epoch it replaced.
+    - an epoch already replaced -> refuse. A straggler cannot resurrect a lifetime that is over.
+
+    `expect_current` is `[revision, epoch]` — asserting the revision alone would pass for a row that
+    kept the wrong lifetime's message.
+    """
+    rows: list[dict] = [
+        {
+            "name": "inbox-first-message-is-accepted",
+            "offer": [[1, EPOCH_A]],
+            "expect_accepted": [True],
+            "expect_current": [1, EPOCH_A],
+        },
         {
             "name": "inbox-increasing-revisions-are-accepted",
-            "offer": [1, 2, 3],
+            "offer": [[1, EPOCH_A], [2, EPOCH_A], [3, EPOCH_A]],
             "expect_accepted": [True, True, True],
-            "expect_current": 3,
+            "expect_current": [3, EPOCH_A],
         },
         {
             "name": "inbox-a-lower-revision-is-dropped-and-cannot-resurrect-a-stale-route",
-            "offer": [5, 4],
+            "offer": [[5, EPOCH_A], [4, EPOCH_A]],
             "expect_accepted": [True, False],
-            "expect_current": 5,
+            "expect_current": [5, EPOCH_A],
         },
         {
             "name": "inbox-an-equal-revision-is-dropped-as-a-retransmit",
-            "offer": [5, 5],
+            "offer": [[5, EPOCH_A], [5, EPOCH_A]],
             "expect_accepted": [True, False],
-            "expect_current": 5,
+            "expect_current": [5, EPOCH_A],
         },
         {
             "name": "inbox-reordered-delivery-settles-on-the-highest",
-            "offer": [1, 3, 2, 4],
+            "offer": [[1, EPOCH_A], [3, EPOCH_A], [2, EPOCH_A], [4, EPOCH_A]],
             "expect_accepted": [True, True, False, True],
-            "expect_current": 4,
+            "expect_current": [4, EPOCH_A],
         },
         {
             "name": "inbox-revision-zero-is-a-legal-first-value",
-            "offer": [0, 0, 1],
+            "offer": [[0, EPOCH_A], [0, EPOCH_A], [1, EPOCH_A]],
             "expect_accepted": [True, False, True],
-            "expect_current": 1,
+            "expect_current": [1, EPOCH_A],
         },
     ]
+
+    # --- ADR-021 Amendment A7: the floor belongs to one lifetime ------------------------------------
+    rows.extend(
+        [
+            {
+                # The defect this amendment exists for: a sender that restarted comes back at 1, and
+                # a floor of 50 from its previous lifetime must not refuse it.
+                "name": "inbox-a-new-lifetime-restarting-at-1-is-accepted-over-a-high-floor",
+                "offer": [[50, EPOCH_A], [1, EPOCH_B]],
+                "expect_accepted": [True, True],
+                "expect_current": [1, EPOCH_B],
+            },
+            {
+                "name": "inbox-the-new-lifetime-then-orders-normally-against-itself",
+                "offer": [[50, EPOCH_A], [1, EPOCH_B], [2, EPOCH_B], [2, EPOCH_B], [1, EPOCH_B]],
+                "expect_accepted": [True, True, True, False, False],
+                "expect_current": [2, EPOCH_B],
+            },
+            {
+                # The half a naive "accept anything with a different epoch" fix breaks.
+                "name": "inbox-a-straggler-from-a-replaced-lifetime-cannot-overwrite-its-successor",
+                "offer": [[50, EPOCH_A], [1, EPOCH_B], [2, EPOCH_B], [51, EPOCH_A]],
+                "expect_accepted": [True, True, True, False],
+                "expect_current": [2, EPOCH_B],
+                "expect_dropped_retired_epoch": 1,
+            },
+            {
+                "name": "inbox-a-straggler-is-refused-however-high-its-revision",
+                "offer": [[3, EPOCH_A], [1, EPOCH_B], [9_007_199_254_740_991, EPOCH_A]],
+                "expect_accepted": [True, True, False],
+                "expect_current": [1, EPOCH_B],
+                "expect_dropped_retired_epoch": 1,
+            },
+            {
+                "name": "inbox-an-epoch-that-is-stale-and-one-that-is-retired-are-counted-separately",
+                "offer": [[5, EPOCH_A], [4, EPOCH_A], [1, EPOCH_B], [6, EPOCH_A]],
+                "expect_accepted": [True, False, True, False],
+                "expect_current": [1, EPOCH_B],
+                "expect_dropped_stale": 1,
+                "expect_dropped_retired_epoch": 1,
+            },
+            {
+                "name": "inbox-three-lifetimes-in-a-row-each-supersede-the-last",
+                "offer": [[7, EPOCH_A], [1, EPOCH_B], [1, EPOCH_C], [2, EPOCH_A], [2, EPOCH_B]],
+                "expect_accepted": [True, True, True, False, False],
+                "expect_current": [1, EPOCH_C],
+                "expect_dropped_retired_epoch": 2,
+            },
+            {
+                # A lifetime that was never *held* is not retired — it is simply new. The first frame
+                # of a lifetime always wins over the one it replaces, whatever its revision.
+                "name": "inbox-an-unseen-epoch-is-new-not-retired-even-at-revision-zero",
+                "offer": [[40, EPOCH_A], [0, EPOCH_D]],
+                "expect_accepted": [True, True],
+                "expect_current": [0, EPOCH_D],
+                "expect_dropped_retired_epoch": 0,
+            },
+        ]
+    )
+
+    # The ring is bounded, and the bound is a stated cost rather than an accident. Ten lifetimes are
+    # walked so that the first is evicted from a ring that holds eight, and the row then asserts both
+    # halves: a lifetime still in the ring is refused, and the evicted one is not. ADR-025's
+    # generation gate is what still refuses that frame in production — this file pins only what the
+    # pure inbox does, which is the point of keeping the two rules separate.
+    ring_epochs = [f"{index:032x}" for index in range(1, 10)]
+    walk = [[1, EPOCH_A]] + [[1, epoch] for epoch in ring_epochs]
+    # After the walk: current is the last epoch, the ring holds ring_epochs[0..7], and EPOCH_A — the
+    # ninth-oldest — has been evicted.
+    rows.append(
+        {
+            "name": "inbox-the-superseded-ring-is-bounded-at-8-and-the-evicted-lifetime-is-no-longer-refused",
+            "offer": walk + [[2, ring_epochs[7]], [2, EPOCH_A]],
+            "expect_accepted": [True] * len(walk) + [False, True],
+            "expect_current": [2, EPOCH_A],
+            "expect_dropped_retired_epoch": 1,
+            "_comment": (
+                "EPOCH_A plus nine more is ten lifetimes, so by the end of the walk the ring holds the "
+                "eight most recently superseded and EPOCH_A has been evicted from it. A frame naming a "
+                "lifetime still in the ring is refused; one naming the evicted lifetime reads as new "
+                "again, which is the bound's honest cost and is stated rather than hidden."
+            ),
+        }
+    )
+    return rows
 
 
 def main() -> None:
     payload = {
         "_comment": (
             "PROTOCOL §4.4 / ADR-016 — the AUDIO_STATE message: its exact field set, its bounds, its "
-            "media_quality derivation, and the monotonic revision rule on both sides. Both platforms' "
+            "media_quality derivation, the monotonic revision rule on both sides, and (ADR-021 "
+            "Amendment A7) the revision_epoch that says which sender lifetime a revision belongs to. "
+            "Both platforms' "
             "AudioStateCodec, AudioStatePublisher and AudioStateInbox run this same file, so a bound or "
             "a revision rule implemented differently on the two phones is a laptop unit-test failure "
             "rather than something two phones discover on a ride. Generated by "
@@ -625,21 +828,36 @@ def main() -> None:
             "VOICE_* and §6 for PING.",
             "An unrecognised enum value is tolerated as `unknown` (or `stable`, for route_state) rather "
             "than treated as malformed: §4.3.1's forward-compatibility rule.",
-            "Every publisher row's revisions are strictly increasing, and a suppressed publish "
-            "(expect_revision null) must not move the revision at all.",
-            "No inbox row accepts a revision that is not strictly greater than the one it holds.",
+            "Every publisher row's revisions are strictly increasing within one revision_epoch, and a "
+            "suppressed publish (expect_revision null) must not move the revision at all.",
+            "The ONLY step that may change a publisher's revision_epoch is the same step that restarts "
+            "its counter (reset_to_epoch). An epoch that moved without the counter restarting, or a "
+            "counter that restarted without the epoch moving, would each break the receiving rule.",
+            "No inbox row accepts a revision that is not strictly greater than the one it holds FOR "
+            "THE SAME revision_epoch. A revision is not comparable across epochs and no row treats it "
+            "as if it were.",
+            "No inbox row lets a revision_epoch that has already been superseded replace the lifetime "
+            "that superseded it — solving 'a restarted sender is refused' must not reintroduce 'a "
+            "stale route is resurrected'.",
             "media_quality is derived from effective_output_profile alone and is never measured from "
             "audio (ADR-016 Amendment A1).",
         ],
         "_test_values_only": (
-            "Every value here is fabricated. No real device name, address, key or measurement appears in "
+            "Every value here is fabricated, revision_epoch included: the epochs are readable runs of one "
+            "hex digit and small counters, deliberately NOT CSPRNG output, so that nothing in this file "
+            "could ever be mistaken for a captured value. "
+            "No real device name, address, key or measurement appears in "
             "protocol/vectors/. In particular `confidence: assumed` is the truth for both platforms "
             "until docs/PHASE0_RESULTS.md is filled in, and the one `measured` value below appears only "
             "in a parse row to prove the vocabulary round-trips."
         ),
         "_forbidden_substrings": FORBIDDEN_SUBSTRINGS,
         "_scanned_keys": SCANNED_KEYS,
-        "bounds": {"MAX_SAMPLE_RATE_HZ": MAX_SAMPLE_RATE_HZ, "MAX_REVISION": MAX_REVISION},
+        "bounds": {
+            "MAX_SAMPLE_RATE_HZ": MAX_SAMPLE_RATE_HZ,
+            "MAX_REVISION": MAX_REVISION,
+            "MAX_SUPERSEDED_EPOCHS": MAX_SUPERSEDED_EPOCHS,
+        },
         "field_order": FIELD_ORDER,
         "vocabulary": {
             "endpoint_class": ENDPOINT_CLASSES,

@@ -298,6 +298,7 @@ final class VoiceAuthenticationGateTests: XCTestCase {
                 sentAtMonoUs: revision,
                 message: AudioStateMessage(
                     revision: revision,
+                    revisionEpoch: AudioStateEpoch("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
                     endpointClass: .bluetooth,
                     microphoneOpen: true,
                     effectiveOutputProfile: .duplexWideband,

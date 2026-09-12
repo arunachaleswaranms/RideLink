@@ -60,6 +60,7 @@ final class AudioStateVectorTests: XCTestCase {
         let bounds = doc.dict("bounds")
         XCTAssertEqual(bounds.int64("MAX_SAMPLE_RATE_HZ"), AudioStateCodec.maxSampleRateHz)
         XCTAssertEqual(bounds.int64("MAX_REVISION"), AudioStateCodec.maxRevision)
+        XCTAssertEqual(bounds.int64("MAX_SUPERSEDED_EPOCHS"), Int64(AudioStateInbox.maxSupersededEpochs))
     }
 
     /// Every value in §4.3.1's closed vocabularies must round-trip through this platform's enums.
@@ -94,6 +95,7 @@ final class AudioStateVectorTests: XCTestCase {
             let name = row.str("name")
             let message = AudioStateMessage.from(
                 revision: row.int64("revision"),
+                revisionEpoch: AudioStateEpoch(row.str("revision_epoch")),
                 snapshot: snapshot(row.dict("snapshot")),
                 intercomMode: IntercomMode.parse(row.str("intercom_mode"))
             )
@@ -199,11 +201,20 @@ final class AudioStateVectorTests: XCTestCase {
             // swiftlint:disable:next force_cast
             let row = element as! [String: Any]
             let name = row.str("name")
-            var publisher = AudioStatePublisher()
+            var publisher = AudioStatePublisher(epoch: AudioStateEpoch(Self.vectorEpochA))
             var lastRevision: Int64 = 0
             for (index, stepElement) in row.array("steps").enumerated() {
                 // swiftlint:disable:next force_cast
                 let step = stepElement as! [String: Any]
+                // The one step that may move the epoch is the one that restarts the counter (ADR-021
+                // Amendment A7). The file's `_invariants` say so; this is that, executed.
+                if let resetTo = step["reset_to_epoch"] as? String {
+                    publisher.resetForNewSession(epoch: AudioStateEpoch(resetTo))
+                    XCTAssertEqual(0, publisher.currentRevision, "\(name) step \(index) must restart the counter")
+                    XCTAssertNil(publisher.published, "\(name) step \(index) must forget what was published")
+                    lastRevision = 0
+                    continue
+                }
                 let snap = snapshot(step.dict("snapshot"))
                 let mode = IntercomMode.parse(step.str("intercom_mode"))
                 let produced = step.boolVal("force")
@@ -217,18 +228,38 @@ final class AudioStateVectorTests: XCTestCase {
                     XCTAssertNil(produced, "\(name) step \(index) expected no publish")
                     XCTAssertEqual(lastRevision, publisher.currentRevision, "\(name) step \(index) moved the revision")
                 }
+                if let expectedEpoch = step["expect_epoch"] as? String {
+                    XCTAssertEqual(
+                        AudioStateEpoch(expectedEpoch), produced?.revisionEpoch, "\(name) step \(index) epoch"
+                    )
+                }
+                // Every message a publisher emits names the lifetime it is currently in — there is no
+                // path that stamps anything else.
+                if let produced {
+                    XCTAssertEqual(
+                        publisher.currentEpoch, produced.revisionEpoch, "\(name) step \(index) stamped epoch"
+                    )
+                }
             }
         }
     }
 
     /// A new control session restarts the numbering: §4.4's revision is per sender per session.
-    func testResetForNewSessionRestartsTheRevision() {
-        var publisher = AudioStatePublisher()
+    func testResetForNewSessionRestartsTheRevisionAndNamesTheNewLifetime() {
+        var publisher = AudioStatePublisher(epoch: AudioStateEpoch(Self.vectorEpochA))
         let snap = AudioRouteSnapshot(endpointClass: .bluetooth)
-        XCTAssertEqual(1, publisher.next(snapshot: snap, intercomMode: .ptt)?.revision)
-        publisher.resetForNewSession()
+        let first = publisher.next(snapshot: snap, intercomMode: .ptt)
+        XCTAssertEqual(1, first?.revision)
+        XCTAssertEqual(AudioStateEpoch(Self.vectorEpochA), first?.revisionEpoch)
+        publisher.resetForNewSession(epoch: AudioStateEpoch(Self.vectorEpochB))
         XCTAssertNil(publisher.published, "a reset forgets what was published")
-        XCTAssertEqual(1, publisher.next(snapshot: snap, intercomMode: .ptt)?.revision, "numbering starts again")
+        let second = publisher.next(snapshot: snap, intercomMode: .ptt)
+        XCTAssertEqual(1, second?.revision, "numbering starts again")
+        XCTAssertEqual(
+            AudioStateEpoch(Self.vectorEpochB),
+            second?.revisionEpoch,
+            "under a lifetime the receiver can tell apart — the whole of ADR-021 Amendment A7"
+        )
     }
 
     // MARK: - inbox
@@ -240,28 +271,56 @@ final class AudioStateVectorTests: XCTestCase {
             let row = element as! [String: Any]
             let name = row.str("name")
             var inbox = AudioStateInbox()
-            // swiftlint:disable:next force_cast
-            let offers = row.array("offer").map { ($0 as! NSNumber).int64Value }
+            let offers: [(Int64, AudioStateEpoch)] = row.array("offer").map { element in
+                // swiftlint:disable:next force_cast
+                let pair = element as! [Any]
+                // swiftlint:disable:next force_cast
+                return ((pair[0] as! NSNumber).int64Value, AudioStateEpoch(pair[1] as! String))
+            }
             // swiftlint:disable:next force_cast
             let expected = row.array("expect_accepted").map { ($0 as! NSNumber).boolValue }
             XCTAssertEqual(offers.count, expected.count, "\(name) malformed row")
-            for (index, revision) in offers.enumerated() {
+            for (index, offer) in offers.enumerated() {
                 XCTAssertEqual(
                     expected[index],
-                    inbox.accept(sampleMessage(revision: revision)),
-                    "\(name) offer \(index) (revision \(revision))"
+                    inbox.accept(sampleMessage(revision: offer.0, epoch: offer.1)),
+                    "\(name) offer \(index) (revision \(offer.0) epoch \(offer.1))"
                 )
             }
-            XCTAssertEqual(row.int64("expect_current"), inbox.current?.revision, "\(name) final revision")
-            XCTAssertEqual(expected.filter { !$0 }.count, inbox.droppedStale, "\(name) dropped count")
+            let current = row.array("expect_current")
+            // swiftlint:disable:next force_cast
+            XCTAssertEqual((current[0] as! NSNumber).int64Value, inbox.current?.revision, "\(name) final revision")
+            XCTAssertEqual(
+                // swiftlint:disable:next force_cast
+                AudioStateEpoch(current[1] as! String),
+                inbox.current?.revisionEpoch,
+                "\(name) final lifetime — a revision alone would pass for the wrong one"
+            )
+            // Every refusal is one or the other, never both and never uncounted: a stale revision
+            // within the held lifetime, or a straggler from a lifetime already replaced.
+            if let retired = row.int64Opt("expect_dropped_retired_epoch") {
+                XCTAssertEqual(Int(retired), inbox.droppedRetiredEpoch, "\(name) retired-epoch count")
+            }
+            if let stale = row.int64Opt("expect_dropped_stale") {
+                XCTAssertEqual(Int(stale), inbox.droppedStale, "\(name) stale count")
+            }
+            XCTAssertEqual(
+                expected.filter { !$0 }.count,
+                inbox.droppedStale + inbox.droppedRetiredEpoch,
+                "\(name) every refusal must be counted exactly once"
+            )
         }
     }
 
     // MARK: - decoding
 
-    private func sampleMessage(revision: Int64 = 1) -> AudioStateMessage {
+    private func sampleMessage(
+        revision: Int64 = 1,
+        epoch: AudioStateEpoch = AudioStateEpoch(AudioStateVectorTests.vectorEpochA)
+    ) -> AudioStateMessage {
         AudioStateMessage(
             revision: revision,
+            revisionEpoch: epoch,
             endpointClass: .bluetooth,
             microphoneOpen: true,
             effectiveOutputProfile: .duplexWideband,
@@ -295,6 +354,7 @@ final class AudioStateVectorTests: XCTestCase {
     private func message(_ spec: [String: Any]) -> AudioStateMessage {
         AudioStateMessage(
             revision: spec.int64("revision"),
+            revisionEpoch: AudioStateEpoch(spec.str("revision_epoch")),
             endpointClass: EndpointClass.parse(spec.str("endpoint_class")),
             microphoneOpen: spec.boolVal("microphone_open"),
             effectiveOutputProfile: AudioProfile.parse(spec.str("effective_output_profile")),
@@ -369,4 +429,10 @@ final class AudioStateVectorTests: XCTestCase {
         }
         return out
     }
+    /// The same fabricated values `tools/generate_audio_state_vectors.py` uses. Readable runs of one hex
+    /// digit, deliberately not CSPRNG output, so nothing here could be mistaken for a captured value
+    /// (CLAUDE.md: vectors carry fabricated test values only).
+    fileprivate static let vectorEpochA = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    fileprivate static let vectorEpochB = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+
 }

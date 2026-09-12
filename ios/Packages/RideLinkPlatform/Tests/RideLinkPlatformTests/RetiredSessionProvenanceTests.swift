@@ -420,11 +420,17 @@ final class RetiredSessionProvenanceTests: XCTestCase {
         )
     }
 
-    private static func audioState(revision: Int) -> Envelope {
+    private static let audioStateEpoch = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+    private static func audioState(revision: Int, epoch: String = audioStateEpoch) -> Envelope {
         envelope(
             AudioStateMessageTypes.audioState,
             [
                 "revision": .number(Double(revision)),
+                // ADR-021 Amendment A7. A fixed fabricated lifetime, because these rows are about the
+                // *connection* a frame was read from and not about which of the peer's counters it came
+                // from — holding the epoch still is what keeps them testing only the ADR-025 gate.
+                "revision_epoch": .string(epoch),
                 "endpoint_class": .string("bluetooth"),
                 "microphone_open": .bool(true),
                 "effective_output_profile": .string("duplex_wideband"),

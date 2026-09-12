@@ -6,6 +6,7 @@ import com.ridelink.core.audiopolicy.EndpointClass
 import com.ridelink.core.audiopolicy.IntercomMode
 import com.ridelink.core.audiopolicy.MediaQuality
 import com.ridelink.core.audiopolicy.RouteState
+import com.ridelink.core.protocol.AudioStateEpoch
 import com.ridelink.core.protocol.AudioStateMessage
 import com.ridelink.core.protocol.AudioStateMessageTypes
 import com.ridelink.core.protocol.VoiceMessageTypes
@@ -404,6 +405,7 @@ class VoiceAuthenticationGateTest {
                     revision,
                     AudioStateMessage(
                         revision = revision,
+                        revisionEpoch = AudioStateEpoch("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
                         endpointClass = EndpointClass.BLUETOOTH,
                         microphoneOpen = true,
                         effectiveOutputProfile = AudioProfile.DUPLEX_WIDEBAND,

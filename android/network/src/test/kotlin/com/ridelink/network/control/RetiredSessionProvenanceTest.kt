@@ -484,20 +484,26 @@ class RetiredSessionProvenanceTest {
             put("sdp", MINIMAL_SDP)
         }
 
-    private fun audioState(revision: Int) =
-        frame(AudioStateMessageTypes.AUDIO_STATE) {
-            put("revision", revision)
-            put("endpoint_class", "bluetooth")
-            put("microphone_open", true)
-            put("effective_output_profile", "duplex_wideband")
-            put("effective_input_profile", "duplex_wideband")
-            put("effective_output_sample_rate_hz", 16_000)
-            put("effective_input_sample_rate_hz", 16_000)
-            put("media_quality", "reduced")
-            put("route_state", "stable")
-            put("intercom_mode", "ptt")
-            put("confidence", "assumed")
-        }
+    private fun audioState(
+        revision: Int,
+        epoch: String = AUDIO_STATE_EPOCH,
+    ) = frame(AudioStateMessageTypes.AUDIO_STATE) {
+        put("revision", revision)
+        // ADR-021 Amendment A7. A fixed fabricated lifetime, because these rows are about the
+        // *connection* a frame was read from and not about which of the peer's counters it came
+        // from — holding the epoch still is what keeps them testing only the ADR-025 gate.
+        put("revision_epoch", epoch)
+        put("endpoint_class", "bluetooth")
+        put("microphone_open", true)
+        put("effective_output_profile", "duplex_wideband")
+        put("effective_input_profile", "duplex_wideband")
+        put("effective_output_sample_rate_hz", 16_000)
+        put("effective_input_sample_rate_hz", 16_000)
+        put("media_quality", "reduced")
+        put("route_state", "stable")
+        put("intercom_mode", "ptt")
+        put("confidence", "assumed")
+    }
 
     /**
      * A §6-valid `PONG` whose round trip is [rttUs]. `t2`/`t3` are equal, so the sample's rtt is
@@ -513,6 +519,7 @@ class RetiredSessionProvenanceTest {
 
     private companion object {
         val PEER_B = PeerId("bbbbbbbbbbbbbbbb")
+        const val AUDIO_STATE_EPOCH = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
         val MONOTONIC: () -> Long = { System.nanoTime() / 1_000 }
         const val POLL_MS = 10L
         const val SETTLE_MS = 100L

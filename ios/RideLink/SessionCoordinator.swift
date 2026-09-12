@@ -70,7 +70,10 @@ public final class SessionCoordinator {
     /// problem rather than "connection failed" (this phase's brief §41).
     public private(set) var lastIntercomRefusal: VoiceFailure?
 
-    private var audioStatePublisher = AudioStatePublisher()
+    /// This device's `AUDIO_STATE` sender lifetime (PROTOCOL §4.4, ADR-021 Amendment A7). The epoch is
+    /// minted here and re-minted by `startDiscovery()`; nothing else may move it, because the epoch's only
+    /// meaning is "the `revision` counter below restarted".
+    private var audioStatePublisher = AudioStatePublisher(epoch: AudioStateEpochGenerator.generate())
     private var peerAudioStateInbox = AudioStateInbox()
 
     /// Whether the app is foreground-active. The only honest source for
@@ -272,7 +275,12 @@ public final class SessionCoordinator {
         discoveryCount = 0
         // PROTOCOL §4.4's revision is per sender per **session**, so a new discovery session restarts the
         // numbering — and the peer's held state goes with it, since it belonged to the old one.
-        audioStatePublisher.resetForNewSession()
+        //
+        // ADR-021 Amendment A7: the restart is *announced*. A fresh epoch is what tells the peer that the
+        // numbers it is about to see belong to a new counter, so its held floor — which it keeps across a
+        // reconnect on purpose — does not silently refuse every one of them. Minting it in the same
+        // statement that resets the counter is the invariant: the two cannot drift apart.
+        audioStatePublisher.resetForNewSession(epoch: AudioStateEpochGenerator.generate())
         peerAudioStateInbox.reset()
         peerAudioState = nil
         lastIntercomRefusal = nil
@@ -581,7 +589,20 @@ public final class SessionCoordinator {
         }
         guard let message else { return }
         let manager = controlSessionManager
-        Task { _ = await manager.audioStateRelay().send(message) }
+        Task { @MainActor [weak self] in
+            // ADR-021 Amendment A7 §4, which is ADR-024 Amendment A3/A5's rule applied outbound:
+            // **authorised to build is not authorised to send.** The revision above was committed
+            // synchronously, but this `Task` is a suspension point, and `startDiscovery()` can land in
+            // that gap — retiring this message's whole sender lifetime. Sending it anyway would announce
+            // a dead epoch on the successor's connection, and a peer that adopted it would then treat the
+            // *live* lifetime's first frame as yet another new epoch.
+            //
+            // The check is deliberately on the epoch and not on the control session: a reconnect does
+            // **not** end this lifetime, and §4.4 requires our current audio state to reach the peer on
+            // the new connection.
+            guard let self, message.revisionEpoch == self.audioStatePublisher.currentEpoch else { return }
+            _ = await manager.audioStateRelay().send(message)
+        }
     }
 
     /// Whether the platform has not refused the microphone. `.undetermined` counts as plausible: the
