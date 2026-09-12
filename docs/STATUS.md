@@ -1,8 +1,10 @@
 # RideLink — Status
 
-**Updated:** 12 September 2026 (`AUDIO_STATE` sender-lifetime closure, ADR-021 Amendment A7, thirty-third session — see §2aj. **This one moved the wire:** `AUDIO_STATE` gains `revision_epoch`)
+**Updated:** 13 September 2026 (session lifecycle — end and restart, [ADR-026](DECISIONS/ADR-026-session-lifecycle-teardown-and-restart.md), thirty-fourth session — see §2ak. **The wire did not move**; one FSM vector row did, and ARCHITECTURE §3 rule 3 is amended)
 **Current milestone:** M1 (Private voice link) is **software-complete with no known defect** — its
-hardware gate is the only thing left open. M2 (local music) is implementation-complete and
+hardware gate is the only thing left open. **§4 problem 53 is fixed and §4 problem 54 with it**: for
+the first time a ride can be ended and a new one started without relaunching the app, and a Stop
+Discovery no longer silently kills Phase 4 and Phase 5 for the rest of the process. M2 (local music) is implementation-complete and
 closure-audited (§2q/§2r). Phase 4 is closure-audited **six** times (§2v–§2z, §2ai) and **§4 problem
 44 is now fixed** (ADR-023 Amendment A6 / ADR-025 §1). **M4 (Synced ride music) has its software
 half, and it has been audited seven times**: Phase 5 is closure-audited A1 (§2ab), A2 (§2ac),
@@ -13,6 +15,10 @@ Phase 5; it closed the cross-phase control-plane defect A7 confirmed and deliber
 problem 47**, one of the four watch items ADR-025's sweep left behind, and it **moved the wire** to do
 it — `AUDIO_STATE` gains `revision_epoch` (PROTOCOL §4.4.2, ADR-021 Amendment A7), because no existing
 field named a sender's `revision` namespace and reinterpreting one that did not fit was refused.
+The thirty-fourth session (§2ak) did not advance Phase 5 either: it fixed **§4 problem 53** — the two
+`SessionFsm` transitions back to discovery that no production code could trigger — and, in making a
+second session reachable at all, exposed and fixed **§4 problem 54**, a one-button-press defect that
+had silently disabled Phase 4 and Phase 5 for the rest of the process since those phases were written.
 **Phase 6 (intercom/music coexistence) and Phase 7 (Ride Mode) are untouched.**
 **Phase 5 status: software closure is now claimable on the grounds A7 withheld it for — problem 44 is
 fixed — but it is still NOT claimed here.** ADR-025's own sweep found three further confirmed,
@@ -4528,7 +4534,327 @@ scope was one Phase 2b problem, and the Phase 5 rows in §4 that withheld it (41
 This is now the **ninth** consecutive pass to find something in code that was already CI-green, and
 the thing it found was recorded as "Low" severity by the pass before it.
 
+## 2ak. Session lifecycle — end and restart, ADR-026 (13 September 2026 session, thirty-fourth)
+
+**Scope: §4 problem 53 only, plus what fixing it exposed.** No Phase 6, no Phase 7, no Phase 4/5
+behaviour change, nothing in ADR-025 undone or weakened, nothing in ADR-021 Amendment A7 /
+`revision_epoch` undone or weakened. Baseline `e48cf8a09bfc394a442e293c9d3ba1f0c4c8609f`, verified
+against `origin/main` before anything was touched — HEAD matched exactly and there were no commits
+after it.
+
+**This session did not move the wire.** Every message shape, bound and encoding is byte-for-byte
+what it was. One **FSM vector row** changed and ARCHITECTURE §3 rule 3 is amended; both are declared
+below and in [ADR-026](DECISIONS/ADR-026-session-lifecycle-teardown-and-restart.md).
+
+### The defect, confirmed from production rather than from this file
+
+`SessionFsm` has carried two transitions since Phase 1a that **nothing outside the FSM itself ever
+triggered**, on either platform:
+
+| Transition | Event | Emitted anywhere in production? |
+|---|---|---|
+| `ENDING -> IDLE` | `TeardownComplete` | no |
+| `DISCONNECTED -> DISCOVERING` | `RetryRequested` | no |
+
+Re-derived by grepping both platforms' entire production source for every `SessionEvent` constructor:
+`TeardownComplete`, `RetryRequested`, `UserEnded`, `StartRide`, `EndRide`, `ErrorAcknowledged` and
+`FatalError` appear **only inside `SessionFsm`/`SessionFsm.swift`**. So a session that reached `ENDING`
+(only ever by a *peer* `BYE` — there was no local way to end one either) or `DISCONNECTED` was
+terminal for the process, and `MainScreen`'s one button called `startDiscovery()`, which the FSM
+correctly refuses from anything but `IDLE`.
+
+### Why emitting them was the easy half, and what the pass actually had to prove
+
+`TeardownComplete` is the event a **successor** session walks through. The pre-fix `ENDING` effect
+was:
+
+```
+releaseVoiceAndAwait()                                  ← awaited
+foregroundService.stop()                                ← only on a proven release
+teardownSession()
+    releaseVoice()                                      ← fire-and-forget shutdown()
+    sessionJob?.cancel()                                ← cancel, never joined
+    scope.launch { controlSessionManager.shutdown() }   ← LAUNCHED, then returns
+```
+
+Emitting `TeardownComplete` where that returns would move the FSM to `IDLE` with `shutdown()` still
+pending. A successor started from that `IDLE` calls `startListening()` — binding a listener, clearing
+`isShutDown` — and the predecessor's `shutdown()` then lands on top of it: closing that listener,
+re-latching `isShutDown` so `promote` refuses every connection the new session completes, and
+detaching its sinks. iOS had the same shape with an extra `Task` in `releaseVoice()`.
+
+That interleaving was unreachable **only because problem 53 stopped the successor from existing.**
+§2aj's own CI history is the evidence: two of its four failures were exactly this ordering, and both
+were worked around by keeping the harness off the `ENDING` path. So the invariant this pass had to
+establish, before emitting anything, is:
+
+> **A session may enter `IDLE` only after every effect owned by the ending session has completed. No
+> continuation owned by the retired session may mutate coordinator, relay, voice, playback,
+> discovery, foreground-service or control-session state after `TeardownComplete`.**
+
+### What was built
+
+**One teardown owner per platform.** `SessionTeardownOwner` (Android `com.ridelink.app.session`; iOS
+`RideLinkPlatform`) holds the latest teardown, chains retirements so two never interleave, and
+exposes a joinable/awaitable handle a successor waits on. `SessionCoordinator.retireSession` is its
+only caller and the only thing on either platform that tears a session down; it is reached from
+exactly three places (`ENDING`'s FSM effect, the user's retry, Stop/Start Discovery).
+
+**Synchronous capture, then an awaited body.** Everything the ending session owns — the voice
+controller, the two relay sinks it installed, the session runtime (Android: one `SupervisorJob`; iOS:
+an explicit `sessionWork` registry), the ordered event channels, the "control plane started" flag — is
+read out of the coordinator's fields **on the caller's stack, before the function returns**, and the
+fields are cleared. The async body then uses only those captured references: release capture and
+await it; stop the foreground service only on a *proven* release; cancel **and join** every
+continuation; await `shutdown()`; and only then `TeardownComplete`. Each captured reference **is** the
+ownership token — no counter was invented, for ADR-024 Amendment A7's and ADR-025's reason.
+
+**Cancellation is not completion**, and this codebase now has a concrete platform example rather than
+an argument: `NsdDiscoveryController`'s two `callbackFlow`s do their real work —
+`unregisterService`, `stopServiceDiscovery` — in `awaitClose` handlers that run *after* cancellation.
+`cancelAndJoin`, never `cancel`.
+
+**iOS needed one thing Android did not.** `attachVoice` suspends several times while *installing*
+things, so a retired attach could hand the successor the predecessor's voice subsystem. It now
+re-proves ownership before every install, using the `sessionWork` registry itself as the token — a
+retirement empties it synchronously, so the check is exact and, on the main actor, atomic with the
+statement after it. The teardown body then re-reads `self.voice` **once**, after every continuation
+is terminal, to catch an install that legitimately completed between the capture and its cancellation
+landing. That is the one point where re-reading live state is correct rather than ADR-025's defect:
+the session that could write it is over, and the successor that will cannot have started, because it
+is awaiting this very task.
+
+**`retryDiscovery()` and `endSession()`** are the new user entry points, and the one session button
+now offers **Start Discovery** / **Stop Discovery** / **End Session** / **Retry** by FSM legality —
+never an action the FSM would reject. The retry is deliberately a *user* action: PROTOCOL §10's ladder
+has a 120 s budget on purpose, and silently re-entering discovery when it is spent would be an
+unbounded background loop wearing the radio for a peer that may be switched off.
+
+### The one architecture change, declared
+
+**ARCHITECTURE §3 rule 3 now has two deliberate ends, not one** (ADR-026 §5): entering `ENDING`, and
+the user's explicit retry out of `DISCONNECTED`. This is a clarification of the rule's purpose rather
+than a reversal — the rule exists to stop a *link blip* releasing capture, and `RECONNECTING` still
+releases nothing. A retry is the opposite case: the budget is spent, the peer is gone, the user has
+explicitly asked to look again and is by definition looking at the screen, so holding the duplex
+Bluetooth profile open (ADR-016's central risk) for an absent peer is exactly what should not happen.
+Keeping the old `VoiceController` instead is worse: its `isLocalLeader` belongs to the dead session
+and ADR-020 makes the offerer role a property of *this* session's leader.
+
+**`SessionFsm` — not a coordinator — says which ends are deliberate.** One vector row gained the
+effect, and **both platforms' vector tests were tightened to assert the effect's absence as well as
+its presence**: they previously checked presence only, so an edit attaching the release to every
+transition, `RECONNECTING` included, would have passed.
+
+### What fixing it exposed — §4 problem 54, reachable *before* this pass
+
+`ControlSessionManager.shutdown()` called `relays.reset()`, which nulled **all seven** relay sinks.
+Two of the five families are the coordinator's per-session sinks; the other three — `manifest`,
+`transfer`, `playback` — are installed **once per process** in the constructors of
+`SharedLibraryCoordinator` and `SyncPlaybackCoordinator`, which deliberately outlive a control-session
+boundary (that is what ADR-023 §3's and ADR-025's per-frame generation is *for*) and which **nothing
+ever re-installs**. So a single **Stop Discovery** silently and permanently disabled Phase 4 and
+Phase 5 for the rest of the process.
+
+That is reachable on today's `main`, by one button press, and it survived six Phase 4 audits and
+seven Phase 5 audits — because none of them could start a *second* session in which to notice.
+Problem 53 kept the app from ever getting there, which is why calling 53 "a product gap, not a
+correctness one" was too generous: without 54 fixed, a restarted session connects and then has no
+shared catalogue and no synchronised playback. Fixed by the narrow rule that was always true — **a
+sink belongs to whoever installed it** — `reset()` is now `resetCounters()` on all five relays and
+detaches nothing. Re-installing on `Connected` was considered and rejected: the read loop can deliver
+a frame before an event collector observes it, trading a permanent loss for a startup window.
+
+Two smaller pieces of the same class, both found and fixed here:
+
+- `ReconnectController.cancel()` leaves the spent 120 s budget behind; `shutdown()` now also
+  `reset()`s it. Not reachable today (`promote` resets it too) — fixed because the shape is the
+  defect.
+- `startListening` inherited the previous session's `controlState`: `shutdown()` leaves `ENDED` and
+  `startListening` used to `copy()` the row forward, so a brand-new session reported the **dead one's
+  ending** on the transport banner. It now installs a whole fresh `ControlDiagnostics`. Invisible
+  until a second session became reachable at all; **observed on the emulator** before the fix and
+  confirmed gone after (below).
+
+### Problems 51 and 52 — re-audited, deliberately not changed
+
+Both were re-derived from production, not from their §4 rows, now that a second session is reachable:
+
+- **51 (`session_id` regenerated on reconnect):** still a documentation-versus-implementation
+  mismatch and **not** made reachable. `handleFrame` reads `binding.sessionId`, which is the locally
+  held `activeSessionId` recorded at read time and used only to stamp replies; `promote` takes the
+  new id from the **handshake outcome**, never from an envelope. Nothing in either codebase decides
+  anything from an inbound `session_id`.
+- **52 (`seq` never restarts at 1):** the lifecycle fix makes the contradicted behaviour *routine*
+  rather than merely possible, but still not observable — `seq` is write-only on both platforms. The
+  sharper finding: **the implementation is the safer of the two and §2 is probably the side that
+  should change**, because a counter restarting at 1 makes a straggler from the previous session
+  indistinguishable from a valid low-`seq` frame of the new one — precisely the class ADR-025 closed
+  everywhere else. The adversarial interleaving is written out in the §4 row.
+
+Neither is tightly coupled to this change, both would broaden it into PROTOCOL §10's resume story,
+and CLAUDE.md's "never change protocol silently" applies. Left as precise findings.
+
+### `revision_epoch` — verified unchanged, and now reached the way ADR-021 A7 intended
+
+ADR-021 Amendment A7 is untouched: same-epoch `revision` must strictly increase; a new epoch may be
+adopted at `revision` 1; a superseded epoch is refused and counted; an ordinary control reconnect
+preserves the epoch; the outbound fence (`message.revisionEpoch == publisher.currentEpoch` before
+send) is still there on both platforms. What *changed* is that the sentence §2aj could only assert —
+"a new discovery session mints a fresh epoch" — is now reachable **after a session end**, not only
+after a Stop/Start Discovery, and `SessionLifecycleRestartTest` asserts exactly that against
+production, plus that a link blip mints none. The nine-row `AudioStateSenderLifetimeTest[s]` and
+`SessionCoordinatorAudioStateLifetimeTest` are green on both platforms, unchanged.
+
+### Protocol-version policy, made explicit (PROTOCOL §2 rule 4a)
+
+The repo simultaneously implied "V1 is the stable wire version" and "a required field may be added to
+it" — `revision_epoch` was added as **required** in §2aj with no `v` bump, which rule 1 (optional
+additive fields) does not cover. Resolved as **Option A**, written into PROTOCOL §2 as rule 4a: V1 is
+**still under construction** until the first real release; a required field may be added to it without
+a `v` bump; older development builds have **no compatibility promise** and no runtime compatibility
+mechanism is required; after the first real release rule 3 governs alone. Both phones are built from
+the same commit and nothing is deployed, so carrying shims for builds nobody runs is pure cost.
+
+### Tests
+
+**Android — `SessionLifecycleRestartTest` (13 cases, `:app`), `SessionTeardownOwnerTest` (3),
+`TeardownTest` +1 (`:network`).** Nothing in them injects `TeardownComplete` or `RetryRequested`; the
+two `internal` seams used stand in for a socket, never for a lifecycle decision. `ParkingControlChannel`
+records each `bind()` and then never returns — `ControlListener`'s constructor is `internal` to
+`:network`, so one cannot be built from `:app` — which turns out to be exactly the observable the
+ordering needs.
+
+**iOS — `SessionTeardownOwnershipTests` (5, `RideLinkPlatform`).** Stated plainly rather than
+smoothed over: **the iOS app-target `SessionCoordinator` has no test bundle** (§4 problem 22), so its
+*wiring* is covered by code inspection against the Android mirror and nothing else. The ownership
+primitive was extracted into `RideLinkPlatform` for exactly that reason — an untestable ownership
+primitive is the wrong thing to have — and the sink-ownership and diagnostics-reset halves are tested
+there against a real `ControlSessionManager`.
+
+**Pre-fix evidence, by mutating production one property at a time** — "it passes now" is not evidence:
+
+| Mutation | Cases it broke |
+|---|---|
+| M1 — never emit `TeardownComplete` | 5: both `IDLE` rows, the stalled-release row, and both second-session rows |
+| M2 — `retryDiscovery()` becomes a no-op | 4: both retry rows and both successor-ordering rows |
+| M3 — drop the successor's `previousSession.join()` | 2: `a successor's control plane waits…`, `stop then start discovery serialises…` |
+| M4 — launch `shutdown()` instead of awaiting it | **0 — recorded as a gap, see below** |
+| M5 — restore `relays.reset()`'s sink detaching (Android **and** iOS, run separately) | Android 2 (`a parked teardown…`, `TeardownTest`), iOS 1 (`testShutdownDetachesOnlyTheSinksTheSessionOwned`, 8 assertions) |
+| M6 — read `voice` inside the teardown coroutine instead of capturing it | 8, across two suites |
+| M7 — launch the capture release instead of awaiting it | 5, across two suites |
+| FSM — remove the retry clause from `isDeliberateEnd` (both platforms) | the `disconnected-retry-to-discovering` vector row, on both |
+
+**M4 is honestly a gap in the integration suite, and it is not a flake.** In this harness
+`shutdown()` has nothing slow to do — the parking channel never returns a listener, so there is no
+socket and no listener to close — and it therefore wins the race against the successor essentially
+always. Making it deterministic would need a gate *inside* `ControlSessionManager.shutdown()`, which
+is not a seam that exists. What covers the property instead: `SessionTeardownOwnerTest` /
+`SessionTeardownOwnershipTests` prove deterministically that joining the returned handle is joining
+the **body**, and `shutdown()` is a direct `await` in that body with no `launch` around it. M7 proves
+the same await-don't-launch property for the one step this harness *can* gate. Recorded rather than
+papered over.
+
+**Stress:** the focused lifecycle suites **20 consecutive clean runs on each platform** (Android
+`SessionLifecycleRestartTest` + `SessionTeardownOwnerTest` + `SessionCoordinatorEndingEffectTest` +
+`SessionCoordinatorAudioStateLifetimeTest`, `--rerun-tasks` each time; iOS
+`SessionTeardownOwnershipTests` + `TeardownTests` + `AudioStateSenderLifetimeTests`, 17 tests each
+run). 0 failures, and no run needed explaining.
+
+**Full sweep, both platforms:** Android `:core:test`, `test`, `ktlintCheck`, `detekt`, `lint`,
+`assembleDebug`, `assembleRelease` — all green; iOS `RideLinkCore` 284 tests, `RideLinkPlatform` 439
+tests, unsigned Debug **and** Release simulator builds — all green. `swiftlint`/`swiftformat` are
+listed in CLAUDE.md but are **installed on neither this machine nor CI**, so they did not run; that is
+a pre-existing gap, not something this pass introduced.
+
+**Detekt made one structural demand and it was obeyed rather than silenced:** the new button pushed
+`MainScreen.kt` over both `LongMethod` and `TooManyFunctions`, so `SessionActionButton.kt` was
+extracted — `config/detekt/detekt.yml`'s own prescription ("extract rather than raise the number
+again"). iOS's equivalent stays inline in `MainScreen.swift` deliberately: it has no such threshold,
+and adding an app-target file carries §4 problem 37's four-section `project.pbxproj` hazard for no
+gain.
+
+### On a real Android emulator (`RideLink_API36`, API 36)
+
+Not a phone, and **not** the two-device gate — but more than a laptop test:
+
+- the full instrumented suite (`connectedAndroidTest`, 4 + 34 + 11 tests) passed;
+- the debug APK installed and `MainActivity` displayed in 1.2 s with no `FATAL`;
+- **three consecutive Stop Discovery → Start Discovery cycles**, driven through the real UI, each one
+  returning `Connection: Discovering…` with `Control state: Idle` — **not** the predecessor's
+  `Ended`, which is the diagnostics-inheritance fix visible on a real screen — and no crash, with the
+  process alive throughout;
+- real `NsdManager` confirmed the teardown actually happens rather than being merely requested:
+  `[MdnsAdvertiser] Removing service with ID 9` and four `Unregistering listener` lines on Stop, then
+  `Adding service name: RideLink-…` with a **new rotating `dh` handle** and `Probing finished` on
+  Start. That is the `awaitClose`/`cancelAndJoin` path executing against a real platform API.
+
+### What this pass does *not* claim
+
+- **No physical device.** The emulator is not a phone, `RideForegroundService` has still never
+  started, and no audio has been captured or played anywhere.
+- **No two-device restart.** TEST_PLAN **I-26** is the new gate for ADR-026 and is **pending**; I-06
+  (aeroplane mode → `DISCONNECTED` → Retry) becomes *runnable* for the first time and is also pending.
+- **No Phase 5 software closure**, no Phase 6, no Phase 7. This pass advanced none of them.
+- **iOS's app-level lifecycle wiring is unverified by any test**, as above.
+
+---
+
 ## 3. Tests passed / pending
+
+### Session lifecycle session (13 September 2026, thirty-fourth) — see §2ak
+
+**Passed and verified this session, by actually running the commands on this machine.** Every Gradle
+command was run with `-Dorg.gradle.java.home=/opt/homebrew/opt/openjdk@21/libexec/openjdk.jdk/Contents/Home`
+(§4 problem 17).
+
+| Gate | Result |
+|---|---|
+| Android `./gradlew :core:test` | green |
+| Android `./gradlew test` (all unit tests, `--rerun-tasks`) | green — **853** tests, 0 failures, 0 errors, 0 skipped (was 836; +17 new) |
+| Android `./gradlew ktlintCheck` | green (four import-style offences in the new `TeardownTest` case, fixed; no rule relaxed) |
+| Android `./gradlew detekt` | green — but it **failed first**, on `MainScreen.kt` breaching both `LongMethod` (86 > 80) and `TooManyFunctions` (12 > 11). Answered the way `config/detekt/detekt.yml` prescribes — **extract, never raise the number** — by lifting the session button into `SessionActionButton.kt`. No threshold moved |
+| Android `./gradlew lint` | green |
+| Android `./gradlew assembleDebug` | green |
+| Android `./gradlew assembleRelease` | green |
+| Android `./gradlew connectedAndroidTest` (emulator `RideLink_API36`, API 36) | green — 4 + 34 + 11 instrumented tests |
+| iOS `swift test` `RideLinkCore` | green — **284** tests |
+| iOS `swift test` `RideLinkPlatform` | green — **439** tests (was 434; +5 new) |
+| iOS unsigned **Debug** simulator build | green |
+| iOS unsigned **Release** simulator build | green |
+| `swiftlint` / `swiftformat` | **did not run — installed on neither this machine nor CI.** Pre-existing gap; CLAUDE.md lists them but `.github/workflows/ci.yml` has no step for them either |
+
+**New suites this session:**
+
+| Suite | Cases |
+|---|---|
+| Android `SessionLifecycleRestartTest` (`:app`) | 13 — the end/restart cycle against production seams, nothing injecting `TeardownComplete`/`RetryRequested` |
+| Android `SessionTeardownOwnerTest` (`:app`) | 3 — the ownership primitive, deterministic |
+| Android `TeardownTest` (`:network`) | +1 — `shutdown` detaches only the session's own sinks (problem 54) |
+| iOS `SessionTeardownOwnershipTests` (`RideLinkPlatform`) | 5 — the ownership primitive, plus problem 54 and the diagnostics reset against a real `ControlSessionManager` |
+
+**Pre-fix proof, by mutating production one property at a time** (the full table, including the one
+mutation the integration suite does **not** deterministically catch and why, is in §2ak): M1 broke 5
+cases, M2 broke 4, M3 broke 2, M5 broke 2 on Android and 1 (8 assertions) on iOS, M6 broke 8, M7 broke
+5, and removing the FSM retry clause broke the `disconnected-retry-to-discovering` vector row on both
+platforms. **M4 broke nothing** — recorded as a gap, not smoothed over.
+
+**Stress, because one green run is not evidence for a lifecycle change:** the focused lifecycle suites
+**20 consecutive clean runs on each platform**, 0 failures, nothing needing explanation.
+
+**Regressions re-run explicitly, since this pass must not weaken any of them** — all green on both
+platforms: ADR-025 stale `VOICE_*`, `AUDIO_STATE` provenance, `MANIFEST_*`/`TRANSFER_*` provenance,
+the retired-connection `PONG` and `PAIR_CONFIRM`, ADR-021 A7's `revision_epoch` sender lifetime
+(`AudioStateSenderLifetimeTest[s]`, 9 rows each, plus `SessionCoordinatorAudioStateLifetimeTest`),
+Phase 5's stale read generation, A6's loss ledger, and voice teardown/capture ownership
+(`VoiceControllerStopAwaitTest`, `VoiceControllerIntercomTest[s]`, `SessionCoordinatorEndingEffectTest`).
+265 Android cases and 73 iOS cases in that group.
+
+**On the emulator, and it is not a phone:** three real Stop Discovery → Start Discovery cycles through
+the real UI, each restart reporting `Control state: Idle` rather than the predecessor's `Ended`, with
+real `NsdManager` logging the advertiser removed and a **new** service added with a fresh rotating
+`dh` handle. No crash. **Not** the two-device gate (I-26), which is pending.
+
 
 ### `AUDIO_STATE` sender-lifetime session (12 September 2026, thirty-third) — see §2aj
 
@@ -5154,9 +5480,11 @@ as of this write-up — see §7.
 | 48 | **iOS has no app-target test bundle, so `ios/RideLink/`'s coordinators have no unit tests at all** (§2ai). `RideLinkPlatformTests` covers the SPM package; `SharedLibraryCoordinator`, `SessionCoordinator`, `MusicCoordinator` and `NowPlayingController` all live in the Xcode app target and are reachable from no test. Android's equivalents have suites (`SharedLibraryCoordinator*Test`, `SessionCoordinatorEndingEffectTest`), so every coordinator-level regression this repo has is Android-only, and a mirrored finding gets a mirrored fix but an unmirrored proof. ADR-025's Finding 1 is the concrete instance, and §2aj added a second: `SessionCoordinatorAudioStateLifetimeTest` — the only proof that `startDiscovery` mints a *fresh* `AUDIO_STATE` sender lifetime and that a reconnect mints none — exists on Android only, against iOS code that is mirrored line-for-line and unproven. **Pre-existing** | Medium | Either add a test target to `RideLink.xcodeproj` (a build-system change, deliberately not done inside a provenance pass), or move the coordinators into `RideLinkPlatform` where they would be testable — the direction the Phase 5 coordinator already went |
 | 49 | **`swiftlint` and `swiftformat` are named as iOS gates but are installed nowhere and run by nothing.** CLAUDE.md's build/test section lists `swiftlint && swiftformat --lint .`; neither binary exists on this machine, there is no `.swiftlint.yml` or `.swiftformat` in the repo, and `.github/workflows/ci.yml` does not invoke them. Every session that has claimed "iOS gates green" has therefore claimed a gate that does not exist | Low | Either add the configs and the CI step (and fix whatever they then find), or strike them from CLAUDE.md. Recorded rather than silently dropped, because an aspirational gate read as an enforced one is exactly the "CI-green is not correct" gap this file keeps recording |
 | 50 | **A `VOICE_*` signal accepted under a live session can still be reduced after that session's `ControlLinkLost` has reset the negotiation.** `VoiceInputMailbox` polls `TEARDOWN` before `CRITICAL`, so in one drain pass `.controlLinkLost` resets the reducer to `IDLE`/`voiceSessionId = null` and a `VOICE_OFFER` already queued below it is then *accepted*, because that is exactly the state `offerReceived` accepts any generation in. The mailbox's own doc claims anything queued below teardown "becomes inert on its own (the existing `VoiceEngineGeneration`/`voice_session_id` guard)", which holds for ICE and answers but **not** for an offer. **Within one session's frames, so not a control-plane provenance defect** and outside ADR-025's scope; the resulting negotiation has no writer and its `SendAnswer` fails closed. **Not proven reachable in a real run, and no regression written** | Low | A candidate for the next voice-lifetime audit: either drain-and-discard the non-teardown lanes when `ControlLinkLost` is applied, or make `offerReceived` refuse while `localAudioOpen` is true but no live control session exists |
-| 51 | **`session_id` is regenerated on every reconnect, which PROTOCOL §2 and §10 say it must not be.** §2's envelope table says "Regenerated on every fresh `CONNECTING`, **preserved across `RECONNECTING`**", and §10's ladder diagram shows `HELLO { session_id = <previous> }` as what distinguishes resuming from starting over. Both platforms' `ControlHandshake` call `freshSessionId()` unconditionally in the initiator role, and the acceptor mints a fresh one whenever it is leader, so a reconnect produces a **new** `session_id`. Found during §2aj's outbound `AUDIO_STATE` audit while checking whether `session_id` could name a sender lifetime — it cannot, and this is why | Low | **Not reachable as a bug today:** nothing in either codebase reads an inbound `session_id` to decide anything; session continuity is carried by the authentication generation (ADR-023 §3) and by `ControlSessionManager`'s own state, neither of which uses it. So this is a documentation-versus-implementation contradiction, which CLAUDE.md calls a bug in its own right. Resolve it deliberately — either implement §10's resume or correct §2/§10 — in a change that is *only* that, alongside problem 42's `STATE_REQUEST` work, which is the same reconnect story |
-| 52 | **`seq` never restarts at 1 per session**, which PROTOCOL §2 says it does ("Per-sender monotonic counter, starts at 1 per session"). `SeqCounter` is one `AtomicLong(1)` per `ControlSessionManager` — i.e. per process — and neither `promote` nor `shutdown` resets it, so the second session on a manager continues the first's numbering. Found alongside problem 51, in the same audit | Low | **Not reachable as a bug today:** `seq` is write-only across both codebases — no receiver reads it, and §2's stated uses (gap detection, duplicate dropping) are unimplemented. Fix it with problem 51, since both are the same question about what a "session" is on the wire, and both should move with §10's resume rather than piecemeal |
-| 53 | **`SessionFsm` defines two transitions back to discovery that no production code can ever trigger.** `TeardownComplete` (`ENDING -> IDLE`) and `RetryRequested` (`DISCONNECTED -> DISCOVERING`) are in the table, are mirrored on both platforms and are covered by the FSM's own tests — and **neither event is emitted anywhere outside a test** on either platform. So once a session reaches `ENDING` (a peer `BYE`, or the user ending the ride) or `DISCONNECTED` (the reconnect budget exhausted), the app cannot return to discovery at all: `MainScreen`'s one button calls `startDiscovery()`, which `SessionFsm` correctly rejects from any state but `IDLE`, so it does nothing and the user must force-quit and relaunch. Found in §2aj, by a CI failure in a new coordinator test that was driving `TeardownComplete` itself — which is also how the same session's over-claim about problem 47's reachability was caught | **Medium** | A product gap, not a correctness one: nothing is corrupted, and a ride that has ended has ended. But "reconnect exhausted, now relaunch the app" is not acceptable behaviour on a motorcycle, and REQUIREMENTS' reconnect story assumes otherwise. Fix it with problem 42's `STATE_REQUEST`/resync work and problems 51–52's session-identity question — all four are the same unfinished area (what ends a session, and how one restarts) and should move together rather than piecemeal. Deliberately **not** fixed inside an `AUDIO_STATE` pass |
+| 51 | **`session_id` is regenerated on every reconnect, which PROTOCOL §2 and §10 say it must not be.** §2's envelope table says "Regenerated on every fresh `CONNECTING`, **preserved across `RECONNECTING`**", and §10's ladder diagram shows `HELLO { session_id = <previous> }` as what distinguishes resuming from starting over. Both platforms' `ControlHandshake` call `freshSessionId()` unconditionally in the initiator role, and the acceptor mints a fresh one whenever it is leader, so a reconnect produces a **new** `session_id`. Found during §2aj's outbound `AUDIO_STATE` audit while checking whether `session_id` could name a sender lifetime — it cannot, and this is why | Low | **Not reachable as a bug today:** nothing in either codebase reads an inbound `session_id` to decide anything; session continuity is carried by the authentication generation (ADR-023 §3) and by `ControlSessionManager`'s own state, neither of which uses it. So this is a documentation-versus-implementation contradiction, which CLAUDE.md calls a bug in its own right. Resolve it deliberately — either implement §10's resume or correct §2/§10 — in a change that is *only* that, alongside problem 42's `STATE_REQUEST` work, which is the same reconnect story. **Re-audited in §2ak, now that a second session is genuinely reachable: still a documentation-versus-implementation mismatch only, and *not* made reachable by the lifecycle change.** Re-derived from production rather than from this row: `handleFrame` reads `binding.sessionId`, which is the locally-held `activeSessionId` recorded at read time and used only to stamp replies; `promote` takes the new id from the *handshake outcome*, never from an envelope. §2ak also notes one adjacent cosmetic point for whoever does resolve this: `shutdown()` does not reset `activeSessionId`, so between a shutdown and the next `promote` it still names the dead session. Nothing builds a frame in that window (the `BYE` that does is legitimately the dead session's), so it is inert — recorded so it is not rediscovered as a finding |
+| 52 | **`seq` never restarts at 1 per session**, which PROTOCOL §2 says it does ("Per-sender monotonic counter, starts at 1 per session"). `SeqCounter` is one `AtomicLong(1)` per `ControlSessionManager` — i.e. per process — and neither `promote` nor `shutdown` resets it, so the second session on a manager continues the first's numbering. Found alongside problem 51, in the same audit | Low | **Not reachable as a bug today:** `seq` is write-only across both codebases — no receiver reads it, and §2's stated uses (gap detection, duplicate dropping) are unimplemented. Fix it with problem 51, since both are the same question about what a "session" is on the wire, and both should move with §10's resume rather than piecemeal. **Re-audited in §2ak.** The lifecycle fix makes the contradicted behaviour *routine* rather than merely possible — a second session on one manager is now an ordinary thing to have — but not observable: `seq` is still write-only on both platforms. The sharper finding §2ak adds is that **the implementation is the safer of the two, and §2 is probably the side that should change**: a counter that restarts at 1 per session makes a straggler from the previous session indistinguishable from a valid low-`seq` frame of the new one, which is precisely the class ADR-025 closed everywhere else. The adversarial interleaving, written out so it is not re-derived: Session A ends at `seq` 400; Session B's first frame is `seq` 401; a receiver implementing §2's "starts at 1" gap detection sees a gap of 400 and, depending on how it reacts, either resyncs needlessly forever or discards B's traffic |
+| 53 | **FIXED (thirty-fourth session, §2ak, [ADR-026](DECISIONS/ADR-026-session-lifecycle-teardown-and-restart.md)).** Confirmed exactly as recorded: `TeardownComplete` (`ENDING -> IDLE`) and `RetryRequested` (`DISCONNECTED -> DISCOVERING`) were in `SessionFsm` on both platforms, mirrored, vector-covered, drawn in ARCHITECTURE §3.1 — and emitted by **nothing outside a test**, so an ended session or an exhausted reconnect budget required a force-quit. **Emitting them was the easy half.** `TeardownComplete` is the event a successor session walks through, and the pre-fix `ENDING` effect ended by *launching* `ControlSessionManager.shutdown()` and returning — so emitting it there would have let a successor bind a listener that the predecessor's pending `shutdown()` then closed, re-latched `isShutDown` behind, and (via `relays.reset()`) stripped the sinks from. Fixed with one teardown owner per platform (`SessionCoordinator.retireSession` over the new `SessionTeardownOwner`): everything the ending session owns is captured **synchronously** before the first suspension, then capture release is awaited, every continuation is cancelled **and joined**, `shutdown()` is awaited, and only then `TeardownComplete`. A successor joins that same job before touching anything shared. `retryDiscovery()`/`endSession()` are the new user entry points and the one session button now offers Start / Stop / End / Retry by FSM legality. ARCHITECTURE §3 rule 3 is amended to **two** deliberate ends (ADR-026 §5) and the FSM — not a coordinator — says which; the vector row and both platforms' effect assertions moved with it | ~~**Medium**~~ Fixed | See §2ak. `ErrorAcknowledged` remains un-emitted, tracked separately as problem 55 |
+| 54 | **FIXED (thirty-fourth session, §2ak, ADR-026 §6) — and it was reachable before this pass, by Stop Discovery alone.** `ControlSessionManager.shutdown()` called `relays.reset()`, which nulled **all seven** relay sinks. Two of the five families (`voice`, `audioState`) are per authenticated session and are the coordinator's to detach; the other three (`manifest`, `transfer`, `playback`) are installed **once per process**, in the constructors of `SharedLibraryCoordinator` and `SyncPlaybackCoordinator`, which deliberately outlive a control-session boundary — that is what ADR-023 §3's and ADR-025's per-frame generation is *for* — and **nothing ever re-installs them**. So a single Stop Discovery silently and permanently disabled Phase 4 and Phase 5 for the rest of the process. It survived every audit because nothing could start a *second* session in which to notice the loss: problem 53 kept the app from ever getting there, which is why "53 is only a product gap" was too generous. Fixed by the narrow rule that was always true — a sink belongs to whoever installed it — `reset()` is now `resetCounters()` on all five relays and detaches nothing. Regressions on both platforms, each verified to fail against the restored pre-fix behaviour | ~~**High**~~ Fixed | See §2ak. Re-installing on `Connected` was considered and rejected: the read loop can deliver a frame before an event collector observes it, trading a permanent loss for a startup window |
+| 55 | **`ErrorAcknowledged` is the last `SessionFsm` transition no production code can trigger** — problem 53's residue. `ERROR -> ENDING` is in the table on both platforms and nothing emits it, but unlike 53 this is currently harmless for a stronger reason than "nobody reached it": **nothing emits `FatalError` either**, so `ERROR` cannot be entered at all. The state, its transition and its UI row are all dead together. Found while wiring problem 53's session button, which deliberately offers **no** action from `ERROR` rather than a button for an unreachable state | Low | Resolve it as a pair, not piecemeal: decide what a `FatalError` actually *is* in this app (there is no current candidate — every failure path today is a named refusal, a security alert or a link loss), and either give it an emitter plus an acknowledged path back through `ENDING`, or remove `ERROR`/`FatalError`/`ErrorAcknowledged` from the FSM and from ARCHITECTURE §3. Do not add a UI affordance for it before that decision |
 | 26 | **APK/IPA size.** The Android AAR adds ~48 MB of native code across four ABIs; the Apple XCFramework is ~96 MB expanded and embedded in the app bundle. No ABI filtering or slice stripping is applied — the default is the safe configuration and a sideloaded personal build has no size gate | Low | Revisit if install time becomes annoying. Recorded rather than forgotten |
 | 21 | **Diagnostics now show `CONNECTING` while a six-digit code is on screen**, where they previously showed `CONNECTED`. This is deliberate and more honest (ADR-019 §5), but it is a user-visible change that has never been looked at on a real screen | Low | Confirm it reads sensibly during I-02 on the two phones; the FR-023 diagnostics screen is one of the things I-02 exercises anyway |
 | 32 | **FIXED (twelfth session, §2o, ADR-021 Amendment A2 Finding 3).** `Effect.ReleaseAudioAndStopForegroundService`'s name promised an Android foreground-service stop `SessionCoordinator.runEffect` never actually performed — confirmed exactly as originally recorded here. Fixed with a `ForegroundServiceController` seam (no `Context` inside `SessionCoordinator`) and one owner: `runEffect` awaits capture release (`StopReleaseResult`) before calling `foregroundService.stop()` — never on a timeout — and always tears down the control session afterward. `SessionCoordinatorEndingEffectTest` (new) proves the order at the integration boundary, including that a peer BYE, a timed-out release, a `NETWORK` link loss and a repeated `ENDING` all behave correctly. Kept in this table with its resolution noted rather than deleted, per this file's own discipline | ~~Medium~~ Fixed | ~~Give `SessionCoordinator` a way to reach `RideForegroundService.stop()`...~~ Done — see §2o |
@@ -5226,6 +5554,19 @@ namespace and the alternatives (`session_id`, `conn_tiebreak`, the local authent
 each fail on semantics rather than on convenience. **So the "the wire has not moved in any of the
 eight passes" sentence above is true of those eight and no longer true of the ninth.** Problems 48,
 49 and 50 remain open, and 51 and 52 were added by §2aj's outbound audit.
+
+**And the thirty-fourth session (§2ak, ADR-026) fixed problem 53 — with a warning attached.** The
+two `SessionFsm` transitions back to discovery that nothing could trigger are now emitted by
+production, under the invariant that makes them safe: *a session may enter `IDLE` only when every
+effect it owned is terminal.* Making a second session reachable then exposed **problem 54** —
+`ControlSessionManager.shutdown()` detached the three **process-lifetime** relay sinks nothing ever
+re-installs, so **one Stop Discovery silently disabled Phase 4 and Phase 5 for the rest of the
+process**. That was reachable by a single button press on `e48cf8a`, and it survived six Phase 4
+audits and seven Phase 5 audits *because no audit could start a second session in which to notice*.
+The lesson to carry forward is narrower than "audit harder": **a defect that needs a second session to
+observe was structurally unobservable while problem 53 stood**, so the area behind it has effectively
+never been audited at all. Problems 51 and 52 were re-audited in the same pass and deliberately left
+alone; problem 55 (`ErrorAcknowledged`/`FatalError`, the last unreachable FSM pair) is new.
 
 **The next exact task is an independent verification of ADR-025 itself**, re-derived from production
 code rather than from this file — and now also of ADR-021 Amendment A7, whose new question is a
@@ -5319,11 +5660,16 @@ stopped short:
    the production code, not from this file. Start where §7's list above says this pass stopped short —
    and in particular ask of every remaining "this family is exempt" whether the exemption has a gate
    of its own.
-2. **Run the scheduled-start path on the iOS simulator** (§4 problem 41's remaining half). The Android emulator half is done; there is no `Context`-shaped obstacle on iOS either.
-3. **Get two real devices into this loop.** Unchanged since Phase 1a and now blocking five gates: (a) enable USB debugging on the OnePlus Nord 5; (b) set up a development-team signing identity for the iPhone 17 Pro Max.
-4. **Run the Phase 1a gate**: I-01, I-05, I-06, I-07, I-08, I-14, I-15, I-17, I-22.
-5. **Run the Phase 5 gate**: S-01…S-12 (TEST_PLAN §5.2). This is the only thing that produces an alignment figure or a drift p95 — neither exists today, and nothing in this audit changed that.
-6. **Fill in `docs/PHASE0_RESULTS.md`** — still the only blocker for Phase 6, and still the reason `AUDIO_STATE.confidence` is `assumed`.
+2. **Audit the area problem 53 made unobservable** (§2ak). Everything whose defect requires a *second*
+   session to notice has never been auditable: problem 54 was one button press away on `e48cf8a` and
+   survived thirteen audits for exactly that reason. Sweep for anything else that is installed once
+   per process, latched once per process, or reset on a boundary that never used to be crossed twice
+   — and do it with an end→restart harness, not by reading.
+3. **Run the scheduled-start path on the iOS simulator** (§4 problem 41's remaining half). The Android emulator half is done; there is no `Context`-shaped obstacle on iOS either.
+4. **Get two real devices into this loop.** Unchanged since Phase 1a and now blocking five gates: (a) enable USB debugging on the OnePlus Nord 5; (b) set up a development-team signing identity for the iPhone 17 Pro Max.
+5. **Run the Phase 1a gate**: I-01, I-05, I-06, I-07, I-08, I-14, I-15, I-17, I-22 — and **I-26**, ADR-026's own two-device gate (end a ride, start another, without relaunching).
+6. **Run the Phase 5 gate**: S-01…S-12 (TEST_PLAN §5.2). This is the only thing that produces an alignment figure or a drift p95 — neither exists today, and nothing in this audit changed that.
+7. **Fill in `docs/PHASE0_RESULTS.md`** — still the only blocker for Phase 6, and still the reason `AUDIO_STATE.confidence` is `assumed`.
 
 ## 7a. Historical note — the Phase 3 start gate
 

@@ -1,6 +1,8 @@
 # RideLink Peer Protocol — v1
 
-**Status:** specification baseline for Phases 1–5. **Wire version:** `1`.
+**Status:** specification baseline for Phases 1–5. **Wire version:** `1` — and **V1 is still under
+construction, not yet a compatibility contract**; see §2 rule 4a for exactly what that permits and
+when it stops applying.
 **Last updated:** 8 September 2026 (Phase 5 — §5 gained the follower-intent convention
 (`command_seq: 0`), `RESUME`'s and `PLAYBACK_STATE`'s payloads, and the shared `MAX_WIRE_INT` bound;
 §9's queue cap is corrected from 2 000 to **1 000** (2 000 does not fit `MAX_CONTROL_FRAME_BYTES`,
@@ -96,6 +98,11 @@ Every control frame is an object with a fixed envelope and a type-specific `payl
 2. Receivers **must ignore unknown `type` values** — new message types can be introduced against an older peer.
 3. `v` increments **only** on a breaking change to the envelope or to an existing field's meaning.
 4. Capability negotiation (§4.3), not version arithmetic, gates optional features.
+4a. **V1 is still mutable, and that is a deliberate, dated position — not an oversight.** RideLink has never been released: no store listing, no deployed peers, exactly two devices, and both are built from this repository at the same commit. Until the *first real release* — the first time the two phones are flashed with builds that are then relied on and not immediately replaced — **`v: 1` is the version under construction, not a compatibility contract.** Concretely:
+   - A **required** payload field may be added to V1 without bumping `v`. Rule 1 covers *optional* additive fields; a required one is breaking for an older build, and V1 accepts that. `AUDIO_STATE.revision_epoch` ([§4.4.2](#442-revision_epoch--which-sender-session-a-revision-belongs-to), [ADR-021 Amendment A7](DECISIONS/ADR-021-intercom-transmission-and-capture-ownership.md#amendment-a7--12-september-2026--an-audio_state-revision-floor-belongs-to-one-sender-lifetime)) is the first and so far only one.
+   - Older development builds therefore have **no compatibility promise**, and no runtime backward-compatibility mechanism is required or wanted. Two peers must be built from the same commit; a mismatch surfaces as the ordinary field-level refusal the codec already performs.
+   - After the first real release this paragraph stops applying and rule 3 governs alone: a required-field addition becomes a `v` bump, or a `§4.3` capability, whichever fits.
+   The alternative — declaring V1 stable now and carrying compatibility shims for builds nobody is running — was rejected as pure cost. See [ADR-026](DECISIONS/ADR-026-session-lifecycle-teardown-and-restart.md) for where this was made explicit and why leaving both readings available was itself the bug.
 5. Timestamps are always `_mono_us` (monotonic) or `_session_us` (session clock). No field ever carries wall-clock time. This naming convention is deliberate: a reviewer can spot a scheduling bug by field name alone.
 
 Note that rule 1 and the sizing rules of §8.1 interact: a page is sized by its **encoded byte

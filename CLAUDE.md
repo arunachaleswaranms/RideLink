@@ -23,7 +23,7 @@ Read these before changing anything. They are authoritative; this file is a summ
 | What's on the wire? | `docs/PROTOCOL.md` |
 | How do we verify? | `docs/TEST_PLAN.md` |
 | State now / exact next task | `docs/STATUS.md` |
-| Why this way? | `docs/DECISIONS/` (ADR-001…025) |
+| Why this way? | `docs/DECISIONS/` (ADR-001…026) |
 | What was actually measured? | `docs/test-results/` — including the Phase 1b security spike |
 | What did the hardware do? | `docs/PHASE0_RESULTS.md` (awaiting user input) |
 
@@ -52,9 +52,10 @@ Read these before changing anything. They are authoritative; this file is a summ
 | 15 | **`ControlEvent.Connected` means "the surviving connection passed the RideLink trust gate"** (ADR-019). `PAIRING -> CONNECTING` opens only on `PeerTrusted` (stored pin matched) or `PairingSucceeded` (both users confirmed and the pin was written). The gate table is `SessionGate` on both platforms, pinned by `vectors/session-gate/` | Never read "TLS and HELLO succeeded" as authentication; never let `Connected` imply pairing success; never start a task that presumes an authenticated peer just because a socket exists |
 | 18 | **Phase 5 decides nothing in a coordinator.** Ordering is `CommandOrderGate`, deadline mapping is `ScheduledCommand`, correction is `DriftController`, queue algebra is `SharedQueue`, timing is `SessionClock` — all pure, mirrored and pinned by `protocol/vectors/{ordering,drift,queue,session-clock}/`. The **leader alone** assigns `command_seq`; a follower sends the *same message type* with `command_seq: 0` (ADR-024 §3), and an authoritative `command_seq` arriving at the leader is a role violation. Scheduling is session/monotonic time only, never wall-clock. Every audible effect goes through the ONE `MusicCoordinator`; the system media controls enter that same leader-ordered path through its gate | Never let a coordinator decide ordering or correction; never let a follower allocate a `command_seq`; never add a second player, queue, `MediaSession` or RTT tracker; never leave a drift nudge behind — correction always ends at exactly 1.0; **never let one `SyncPlayerPort` method perform two externally visible effects**, and never express a scheduled action as a closure that could hide a second `await` (ADR-024 A4) |
 | 19 | **An authenticated inbound frame is permanently bound to the connection that authorised its read, and to that connection's authentication epoch** (ADR-024 Amendment A7). `readLoop` builds an immutable `ReadFrameBinding` the instant `readFrame()` returns, from an immutable `(connection, generation)` record created once at `activateAuthenticatedSession`; `handleFrame` takes that binding, the pre-authentication gate asks *"was **this** frame's connection an authenticated session when it was read"*, and every generation handed downstream is the binding's. `endConnection` cancels neither read loop, and both resume across a scheduling point — so a frame whose dispatch runs after a reconnect must keep its own generation or be refused, never acquire the successor's | Never re-read `authenticationGeneration` (or any live epoch) at dispatch time to label a frame that has already been read; never add a second generation source; never infer a frame's session from what is live when its work happens to run |
+| 21 | **A session may enter `IDLE` only when it is terminal, and `TeardownComplete` is the claim that it is** (ADR-026). The event that opens `ENDING -> IDLE` is the door a successor walks through, so it may be emitted only after every effect owned by the ending session has **completed**: capture released and awaited; every continuation the session started cancelled **and joined**; `ControlSessionManager.shutdown()` awaited, not launched. There is **one** teardown owner per platform — `SessionCoordinator.retireSession` over `SessionTeardownOwner` — it captures everything the ending session owns **synchronously**, before its first suspension, and each captured reference *is* the ownership token. A successor joins that job before touching anything shared. **Cancellation is a request; joining is the proof** — `NsdDiscoveryController`'s `awaitClose` handlers and iOS's actor `await`s all run after a cancel. Two corollaries: ARCHITECTURE §3 rule 3 has **two** deliberate ends, not one (`ENDING`, and the user's retry out of `DISCONNECTED`), and `SessionFsm` — never a coordinator — is what says which; and **a relay sink belongs to whoever installed it**, so `shutdown()` resets counters and detaches nothing | Never emit `TeardownComplete` from wherever the teardown happens to finish; never let a fire-and-forget tail outlive the transition to `IDLE`; never let two components emit it; never clear a mutable "current" sink after `IDLE`; never read live coordinator state from retired teardown work; never use a sleep as lifecycle synchronisation; never invent a generation counter where a captured reference already answers "whose?" |
 | 20 | **An inbound frame's authority is the `ReadFrameBinding` its read produced, for *every* message family** (ADR-025). No subsystem downstream of `handleFrame` may discard that provenance and rebuild authority from live session state: `MANIFEST_*`/`TRANSFER_*` carry the generation to their sink, `VOICE_*` and `AUDIO_STATE` are refused at their relay when it is no longer live, and the pre-authentication family (`PING`/`PONG`/`PAIR_*`/`BYE`/`ERROR`) — which is exempt from the generation gate by design and therefore bound to nothing — is answered **only for the connection it was read from**. `ReadFrameBinding.generation` says which session authorised *this frame* and never changes; `liveAuthenticatedGeneration` says which session is authenticated *right now* and is null between sessions. **Comparing them is correct; reading the second to label a frame is the defect.** A frame that is live by this rule may still belong to a *dead sender lifetime*, which is a different question again and is rule 17's `revision_epoch` (ADR-021 Amendment A7) — provenance and state lifetime are not the same guard and both are required. Phase 5 is the one deliberate exception to the relay-level refusal, because ADR-024 A6's ledger must *see* a retired frame to attribute it | Never read a live generation, epoch or session id to decide what a frame you already have belongs to; never conflate `authenticationGeneration` with `voice_session_id`; never use `currentAuthGeneration` where "is there a live session at all" is the question; never assume a family that is exempt from one gate is covered by another |
 
-Reasoning: `docs/DECISIONS/ADR-001…025`.
+Reasoning: `docs/DECISIONS/ADR-001…026`.
 
 ## Platform stack and baselines
 
@@ -208,9 +209,22 @@ resume are deferred, but the chunk and page framing keep both possible.
 it deliberately left open (`docs/STATUS.md` §4 problem 44) are both now fixed and green on both
 platforms — but software closure is *still not* claimed: closing problem 44 meant sweeping every other
 inbound family, and that sweep found three more confirmed reachable instances of the same class
-(ADR-025, `docs/STATUS.md` §2ai), one of them in PROTOCOL §4.5's two-human pairing gate. Eight passes
+(ADR-025, `docs/STATUS.md` §2ai), one of them in PROTOCOL §4.5's two-human pairing gate. Ten passes
 have each found something in code that was already CI-green. The real-device synchronized-playback
 gate is also still open. Phase 6 and Phase 7 have not started.**
+
+**The tenth pass is rule 21 above (ADR-026, `docs/STATUS.md` §2ak), and its lesson is about what an
+audit can even see.** `SessionFsm` has carried `ENDING -> IDLE` and `DISCONNECTED -> DISCOVERING`
+since Phase 1a with **no production emitter on either platform**, so an ended session or a spent
+reconnect budget meant force-quitting the app. Fixing that was two-thirds ordering work — the
+pre-fix `ENDING` effect *launched* `ControlSessionManager.shutdown()` and returned, so emitting
+`TeardownComplete` there would have let a successor bind a listener the predecessor then closed. What
+matters more: making a second session reachable immediately exposed a defect that had been **one
+button press away** all along — `shutdown()` detached the three relay sinks that are installed once
+per process and never re-installed, so a single **Stop Discovery** silently disabled Phase 4 and
+Phase 5 for the rest of the process. It survived six Phase 4 audits and seven Phase 5 audits because
+none of them could start a *second* session in which to notice. **Assume the same of anything else
+whose failure needs a second session to observe: that area has effectively never been audited.**
 
 `docs/STATUS.md` is the authority on this and is kept current; the sections below are the
 architectural summary for phases 1a–2b and remain accurate for *those* phases. Phase 3 (local music
