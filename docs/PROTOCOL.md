@@ -167,6 +167,14 @@ Before the trust gate opens, a connection may carry only `PING`, `PONG`, `PAIR_R
 type is (§2 rule 2) — including, in particular, every message type Phase 2 adds, unless it is added
 to that list deliberately.
 
+**These seven are answered only for the connection they were read from**
+([ADR-025 §4](DECISIONS/ADR-025-inbound-control-frame-provenance.md)). Because they are exempt from
+the authentication-generation gate by design, they are the one family that carries no generation to
+check, so a receiver binds them to their connection instead: a frame read from a connection that is
+no longer the surviving one is dropped. A read loop is not cancelled when its connection ends, so
+without that binding a retired connection's `PONG` would feed the *successor's* clock and a retired
+connection's `PAIR_CONFIRM` would satisfy §4.5's remote half for a *different* peer's exchange.
+
 `HELLO` payload:
 
 ```json
@@ -470,6 +478,7 @@ Points that were previously ambiguous or wrong, made explicit:
 - **Bytes 4…31 of `S` are unused** in v1. They are still exported (a fixed 32-byte length keeps the exporter call identical everywhere) and are reserved. A vector asserts that changing them does not change `sas6`.
 - **Modulo bias is accepted and quantified.** `2³² = 4294·10⁶ + 967296`, so 967 296 of the million residues occur 4295 times and the rest 4294 — a relative deviation of ~2.3 × 10⁻⁴. Against a 6-digit code with a 3-attempts-per-minute limit, that is irrelevant. Rejection sampling is deliberately *not* used: it would make the function partial and much harder to pin down with golden vectors.
 - **`sas6` is never logged, never transmitted, and never persisted.** There is no log path for it at all ([ARCHITECTURE §11](ARCHITECTURE.md#11-privacy-and-security-posture)). `PAIR_CONFIRM` carries a boolean, not the code.
+- **Both halves of the two-human gate must come from *this* exchange's connection.** `PAIR_REQUEST` and `PAIR_RESULT` each cross-check the advertised `identity_spki_sha256` against the one the exchange was built for; `PAIR_CONFIRM` carries a bare boolean and has nothing to cross-check, so what binds it is the connection it was read from ([ADR-025 §4](DECISIONS/ADR-025-inbound-control-frame-provenance.md), [ADR-019 Amendment A1](DECISIONS/ADR-019-connected-means-authenticated.md)). Without that, a `PAIR_CONFIRM` read from a connection whose session has ended could stand in for the remote user's confirmation of a different peer's six digits — and a pin would be written for someone who was never asked.
 
 **Contingency — resolved, 27 August 2026.** Both platforms expose a public keying-material
 exporter, and the two produce byte-identical output for the same TLS 1.3 connection. Measured in

@@ -981,6 +981,20 @@ construction blocks inside `ControlSessionManager`, and adding a sixth took that
 `LargeClass` ceiling. `config/detekt/detekt.yml` records that the headroom bought for it in Phase 2a
 "is the last of it", so the answer was the extraction that file prescribes rather than another raise.
 
+**Inbound provenance across the whole control plane** ([ADR-025](DECISIONS/ADR-025-inbound-control-frame-provenance.md)).
+`ControlSessionManager` binds every inbound frame at the read to the connection it came from
+(`ReadFrameBinding`, [ADR-024 Amendment A7](DECISIONS/ADR-024-synchronized-playback-integration.md))
+and hands that authorisation down rather than letting any relay, sink or coordinator rebuild it from
+live state. Two names, deliberately different: `ReadFrameBinding.generation` is what authorised
+*this frame* and never changes; `ControlSessionManager.liveAuthenticatedGeneration` is which session
+is authenticated *right now* and is `null` between sessions. Every relay compares them and refuses a
+retired frame; `MANIFEST_*`/`TRANSFER_*` additionally carry the generation to their sink, because
+those two consumers defer their apply. Phase 5 is the one family **not** refused at the relay — its
+`Phase5FrameQueue` ledger exists to attribute a retired frame rather than to never see it. The
+pre-authentication family (PROTOCOL §4.1's closed list) carries no generation at all and is bound to
+its connection instead. On iOS the authenticated-connection record lives in a lock-backed box, as its
+only storage, so those comparisons stay synchronous and no `await` enters a relay callback.
+
 ### 9.3 The shared seam
 
 `protocol/` at the repo root is the single source of truth for the wire format, consumed by

@@ -131,3 +131,33 @@ not choose what a security message says.
 | **Collapse `PAIRING` and `CONNECTING` into one state** | Loses the distinction the FSM exists to draw, and `protocol/vectors/session-fsm/` would have to change. The states were right; only the event that moved between them was wrong |
 | **Add a `PENDING_TRUST` state** | The state already exists and is called `PAIRING`. A new state would have to be reflected in ARCHITECTURE §3, the vectors, and both platforms, to express something the existing one already means |
 | **Tear down and re-dial once pairing succeeds** | A second handshake produces a second exporter, so the code the users compared would no longer bind the session in use (ADR-018) |
+
+
+## Amendment A1 — 12 September 2026 — the pre-authentication family is bound to its own connection
+
+Superseded by nothing; ADR-019's decision stands exactly as written. What changed is one thing it did
+not say, and [ADR-025 §4](ADR-025-inbound-control-frame-provenance.md) says it: **the closed list of
+frames an unauthenticated connection may carry is answered only for the connection the frame was read
+from.**
+
+That list — `PING`, `PONG`, `PAIR_REQUEST`, `PAIR_CONFIRM`, `PAIR_RESULT`, `BYE`, `ERROR` — exists so
+a peer that has completed TLS but not RideLink authentication can still keepalive and still pair. It
+is therefore the one set of types allowed *past* the generation gate ADR-024 Amendment A7 built, and
+before ADR-025 nothing else bound it to a connection at all. `endConnection` cancels no read loop, so
+a frame read from a connection whose session has ended can still be dispatched — and
+`handlePairingFrame` reached for whatever `PairingExchange` was live.
+
+The consequence that matters to *this* ADR: `PairingExchange` splits PROTOCOL §4.5's two-human gate
+into `localConfirmed` and `remoteConfirmed`. `onPairRequest` and `onPairResult` each cross-check the
+advertised `identity_spki_sha256` against the one their exchange was built for. `onPairConfirm` is a
+bare boolean and has nothing to check. So a `PAIR_CONFIRM` read from a **retired** connection could
+mark a *different* peer's exchange as remotely confirmed, and with this device's user then confirming
+the six digits, `settleIfBothConfirmed` wrote a pin for a peer whose user never confirmed anything.
+
+Measured, not argued: `RetiredConnectionPairingTest[s]`'s `PAIR_CONFIRM` case fails against unmodified
+`326a145` with the trust store containing the unknown peer. `ControlEvent.Connected` still means
+exactly what this ADR says it means; what ADR-025 adds is that the frame which carried the remote
+user's "yes" has to have come from the connection those six digits belong to.
+
+**No wire change, no gate-table change, no `SessionGate` change** — `protocol/vectors/session-gate/`
+regenerates byte-identically.

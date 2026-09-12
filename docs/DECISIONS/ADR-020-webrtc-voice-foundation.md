@@ -456,3 +456,31 @@ vector already existed and continues to pass unmodified, because the reducer's o
 `closed`/`failed` was already correct; only the mailbox's classification in front of it was wrong.
 The critical and ICE lanes, their capacities, and their overflow behaviour are unchanged. The
 generation guard (Amendment A2, finding 1) is unchanged and its tests remain green.
+
+
+## Amendment A3 — 12 September 2026 — `VOICE_*` carries its control-session provenance
+
+[ADR-025 §2](ADR-025-inbound-control-frame-provenance.md) applies ADR-024 Amendment A7's rule to this
+ADR's message family: `VoiceSignalRelay.deliver` now takes the frame's authorising generation and
+refuses — counting `droppedRetiredGeneration` — a frame whose control session has been replaced.
+
+**This ADR's decisions are unchanged.** The leader is still always the offerer, ICE is still an empty
+server list, `stop()` and `release()` are still two calls, and `VOICE_*` is still absent from the
+pre-authentication allowlist. `VoiceController` is still deliberately **retained across a control
+reconnect** so the capture device stays open for the ride segment — that is the behaviour this
+amendment exists to keep safe, not to change.
+
+**Why the existing generation guards were not enough.** They answer a different question.
+`VoiceNegotiation`'s `voice_session_id` checks prove *voice-session* ownership; ADR-025's generation
+proves *control-session* ownership, and conflating the two would be wrong in both directions. Two of
+the reducer's correct behaviours are exactly what made a stale frame harmful:
+
+- `VOICE_STATE { state: "closed" }` may legally omit `voice_session_id`, and `peerStateReceived`
+  treats an absent id as carrying no generation claim — not a mismatch. It is `teardownFromPeer`. A
+  Session A frame therefore stopped **Session B's** live media.
+- after `ControlLinkLost` the reducer resets to `IDLE` with `voiceSessionId == null`, which is exactly
+  the state in which `offerReceived` **accepts** an offer naming any generation. A Session A offer
+  would start a negotiation whose answer went out on Session B's connection.
+
+Both are pinned by `RetiredSessionProvenanceTest[s]`, which verify-fail against unmodified `326a145`.
+No wire change; `protocol/vectors/voice-signal/` and `voice-fsm/` regenerate byte-identically.

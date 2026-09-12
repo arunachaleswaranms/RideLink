@@ -981,3 +981,28 @@ then-stale-result path to have the same defect in the first place — inspected,
   simulator builds re-run as a clean regression check only, no iOS code changed.
 - The affected suite was run 100 consecutive times with `--rerun-tasks`, isolated from any other
   concurrent Gradle process — see `docs/STATUS.md` §2t for the exact count and the isolation note.
+
+
+## Amendment A6 — 12 September 2026 — `AUDIO_STATE` carries its control-session provenance
+
+[ADR-025 §2](ADR-025-inbound-control-frame-provenance.md) applies ADR-024 Amendment A7's rule to
+`AUDIO_STATE`: `AudioStateRelay.deliver` now takes the frame's authorising generation and refuses —
+counting `droppedRetiredGeneration` — a frame whose control session has been replaced.
+
+**Checked rather than assumed, and reachable.** §3's `revision` rule is "per sender per session", and
+`AudioStateInboxHolder`/`AudioStatePublisher` are accordingly reset per **discovery** session, not per
+control session — they survive a reconnect on purpose. So a stale Session A message whose `revision`
+happened to exceed the held one was accepted by the revision rule and published as the **successor**
+session's peer audio state. Pinned by `RetiredSessionProvenanceTest[s]`, verify-failing against
+unmodified `326a145`.
+
+**Nothing else in this ADR moves.** The transmission gate still never touches the capture device, the
+`IntercomTransmission` action vocabulary still has no capture case, `intercom_mode` is still §3's
+superset, and the wire is unchanged — `protocol/vectors/audio-state/` and `intercom/` regenerate
+byte-identically.
+
+**Recorded, not fixed:** the inbox surviving a *control*-session boundary is correct for a reconnect
+to the same peer (whose `revision` keeps climbing) and wrong for a peer that restarted its process,
+whose `revision` restarts at 1 and is then refused as stale until it climbs past the dead session's
+floor. That is ADR-024 Amendment A6's class — a long-lived object carrying a dead session's verdict —
+rather than a provenance defect, and it is `docs/STATUS.md` §4 problem 47.

@@ -23,12 +23,13 @@ Consequences · Alternatives considered.
 | [016](ADR-016-effective-audio-capability-model.md) | Effective audio capability model, not independent routes | Accepted |
 | [017](ADR-017-identity-key-and-certificate.md) | P-256 identity key, and a shared certificate encoder on both platforms | Accepted |
 | [018](ADR-018-tls-exporter-channel-binding.md) | The SAS channel binding is a TLS 1.3 exporter with an empty context | Accepted |
-| [019](ADR-019-connected-means-authenticated.md) | `Connected` means the trust gate passed, not that TLS came up | Accepted |
-| [020](ADR-020-webrtc-voice-foundation.md) | Phase 2a voice foundation: pinned WebRTC distributions, leader-is-offerer, host-only ICE, and the `stop`/`release` audio-session split | Accepted · **amended A1** (2 Sep 2026 — the Apple pin moves to M152 because upstream deleted M151) · **A2** (2 Sep 2026 — the generation guard is strict) |
-| [021](ADR-021-intercom-transmission-and-capture-ownership.md) | Phase 2b intercom: one capture owner, one policy object, transmission gated at the audio track and never at the device | Accepted |
+| [019](ADR-019-connected-means-authenticated.md) | `Connected` means the trust gate passed, not that TLS came up | Accepted · **amended A1** (12 Sep 2026 — the pre-authentication family is bound to its own connection) |
+| [020](ADR-020-webrtc-voice-foundation.md) | Phase 2a voice foundation: pinned WebRTC distributions, leader-is-offerer, host-only ICE, and the `stop`/`release` audio-session split | Accepted · **amended A1** (2 Sep 2026 — the Apple pin moves to M152 because upstream deleted M151) · **A2** (2 Sep 2026 — the generation guard is strict) · **A3** (12 Sep 2026 — `VOICE_*` carries its control-session provenance) |
+| [021](ADR-021-intercom-transmission-and-capture-ownership.md) | Phase 2b intercom: one capture owner, one policy object, transmission gated at the audio track and never at the device | Accepted · **amended A1–A5** (4–5 Sep 2026) · **A6** (12 Sep 2026 — `AUDIO_STATE` carries its control-session provenance) |
 | [022](ADR-022-media-session-without-mediasessionservice.md) | A real `MediaSession`, owned by the existing ride foreground service, without subclassing `MediaSessionService` | Accepted |
-| [023](ADR-023-bulk-transfer-session-binding.md) | Bulk transfer session binding, listener lifecycle and cache trust model | Accepted · **amended A1–A5** (5–8 Sep 2026 — five closure audits) |
-| [024](ADR-024-synchronized-playback-integration.md) | Phase 5 synchronized-playback integration | Accepted |
+| [023](ADR-023-bulk-transfer-session-binding.md) | Bulk transfer session binding, listener lifecycle and cache trust model | Accepted · **amended A1–A6** (5–12 Sep 2026 — six closure audits) |
+| [024](ADR-024-synchronized-playback-integration.md) | Phase 5 synchronized-playback integration | Accepted · **amended A1–A7** (8–12 Sep 2026 — seven closure audits) |
+| [025](ADR-025-inbound-control-frame-provenance.md) | An inbound control frame keeps the authority of the connection it was read from — for every message family, not just Phase 5 | Accepted |
 
 ADRs 011–016 and the three amendments came out of the pre-Phase-1 correction pass recorded in
 [`../STATUS.md`](../STATUS.md#2-what-changed-in-the-correction-pass). ADRs 017–018 came out of the
@@ -72,6 +73,14 @@ and `PLAYBACK_STATE` had no payload; §9's 2 000-item queue cap does not actuall
 the wire in the same paragraph that called it untrusted, so it is gone. It deliberately does **not**
 re-open ADR-004 (the drift ladder and the never-restream decision) or ADR-010 (leadership) — it
 records only what integrating them found unanswered.
+
+ADR-025 finishes the sweep ADR-024 Amendment A7 started and deliberately stopped short of. A7 proved
+that an inbound frame's authority must come from the connection it was read from and threaded that
+through Phase 5 alone, recording the rest as open. ADR-025 applies the same rule to `MANIFEST_*`,
+`TRANSFER_*`, `VOICE_*` and `AUDIO_STATE`, and binds the pre-authentication family
+(`PING`/`PONG`/`PAIR_*`/`BYE`/`ERROR`) — which carries no generation at all — to its own connection.
+It deliberately leaves Phase 5's seam alone, because A6's retired-loss ledger exists to *observe*
+exactly the frames a relay-level refusal would delete. The wire did not move.
 
 **Adding one:** next free number, update this table, link it from the relevant section of
 `ARCHITECTURE.md`.

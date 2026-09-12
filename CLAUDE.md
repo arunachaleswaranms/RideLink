@@ -52,8 +52,9 @@ Read these before changing anything. They are authoritative; this file is a summ
 | 15 | **`ControlEvent.Connected` means "the surviving connection passed the RideLink trust gate"** (ADR-019). `PAIRING -> CONNECTING` opens only on `PeerTrusted` (stored pin matched) or `PairingSucceeded` (both users confirmed and the pin was written). The gate table is `SessionGate` on both platforms, pinned by `vectors/session-gate/` | Never read "TLS and HELLO succeeded" as authentication; never let `Connected` imply pairing success; never start a task that presumes an authenticated peer just because a socket exists |
 | 18 | **Phase 5 decides nothing in a coordinator.** Ordering is `CommandOrderGate`, deadline mapping is `ScheduledCommand`, correction is `DriftController`, queue algebra is `SharedQueue`, timing is `SessionClock` — all pure, mirrored and pinned by `protocol/vectors/{ordering,drift,queue,session-clock}/`. The **leader alone** assigns `command_seq`; a follower sends the *same message type* with `command_seq: 0` (ADR-024 §3), and an authoritative `command_seq` arriving at the leader is a role violation. Scheduling is session/monotonic time only, never wall-clock. Every audible effect goes through the ONE `MusicCoordinator`; the system media controls enter that same leader-ordered path through its gate | Never let a coordinator decide ordering or correction; never let a follower allocate a `command_seq`; never add a second player, queue, `MediaSession` or RTT tracker; never leave a drift nudge behind — correction always ends at exactly 1.0; **never let one `SyncPlayerPort` method perform two externally visible effects**, and never express a scheduled action as a closure that could hide a second `await` (ADR-024 A4) |
 | 19 | **An authenticated inbound frame is permanently bound to the connection that authorised its read, and to that connection's authentication epoch** (ADR-024 Amendment A7). `readLoop` builds an immutable `ReadFrameBinding` the instant `readFrame()` returns, from an immutable `(connection, generation)` record created once at `activateAuthenticatedSession`; `handleFrame` takes that binding, the pre-authentication gate asks *"was **this** frame's connection an authenticated session when it was read"*, and every generation handed downstream is the binding's. `endConnection` cancels neither read loop, and both resume across a scheduling point — so a frame whose dispatch runs after a reconnect must keep its own generation or be refused, never acquire the successor's | Never re-read `authenticationGeneration` (or any live epoch) at dispatch time to label a frame that has already been read; never add a second generation source; never infer a frame's session from what is live when its work happens to run |
+| 20 | **An inbound frame's authority is the `ReadFrameBinding` its read produced, for *every* message family** (ADR-025). No subsystem downstream of `handleFrame` may discard that provenance and rebuild authority from live session state: `MANIFEST_*`/`TRANSFER_*` carry the generation to their sink, `VOICE_*` and `AUDIO_STATE` are refused at their relay when it is no longer live, and the pre-authentication family (`PING`/`PONG`/`PAIR_*`/`BYE`/`ERROR`) — which is exempt from the generation gate by design and therefore bound to nothing — is answered **only for the connection it was read from**. `ReadFrameBinding.generation` says which session authorised *this frame* and never changes; `liveAuthenticatedGeneration` says which session is authenticated *right now* and is null between sessions. **Comparing them is correct; reading the second to label a frame is the defect.** Phase 5 is the one deliberate exception to the relay-level refusal, because ADR-024 A6's ledger must *see* a retired frame to attribute it | Never read a live generation, epoch or session id to decide what a frame you already have belongs to; never conflate `authenticationGeneration` with `voice_session_id`; never use `currentAuthGeneration` where "is there a live session at all" is the question; never assume a family that is exempt from one gate is covered by another |
 
-Reasoning: `docs/DECISIONS/ADR-001…024`.
+Reasoning: `docs/DECISIONS/ADR-001…025`.
 
 ## Platform stack and baselines
 
@@ -161,7 +162,8 @@ python3 tools/generate_intercom_vectors.py
 python3 tools/generate_audio_state_vectors.py
 
 # Regenerate the Phase 5 synchronisation vectors (ADR-024; all six independent third transcriptions,
-# plus the two closure audits' gate tables)
+# plus the two closure audits' gate tables). ADR-025 adds no vector set — connection identity and
+# coroutine/Task lifetime are not distributed decisions (the reason ADR-024 A3–A7 add none either).
 python3 tools/generate_session_clock_vectors.py
 python3 tools/generate_ordering_vectors.py
 python3 tools/generate_drift_vectors.py
@@ -202,11 +204,13 @@ resume are deferred, but the chunk and page framing keep both possible.
 
 ## Current phase
 
-**Phase 5 — synchronized playback. Closure-audited seven times; A7's own findings are fixed and
-green on both platforms, but software closure is *not* claimed — A7 confirmed the same defect class
-still live in Phase 4's manifest/transfer dispatch and deliberately did not fix it (`docs/STATUS.md`
-§4 problem 44, which is the exact next task). The real-device synchronized-playback gate is also
-still open. Phase 6 and Phase 7 have not started.**
+**Phase 5 — synchronized playback. Closure-audited seven times. A7's findings and the Phase 4 defect
+it deliberately left open (`docs/STATUS.md` §4 problem 44) are both now fixed and green on both
+platforms — but software closure is *still not* claimed: closing problem 44 meant sweeping every other
+inbound family, and that sweep found three more confirmed reachable instances of the same class
+(ADR-025, `docs/STATUS.md` §2ai), one of them in PROTOCOL §4.5's two-human pairing gate. Eight passes
+have each found something in code that was already CI-green. The real-device synchronized-playback
+gate is also still open. Phase 6 and Phase 7 have not started.**
 
 `docs/STATUS.md` is the authority on this and is kept current; the sections below are the
 architectural summary for phases 1a–2b and remain accurate for *those* phases. Phase 3 (local music
@@ -214,6 +218,19 @@ player, ADR-022), Phase 4 (shared catalogue + `ContentHash`-keyed transfer on a 
 TLS connection, ADR-023) and Phase 5 (clock-scheduled playback, drift correction and a replicated
 queue, ADR-004 + ADR-024) all landed after this section was last rewritten and are implementation-
 complete on both platforms with their real-device gates open — see `docs/STATUS.md` §2q–§2ah.
+
+**ADR-025 is rule 20 above, and it is A7's lesson finished.** A7 proved a frame's authority must come
+from the connection it was read from, and threaded that through Phase 5 **only** — recording the rest
+as open. Finishing it found the identical defect in Phase 4's manifest/transfer dispatch (the
+already-known problem 44) and then three more nobody had asked about: `VOICE_*`, where a stale
+`VOICE_STATE { closed }` with no `voice_session_id` is not a generation mismatch to the reducer and so
+tore down the *successor's* live media; `AUDIO_STATE`, whose inbox survives a control boundary by
+design; and the **pre-authentication family**, which is exempt from the generation gate by design and
+was therefore bound to nothing at all — a retired connection's `PONG` pushed its round trip into the
+successor's fresh RTT window, and a retired connection's `PAIR_CONFIRM` supplied the remote half of
+PROTOCOL §4.5's two-human gate, writing a pin for a peer whose user never confirmed the six digits.
+The standing lesson: **"this family is exempt from that gate" is not the same as "this family is
+covered", and an exemption needs a gate of its own.**
 
 **Amendment A7 is the shortest standing lesson of the seven, and it is rule 19 above: a frame's
 generation must come from the connection it was read from, never from whatever session is live when
@@ -227,11 +244,14 @@ eight-bucket loss ledger unsafe — its fold could re-attribute a dead session's
 one and recreate A6's own cross-session halt. The ledger is now one bucket per generation, evicting
 the smallest, and the safety argument no longer depends on arrival order at all. **A7 also confirmed
 a third finding it did not fix** — Phase 4's manifest/transfer dispatch has the identical
-live-generation origin — which is why Phase 5 software closure is withheld.
+live-generation origin — which A7 left open and **ADR-025 closed**, along with three more instances
+of the same class that finishing it exposed. Software closure is still withheld, for the reason the
+"Current phase" note above gives.
 
-**Phase 4 has been closure-audited five times** (ADR-023 Amendments A1–A5), each pass finding real
+**Phase 4 has been closure-audited six times** (ADR-023 Amendments A1–A6), each pass finding real
 integration/lifecycle defects in code that was already CI-green: eighteen, then two, then two, then
-four, then three — **and A7 found a sixth that is still open (`docs/STATUS.md` §4 problem 44).**
+four, then three — and then the one A7 confirmed but did not fix (`docs/STATUS.md` §4 problem 44),
+**fixed in A6 / ADR-025**.
 **Phase 5 has now been closure-audited seven times** — A1 (ADR-024 Amendment A1):
 six findings given, all six confirmed, plus a seventh found by stress-running one of the new
 regressions; then A2 (Amendment A2), an independent verification *of A1*, which found five more,

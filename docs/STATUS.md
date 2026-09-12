@@ -1,22 +1,40 @@
 # RideLink — Status
 
-**Updated:** 12 September 2026 (Phase 5 closure audit A7, thirty-first session — see §2ah)
+**Updated:** 12 September 2026 (control-plane provenance closure, ADR-025, thirty-second session — see §2ai)
 **Current milestone:** M1 (Private voice link) is **software-complete with no known defect** — its
 hardware gate is the only thing left open. M2 (local music) is implementation-complete and
-closure-audited (§2q/§2r). Phase 4 is closure-audited **five** times (§2v–§2z) **and has one open
-defect A7 found and did not fix — see §4 problem 44.** **M4 (Synced ride music) now has its software
+closure-audited (§2q/§2r). Phase 4 is closure-audited **six** times (§2v–§2z, §2ai) and **§4 problem
+44 is now fixed** (ADR-023 Amendment A6 / ADR-025 §1). **M4 (Synced ride music) has its software
 half, and it has been audited seven times**: Phase 5 is closure-audited A1 (§2ab), A2 (§2ac),
 A3 (§2ad), A4 (§2ae), A5 (§2af), A6 (§2ag) and A7 (§2ah), with its real-device gate open.
-**Current phase:** Phase 5 — synchronized playback, **closure-audited seven times** (this session,
-§2ah; the earlier audits are §2ab, §2ac, §2ad, §2ae, §2af and §2ag, the implementation §2aa).
-Clock-scheduled `PLAY`/`PAUSE`/`RESUME`/`SEEK`/`NEXT`/`PREVIOUS`, a replicated shared queue, drift
-measurement and the ADR-004 correction ladder, all on top of the Phase 1a clock layer and the
-Phase 3 player.
+**Current phase:** Phase 5 — synchronized playback. This session did **not** advance Phase 5; it
+closed the cross-phase control-plane defect A7 confirmed and deliberately did not fix (§2ai, ADR-025),
+which is what §7 named as the next exact task.
 **Phase 6 (intercom/music coexistence) and Phase 7 (Ride Mode) are untouched.**
-**Phase 5 status: A7's own findings are fixed and green on both platforms, but SOFTWARE CLOSURE IS
-NOT CLAIMED** — A7's sweep found the same defect class still live in Phase 4's manifest/transfer
-dispatch (§4 problem 44), which is an ADR-023 change this Phase 5 pass was scoped out of. The
+**Phase 5 status: software closure is now claimable on the grounds A7 withheld it for — problem 44 is
+fixed — but it is still NOT claimed here.** ADR-025's own sweep found three further confirmed,
+reachable instances of the same class (`VOICE_*`, `AUDIO_STATE`, and the pre-authentication family's
+`PONG`/`PAIR_CONFIRM`), all now fixed, plus four new watch items (§4 problems 47–50). Eight passes
+have each found something in code that was already CI-green; assume a ninth would too. The
 real-device synchronized-playback gate also remains pending.
+
+**ADR-025 in one paragraph.** A7 proved that an inbound frame's authority must come from **the
+connection it was read from**, built `ReadFrameBinding` to carry it, and threaded it through Phase 5
+alone — recording the rest as open. This session finished the sweep. `MANIFEST_*`/`TRANSFER_*` had the
+identical defect (problem 44): their sink closures run *synchronously inside* `handleFrame` and read a
+live value there, so a Session A `MANIFEST_PAGE` dispatched after a reconnect became **Session B's
+catalogue** — measured. `VOICE_*` and `AUDIO_STATE` never carried a generation at all, and both are
+harmful without one: a stale `VOICE_STATE { closed }` with no `voice_session_id` is not a generation
+mismatch to `VoiceNegotiation`, so it tore down the successor's live media, and the `AUDIO_STATE`
+inbox survives a control-session boundary by design so a stale message was published as the
+successor's peer state. The pre-authentication family (`PING`/`PONG`/`PAIR_*`/`BYE`/`ERROR`) is
+allowed *past* the generation gate by design and so was bound to nothing: a retired connection's
+`PONG` pushed its round trip into the successor's **fresh** RTT window (the input to
+`LEAD = max(120 ms, 4 × rtt_p95)`), and — the one that matters most — a retired connection's
+`PAIR_CONFIRM` supplied the **remote half of PROTOCOL §4.5's two-human gate for a different peer**,
+writing a pin for someone whose user never confirmed the six digits. Every family now either keeps the
+generation its read was authorised by or is refused; the pre-authentication family is answered only
+for its own connection. **The wire did not move.**
 
 **A7 in one paragraph.** A6 bound every Phase 5 *loss* to the generation that caused it. A7 asked
 where the generation a frame arrives with comes from, and the answer was **live state**: every
@@ -4128,7 +4146,7 @@ Full reasoning: [ADR-024 Amendment A7](DECISIONS/ADR-024-synchronized-playback-i
 |---|---|---|---|
 | **A** | `ControlSessionManager.handleFrame` derived each inbound Phase 5 frame's generation by reading the manager's **live** `authenticationGeneration` at *dispatch* time. `endConnection` cancels neither read loop, and both resume across a scheduling point — a dispatcher hop on Android, actor re-entrancy on iOS — so a Session A frame whose continuation resumed after a reconnect was delivered stamped as **Session B's** authority. A6's retired-loss accounting cannot help: the frame was relabelled before it reached `Phase5FrameQueue`. Both platforms | **CONFIRMED** | `readLoop` builds an immutable `ReadFrameBinding` the instant the read returns, from an immutable `(connection, generation)` record created once at activation. `handleFrame` takes the binding; the pre-auth gate asks `binding.generation == null`, and the relays get `binding.generation`, never a live read |
 | **B** | A's fix makes generation arrival **non-monotonic** — `A, B, A` now reaches `Phase5FrameQueue.offer`, because a dead session's read loop still dispatches the frame it had already read. A6's ledger bucketed by *adjacency* and evicted the oldest **by arrival**, so on an alternating run nine buckets could be two generations and the fold target was the **newest** — which may be live. A dead session's refusal was re-attributed to the live one, and a follower answers a live-generation loss by halting incremental authority: **A6's own cross-session halt, through the ledger's back door** | **CONFIRMED** (reachable *because of* A's fix) | one bucket per **distinct** generation; eviction removes the **smallest** generation and folds into the next smallest. Safe without any arrival-order assumption: the live generation is always the largest present, so the fold target is never it |
-| **C** | The same origin defect is still live in **Phase 4's** manifest/transfer dispatch. `SharedLibraryCoordinator`'s `ManifestSink`/`TransferSink` lambdas run synchronously inside `handleFrame` and read a live value there (`currentAuthGeneration` on Android, `sessionEpoch.current()` on iOS). Android's doc comment makes exactly the claim A7 disproved. `handleFrame` can legitimately be entered with a **retired** binding, so a Session A `MANIFEST_PAGE` can mutate Session B's catalogue — what ADR-023 A2 Finding S exists to prevent. Both platforms | **CONFIRMED · NOT FIXED** | out of scope: fixing it means threading a generation through `ManifestRelay`/`TransferRelay`, an ADR-023 change this Phase 5 pass was explicitly scoped out of. Recorded as **§4 problem 44** |
+| **C** *(fixed in §2ai)* | The same origin defect is still live in **Phase 4's** manifest/transfer dispatch. `SharedLibraryCoordinator`'s `ManifestSink`/`TransferSink` lambdas run synchronously inside `handleFrame` and read a live value there (`currentAuthGeneration` on Android, `sessionEpoch.current()` on iOS). Android's doc comment makes exactly the claim A7 disproved. `handleFrame` can legitimately be entered with a **retired** binding, so a Session A `MANIFEST_PAGE` can mutate Session B's catalogue — what ADR-023 A2 Finding S exists to prevent. Both platforms | **CONFIRMED · NOT FIXED** | out of scope: fixing it means threading a generation through `ManifestRelay`/`TransferRelay`, an ADR-023 change this Phase 5 pass was explicitly scoped out of. Recorded as **§4 problem 44** |
 
 **Finding A was measured, not argued.** With only the A7 guard reverted against `a0b81c1`
 production sources, the new regressions record the `PAUSE` arriving tagged generation **2** where it
@@ -4214,9 +4232,176 @@ S-01…S-12 are what will change that. The iOS scheduled-start path still has no
 **And A7 is explicitly not closure.** Finding C is a real, reachable, confirmed defect of the same
 class that this pass deliberately did not fix. Five Phase 4 closure audits and now seven Phase 5 ones
 have each found real defects in code that was already CI-green; assume an eighth would find something
-too.
+too. *(Finding C was fixed in the next session — §2ai, ADR-025 §1 / ADR-023 Amendment A6 — and that
+pass did indeed find three more. The prediction in the sentence above held.)*
+
+## 2ai. Control-plane provenance closure — ADR-025 (12 September 2026 session, thirty-second)
+
+**Status: all four confirmed findings fixed and green on both platforms. Phase 4's §4 problem 44 is
+closed. SOFTWARE CLOSURE STILL NOT CLAIMED — see the end of this section. REAL-DEVICE GATES UNCHANGED
+AND STILL PENDING.**
+
+Not a Phase 5 audit. This is the task §7 named: finish the sweep ADR-024 Amendment A7 started, which
+had threaded its own rule through Phase 5 and explicitly nowhere else. Full reasoning:
+[ADR-025](DECISIONS/ADR-025-inbound-control-frame-provenance.md), with dated pointer amendments in
+ADR-019 (A1), ADR-020 (A3), ADR-021 (A6) and ADR-023 (A6).
+
+> Once `ControlSessionManager` has created a `ReadFrameBinding` for an inbound frame, no downstream
+> subsystem may discard that provenance and reconstruct authority from mutable live session state. A
+> frame must either **retain** the provenance that authorised its read, or be **rejected** as stale.
+
+### The findings
+
+| # | Finding | Verdict | Fix |
+|---|---|---|---|
+| **1** | **`MANIFEST_*`/`TRANSFER_*` lose the generation.** `ControlRelays.deliver` received it and `ManifestRelay`/`TransferRelay` discarded it; `SharedLibraryCoordinator`'s sink closures — which run **synchronously inside `handleFrame`** — then read a live value *there* (`currentAuthGeneration` on Android, `sessionEpoch.current()` on iOS). A7 proved `handleFrame` can be entered with a retired binding, so the live read returned the **successor's** number and the apply-time re-check compared it against itself. Both platforms. **= §4 problem 44** | **CONFIRMED** | the relays take the generation, refuse and count a stale one, and pass it to `submit(message, generation)` — the contract `PlaybackSink` already had. The coordinator compares it against the new `liveAuthenticatedGeneration` |
+| **2** | **`VOICE_*` carries no control-session provenance.** `VoiceController` is deliberately retained across a reconnect (capture stays open for the ride segment), and `VoiceNegotiation`'s `voice_session_id` guards prove *voice-session* ownership, not control-session ownership. A stale `VOICE_STATE { state: "closed" }` omitting `voice_session_id` is **not** a mismatch to that table — it is `teardownFromPeer`, so it stops the **successor's** live media; and after `ControlLinkLost` the reducer sits at `IDLE`/`nil`, which is exactly the state in which `offerReceived` **accepts** an offer naming any generation. Both platforms | **CONFIRMED** | `VoiceSignalRelay.deliver` takes the generation and refuses a retired one, counting `droppedRetiredGeneration`. The voice reducer, the mailbox and capture ownership are untouched |
+| **3** | **`AUDIO_STATE` likewise — checked rather than assumed.** `AudioStateInboxHolder` is reset per **discovery** session (§4.4's `revision` is "per sender per session"), so it survives a control boundary on purpose; a stale message whose `revision` exceeded the held one was accepted by the revision rule and published as the successor's peer audio state. Both platforms | **CONFIRMED** | `AudioStateRelay.deliver` takes the generation and refuses a retired one |
+| **4** | **The pre-authentication family is bound to nothing.** `PING`/`PONG`/`PAIR_*`/`BYE`/`ERROR` are allowed *past* the generation gate by design, so nothing else tied them to a connection. `handlePong` took a payload and no socket; `handlePairingFrame` reached for whatever exchange was live. Both platforms | **CONFIRMED** (found during this pass, not given) | one gate in `handleFrame`: a pre-authentication frame is answered only when `binding.socket === activeSocket`, else counted as `retiredConnectionFrames` |
+
+### Finding 4 is the one to read twice
+
+Three reachable consequences, in ascending order of seriousness:
+
+1. **`PONG` contaminated the successor's clock.** Every effect of `handlePong` is manager-level:
+   `lastPongAtMonoUs` (what `keepaliveLoop` measures liveness against), `clock.recordRtt` —
+   **unconditional**, it does not depend on a matching pending ping — and the `rttMs` diagnostic.
+   `promote` calls `clock.reset()`, so a retired connection's round trip landed in the successor's
+   **fresh** RTT window, which is the input to ARCHITECTURE §7.2's `LEAD = max(120 ms, 4 × rtt_p95)`.
+   The pending-ping completion itself was already inert (`endConnection` fails every outstanding
+   waiter, and the key is a monotonic timestamp) — that half was checked, not assumed.
+2. **A stale `PAIR_RESULT` or fatal `ERROR` destroyed the successor's pairing.** Both take
+   `failPairing`, which clears the exchange and the six digits; its `endConnection` then returns
+   immediately because the retired socket is not the active one, leaving the live connection open with
+   `pairing` already null — a pairing that can never complete and never fails visibly again.
+3. **A stale `PAIR_CONFIRM` supplied the remote half of PROTOCOL §4.5's two-human gate.**
+   `PairingExchange` splits that gate into `localConfirmed` and `remoteConfirmed`; `onPairRequest` and
+   `onPairResult` each cross-check the advertised `identity_spki_sha256`, and `onPairConfirm` is a
+   bare boolean with nothing to check. A `PAIR_CONFIRM` read from a retired connection marked a
+   **different** peer's exchange as remotely confirmed, and with this device's user then confirming
+   the six digits, a pin was written for a peer whose user never confirmed anything.
+
+**Measured, not argued.** With only ADR-025's guards reverted on unmodified `326a145` production
+sources, `RetiredConnectionPairingTest`'s `PAIR_CONFIRM` case fails with the trust store containing
+**peer C** — `TrustedPeer(peerId: peer:cccccc…, identitySpkiSha256: spki:1b555f…)` on Android and the
+same on iOS.
+
+### The model, in two names
+
+| Question | Answered by | Changes when |
+|---|---|---|
+| Which session authorised **this frame**? | `ReadFrameBinding.generation` | never — fixed at the read |
+| Which session is authenticated **right now**? | `ControlSessionManager.liveAuthenticatedGeneration` | every session boundary |
+
+Comparing them is correct; reading the second to *label* a frame is the defect. The new property is
+derived from the one `AuthenticatedConnection` record, so there is no second source to disagree, and
+it is deliberately **not** `currentAuthGeneration`: that one keeps reporting the last number it
+assigned after the link drops, so a frame authorised by a session that has ended still matched it.
+On iOS the record moved into a lock-backed `AuthenticatedConnectionBox` — as its **only** storage, not
+a mirror — so a relay's synchronous `deliver` and the coordinator's `@MainActor` guard read it with no
+`await`. No `await` was introduced into any synchronous relay callback.
+
+### Phase 5's own seam is deliberately left alone
+
+A stale-generation `PLAY`/`QUEUE_*` still reaches `Phase5FrameQueue` rather than being refused at the
+relay, because ADR-024 Amendment A6's per-generation ledger exists to attribute it and surface it as
+`inboundRetiredLossCount`. Refusing there would silently delete the accounting A6 exists to produce.
+A6 and A7 are untouched; their suites are green unchanged.
+
+### Regressions
+
+Deterministic and mirrored, no sleeps in any assertion, all using A7's two-statement park
+(`currentReadBinding()` then `handleFrame(binding, frame)` with a **real** session boundary between):
+
+| Suite | Cases | Fail pre-fix |
+|---|---|---|
+| `RetiredSessionProvenanceTest` / `RetiredSessionProvenanceTests` | 10 each | 8 each (the 2 that pass are positive controls, which must pass both ways) |
+| `RetiredConnectionPairingTest` / `RetiredConnectionPairingTests` | 4 each | 3 each (the 4th is the "live pairing still completes" control) |
+| `SharedLibraryReadProvenanceTest` (Android only) | 5 | 3 |
+
+iOS's `generations` spy records `[1, 1, 1, 2]` pre-fix where it must record `[2]`; Android's
+coordinator suite shows a Session A `MANIFEST_PAGE` becoming Session B's catalogue and a Session A
+`TRANSFER_REQUEST` being resolved and served under Session B.
+
+### Android / iOS symmetry
+
+**Both platforms are equally affected by all four findings**, and neither has a structural accident
+that spared it (unlike A4 and A5, where Android was safe by composition). The iOS window is *wider*
+in findings 1–3: `await relay.deliver(...)` is a real actor hop out of the manager, where Android's is
+a thread-preemption point between the binding capture and the sink's live read.
+
+The one asymmetry is in **coverage, not behaviour**: iOS has no app-target test bundle, so
+`ios/RideLink/SharedLibraryCoordinator.swift` has no coordinator-level regression. On iOS the same
+defect is pinned one layer down, at the relay, where the refusal now happens. Recorded as §4 problem
+48 rather than closed by adding an Xcode test target in a change that is about provenance.
+
+### Validation
+
+Both platforms, this session, on this machine:
+
+- Android — `:core:test`, `test` (all unit tests), `ktlintCheck`, `detekt`, `lint`, `assembleDebug`,
+  `assembleRelease`: **all green**. No detekt/ktlint threshold was loosened; `LongParameterList` fired
+  on the new test harness at 10 and was answered by grouping the four sinks into one holder.
+- iOS — `swift test` on `RideLinkCore` (284 tests) and `RideLinkPlatform` (**425**, up from 411), plus
+  unsigned Debug and Release simulator `xcodebuild` builds: **all green**.
+- `protocol/vectors/` — **every** generator re-run; byte-identical output, **no wire change**.
+- `connectedDebugAndroidTest` was not run: this change touches no Android platform I/O path, and the
+  emulator scheduled-start evidence from §2ag stands unchanged.
+- `swiftlint`/`swiftformat` were **not** run: neither is installed on this machine and neither is in
+  `.github/workflows/ci.yml`. CLAUDE.md lists them as iOS gates; that is aspirational rather than
+  enforced, and saying so is more useful than implying they passed. Recorded as §4 problem 49.
+
+### What is still not true
+
+**Nothing in this session ran on a phone, and no audio reached a speaker or a Bluetooth endpoint.**
+Every figure here is a software figure. No real-device gate moved. **No alignment figure exists**, and
+the <100 ms product target and the <50 ms stretch target must not be described as approached. The iOS
+scheduled-start path still has not run on a simulator (§4 problem 41), and `AVAudioUnitVarispeed` has
+still never changed a real rate.
+
+**And this is not closure either.** Problem 44 — the reason §2ah withheld Phase 5 software closure —
+is fixed. But this pass's own sweep found three *more* confirmed reachable instances of the same class
+before it was done, one of them in the pairing gate, and left four watch items behind (§4 problems
+47–50). Eight passes have now each found real defects in code that was already CI-green. The next
+audit should re-derive from production code rather than from this file, and should look hardest at
+where this one stopped short — §7 lists those.
 
 ## 3. Tests passed / pending
+
+### Control-plane provenance session (12 September 2026, thirty-second) — see §2ai
+
+**Passed and verified this session, by actually running the commands on this machine.** Every Gradle
+command was run with `-Dorg.gradle.java.home=/opt/homebrew/opt/openjdk@21/libexec/openjdk.jdk/Contents/Home`
+(§4 problem 17).
+
+| Gate | Result |
+|---|---|
+| Android `./gradlew :core:test` | green |
+| Android `./gradlew test` (all unit tests) | green — includes the 19 new cases |
+| Android `./gradlew ktlintCheck` | green (two offences in the new tests found and fixed; no rule relaxed) |
+| Android `./gradlew detekt` | green (`LongParameterList` fired at 10 on the new harness and was answered by extracting a `Sinks` holder, not by raising the threshold) |
+| Android `./gradlew lint` | green |
+| Android `./gradlew assembleDebug` / `assembleRelease` | green |
+| iOS `swift test --package-path ios/Packages/RideLinkCore` | green — 284 tests |
+| iOS `swift test --package-path ios/Packages/RideLinkPlatform` | green — **425** tests, up from 411 |
+| iOS unsigned Debug simulator `xcodebuild` | green |
+| iOS unsigned Release simulator `xcodebuild` | green |
+| `protocol/vectors/` — every generator re-run | byte-identical, **no wire change** |
+
+**New suites** (19 cases, all deterministic, no sleeps in any assertion):
+`RetiredSessionProvenanceTest`/`Tests` (10 each), `RetiredConnectionPairingTest`/`Tests` (4 each),
+`SharedLibraryReadProvenanceTest` (5, Android only — §4 problem 48).
+
+**Verified to fail against the pre-fix behaviour**, each with exactly one guard reverted on unmodified
+`326a145` production sources: 8/10, 3/4 and 3/5 respectively on Android; 8/10 and 3/4 on iOS. The
+cases that pass both ways are the positive controls, which must.
+
+**Not run this session, and the omission is deliberate rather than overlooked:** anything on a phone;
+`connectedDebugAndroidTest` (this change touches no Android platform I/O path, and §2ag's emulator
+evidence stands); `swiftlint`/`swiftformat` (§4 problem 49 — not installed here and not in CI, so
+claiming them would be false); the Phase 1b spike harness; every real-device gate.
+
+### Phase 5 closure audit A6 session (12 September 2026, thirtieth)
 
 **Passed and verified in the Phase 5 closure audit A6 session (12 September 2026, thirtieth), by
 actually running the commands.** Every Gradle command was run with
@@ -4729,9 +4914,13 @@ as of this write-up — see §7.
 | 41 | **Phase 5's scheduled start has run on the Android emulator but not on the iOS simulator.** `SyncScheduledPlaybackTest` proves the pre-roll, the monotonic-deadline start and the real `setPlaybackParameters` nudge/restore against a real `ExoPlayer` on `RideLink_API36` (measured sleeper wake error 1.4–3.1 ms). The iOS half — `AVAudioEnginePlayer` started at a deadline, and `AVAudioUnitVarispeed` actually changing a rate — has **not** run anywhere. **Unlike problem 22, nothing prevents it**: the simulator exists and already runs Phase 3 media tests | Medium | **Still open after closure audit A1** (§2ab), which was scoped to seven correctness findings in the integration layer rather than to new device coverage. It is now §7 step 2. TEST_PLAN §5.2's S-01…S-12 remain the device gate beyond it either way |
 | 42 | **Recovery from a Phase 5 ingress desynchronisation is unbounded in time** (ADR-024 Amendment A1 Finding C, §2ab). An explicit, counted refusal in the bounded post-transport handoff halts a follower's application of incremental commands — nothing incoherent is ever applied, and local music keeps playing — but the halt ends only when the leader next emits authoritative state or the session ends, and **nothing prompts it**. `STATE_REQUEST` is catalogued in PROTOCOL §3 and unimplemented. Reaching the bound at all requires a peer flooding frames that cannot be superseded (latest-wins coalescing absorbs an ordinary 5 s report cadence), so this is a pathological-peer path, not a busy-link one | Medium | Implement §10's resync properly — `STATE_REQUEST` → authoritative state — as **reconnect** work, not as a Phase 5 patch. Deliberately not done blind in A1: it is a wire addition, and A1's whole claim is that the wire did not move |
 | 43 | **Phase 5's session-boundary lifecycle is proven with two coordinators on Android only.** ADR-024 Amendment A3's race — an apply-chain node created under Session A waking in Session B — is pinned on both platforms by `SyncPlaybackLifecycleAuditTest[s]` (9 cases each, 7 verified to fail pre-fix), and by one Android **coordinator-pair** scenario on clocks 7.5 s apart. iOS has no two-peer equivalent: that harness is real TLS end-to-end and bumping the authentication generation in it needs a genuine re-pairing the harness cannot currently drive. The iOS single-coordinator proof is the *stronger* positioning for this particular race — the coordinator is an `actor`, so every `await` is a real re-entrancy point, and the iOS pre-fix evidence was sharper than Android's — but it is one coordinator, not two | Low | Either teach the iOS TLS harness to re-pair (which also unblocks iOS reconnect testing generally), or accept the asymmetry as the Android/iOS harness division already recorded in TEST_PLAN §3.1c. Not a blocker: the fence itself is pinned on both platforms |
-| 44 | **Phase 4's manifest/transfer dispatch derives its generation from live state, exactly as Phase 5's did before ADR-024 Amendment A7** (§2ah Finding C). `SharedLibraryCoordinator`'s `ManifestSink`/`TransferSink` lambdas are invoked **synchronously from `ControlSessionManager.handleFrame`**, and each reads a live value *there*: `controlSessionManager.currentAuthGeneration` on Android, `sessionEpoch.current()` on iOS. Android's own doc comment claims the value is "`currentAuthGeneration` as it was the moment this message was read off the wire" — A7 disproved precisely that claim for Phase 5. `handleFrame` can legitimately be entered with a **retired** binding (the window A7 §A describes and A7's regressions drive), so the live read returns the **successor's** number, `handleManifestMessage`'s re-check passes spuriously, and a Session A `MANIFEST_PAGE` can mutate Session B's catalogue — the thing ADR-023 Amendment A2 Finding S exists to prevent. **Pre-existing; not introduced by A7.** A7 *narrows* the window (a frame read after the boundary is now refused outright) but does not close it | Medium | **Not fixed in A7**, deliberately: the fix is to hand those two sinks `binding.generation` instead, which means threading a generation through `ManifestRelay`/`TransferRelay` — an ADR-023 change this Phase 5 pass was explicitly scoped out of. It is a small, well-understood change of exactly the shape `PlaybackRelay` already has. **This is why §2ah does not claim Phase 5 software closure.** Do it as an ADR-023 Amendment A6, with the same two-statement park regression A7 used |
+| 44 | ~~**Phase 4's manifest/transfer dispatch derives its generation from live state, exactly as Phase 5's did before ADR-024 Amendment A7**~~ **Resolved 12 Sep 2026 (§2ai, ADR-025 §1 / ADR-023 Amendment A6).** `ManifestRelay`/`TransferRelay` now take the frame's authorising generation, refuse and count a retired one, and hand it to `submit(message, generation)`; `SharedLibraryCoordinator`'s sink closures read nothing at dispatch time and `handleManifestMessage`/`handleTransferMessage` compare the supplied value against the new `ControlSessionManager.liveAuthenticatedGeneration`. Verified by reverting only that change on unmodified `326a145`: 3 of 5 `SharedLibraryReadProvenanceTest` cases fail, with a Session A `MANIFEST_PAGE` becoming Session B's catalogue and a Session A `TRANSFER_REQUEST` resolved and served under Session B | ~~Medium~~ — | **Residual:** iOS has no app-target test bundle, so the coordinator-level half of that regression is Android-only — folded into problem 48 |
 | 45 | **`VoiceControllerIntercomTest > switching from full duplex to PTT stops transmitting` is flaky.** Observed failing **once** in a full `:network:test` run during the A7 session, and never again in 5 targeted `--rerun-tasks` runs, a second full-suite run or the final CI-equivalent sweep. The test awaits `!diagnostics.transmitting` and then asserts `fakes.engine.muted == true`; `muted` is a plain non-`@Volatile` `var` on a test fake, written from a coroutine and read from the test thread, so the assertion can observe a stale value. **Pre-existing and test-only** — the test constructs no `ControlSessionManager` and touches no `Phase5FrameQueue`, and it passes on unmodified `a0b81c1` | Low | Make the fake's `muted` field `@Volatile` (or await it rather than the diagnostics field). Recorded rather than fixed here: A7 is a Phase 5 pass and this is Phase 2b test scaffolding |
 | 46 | **`ControlSessionManager.endConnection` re-proves nothing after it releases `stateLock`** (§2ah, ADR-024 Amendment A7 §I2). It clears `activeSocket` *inside* the lock and then writes `authenticatedConnection`, `pendingActivation`, `pairing` and the pairing prompt, and calls `cancel()` on the keepalive and clock-sync jobs, all *outside* it — none re-checking that the session being torn down still owns those fields. `promote` needs only `activeSocket == null`, and the accept loop is an independent `scope.launch` that does not wait for the `LinkLost` this function emits at its end, so a concurrently promoted and activated Session B could in principle have its authenticated record nulled and its keepalive/clock-sync jobs cancelled by Session A's trailing teardown. **Not claimed as reachable, and deliberately not called a defect:** iOS `endConnection` contains **no `await` at all**, so it is atomic within the actor and the race cannot occur; Android has no suspension point between `withLock`'s return and those writes either, so it would need the OS to deschedule that thread for as long as a full TLS + `HELLO` handshake takes on another. **Pre-existing** — every one of those writes predates A7 | Low | The safety on both platforms is *incidental*, not stated: one future `await` anywhere in either tail opens it, and nothing would say so. Either re-prove ownership after the lock (`if (activeSocket !== socket && authenticatedConnection?.socket !== socket) return`-style) or move the writes inside the critical section, in a change that is *only* that. Watch item, not a blocker |
+| 47 | **The `AUDIO_STATE` peer inbox and publisher outlive a control-session boundary, and a peer that restarts is then refused as stale** (§2ai, ADR-021 Amendment A6's closing note). PROTOCOL §4.4's `revision` is "per sender per **session**", and `AudioStateInboxHolder`/`AudioStatePublisher` are reset in `SessionCoordinator.startDiscovery` — a *discovery* session — so they deliberately survive a control reconnect. That is right for the ordinary case (the same peer's `revision` keeps climbing) and wrong for a peer whose **process restarted** and reconnected inside our discovery session: its `revision` restarts at 1 and every genuine message is dropped as stale until it climbs past the dead session's floor, leaving a stale route on screen. **Not a provenance defect** — ADR-025 refuses the retired *frame*; this is about the long-lived *object*, which is ADR-024 Amendment A6's class. **Pre-existing**, and not introduced by ADR-025 | Low | Decide what §4.4's "per session" means at a control boundary and reset the inbox there, or make the inbox tolerate a revision that goes backwards *with* a new generation. Either is a §4.4 semantics decision, not a lifetime patch — do it with a vector |
+| 48 | **iOS has no app-target test bundle, so `ios/RideLink/`'s coordinators have no unit tests at all** (§2ai). `RideLinkPlatformTests` covers the SPM package; `SharedLibraryCoordinator`, `SessionCoordinator`, `MusicCoordinator` and `NowPlayingController` all live in the Xcode app target and are reachable from no test. Android's equivalents have suites (`SharedLibraryCoordinator*Test`, `SessionCoordinatorEndingEffectTest`), so every coordinator-level regression this repo has is Android-only, and a mirrored finding gets a mirrored fix but an unmirrored proof. ADR-025's Finding 1 is the concrete instance: its coordinator regression exists on Android and not on iOS. **Pre-existing** | Medium | Either add a test target to `RideLink.xcodeproj` (a build-system change, deliberately not done inside a provenance pass), or move the coordinators into `RideLinkPlatform` where they would be testable — the direction the Phase 5 coordinator already went |
+| 49 | **`swiftlint` and `swiftformat` are named as iOS gates but are installed nowhere and run by nothing.** CLAUDE.md's build/test section lists `swiftlint && swiftformat --lint .`; neither binary exists on this machine, there is no `.swiftlint.yml` or `.swiftformat` in the repo, and `.github/workflows/ci.yml` does not invoke them. Every session that has claimed "iOS gates green" has therefore claimed a gate that does not exist | Low | Either add the configs and the CI step (and fix whatever they then find), or strike them from CLAUDE.md. Recorded rather than silently dropped, because an aspirational gate read as an enforced one is exactly the "CI-green is not correct" gap this file keeps recording |
+| 50 | **A `VOICE_*` signal accepted under a live session can still be reduced after that session's `ControlLinkLost` has reset the negotiation.** `VoiceInputMailbox` polls `TEARDOWN` before `CRITICAL`, so in one drain pass `.controlLinkLost` resets the reducer to `IDLE`/`voiceSessionId = null` and a `VOICE_OFFER` already queued below it is then *accepted*, because that is exactly the state `offerReceived` accepts any generation in. The mailbox's own doc claims anything queued below teardown "becomes inert on its own (the existing `VoiceEngineGeneration`/`voice_session_id` guard)", which holds for ICE and answers but **not** for an offer. **Within one session's frames, so not a control-plane provenance defect** and outside ADR-025's scope; the resulting negotiation has no writer and its `SendAnswer` fails closed. **Not proven reachable in a real run, and no regression written** | Low | A candidate for the next voice-lifetime audit: either drain-and-discard the non-teardown lanes when `ControlLinkLost` is applied, or make `offerReceived` refuse while `localAudioOpen` is true but no live control session exists |
 | 26 | **APK/IPA size.** The Android AAR adds ~48 MB of native code across four ABIs; the Apple XCFramework is ~96 MB expanded and embedded in the app bundle. No ABI filtering or slice stripping is applied — the default is the safe configuration and a sideloaded personal build has no size gate | Low | Revisit if install time becomes annoying. Recorded rather than forgotten |
 | 21 | **Diagnostics now show `CONNECTING` while a six-digit code is on screen**, where they previously showed `CONNECTED`. This is deliberate and more honest (ADR-019 §5), but it is a user-visible change that has never been looked at on a real screen | Low | Confirm it reads sensibly during I-02 on the two phones; the FR-023 diagnostics screen is one of the things I-02 exercises anyway |
 | 32 | **FIXED (twelfth session, §2o, ADR-021 Amendment A2 Finding 3).** `Effect.ReleaseAudioAndStopForegroundService`'s name promised an Android foreground-service stop `SessionCoordinator.runEffect` never actually performed — confirmed exactly as originally recorded here. Fixed with a `ForegroundServiceController` seam (no `Context` inside `SessionCoordinator`) and one owner: `runEffect` awaits capture release (`StopReleaseResult`) before calling `foregroundService.stop()` — never on a timeout — and always tears down the control session afterward. `SessionCoordinatorEndingEffectTest` (new) proves the order at the integration boundary, including that a peer BYE, a timed-out release, a `NETWORK` link loss and a repeated `ENDING` all behave correctly. Kept in this table with its resolution noted rather than deleted, per this file's own discipline | ~~Medium~~ Fixed | ~~Give `SessionCoordinator` a way to reach `RideForegroundService.stop()`...~~ Done — see §2o |
@@ -4777,44 +4966,44 @@ Not blocking Phase 1. Answers needed before Phase 6.
 
 ## 7. Next exact task
 
-**Phase 5 — synchronized playback. SOFTWARE CLOSURE IS *NOT* CLAIMED (§2ah). REAL-DEVICE
-SYNCHRONIZED-PLAYBACK GATE PENDING.** Every laptop-runnable gate is green on both platforms; the
-audit §7 previously asked for has now run seven times, and all thirty findings (A1's seven, A2's six,
-A3's three, A4's six, A5's four, A6's two, A7's two) are fixed with regressions each verified to fail
-against the pre-fix behaviour. Every pre-existing vector set regenerates byte-for-byte identically:
-the wire did not move in any of the seven passes.
+**Phase 5 — synchronized playback. SOFTWARE CLOSURE IS STILL *NOT* CLAIMED. REAL-DEVICE
+SYNCHRONIZED-PLAYBACK GATE PENDING.** Every laptop-runnable gate is green on both platforms. The task
+§7 previously named — fix the generation-origin defect A7 confirmed in Phase 4's manifest/transfer
+dispatch — **is done** (§2ai, ADR-025 §1 / ADR-023 Amendment A6, §4 problem 44 resolved). Every
+pre-existing vector set still regenerates byte-for-byte identically: the wire has not moved in any of
+the eight passes.
 
-**Why closure is withheld.** A7's sweep confirmed a **third** finding it deliberately did not fix:
-the same generation-origin defect is still live in Phase 4's manifest/transfer dispatch on both
-platforms (§4 problem 44). It is reachable, it is confirmed, and it is one small ADR-023 change of a
-shape `PlaybackRelay` already demonstrates. **The next exact task is that fix**, as an ADR-023
-Amendment A6, using the same two-statement park regression A7 used. Phase 5's own software closure
-should be claimed only once a pass finds nothing.
+**Why closure is still withheld.** ADR-025's own sweep, going after the one finding it was given,
+found **three more** confirmed reachable instances of the same class before it was finished —
+`VOICE_*`, `AUDIO_STATE`, and the pre-authentication family's `PONG`/`PAIR_CONFIRM`/`PAIR_RESULT`/
+fatal `ERROR` — one of which let a retired connection's frame supply the remote half of PROTOCOL
+§4.5's two-human pairing gate. All are fixed with regressions verified to fail against the pre-fix
+behaviour. It also left four watch items (§4 problems 47–50). **The next exact task is an independent
+verification of ADR-025 itself**, re-derived from production code rather than from this file.
 
-**"A7" is not "final", and the wording is deliberate.** §2y dropped "final" from Phase 4 after five
-audits each found real defects in code that was already CI-green. A1 found seven; verifying A1 found
-five more plus a sixth while fixing them; verifying A2 found three more; verifying A3 found six more;
-verifying A4 found four more plus a crash and two more adjacent instances while sweeping for them;
-verifying A5 confirmed all of A5 and then found two more that A5's sweep structurally could not
-reach; verifying A6 accepted all of A6 and then found that **the generation A6 was so careful to
-attribute had itself been read from live state one layer above**, plus the ledger consequence that
-followed from fixing it, plus the unfixed Phase 4 instance. That is evidence *for* auditing again,
-not against it. The next audit should re-derive its findings from the production code rather than
-from this file, and should look hardest at the places these seven deliberately stopped short:
+**"ADR-025" is not "final", and the wording is deliberate.** Eight passes have now each found real
+defects in code that was already CI-green: A1 seven, A2 six, A3 three, A4 six, A5 four, A6 two, A7
+three (one left open), and ADR-025 four. That is evidence *for* auditing again, not against it. Look
+hardest at where this one stopped short:
 
-- **A7 swept for other live-generation derivations and found one it did not fix** (§4 problem 44).
-  It did **not** ask the same question of `VoiceController`/`VoiceSignalRelay` or of `AudioStateRelay`
-  — neither carries a generation at all, and whether that is safe or merely unexamined is open. The
-  A7 shape is a *class*: **any value a dispatch path reads live rather than receives as an argument
-  is a candidate**, and `handleFrame` is entered with a retired binding often enough to matter.
-- **A7 changed the loss ledger's bucketing, not the consumer.** `observeIngressStats` still judges
-  each record with `stillCurrent`, which is right. But A7's safety argument rests on "the live
-  generation is always the largest present". That is true because generations only increase; if a
-  future change ever makes a generation reusable or resettable, the fold becomes unsafe again and
-  nothing would say so.
-- **A7's park is produced by two `internal` calls, not by a real parked coroutine.** That is
-  deliberate and argued (nothing a test controls can suspend between the read and the dispatch, which
-  is the fix), but it means the *timing* of the real window is asserted by reasoning, not measured.
+- **ADR-025 gated four families at the relay and deliberately did not gate Phase 5** (§2ai), on the
+  argument that A6's ledger must see a retired frame to attribute it. That argument is correct today
+  and depends on `Phase5FrameQueue` continuing to be the only consumer that *wants* stale frames. If
+  another family ever grows a ledger, or Phase 5 ever loses one, the asymmetry becomes a trap.
+- **ADR-025's liveness comparison is `frameGeneration == liveAuthenticatedGeneration`, read at the
+  moment of delivery.** Between that read and the mutation there is no suspension on either platform,
+  but there *is* thread preemption on Android and there is nothing structural that would keep a
+  future `await` out of the gap. Nothing in the code says so except the ADR.
+- **The two new counters are non-atomic `+= 1`**, matching `droppedPreAuthentication`'s existing
+  convention. No correctness claim rests on them, but a future diagnostics screen that reads one as
+  exact would be wrong.
+- **Finding 4 was found by sweeping, not by the brief**, which asked only about `PONG`. The pairing
+  half of it was the more serious defect and nothing pointed at it. The pre-authentication family is
+  small; the lesson is that "this family is exempt from the gate" deserves its own gate, and there may
+  be other exemptions phrased as absences.
+- **`ios/RideLink/`'s coordinators remain untested** (§4 problem 48), so every coordinator-level
+  regression in this repo is Android-only. A mirrored fix with an unmirrored proof is exactly the gap
+  A1–A7 kept finding on the other foot.
 
 - **A6 swept exactly two paths and said so**: the ingress loss-accounting path and
   `restoreRate`'s three callers. It did **not** re-sweep every `await` in the coordinators — A5 did
@@ -4863,7 +5052,10 @@ from this file, and should look hardest at the places these seven deliberately s
 
 **Immediately actionable next steps, in order:**
 
-1. **Independently verify closure audit A6** (§2ag, ADR-024 Amendment A6), and A1–A5 with it (§2ab–§2af). Re-derive each finding from the current production code; the regressions are in `SyncPlaybackIngressLifetimeAuditTest[s]` (A6), `SyncPlaybackSessionStateAuditTests` (A5, iOS only — see §2af for why Android is structurally safe), `SyncPlaybackOperationLifetimeAuditTest[s]` (A4), `SyncPlaybackLifecycleAuditTest[s]` (A3), `SyncPlaybackDeliveryAuditTest[s]` (A2), `SyncPlaybackClosureAuditTest[s]`, `SyncPlaybackTwoPeerTest[s]`, `Phase5FrameQueueTest[s]` and `Phase5GatesVectorTest[s]`, and each should be confirmed to fail if its fix is reverted. **Run the whole `SyncPlayback` sweep in one process, not suite by suite** — three of A4's flakes were invisible individually and only appeared under the load of the real-TLS two-peer tests sharing the process, and A6's own harness defect surfaced the same way.
+1. **Independently verify ADR-025** (§2ai), and A1–A7 with it (§2ab–§2ah). Re-derive each finding from
+   the production code, not from this file. Start where §7's list above says this pass stopped short —
+   and in particular ask of every remaining "this family is exempt" whether the exemption has a gate
+   of its own.
 2. **Run the scheduled-start path on the iOS simulator** (§4 problem 41's remaining half). The Android emulator half is done; there is no `Context`-shaped obstacle on iOS either.
 3. **Get two real devices into this loop.** Unchanged since Phase 1a and now blocking five gates: (a) enable USB debugging on the OnePlus Nord 5; (b) set up a development-team signing identity for the iPhone 17 Pro Max.
 4. **Run the Phase 1a gate**: I-01, I-05, I-06, I-07, I-08, I-14, I-15, I-17, I-22.

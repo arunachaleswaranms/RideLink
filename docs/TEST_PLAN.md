@@ -532,14 +532,61 @@ Android `com.ridelink.app.sync.*` suite (A1–A7, drift, coordinator, two-peer, 
 failures; the three iOS A7 suites **15×**, 0 failures. One pre-existing, test-only flake was observed
 once and is recorded rather than papered over — `docs/STATUS.md` §4 problem 45.
 
-**What A7 found and did **not** fix.** The same generation-origin defect is still live in Phase 4's
-manifest/transfer dispatch on both platforms (`docs/STATUS.md` §4 problem 44). It is confirmed and
-reachable; fixing it is an ADR-023 change this Phase 5 pass was scoped out of. **Phase 5 software
-closure is therefore not claimed.**
+**What A7 found and did **not** fix — now fixed.** The same generation-origin defect was still live in
+Phase 4's manifest/transfer dispatch on both platforms (`docs/STATUS.md` §4 problem 44). It is closed
+by ADR-025, along with three more instances of the same class that pass found while sweeping — see
+§3.1d.
 
 **Still not proven by any of it.** Every figure A7 adds is a *software* figure. Nothing ran on a
 phone, no audio reached a speaker or a Bluetooth endpoint, and no alignment figure exists.
 S-01…S-12 remain the gate.
+
+### 3.1d Control-plane provenance — ADR-025, what is proven on a laptop, and what is not
+
+ADR-024 Amendment A7 established that an inbound frame's authority must come from **the connection it
+was read from**, built `ReadFrameBinding` to carry it, and threaded it through Phase 5 alone. ADR-025
+finished that sweep across every other inbound family, and found three more instances while doing it.
+
+> Once `ControlSessionManager` has created a `ReadFrameBinding` for an inbound frame, no downstream
+> subsystem may discard that provenance and reconstruct authority from mutable live session state. A
+> frame must either **retain** the provenance that authorised its read, or be **rejected** as stale.
+
+| Finding | What the regression proves | Where |
+|---|---|---|
+| 1 — `MANIFEST_*` at the relay | A `MANIFEST_PAGE` captured on a live Session A, a real `BYE` boundary, a second real TLS session as generation 2, and only then the parked dispatch: the frame reaches **no sink**, is counted as a retired-generation refusal, and no codec rejection is recorded. Pre-fix: delivered, with the coordinator's own lambda reading **2** for it | `RetiredSessionProvenanceTest[s]` |
+| 1 — `MANIFEST_*` at the coordinator | The same interleaving one layer up: `remoteEntries` stays **empty**. Pre-fix: peer A's entry *is* Session B's catalogue | `SharedLibraryReadProvenanceTest` (Android — §4 problem 48) |
+| 1 — `TRANSFER_*` | `TRANSFER_OFFER` reaches no sink (it is what satisfies a requester's pending request and carries the bulk port and token), and `REQUEST`/`CANCEL`/`RESULT` are all refused together. At the coordinator: a Session A `TRANSFER_REQUEST` resolves **nothing**, opens no bulk listener, mints no token and sends no offer. Pre-fix: resolved and served under Session B | `RetiredSessionProvenanceTest[s]`, `SharedLibraryReadProvenanceTest` |
+| 1 — after a link loss with no successor | A frame authorised by a session that has **ended** is refused even before a successor exists — the case `currentAuthGeneration` could never refuse, and the reason the guard compares against `liveAuthenticatedGeneration` | `SharedLibraryReadProvenanceTest` |
+| 2 — `VOICE_STATE { closed }` | The shape that omits `voice_session_id`, which `VoiceNegotiation` correctly reads as carrying **no generation claim** — so it is `teardownFromPeer` and would stop the successor's live media. It reaches no sink. Pre-fix: delivered | `RetiredSessionProvenanceTest[s]` |
+| 2 — `VOICE_OFFER` | The shape `offerReceived` accepts at any generation once `ControlLinkLost` has reset the table to `IDLE`/null. It reaches no sink, and Session B's own offer still does | `RetiredSessionProvenanceTest[s]` |
+| 3 — `AUDIO_STATE` | A stale message whose `revision` exceeds the held one reaches no sink, and Session B's own (higher revision) still does — the inbox is reset per *discovery* session, so the revision rule alone would have accepted it | `RetiredSessionProvenanceTest[s]` |
+| 4 — `PONG` | A full `RTT_WINDOW_CAPACITY` (64) of retired-connection `PONG`s, each carrying an absurd ~1.4-hour round trip: all 64 refused and counted, and Session B's fresh RTT window's p95 stays under 1 ms. Pre-fix: the window holds the injected value, which is the input to `LEAD = max(120 ms, 4 × rtt_p95)` | `RetiredSessionProvenanceTest[s]` |
+| 4 — `PONG` on the live connection | Still measured normally, so the gate did not turn keepalive off | `RetiredSessionProvenanceTest[s]` |
+| 4 — `PAIR_CONFIRM` | A real silent connect with a known peer, a real link loss, a real first-meeting with an **unknown** peer, then the parked `PAIR_CONFIRM` and this user confirming: **no pin is written**, no `PairingSucceeded`, no `PairingFailed`, and the six digits stay up. Pre-fix: the trust store contains the unknown peer | `RetiredConnectionPairingTest[s]` |
+| 4 — `PAIR_RESULT` / fatal `ERROR` | Neither can drive the successor's exchange into `failPairing`; the prompt survives. Pre-fix: `PairingFailed(identity_mismatch)` and `PairingFailed(pairing_rejected)` respectively, with the live connection left open and `pairing` already null | `RetiredConnectionPairingTest[s]` |
+| 4 — the live pairing still completes | Peer C's **own** `PAIR_CONFIRM`, produced by its user confirming, still writes the pin. A fix that refused every pairing frame would pass every row above and break the app | `RetiredConnectionPairingTest[s]` |
+| all — being late is not being stale | A frame dispatched late *within its own still-live session* is still delivered, tagged that session's own generation | `RetiredSessionProvenanceTest[s]` |
+
+**Pre-fix evidence.** Each suite was re-run against production code with exactly **one** thing
+reverted — the relay's liveness guard, then `handleFrame`'s pre-authentication connection gate, then
+the coordinator's sink closures — the same isolation technique A4–A7 used.
+`RetiredSessionProvenanceTest[s]`: **8 of 10 fail on each platform** (the two that pass are the
+positive controls, which must pass both ways). `RetiredConnectionPairingTest[s]`: **3 of 4 fail on
+each platform**. `SharedLibraryReadProvenanceTest`: **3 of 5 fail**.
+
+**Both platforms are equally affected**, and the iOS window is *wider* for findings 1–3: `await
+relay.deliver(...)` is a real actor hop out of the manager, where Android's is a thread-preemption
+point between the binding capture and the sink's live read.
+
+**How the park is produced** is A7's construction, unchanged and for A7's reason — `currentReadBinding()`
+then `handleFrame(binding, frame)` with a **real** session boundary between them. What it does **not**
+measure is the *timing* of the real window; that remains argued.
+
+**What this does not cover.** `ios/RideLink/SharedLibraryCoordinator.swift` has no coordinator-level
+regression because iOS has no app-target test bundle (§4 problem 48) — on iOS the defect is pinned at
+the relay instead. `swiftlint`/`swiftformat` did not run, because neither is installed here nor in CI
+(§4 problem 49). And every figure here is a *software* figure: nothing ran on a phone, no audio
+reached a speaker, and no real-device gate moved.
 
 ### 3.1a Phase 2a voice — what is proven on a laptop, and what is not
 

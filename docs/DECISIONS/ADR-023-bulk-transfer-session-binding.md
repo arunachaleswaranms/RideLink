@@ -491,3 +491,42 @@ started — where the cancel is a no-op and A4's 30 s bound is what applies — 
 than closed, because closing it would mean tracking not-yet-started operations in the transport for a
 window a network round trip makes vanishingly unlikely. The cancelled token is removed regardless, so
 even in that window the abandoned offer is no longer authorised.
+
+
+## Amendment A6 — 12 September 2026 — the sixth closure-audit pass: the inbound generation's origin
+
+The finding ADR-024 Amendment A7 confirmed and deliberately did not fix — `docs/STATUS.md` §4 problem
+44, and the task §7 named as next. Reasoning in full:
+[ADR-025 §1](ADR-025-inbound-control-frame-provenance.md).
+
+**The defect.** `SharedLibraryCoordinator`'s `ManifestSink`/`TransferSink` closures are invoked
+**synchronously from `ControlSessionManager.handleFrame`**, and each read a live value *there*:
+`currentAuthGeneration` on Android, `sessionEpoch.current()` on iOS. Amendment A2's Finding S and
+Amendment A3's dispatch-entry check were both built on the claim that this value was "the generation
+as it was the moment this message was read off the wire" — which A7 disproved. `handleFrame` can
+legitimately be entered with a **retired** binding, so the live read returned the *successor's*
+number, the apply-time re-check compared that number against itself and passed, and a Session A
+`MANIFEST_PAGE` mutated Session B's catalogue.
+
+**The fix.** `ManifestRelay`/`TransferRelay` take the frame's generation, refuse (and count) one whose
+generation is no longer live, and hand it to the sink — `submit(message, generation)`, the contract
+`PlaybackSink` already had. The coordinator's closures take that value rather than reading one, and
+`handleManifestMessage`/`handleTransferMessage` compare it against
+`ControlSessionManager.liveAuthenticatedGeneration` (deliberately not `currentAuthGeneration`, which
+keeps reporting the last number it assigned after the link drops).
+
+**What did not change.** `OperationFence`, `BulkOperationGate`, `ProviderSessionContext`,
+`stillAuthorised`, `BulkTokenTable`, the SPKI fencing, the listener lifecycle, the cache trust model
+and every `TRANSFER_*`/`MANIFEST_*` wire shape are untouched. On iOS `sessionEpoch` survives as the
+provider-side operation fence A3/A5 built on it; it is simply read on `@MainActor` *after* the
+provenance guard, instead of in the sink closure.
+
+**Evidence.** `SharedLibraryReadProvenanceTest` (Android, 5 cases) — 3 fail against unmodified
+`326a145`, with a Session A `MANIFEST_PAGE` becoming Session B's catalogue and a Session A
+`TRANSFER_REQUEST` being resolved and served under Session B. `RetiredSessionProvenanceTest[s]`
+(10 cases each) pin the relay seam on both platforms over two real TLS sessions. iOS has no
+app-target test bundle, so `ios/RideLink/SharedLibraryCoordinator.swift` has no coordinator-level
+regression — recorded as `docs/STATUS.md` §4 problem 48 rather than closed by adding an Xcode test
+target here.
+
+**No wire change**; every `protocol/vectors/` generator re-runs byte-identically.
