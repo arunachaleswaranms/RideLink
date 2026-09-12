@@ -85,14 +85,21 @@ import com.ridelink.core.sessionfsm.LinkLossReason as FsmLinkLossReason
 class SessionCoordinatorAudioStateLifetimeTest {
     // --- the sending side: when does a lifetime begin ----------------------------------------------
 
+    /**
+     * Uses the **one restart path production can actually take**: `Stop Discovery` then `Start
+     * Discovery`, which is `DISCOVERING -> IDLE -> DISCOVERING` and never touches `ENDING`. Getting
+     * back to `IDLE` from `CONNECTED` needs `TeardownComplete`, which nothing in the app emits (§4
+     * problem 53) — so a row that went that way would be testing a sequence no user can produce.
+     */
     @Test
     fun `each discovery session begins a sender lifetime that has never been used before`() =
-        withCoordinator { coordinator, manager ->
+        withCoordinator(connect = false) { coordinator, _ ->
+            coordinator.startDiscovery()
             val first = coordinator.audioStateSenderEpoch
 
-            coordinator.restartDiscovery(manager)
+            coordinator.restartDiscovery()
             val second = coordinator.audioStateSenderEpoch
-            coordinator.restartDiscovery(manager)
+            coordinator.restartDiscovery()
             val third = coordinator.audioStateSenderEpoch
 
             assertNotEquals(first, second, "a new discovery session must announce a new lifetime")
@@ -168,61 +175,79 @@ class SessionCoordinatorAudioStateLifetimeTest {
             coordinator.settle()
             assertEquals(1L, coordinator.peerAudioState.value?.revision, "the straggler was refused")
 
-            coordinator.restartDiscovery(manager)
+            // Held before the restart, and used after it. The sink is the production lambda closing
+            // over the coordinator's own inbox and state flow, so submitting through it exercises
+            // exactly what the read loop would — and holding it keeps this row independent of
+            // `ENDING`'s launched teardown, whose tail calls `releaseVoice()` and would otherwise
+            // decide the outcome by winning or losing a race. (That tail clearing a *successor's*
+            // sink is problem 46's shape one layer up; it is unreachable in the app for §4 problem
+            // 53's reason — nothing emits `TeardownComplete` — which is exactly why this row has to
+            // drive that event itself.)
+            val sink = requireNotNull(manager.audioState.sink)
+
+            coordinator.endSessionAndRestartDiscovery()
             assertNull(coordinator.peerAudioState.value, "the peer's state belonged to the old session")
 
             // A fresh local session tracks nothing, so it has no standing to call that lifetime dead.
-            manager.submitPeerAudioState(peerMessage(revision = 41, epoch = firstPeerLifetime))
+            sink.submit(peerMessage(revision = 41, epoch = firstPeerLifetime))
             coordinator.awaitPeerRevision(41)
         }
 
     // --- harness ------------------------------------------------------------------------------------
 
-    private fun withCoordinator(body: suspend (SessionCoordinator, ControlSessionManager) -> Unit) =
-        runBlocking {
-            val scope = CoroutineScope(SupervisorJob())
-            try {
-                val manager =
-                    ControlSessionManager(
-                        scope = scope,
-                        monotonicNowUs = { 0L },
-                        localPeerId = PeerId("fedcba9876543210"),
-                        channel = FixtureControlChannel(),
-                        trustedPeers = InMemoryTrustedPeerStore(),
-                    )
-                val coordinator =
-                    SessionCoordinator(
-                        discovery = FixtureDiscoveryController(),
-                        controlSessionManager = manager,
-                        localIdentity = LOCAL_IDENTITY,
-                        scope = scope,
-                        logSink = InMemoryLogSink(),
-                        trustedPeers = InMemoryTrustedPeerStore(),
-                        environment =
-                            SessionEnvironment(
-                                monotonicNowUs = { 0L },
-                                nowEpochSeconds = { 0L },
-                                audioEndpointPresent = { true },
-                            ),
-                        foregroundService = { },
-                        buildVoiceController = { isLocalLeader ->
-                            VoiceController(
-                                scope = scope,
-                                engine = FixtureVoiceEngine(),
-                                audioSession = FixtureVoiceAudioSession(),
-                                transport = FixtureVoiceTransport(),
-                                isLocalLeader = isLocalLeader,
-                                localTrackId = "test-track",
-                                audioProcessing = AudioProcessingConfig(),
-                            )
-                        },
-                    )
-                coordinator.reachConnected()
-                body(coordinator, manager)
-            } finally {
-                scope.cancel()
-            }
+    /**
+     * @param connect whether to walk the FSM to `CONNECTED` first. Only the rows that need the
+     *   `AUDIO_STATE` sink do — `attachVoice` is what installs it — and a row that does not need it
+     *   should not pay for a state it would then have to leave through a transition no user can
+     *   reach (§4 problem 53).
+     */
+    private fun withCoordinator(
+        connect: Boolean = true,
+        body: suspend (SessionCoordinator, ControlSessionManager) -> Unit,
+    ) = runBlocking {
+        val scope = CoroutineScope(SupervisorJob())
+        try {
+            val manager =
+                ControlSessionManager(
+                    scope = scope,
+                    monotonicNowUs = { 0L },
+                    localPeerId = PeerId("fedcba9876543210"),
+                    channel = FixtureControlChannel(),
+                    trustedPeers = InMemoryTrustedPeerStore(),
+                )
+            val coordinator =
+                SessionCoordinator(
+                    discovery = FixtureDiscoveryController(),
+                    controlSessionManager = manager,
+                    localIdentity = LOCAL_IDENTITY,
+                    scope = scope,
+                    logSink = InMemoryLogSink(),
+                    trustedPeers = InMemoryTrustedPeerStore(),
+                    environment =
+                        SessionEnvironment(
+                            monotonicNowUs = { 0L },
+                            nowEpochSeconds = { 0L },
+                            audioEndpointPresent = { true },
+                        ),
+                    foregroundService = { },
+                    buildVoiceController = { isLocalLeader ->
+                        VoiceController(
+                            scope = scope,
+                            engine = FixtureVoiceEngine(),
+                            audioSession = FixtureVoiceAudioSession(),
+                            transport = FixtureVoiceTransport(),
+                            isLocalLeader = isLocalLeader,
+                            localTrackId = "test-track",
+                            audioProcessing = AudioProcessingConfig(),
+                        )
+                    },
+                )
+            if (connect) coordinator.reachConnected()
+            body(coordinator, manager)
+        } finally {
+            scope.cancel()
         }
+    }
 
     /**
      * `StartDiscovery -> PeerSelected -> PeerTrusted -> Connected`, the real trust-gate path
@@ -252,31 +277,32 @@ class SessionCoordinatorAudioStateLifetimeTest {
     }
 
     /**
-     * Ends this session and starts a new discovery one — the production path a user takes by leaving
-     * and re-entering discovery, and the only thing that begins a new sender lifetime.
+     * `Stop Discovery` then `Start Discovery` — the production-reachable restart, entirely
+     * synchronous: `cancelDiscovery` from `DISCOVERING` tears down a session whose `voice` is null,
+     * so `releaseVoice` returns immediately and there is no launched tail to race.
      */
-    private suspend fun SessionCoordinator.restartDiscovery(manager: ControlSessionManager) {
-        assertTrue(applyEvent(SessionEvent.LinkLost(FsmLinkLossReason.BYE)))
-        // `ENDING`'s effect releases audio in a **launched** coroutine, and that release is what
-        // clears the `AUDIO_STATE` sink. `TeardownComplete` means "that finished", so waiting for it
-        // to actually have finished is what the event says rather than a stabilisation: driving the
-        // transition first would let Session A's trailing teardown clear the sink the *next* session
-        // installs. (On a laptop the launch wins the race every time; on a loaded CI agent it does
-        // not — which is the only reason this is written down rather than assumed.)
-        awaitTrue("the ENDING release to finish") { manager.audioState.sink == null }
-        assertTrue(applyEvent(SessionEvent.TeardownComplete))
+    private fun SessionCoordinator.restartDiscovery() {
+        assertEquals(SessionStatus.DISCOVERING, state.value.status)
+        cancelDiscovery()
         assertEquals(SessionStatus.IDLE, state.value.status)
-        reachConnected()
+        startDiscovery()
+        assertEquals(SessionStatus.DISCOVERING, state.value.status)
     }
 
-    private suspend fun awaitTrue(
-        what: String,
-        condition: () -> Boolean,
-    ) {
-        withTimeout(TIMEOUT_MS) {
-            while (!condition()) delay(POLL_MS)
-        }
-        assertTrue(condition(), "timed out waiting for $what")
+    /**
+     * `CONNECTED -> ENDING -> IDLE -> DISCOVERING`. `TeardownComplete` is driven here because
+     * **nothing in the app emits it** (§4 problem 53), so this transition — which `SessionFsm`
+     * specifies — is otherwise unreachable and the "a new discovery session drops the peer's state"
+     * rule would have no test at all. Its caller does not depend on anything `ENDING`'s launched
+     * effect does afterwards.
+     */
+    private fun SessionCoordinator.endSessionAndRestartDiscovery() {
+        assertTrue(applyEvent(SessionEvent.LinkLost(FsmLinkLossReason.BYE)))
+        assertEquals(SessionStatus.ENDING, state.value.status)
+        assertTrue(applyEvent(SessionEvent.TeardownComplete))
+        assertEquals(SessionStatus.IDLE, state.value.status)
+        startDiscovery()
+        assertEquals(SessionStatus.DISCOVERING, state.value.status)
     }
 
     private suspend fun SessionCoordinator.awaitPeerRevision(revision: Long) {

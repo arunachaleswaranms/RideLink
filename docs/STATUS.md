@@ -4578,12 +4578,16 @@ the evidence this file keeps warning about.
 | `a new authentication generation alone does not restart the revision namespace` — "the sender's relay must accept it" | The harness waited for the **receiver's** `Connected` and then sent from the **sender's** manager. The two peers activate independently, so `send` could be called before the sender had authenticated and correctly returned false. Wide on a loaded agent, invisible on a laptop — the same shape as `c1ca688`'s "wait for both pairing prompts" | Wait for `target.liveAuthenticatedGeneration != null` as well |
 | `a new discovery session drops the peer's held state and every lifetime it had retired` | `ENDING`'s effect releases audio in a **launched** coroutine, and that release is what clears the `AUDIO_STATE` sink. The test drove `TeardownComplete` without waiting for it, so Session A's trailing teardown could clear the sink the next session had just installed | Wait for the release to have finished before driving the event that *means* it finished |
 | the **same** both-ends defect on iOS, found by stressing after the Android fix | The Android harness was fixed and the iOS one was not — a one-sided fix to a mirrored test, which is the exact failure mode this repo keeps recording about mirrored *code*. It reproduced in 1 run of 6, then in run 3 of a 12-run hunt | Mirror the wait. 20 consecutive clean iOS runs afterwards |
+| the **same** coordinator row, failing CI a **second** time after the first fix | The first fix waited for the sink to be cleared *inside* `releaseVoiceAndAwait`, and missed that `ENDING`'s coroutine continues afterwards into `teardownSession()` -> `releaseVoice()` — which, once the next session has attached, clears the **successor's** sink. Waiting for a point in the middle of a launched effect is not waiting for the effect | Stop depending on the ordering at all. The epoch rows now use `Stop Discovery`/`Start Discovery`, the **only restart path production can take**, which never enters `ENDING`; the peer-state row holds the production sink across the restart, so the trailing teardown cannot decide the outcome |
 
-None is a production defect: the first and third are harness sequencing, and the second is
-unreachable in the app because **nothing emits `TeardownComplete` at all** (§4 problem 53, found by
-exactly this). Post-fix stress: **10 consecutive Android runs and 20 consecutive iOS runs, all
-clean** — the counts were raised from 5 after the third failure showed that 5 was not enough to see
-it. The second failure is also what caught this session's own over-claim about
+None is a production defect. The first and third are harness sequencing. The second and fourth are
+the same unreachable path: `ENDING -> IDLE` needs `TeardownComplete`, which **nothing in the app
+emits** (§4 problem 53, found by exactly this), so the trailing `releaseVoice()` can never meet a
+successor in production — it is problem 46's shape, kept unreachable by an unrelated gap. Post-fix
+stress: **12 consecutive Android runs and 20 consecutive iOS runs, all clean**, plus a full clean
+`test`+analysis+`assembleRelease` sweep. The counts were raised from 5 after failures three and four
+showed 5 was not enough to see them — **the honest lesson of this session's test work is that five
+local runs is not a stress test**. The second failure is also what caught this session's own over-claim about
 problem 47's reachability — recorded above.
 
 **Pre-fix evidence, recorded because "it passes now" is not evidence:** reverting **only**
