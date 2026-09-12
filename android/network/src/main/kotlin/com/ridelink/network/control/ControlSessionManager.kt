@@ -233,12 +233,29 @@ class ControlSessionManager(
     private var pendingActivation: PendingActivation? = null
 
     /**
-     * Whether the trust gate has passed on [activeSocket]. Read by [handleFrame] so that a peer
-     * which has completed TLS but not RideLink authentication cannot invoke anything reserved for
-     * an authenticated session. Transport alive != session authenticated.
+     * The connection the trust gate has passed on, and the generation that owns it — created once
+     * in [activateAuthenticatedSession] and never mutated (ADR-024 Amendment A7).
+     *
+     * Non-null exactly while [activeSocket] is an authenticated RideLink session, so this field
+     * **is** the `authenticated` boolean it replaces: two fields would be two answers to one
+     * question, and the boolean's answer carried no connection, which is precisely what A7 found
+     * missing. Read by [handleFrame] so that a peer which has completed TLS but not RideLink
+     * authentication cannot invoke anything reserved for an authenticated session. Transport alive
+     * != session authenticated.
      */
     @Volatile
-    private var authenticated = false
+    private var authenticatedConnection: AuthenticatedConnection? = null
+
+    /**
+     * The record above, for this module's own unit tests — the same standing [writeRawFrame] has,
+     * and for the same reason: ADR-024 Amendment A7's regression has to ask **production** what a
+     * given socket's generation is after a session boundary, and [ReadFrameBinding.of] is the
+     * function that answers it.
+     */
+    internal val authenticatedRecord: AuthenticatedConnection? get() = authenticatedConnection
+
+    /** Whether the trust gate has passed on [activeSocket]. Derived, so it cannot disagree. */
+    private val authenticated: Boolean get() = authenticatedConnection != null
 
     @Volatile
     private var authenticationGeneration: Long = 0
@@ -517,7 +534,7 @@ class ControlSessionManager(
             endedDeliberately = false
         }
         clock.reset()
-        authenticated = false
+        authenticatedConnection = null
         lastPongAtMonoUs = monotonicNowUs()
         reconnectController.reset()
 
@@ -580,12 +597,14 @@ class ControlSessionManager(
         val pending = pendingActivation ?: return
         if (activeSocket !== pending.socket) return
         pendingActivation = null
-        authenticated = true
         // ADR-023 §3: a fresh, strictly-increasing generation per activation — including a
         // reconnect's re-authentication of the *same* wire session_id. Anything scoped to a
         // bulk transfer (its token, its listener) is scoped to this number, never to session_id,
         // so a reconnect can never let a stale transfer's token or completion apply to the new one.
         authenticationGeneration += 1
+        // ADR-024 Amendment A7: the generation is bound to **this connection**, here, once. Every
+        // frame read off it is authorised by this record for as long as that frame exists.
+        authenticatedConnection = AuthenticatedConnection(pending.socket, authenticationGeneration)
         _diagnostics.update { it.copy(controlState = ControlState.CONNECTED) }
         _events.tryEmit(ControlEvent.Connected(pending.remotePeerId, pending.sessionId, pending.isLocalLeader))
         clockSyncJob = scope.launch { clockSyncLoop(pending.socket) }
@@ -742,13 +761,35 @@ class ControlSessionManager(
         endConnection(socket, LinkLossReason.USER_ENDED)
     }
 
+    /**
+     * The binding the surviving connection's read loop would capture for a frame arriving **now**,
+     * or null when there is no connection at all.
+     *
+     * `internal`, so it is reachable from this module's own unit tests and from nowhere else, and
+     * it exists for one job that cannot be done any other way — the same standing this module
+     * already gives [writeRawFrame]. ADR-024 Amendment A7 is about a read-loop coroutine that
+     * resumes *after* an authentication boundary, and nothing a test controls can park a coroutine
+     * between `ControlSocket.readFrame()` returning and the [handleFrame] call that follows it.
+     * Capturing the binding here and handing it to [handleFrame] after the boundary **is** that
+     * park, expressed as two calls instead of one — and it is the same binding, produced by the
+     * same [ReadFrameBinding.of], that the read loop itself would have held.
+     */
+    internal fun currentReadBinding(): ReadFrameBinding? =
+        activeSocket?.let { ReadFrameBinding.of(authenticatedConnection, it, activeSessionId) }
+
     private suspend fun readLoop(
         socket: ControlSocket,
         sessionId: SessionId,
     ) {
         while (true) {
             when (val result = socket.readFrame()) {
-                is FrameReadResult.Frame -> handleFrame(socket, sessionId, result)
+                // ADR-024 Amendment A7: the frame is bound to the connection that authorised its
+                // read **here**, before anything else can run. [handleFrame] is then given that
+                // binding rather than re-deriving one, which is the whole of the amendment: this
+                // coroutine resumes on a dispatcher, and an authentication boundary can land in the
+                // gap between the resume and the dispatch below.
+                is FrameReadResult.Frame ->
+                    handleFrame(ReadFrameBinding.of(authenticatedConnection, socket, sessionId), result)
                 is FrameReadResult.Malformed -> Unit // PROTOCOL §2: log and continue, framing itself is intact
                 is FrameReadResult.FrameTooLarge -> {
                     runCatching {
@@ -776,11 +817,12 @@ class ControlSessionManager(
     }
 
     @Suppress("ReturnCount") // one early-out per malformed-field guard (this session's brief §7) reads clearer than nesting
-    private suspend fun handleFrame(
-        socket: ControlSocket,
-        sessionId: SessionId,
+    internal suspend fun handleFrame(
+        binding: ReadFrameBinding,
         frame: FrameReadResult.Frame,
     ) {
+        val socket = binding.socket
+        val sessionId = binding.sessionId
         val payload = frame.envelope.payload
         // Until the trust gate has passed, the only frames acted on are the ones an
         // *unauthenticated* connection is defined to carry: PROTOCOL §4.5's pairing exchange,
@@ -788,7 +830,12 @@ class ControlSessionManager(
         // peer is dropped the same way an unknown type is (PROTOCOL §2 rule 2) — a peer that has
         // completed TLS but not RideLink authentication must not be able to reach it, and
         // PING/PONG in particular can never mark authentication complete.
-        if (!authenticated && frame.envelope.type !in PRE_AUTHENTICATION_FRAME_TYPES) {
+        //
+        // ADR-024 Amendment A7: the question asked is "was **this** frame's own connection an
+        // authenticated session when it was read", never "is *some* session authenticated now".
+        // A frame read from a connection whose session has since ended is refused here rather than
+        // silently acquiring the successor's authority.
+        if (binding.generation == null && frame.envelope.type !in PRE_AUTHENTICATION_FRAME_TYPES) {
             // Counted rather than merely dropped: PROTOCOL §7.1's whole point is that VOICE_* is
             // inert before the trust gate, and "it never happened" and "it happened and was
             // refused" are different facts on a diagnostics screen. The same holds for every other
@@ -815,7 +862,12 @@ class ControlSessionManager(
             // Every remaining known type belongs to a relay, and is reachable only past the guard
             // above — so only for an authenticated peer (PROTOCOL §4.4, §5, §7.1, §8.1, §8.2, §9).
             // A type no relay owns falls through to PROTOCOL §2 rule 2: ignored, logged, not fatal.
-            else -> relays.deliver(frame.envelope.type, payload, authenticationGeneration)
+            // The generation comes from the binding captured at the read, never from live state:
+            // re-reading it here is exactly the ADR-024 Amendment A7 defect. Null is unreachable —
+            // every relay-owned type is absent from [PRE_AUTHENTICATION_FRAME_TYPES], so the gate
+            // above has already returned — and failing closed rather than reaching for a live
+            // value is the invariant itself.
+            else -> relays.deliver(frame.envelope.type, payload, binding.generation ?: return)
         }
     }
 
@@ -915,7 +967,7 @@ class ControlSessionManager(
             activeSocket = null
             endedDeliberately = reason != LinkLossReason.NETWORK
         }
-        authenticated = false
+        authenticatedConnection = null
         pendingActivation = null
         // A six-digit code belongs to one live TLS session (PROTOCOL §4.5.1). The moment that
         // session ends the code means nothing, so it is dropped here too rather than left on a
@@ -1062,7 +1114,7 @@ class ControlSessionManager(
     suspend fun shutdown(reason: String = BYE_REASON_SHUTDOWN) {
         isShutDown = true
         pairing = null
-        authenticated = false
+        authenticatedConnection = null
         // This manager is reused across sessions, so a sink still attached from the previous one must
         // not survive into the next — the same hazard STATUS §2h fixed for control events, applied to
         // the voice sink. The coordinator also detaches it, and doing both is deliberate: neither

@@ -156,10 +156,25 @@ public actor ControlSessionManager {
     /// handshake would produce a second exporter and therefore a code that was never the one the
     /// two users compared.
     private var pendingActivation: PendingActivation?
-    /// Whether the trust gate has passed on `activeSocket`. Read by `handleFrame` so that a peer
-    /// which has completed TLS but not RideLink authentication cannot invoke anything reserved for
-    /// an authenticated session. Transport alive != session authenticated.
-    private var authenticated = false
+    /// The connection the trust gate has passed on, and the generation that owns it — created once
+    /// in `activateAuthenticatedSession()` and never mutated (ADR-024 Amendment A7).
+    ///
+    /// Non-nil exactly while `activeSocket` is an authenticated RideLink session, so this property
+    /// **is** the `authenticated` boolean it replaces: two fields would be two answers to one
+    /// question, and the boolean's answer carried no connection, which is precisely what A7 found
+    /// missing. Read by `handleFrame` so that a peer which has completed TLS but not RideLink
+    /// authentication cannot invoke anything reserved for an authenticated session. Transport alive
+    /// != session authenticated.
+    private var authenticatedConnection: AuthenticatedConnection?
+
+    /// The record above, for this package's own unit tests — the same standing `writeRawFrame` has,
+    /// and for the same reason: ADR-024 Amendment A7's regression has to ask **production** what a
+    /// given connection's generation is after a session boundary, and `ReadFrameBinding.of` is the
+    /// function that answers it.
+    var authenticatedRecord: AuthenticatedConnection? { authenticatedConnection }
+
+    /// Whether the trust gate has passed on `activeSocket`. Derived, so it cannot disagree.
+    private var authenticated: Bool { authenticatedConnection != nil }
     /// ADR-023 §3's "session generation": a monotonically increasing counter, incremented once per
     /// successful `activateAuthenticatedSession()` — including a reconnect's re-authentication of
     /// the *same* wire `session_id`. Anything scoped to a bulk transfer (its token, its listener) is
@@ -505,7 +520,7 @@ public actor ControlSessionManager {
         activeSessionId = sessionId
         endedDeliberately = false
         clockTracker.reset()
-        authenticated = false
+        authenticatedConnection = nil
         lastPongAtMonoUs = monotonicNowUs()
         await reconnectController.reset()
 
@@ -564,12 +579,15 @@ public actor ControlSessionManager {
     private func activateAuthenticatedSession() {
         guard let pending = pendingActivation, activeSocket === pending.socket else { return }
         pendingActivation = nil
-        authenticated = true
         // ADR-023 §3: a fresh, strictly-increasing generation per activation — including a
         // reconnect's re-authentication of the *same* wire session_id. Anything scoped to a bulk
         // transfer (its token, its listener) is scoped to this number, never to session_id, so a
         // reconnect can never let a stale transfer's token or completion apply to the new one.
         authenticationGeneration += 1
+        // ADR-024 Amendment A7: the generation is bound to **this connection**, here, once. Every
+        // frame read off it is authorised by this record for as long as that frame exists.
+        authenticatedConnection = AuthenticatedConnection(
+            connection: pending.socket, generation: authenticationGeneration)
         updateDiagnostics { $0.controlState = .connected }
         emit(.connected(
             remotePeerId: pending.remotePeerId, sessionId: pending.sessionId, isLocalLeader: pending.isLocalLeader))
@@ -739,11 +757,36 @@ public actor ControlSessionManager {
         await applyPairingStep(socket: socket, exchange: exchange, step: step)
     }
 
+    /// The binding the surviving connection's read loop would capture for a frame arriving **now**,
+    /// or nil when there is no connection at all.
+    ///
+    /// Internal, so `@testable import` reaches it and nothing else does, and it exists for one job
+    /// that cannot be done any other way — the same standing this module already gives
+    /// `writeRawFrame`. ADR-024 Amendment A7 is about a read-loop task that resumes *after* an
+    /// authentication boundary, and nothing a test controls can park a task between
+    /// `ControlConnection.readFrame()` returning and the `handleFrame` call that follows it.
+    /// Capturing the binding here and handing it to `handleFrame` after the boundary **is** that
+    /// park, expressed as two calls instead of one — and it is the same binding, produced by the
+    /// same `ReadFrameBinding.of`, that the read loop itself would have held.
+    func currentReadBinding() -> ReadFrameBinding? {
+        guard let socket = activeSocket else { return nil }
+        return ReadFrameBinding.of(authenticated: authenticatedConnection, connection: socket, sessionId: activeSessionId)
+    }
+
     private func readLoop(socket: ControlConnection, sessionId: SessionId) async {
         while !Task.isCancelled {
             switch await socket.readFrame() {
             case .frame(let envelope, _):
-                await handleFrame(socket: socket, sessionId: sessionId, envelope: envelope)
+                // ADR-024 Amendment A7: the frame is bound to the connection that authorised its
+                // read **here**, before anything else can run. `handleFrame` is then given that
+                // binding rather than re-deriving one, which is the whole of the amendment: the
+                // `await` above is an actor re-entrancy point, so an authentication boundary can
+                // land between the resume and the dispatch below.
+                await handleFrame(
+                    binding: ReadFrameBinding.of(
+                        authenticated: authenticatedConnection, connection: socket, sessionId: sessionId),
+                    envelope: envelope
+                )
             case .malformed:
                 continue // PROTOCOL §2: log and continue, framing itself is intact
             case .frameTooLarge:
@@ -759,7 +802,9 @@ public actor ControlSessionManager {
         }
     }
 
-    private func handleFrame(socket: ControlConnection, sessionId: SessionId, envelope: Envelope) async {
+    func handleFrame(binding: ReadFrameBinding, envelope: Envelope) async {
+        let socket = binding.connection
+        let sessionId = binding.sessionId
         let payload = envelope.payload
         // Until the trust gate has passed, the only frames acted on are the ones an
         // *unauthenticated* connection is defined to carry: PROTOCOL §4.5's pairing exchange, §1's
@@ -767,7 +812,11 @@ public actor ControlSessionManager {
         // dropped the same way an unknown type is (PROTOCOL §2 rule 2) — a peer that has completed
         // TLS but not RideLink authentication must not be able to reach it, and PING/PONG in
         // particular can never mark authentication complete.
-        guard authenticated || Self.preAuthenticationFrameTypes.contains(envelope.type) else {
+        // ADR-024 Amendment A7: the question asked is "was **this** frame's own connection an
+        // authenticated session when it was read", never "is *some* session authenticated now". A
+        // frame read from a connection whose session has since ended is refused here rather than
+        // silently acquiring the successor's authority.
+        guard binding.generation != nil || Self.preAuthenticationFrameTypes.contains(envelope.type) else {
             // Counted rather than merely dropped when it is a voice frame: PROTOCOL §7.1's whole point
             // is that VOICE_* is inert before the trust gate, and "it never happened" and "it happened
             // and was refused" are different facts on a diagnostics screen.
@@ -838,10 +887,17 @@ public actor ControlSessionManager {
         case PlaybackMessageTypes.play, PlaybackMessageTypes.pause, PlaybackMessageTypes.resume,
             PlaybackMessageTypes.seek, PlaybackMessageTypes.next, PlaybackMessageTypes.previous,
             PlaybackMessageTypes.positionReport, PlaybackMessageTypes.playbackState:
-            await playback.deliverPlayback(type: envelope.type, payload: envelope.payload, generation: authenticationGeneration)
+            // The generation comes from the binding captured at the read, never from live state:
+            // re-reading it here is exactly the ADR-024 Amendment A7 defect. Nil is unreachable —
+            // every Phase 5 type is absent from `preAuthenticationFrameTypes`, so the guard above
+            // has already returned — and failing closed rather than reaching for a live value is
+            // the invariant itself.
+            guard let generation = binding.generation else { return }
+            await playback.deliverPlayback(type: envelope.type, payload: envelope.payload, generation: generation)
         // Reachable only past the guard above, so only for an authenticated peer (PROTOCOL §9).
         case QueueMessageTypes.add, QueueMessageTypes.remove, QueueMessageTypes.move, QueueMessageTypes.snapshot:
-            await playback.deliverQueue(type: envelope.type, payload: envelope.payload, generation: authenticationGeneration)
+            guard let generation = binding.generation else { return }
+            await playback.deliverQueue(type: envelope.type, payload: envelope.payload, generation: generation)
         case "BYE":
             await endConnection(socket, reason: .bye)
         case "ERROR":
@@ -863,7 +919,7 @@ public actor ControlSessionManager {
         guard activeSocket === socket else { return }
         activeSocket = nil
         endedDeliberately = reason != .network
-        authenticated = false
+        authenticatedConnection = nil
         pendingActivation = nil
         // A six-digit code belongs to one live TLS session (PROTOCOL §4.5.1). The moment that
         // session ends the code means nothing, so it is dropped here too rather than left on a
@@ -1065,7 +1121,7 @@ public actor ControlSessionManager {
     public func shutdown(reason: String = byeReasonShutdown) async {
         isShutDown = true
         pairing = nil
-        authenticated = false
+        authenticatedConnection = nil
         // This manager is reused across sessions, so a sink still attached from the previous one must
         // not survive into the next — the same hazard STATUS §2h fixed for control events, applied to
         // the voice sink. The coordinator also detaches it, and doing both is deliberate: neither

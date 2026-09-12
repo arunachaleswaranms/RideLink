@@ -83,10 +83,11 @@ internal class Phase5FrameQueue<T>(
     private var closed = false
 
     /**
-     * Loss and coalescing events, in arrival order, each owned by the generation that caused it
-     * (Amendment A6). Consecutive events from one generation share a bucket, so the list length is
-     * the number of *generation changes* the consumer has not yet drained across, not the number of
-     * events.
+     * Loss and coalescing events, one bucket per **distinct generation**, in first-arrival order
+     * (Amendment A6, corrected by A7). Every event of one generation shares that generation's
+     * bucket wherever it arrives, so the list length is the number of distinct generations the
+     * consumer has not yet drained — which is what [MAX_LOSS_GENERATIONS] has always claimed to
+     * bound, and did not while buckets were per adjacency run.
      */
     private val losses = ArrayDeque<MutableLoss>()
 
@@ -146,7 +147,8 @@ internal class Phase5FrameQueue<T>(
     }
 
     /**
-     * Takes every loss recorded so far, in arrival order, and clears them.
+     * Takes every loss recorded so far — one record per generation, in the order each generation
+     * first caused one — and clears them.
      *
      * Read by the **consumer** rather than reported to the producer. That direction is deliberate:
      * [offer] is called from the control read loop, which cannot suspend into a coordinator and must
@@ -169,30 +171,58 @@ internal class Phase5FrameQueue<T>(
         }
 
     /**
-     * Appends to the newest bucket when it belongs to the same generation, and opens a new one
-     * otherwise. Called only with [lock] held.
+     * Adds one event to its generation's bucket, opening one if that generation has none yet.
+     * Called only with [lock] held.
      *
-     * The bucket count is hard-capped so a consumer that never drains cannot grow this without
-     * bound. Eviction folds the oldest bucket into the next oldest rather than dropping it: with
-     * more than one bucket present, generations being strictly increasing per authentication
-     * (ADR-023 §3) makes both of the two oldest strictly older than the newest, hence both already
-     * retired — so the total is preserved exactly and the only thing merged is *which* dead
-     * generation two retired losses are attributed to. Nothing is silently discarded.
+     * **Amendment A7 — arrival is not monotonic in the generation, so neither the bucketing nor
+     * the eviction may assume it is.** A6 bucketed by *adjacency*: a new bucket whenever the
+     * incoming generation differed from the newest one. A7 bound every inbound frame to the
+     * connection that authorised its read, which makes the ordering this queue actually sees
+     * explicit — a read loop whose session has ended can still dispatch the one frame it had
+     * already read, and it does so *after* the successor session's own read loop has begun
+     * offering. So `A, B, A` reaches [offer], and under A6 that was three buckets for two
+     * generations. Two consequences, both fixed here:
+     *
+     * - the cap counted buckets, not generations, so nine buckets could be as few as two
+     *   generations — `A, B, A, B, …`;
+     * - eviction dropped the *oldest by arrival* and folded it into the next oldest by arrival.
+     *   On that same alternating run the fold target was generation `B`, which may be **live** —
+     *   so a loss caused by the dead session A was re-attributed to the live session B, and a
+     *   follower answers a live-generation loss by latching `playbackDesynchronized`. That is the
+     *   very cross-session halt A6 existed to remove, re-entering through the ledger's back door.
+     *
+     * The rule now: one bucket per generation, and eviction removes the bucket with the
+     * **smallest** generation, folding its counts into the next smallest. That is safe for a
+     * reason that does not depend on arrival order at all — generations strictly increase per
+     * authentication (ADR-023 §3), so any bucket whose generation is live must be the **largest**
+     * generation present, and with distinct generations per bucket the fold target is never the
+     * largest. Nothing is discarded, the total is preserved, and no retired loss can ever be
+     * re-attributed to the live generation.
      */
     private fun recordLoss(
         generation: Long,
         overflow: Boolean,
     ) {
+        // Newest-first, because consecutive events from one generation remain the common case.
         val bucket =
             losses.lastOrNull()?.takeIf { it.generation == generation }
+                ?: losses.firstOrNull { it.generation == generation }
                 ?: MutableLoss(generation).also { losses.addLast(it) }
         if (overflow) bucket.overflowCount += 1 else bucket.coalescedCount += 1
-        while (losses.size > MAX_LOSS_GENERATIONS) {
-            val evicted = losses.removeFirst()
-            val next = losses.first()
-            next.overflowCount += evicted.overflowCount
-            next.coalescedCount += evicted.coalescedCount
-        }
+        while (losses.size > MAX_LOSS_GENERATIONS) evictOldestGeneration()
+    }
+
+    /**
+     * Removes the smallest generation's bucket and folds its counts into the next smallest.
+     * Called only with [lock] held, and only with at least two buckets present — which the caller
+     * guarantees, since [MAX_LOSS_GENERATIONS] is greater than one.
+     */
+    private fun evictOldestGeneration() {
+        val evicted = losses.minBy { it.generation }
+        losses.remove(evicted)
+        val target = losses.minBy { it.generation }
+        target.overflowCount += evicted.overflowCount
+        target.coalescedCount += evicted.coalescedCount
     }
 
     /** @return the next frame in arrival order, or null once [close] has been called and the queue is drained. */
@@ -217,12 +247,16 @@ internal class Phase5FrameQueue<T>(
         signal.close()
     }
 
-    private companion object {
+    companion object {
         /**
          * How many distinct generations' losses may be held undrained at once. The consumer drains
          * on every iteration, so reaching this at all means it has been parked across eight
          * authentications — far beyond anything a ride produces, and the bound is here so that
          * "far beyond" is a fact rather than an expectation.
+         *
+         * Must stay greater than one: [evictOldestGeneration] folds into the bucket that remains
+         * after the smallest is removed, and "the fold target is never the largest generation"
+         * needs at least two buckets to be true at all.
          */
         const val MAX_LOSS_GENERATIONS = 8
     }
