@@ -188,7 +188,7 @@ class VoiceControllerStopAwaitTest {
     /**
      * The exact regression this pass fixes: `stopAndAwaitRelease()` gives up on a stalled `close()`
      * (its own short caller-facing window elapsing), and the caller's very next step —
-     * `SessionCoordinator.releaseVoiceAndAwait()`'s unconditional `controller.shutdown()` — must not
+     * `SessionCoordinator.releaseAndShutdown()`'s unconditional `controller.shutdown()` — must not
      * read that timeout as license to cancel the release `stopAndAwaitRelease()` was still waiting on.
      * Before this pass, `shutdown()`'s `consumerJob?.cancel()` did exactly that, aborting `close()`
      * before its post-close intercom-gate update could run.
@@ -206,7 +206,7 @@ class VoiceControllerStopAwaitTest {
             val firstResult = withTimeout(AWAIT_TIMEOUT_MS) { voice.stopAndAwaitRelease() }
             assertEquals(StopReleaseResult.TimedOut, firstResult, "the stalled close() must surface as a timeout")
 
-            // Exactly `releaseVoiceAndAwait`'s own next step: shutdown() runs unconditionally,
+            // Exactly `releaseAndShutdown`'s own next step: shutdown() runs unconditionally,
             // regardless of the result above, while the release it timed out on is still in flight.
             val shutdownJob = async { voice.shutdown() }
             fakes.settle()

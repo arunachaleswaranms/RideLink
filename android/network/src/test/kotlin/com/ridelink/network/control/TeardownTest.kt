@@ -1,5 +1,11 @@
 package com.ridelink.network.control
 
+import com.ridelink.core.protocol.VoiceSignal
+import com.ridelink.core.voice.VoiceSignalSink
+import com.ridelink.network.manifest.ManifestSink
+import com.ridelink.network.playback.PlaybackSink
+import com.ridelink.network.playback.QueueSink
+import com.ridelink.network.transfer.TransferSink
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -11,6 +17,7 @@ import kotlinx.coroutines.withTimeout
 import java.util.concurrent.atomic.AtomicLong
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertSame
 
 /**
  * This session's brief §9/§10: on shutdown, every task the session owns must actually stop —
@@ -138,6 +145,63 @@ class TeardownTest {
 
                 sut.shutdown()
                 peerB2.shutdown()
+            } finally {
+                scope.cancel()
+            }
+        }
+
+    /**
+     * **`docs/STATUS.md` §4 problem 54.** `shutdown()` used to call `relays.reset()`, which nulled
+     * every relay sink — including the three installed **once per process** by
+     * `SharedLibraryCoordinator` and `SyncPlaybackCoordinator`. Nothing ever re-installs those, so a
+     * single Stop Discovery silently disabled Phase 4 and Phase 5 for the rest of the process.
+     *
+     * The rule now kept is the narrow one that was always true: a sink belongs to whoever installed
+     * it. The two per-session families (`voice`, `audioState`) are detached by `SessionCoordinator`,
+     * synchronously, when it retires the session — see `SessionLifecycleRestartTest`; the three
+     * process-lifetime families are guarded by ADR-025's per-frame generation, which is what lets
+     * them legitimately span a boundary.
+     *
+     * Unreachable-as-a-bug before this pass only in the sense that it could not be *recovered* from:
+     * `ENDING -> IDLE` never opened, so an app that had stopped discovering could not start a second
+     * session in which to notice the loss.
+     */
+    @Test
+    fun `shutdown detaches only the sinks the session owned, never a process-lifetime one`() =
+        runBlocking {
+            val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+            try {
+                val peer = TestSessions.unpairedPeer("7070707070707070", "SUT")
+                val sut = peer.manager(scope, monotonicNowUs)
+
+                val manifestSink = ManifestSink { _, _ -> }
+                val transferSink = TransferSink { _, _ -> }
+                val playbackSink = PlaybackSink { _, _ -> }
+                val queueSink = QueueSink { _, _ -> }
+                sut.manifest.sink = manifestSink
+                sut.transfer.sink = transferSink
+                sut.playback.playbackSink = playbackSink
+                sut.playback.queueSink = queueSink
+                // The two per-session families, attached exactly as SessionCoordinator attaches them.
+                sut.voice.sink =
+                    object : VoiceSignalSink {
+                        override fun submit(signal: VoiceSignal) = Unit
+                    }
+                sut.audioState.sink = AudioStateSink { }
+
+                sut.startListening(peer.local)
+                sut.shutdown()
+
+                assertSame(manifestSink, sut.manifest.sink, "Phase 4's manifest sink is not the session's to remove")
+                assertSame(transferSink, sut.transfer.sink, "nor its transfer sink")
+                assertSame(playbackSink, sut.playback.playbackSink, "nor Phase 5's playback sink")
+                assertSame(queueSink, sut.playback.queueSink, "nor its queue sink")
+
+                // …and a second session on the same manager still has all four.
+                sut.startListening(peer.freshLocal())
+                assertSame(manifestSink, sut.manifest.sink)
+                assertSame(playbackSink, sut.playback.playbackSink)
+                sut.shutdown()
             } finally {
                 scope.cancel()
             }

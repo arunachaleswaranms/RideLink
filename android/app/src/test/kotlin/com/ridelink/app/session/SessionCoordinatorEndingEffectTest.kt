@@ -51,9 +51,11 @@ import kotlin.test.assertTrue
  * `ENDING` effect promised `ReleaseAudioAndStopForegroundService` and `SessionCoordinator.runEffect`
  * never actually stopped the foreground service. `VoiceControllerStopAwaitTest` (network module)
  * proves `stopAndAwaitRelease()` itself is completion-aware; this proves the **wiring one layer up**
- * — that `runEffect` awaits it and only then calls the foreground-service-stop callback — which is
- * the part problem 32 was actually about. A real `VoiceController` drives this, not a fake, so the
- * whole chain from `SessionFsm` down to `audioSession.close()` is exercised in one test.
+ * — that the `ENDING` effect's one teardown owner (`retireSession`, ADR-026) awaits it and only then
+ * calls the foreground-service-stop callback — which is the part problem 32 was actually about. A
+ * real `VoiceController` drives this, not a fake, so the whole chain from `SessionFsm` down to
+ * `audioSession.close()` is exercised in one test. `SessionLifecycleRestartTest` carries the rest of
+ * that owner's contract — that the teardown is *terminal* before `IDLE` opens.
  *
  * `discovery`/`controlSessionManager` are real production types wired with fakes/no-op fixtures:
  * this test never calls [SessionCoordinator.startDiscovery] (so neither is ever actually exercised
@@ -62,7 +64,7 @@ import kotlin.test.assertTrue
  *
  * This phase's closure-audit follow-up (problem 39, ADR-021 Amendment A5) added one more property to
  * the same seam: once `VoiceController.shutdown()` has waited out an initially-timed-out release and
- * proven it complete, [SessionCoordinator.releaseVoiceAndAwait] must not still report the stale
+ * proven it complete, `SessionCoordinator.releaseAndShutdown` must not still report the stale
  * `TimedOut` it captured before `shutdown()` ran — see `shutdown after a release timeout still lets
  * the same stalled release finish` below, which is the exact test that was missing the assertion.
  */
@@ -129,7 +131,7 @@ class SessionCoordinatorEndingEffectTest {
     /**
      * The exact regression this pass fixes (`docs/STATUS.md` §2r's confirmed-but-unfixed concern):
      * `stopAndAwaitRelease()`'s own short caller-facing window gives up on the stalled `close()` above,
-     * and `releaseVoiceAndAwait()`'s very next, unconditional step — `VoiceController.shutdown()` — must
+     * and `releaseAndShutdown()`'s very next, unconditional step — `VoiceController.shutdown()` — must
      * not read that as license to cancel the release it was still waiting on. Before this pass,
      * `shutdown()`'s `consumerJob?.cancel()` did exactly that, aborting `close()` before it could ever
      * finish. Proven here by completing the gate the previous test left permanently stalled and
@@ -137,7 +139,7 @@ class SessionCoordinatorEndingEffectTest {
      * the coroutine running it.
      *
      * This phase's closure-audit follow-up (problem 39): proving `close()` finished is not the whole
-     * story — `releaseVoiceAndAwait()` used to still return the stale `TimedOut` it captured *before*
+     * story — `releaseAndShutdown()` used to still return the stale `TimedOut` it captured *before*
      * `shutdown()` ran, even though `shutdown()` had, by the time it returned, just proven that same
      * release complete. `SessionCoordinator.runEffect` reads exactly that result to decide whether
      * `RideForegroundService.stop()` ever runs, so the missing assertion below — that the foreground
@@ -156,7 +158,7 @@ class SessionCoordinatorEndingEffectTest {
             coordinator.handleControlEvent(ControlEvent.LinkLost(LinkLossReason.BYE))
 
             // Long enough that stopAndAwaitRelease's short timeout has definitely fired and
-            // releaseVoiceAndAwait has moved on to VoiceController.shutdown() — the exact moment the
+            // releaseAndShutdown has moved on to VoiceController.shutdown() — the exact moment the
             // pre-fix code cancelled the coroutine still running audioSession.close().
             delay(SHORT_TIMEOUT_MS * SETTLE_TIMEOUT_MULTIPLIER)
             assertEquals(
