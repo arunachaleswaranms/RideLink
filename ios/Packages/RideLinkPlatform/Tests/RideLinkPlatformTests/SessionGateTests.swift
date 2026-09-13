@@ -88,7 +88,7 @@ final class SessionGateTests: XCTestCase {
         // Neither linkLost event is legal in PAIRING, so without these two rows the FSM would sit
         // there with no prompt and no way forward.
         for reason: RideLinkPlatform.LinkLossReason in [.network, .bye] {
-            let event = SessionGate.sessionEvent(for: .linkLost(reason: reason), status: .pairing)
+            let event = SessionGate.sessionEvent(for: .linkLost(reason: reason, retiredAuthGeneration: nil), status: .pairing)
             XCTAssertEqual(event, .pairingRejectedOrTimeout)
             guard case .transitioned(let newState, _) =
                 SessionFsm.transition(FsmState(status: .pairing), try! XCTUnwrap(event)) else {
@@ -99,12 +99,12 @@ final class SessionGateTests: XCTestCase {
     }
 
     func testLinkLossMapsToTheFsmsOwnVocabularyEverywhereElse() {
-        XCTAssertEqual(SessionGate.sessionEvent(for: .linkLost(reason: .network), status: .connecting), .connectionFailed)
+        XCTAssertEqual(SessionGate.sessionEvent(for: .linkLost(reason: .network, retiredAuthGeneration: nil), status: .connecting), .connectionFailed)
         XCTAssertEqual(
-            SessionGate.sessionEvent(for: .linkLost(reason: .network), status: .connected),
+            SessionGate.sessionEvent(for: .linkLost(reason: .network, retiredAuthGeneration: nil), status: .connected),
             .linkLost(reason: .network))
         XCTAssertEqual(
-            SessionGate.sessionEvent(for: .linkLost(reason: .bye), status: .connected),
+            SessionGate.sessionEvent(for: .linkLost(reason: .bye, retiredAuthGeneration: nil), status: .connected),
             .linkLost(reason: .bye))
     }
 
@@ -113,7 +113,7 @@ final class SessionGateTests: XCTestCase {
         for reason: RideLinkPlatform.LinkLossReason in [.duplicateConnection, .userEnded] {
             for status in allStatuses {
                 XCTAssertNil(
-                    SessionGate.sessionEvent(for: .linkLost(reason: reason), status: status),
+                    SessionGate.sessionEvent(for: .linkLost(reason: reason, retiredAuthGeneration: nil), status: status),
                     "\(reason) from \(status)")
             }
         }

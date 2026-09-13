@@ -53,7 +53,7 @@ public enum SessionGate {
         case .pairingFailed, .handshakeRefused:
             return status == .pairing ? .pairingRejectedOrTimeout : nil
 
-        case .linkLost(let reason):
+        case .linkLost(let reason, _):
             return linkLost(reason: reason, status: status)
 
         // ARCHITECTURE §3 rule 6: passed to the FSM so the no-op is *recorded* as one, rather than

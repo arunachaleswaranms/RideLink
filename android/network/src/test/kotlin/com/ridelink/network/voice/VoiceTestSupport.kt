@@ -24,16 +24,48 @@ import kotlinx.serialization.json.buildJsonObject
 import java.util.UUID
 import java.util.concurrent.CopyOnWriteArrayList
 
-/** Records what an authenticated peer's `VOICE_*` frames actually deliver. */
+/**
+ * Records what an authenticated peer's `VOICE_*` frames actually deliver, **and which control
+ * authentication generation admitted each one** (STATUS §4 problem 60).
+ *
+ * The generation is recorded rather than ignored for the same reason `ManifestSpy` records it: the
+ * claim under test is that the relay passes on the frame's *own* provenance and never substitutes a
+ * live read, and a spy that dropped the parameter could not tell the two apart.
+ */
 class VoiceSignalSpy : VoiceSignalSink {
     private val log = CopyOnWriteArrayList<VoiceSignal>()
+    private val generationLog = CopyOnWriteArrayList<Long>()
 
     val received: List<VoiceSignal> get() = log.toList()
 
-    override fun submit(signal: VoiceSignal) {
+    /** One entry per [received] entry, in the same order. */
+    val generations: List<Long> get() = generationLog.toList()
+
+    override fun submit(
+        signal: VoiceSignal,
+        controlGeneration: Long,
+    ) {
         log.add(signal)
+        generationLog.add(controlGeneration)
     }
 }
+
+/**
+ * The one control authentication generation every suite written before STATUS §4 problem 60 is
+ * about.
+ *
+ * Those suites all describe a **single** control lifetime — a signal admitted by it, and its own
+ * link loss — so naming one generation for both is exactly faithful to what they assert, and it is
+ * what keeps them honest regressions rather than tests that happen to pass because everything is
+ * indistinguishable. A suite that needs two lifetimes says so explicitly instead of using these.
+ */
+const val TEST_CONTROL_GENERATION_A = 1L
+
+/** [TEST_CONTROL_GENERATION_A] admitted this signal. */
+fun VoiceController.submit(signal: VoiceSignal) = submit(signal, TEST_CONTROL_GENERATION_A)
+
+/** [TEST_CONTROL_GENERATION_A] is the lifetime that ended. */
+fun VoiceController.onControlLinkLost() = onControlLinkLost(TEST_CONTROL_GENERATION_A)
 
 fun VoiceSignal.kindName(): String =
     when (this) {

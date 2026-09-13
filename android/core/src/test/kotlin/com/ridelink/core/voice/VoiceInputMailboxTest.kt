@@ -23,7 +23,7 @@ class VoiceInputMailboxTest {
     @Test
     fun `stop and control-link-lost land in the always-accepting teardown lane`() {
         assertEquals(VoiceMailboxLane.TEARDOWN, VoiceInputMailbox.laneFor(VoiceInput.StopRequested))
-        assertEquals(VoiceMailboxLane.TEARDOWN, VoiceInputMailbox.laneFor(VoiceInput.ControlLinkLost))
+        assertEquals(VoiceMailboxLane.TEARDOWN, VoiceInputMailbox.laneFor(VoiceInput.ControlLinkLost(CONTROL_A)))
     }
 
     @Test
@@ -37,11 +37,11 @@ class VoiceInputMailboxTest {
         )
         assertEquals(
             VoiceMailboxLane.CRITICAL,
-            VoiceInputMailbox.laneFor(VoiceInput.SignalReceived(VoiceSignal.Offer(GEN_1, SDP), GEN_1)),
+            VoiceInputMailbox.laneFor(signalReceived(VoiceSignal.Offer(GEN_1, SDP), GEN_1)),
         )
         assertEquals(
             VoiceMailboxLane.CRITICAL,
-            VoiceInputMailbox.laneFor(VoiceInput.SignalReceived(VoiceSignal.Answer(GEN_1, SDP), GEN_1)),
+            VoiceInputMailbox.laneFor(signalReceived(VoiceSignal.Answer(GEN_1, SDP), GEN_1)),
         )
     }
 
@@ -54,7 +54,7 @@ class VoiceInputMailboxTest {
         assertEquals(
             VoiceMailboxLane.ICE,
             VoiceInputMailbox.laneFor(
-                VoiceInput.SignalReceived(VoiceSignal.IceCandidate(GEN_1, CANDIDATE, null, 0), GEN_1),
+                signalReceived(VoiceSignal.IceCandidate(GEN_1, CANDIDATE, null, 0), GEN_1),
             ),
         )
     }
@@ -77,7 +77,7 @@ class VoiceInputMailboxTest {
         for (wire in ordinaryWireStates) {
             assertEquals(
                 VoiceMailboxLane.COALESCED,
-                VoiceInputMailbox.laneFor(VoiceInput.SignalReceived(VoiceSignal.State(GEN_1, wire, false, VoiceMode.CONTINUOUS), GEN_1)),
+                VoiceInputMailbox.laneFor(signalReceived(VoiceSignal.State(GEN_1, wire, false, VoiceMode.CONTINUOUS), GEN_1)),
                 "wire state $wire must coalesce, not be treated as terminal",
             )
         }
@@ -88,20 +88,20 @@ class VoiceInputMailboxTest {
         assertEquals(
             VoiceMailboxLane.TERMINAL_PEER_STATE,
             VoiceInputMailbox.laneFor(
-                VoiceInput.SignalReceived(VoiceSignal.State(GEN_1, VoiceWireState.CLOSED, false, VoiceMode.CONTINUOUS), GEN_1),
+                signalReceived(VoiceSignal.State(GEN_1, VoiceWireState.CLOSED, false, VoiceMode.CONTINUOUS), GEN_1),
             ),
         )
         assertEquals(
             VoiceMailboxLane.TERMINAL_PEER_STATE,
             VoiceInputMailbox.laneFor(
-                VoiceInput.SignalReceived(VoiceSignal.State(GEN_1, VoiceWireState.FAILED, false, VoiceMode.CONTINUOUS), GEN_1),
+                signalReceived(VoiceSignal.State(GEN_1, VoiceWireState.FAILED, false, VoiceMode.CONTINUOUS), GEN_1),
             ),
         )
         // A null voice_session_id is legal for `closed` (PROTOCOL §7.4) and must classify the same way.
         assertEquals(
             VoiceMailboxLane.TERMINAL_PEER_STATE,
             VoiceInputMailbox.laneFor(
-                VoiceInput.SignalReceived(VoiceSignal.State(null, VoiceWireState.CLOSED, false, VoiceMode.CONTINUOUS), GEN_1),
+                signalReceived(VoiceSignal.State(null, VoiceWireState.CLOSED, false, VoiceMode.CONTINUOUS), GEN_1),
             ),
         )
     }
@@ -114,11 +114,11 @@ class VoiceInputMailboxTest {
         mailbox.offer(VoiceInput.StartRequested(GEN_1))
         mailbox.offer(VoiceInput.LocalCandidateGathered(GEN_1, CANDIDATE, null, 0))
         mailbox.offer(VoiceInput.MuteRequested(true))
-        val closed = VoiceInput.SignalReceived(VoiceSignal.State(GEN_1, VoiceWireState.CLOSED, false, VoiceMode.CONTINUOUS), GEN_1)
+        val closed = signalReceived(VoiceSignal.State(GEN_1, VoiceWireState.CLOSED, false, VoiceMode.CONTINUOUS), GEN_1)
         mailbox.offer(closed)
-        mailbox.offer(VoiceInput.ControlLinkLost)
+        mailbox.offer(VoiceInput.ControlLinkLost(CONTROL_A))
 
-        assertEquals(VoiceInput.ControlLinkLost, mailbox.poll(), "local teardown outranks even a terminal peer state")
+        assertEquals(VoiceInput.ControlLinkLost(CONTROL_A), mailbox.poll(), "local teardown outranks even a terminal peer state")
         // `closed` is **not** polled next any more: it is a peer signal, and the control lifetime
         // that admitted it ended when `ControlLinkLost` was offered (STATUS §4 problem 50). The
         // local inputs behind it are untouched and still come back in lane order.
@@ -138,13 +138,13 @@ class VoiceInputMailboxTest {
     @Test
     fun `ControlLinkLost discards every queued peer signal and no local input`() {
         val mailbox = VoiceInputMailbox()
-        val offer = VoiceInput.SignalReceived(VoiceSignal.Offer(GEN_1, "sdp"), GEN_1)
-        val answer = VoiceInput.SignalReceived(VoiceSignal.Answer(GEN_1, "sdp"), GEN_1)
-        val remoteIce = VoiceInput.SignalReceived(VoiceSignal.IceCandidate(GEN_1, CANDIDATE, null, 0), GEN_1)
+        val offer = signalReceived(VoiceSignal.Offer(GEN_1, "sdp"), GEN_1)
+        val answer = signalReceived(VoiceSignal.Answer(GEN_1, "sdp"), GEN_1)
+        val remoteIce = signalReceived(VoiceSignal.IceCandidate(GEN_1, CANDIDATE, null, 0), GEN_1)
         val peerState =
-            VoiceInput.SignalReceived(VoiceSignal.State(GEN_1, VoiceWireState.NEGOTIATING, false, VoiceMode.CONTINUOUS), GEN_1)
+            signalReceived(VoiceSignal.State(GEN_1, VoiceWireState.NEGOTIATING, false, VoiceMode.CONTINUOUS), GEN_1)
         val terminal =
-            VoiceInput.SignalReceived(VoiceSignal.State(GEN_1, VoiceWireState.CLOSED, false, VoiceMode.CONTINUOUS), GEN_1)
+            signalReceived(VoiceSignal.State(GEN_1, VoiceWireState.CLOSED, false, VoiceMode.CONTINUOUS), GEN_1)
         listOf(offer, answer, remoteIce, peerState, terminal).forEach { mailbox.offer(it) }
         // ...alongside local work in every lane a peer signal can also occupy.
         mailbox.offer(VoiceInput.StartRequested(GEN_1))
@@ -152,7 +152,7 @@ class VoiceInputMailboxTest {
         mailbox.offer(VoiceInput.MuteRequested(true))
         mailbox.offer(VoiceInput.ModeSelected(VoiceMode.PTT))
 
-        mailbox.offer(VoiceInput.ControlLinkLost)
+        mailbox.offer(VoiceInput.ControlLinkLost(CONTROL_A))
 
         assertEquals(5, mailbox.discardedRetiredSignalCount, "every queued peer signal is discarded, and counted")
         val drained = generateSequence { mailbox.poll() }.toList()
@@ -162,7 +162,7 @@ class VoiceInputMailboxTest {
         )
         assertEquals(
             listOf(
-                VoiceInput.ControlLinkLost,
+                VoiceInput.ControlLinkLost(CONTROL_A),
                 VoiceInput.StartRequested(GEN_1),
                 VoiceInput.LocalCandidateGathered(GEN_1, CANDIDATE, null, 0),
                 VoiceInput.MuteRequested(true),
@@ -181,7 +181,7 @@ class VoiceInputMailboxTest {
     @Test
     fun `StopRequested shares the teardown lane but discards nothing`() {
         val mailbox = VoiceInputMailbox()
-        val offer = VoiceInput.SignalReceived(VoiceSignal.Offer(GEN_1, "sdp"), GEN_1)
+        val offer = signalReceived(VoiceSignal.Offer(GEN_1, "sdp"), GEN_1)
         mailbox.offer(offer)
 
         mailbox.offer(VoiceInput.StopRequested)
@@ -194,7 +194,7 @@ class VoiceInputMailboxTest {
     @Test
     fun `only the latest teardown request survives, but it is never lost`() {
         val mailbox = VoiceInputMailbox()
-        mailbox.offer(VoiceInput.ControlLinkLost)
+        mailbox.offer(VoiceInput.ControlLinkLost(CONTROL_A))
         mailbox.offer(VoiceInput.StopRequested)
 
         assertEquals(VoiceInput.StopRequested, mailbox.poll())
@@ -216,8 +216,8 @@ class VoiceInputMailboxTest {
     @Test
     fun `a queued CLOSED is not overwritten by a later ACTIVE, and both survive as distinct entries`() {
         val mailbox = VoiceInputMailbox()
-        val closed = VoiceInput.SignalReceived(VoiceSignal.State(GEN_1, VoiceWireState.CLOSED, false, VoiceMode.CONTINUOUS), GEN_1)
-        val active = VoiceInput.SignalReceived(VoiceSignal.State(GEN_1, VoiceWireState.ACTIVE, false, VoiceMode.CONTINUOUS), GEN_1)
+        val closed = signalReceived(VoiceSignal.State(GEN_1, VoiceWireState.CLOSED, false, VoiceMode.CONTINUOUS), GEN_1)
+        val active = signalReceived(VoiceSignal.State(GEN_1, VoiceWireState.ACTIVE, false, VoiceMode.CONTINUOUS), GEN_1)
 
         mailbox.offer(closed)
         mailbox.offer(active)
@@ -232,9 +232,9 @@ class VoiceInputMailboxTest {
     @Test
     fun `a queued FAILED is not overwritten by a later CONNECTING`() {
         val mailbox = VoiceInputMailbox()
-        val failed = VoiceInput.SignalReceived(VoiceSignal.State(GEN_1, VoiceWireState.FAILED, false, VoiceMode.CONTINUOUS), GEN_1)
+        val failed = signalReceived(VoiceSignal.State(GEN_1, VoiceWireState.FAILED, false, VoiceMode.CONTINUOUS), GEN_1)
         val connecting =
-            VoiceInput.SignalReceived(VoiceSignal.State(GEN_1, VoiceWireState.CONNECTING, false, VoiceMode.CONTINUOUS), GEN_1)
+            signalReceived(VoiceSignal.State(GEN_1, VoiceWireState.CONNECTING, false, VoiceMode.CONTINUOUS), GEN_1)
 
         mailbox.offer(failed)
         mailbox.offer(connecting)
@@ -248,7 +248,7 @@ class VoiceInputMailboxTest {
     fun `terminal peer state is drained ahead of a large ICE backlog`() {
         val mailbox = VoiceInputMailbox(iceCapacity = 64)
         repeat(1_000) { i -> mailbox.offer(VoiceInput.LocalCandidateGathered(GEN_1, "c$i", null, 0)) }
-        val closed = VoiceInput.SignalReceived(VoiceSignal.State(GEN_1, VoiceWireState.CLOSED, false, VoiceMode.CONTINUOUS), GEN_1)
+        val closed = signalReceived(VoiceSignal.State(GEN_1, VoiceWireState.CLOSED, false, VoiceMode.CONTINUOUS), GEN_1)
         mailbox.offer(closed)
 
         assertEquals(closed, mailbox.poll(), "a terminal peer state must never queue behind an ICE flood")
@@ -259,7 +259,7 @@ class VoiceInputMailboxTest {
         val mailbox = VoiceInputMailbox()
         mailbox.offer(VoiceInput.MuteRequested(true))
         mailbox.offer(VoiceInput.StartRequested(GEN_1))
-        val closed = VoiceInput.SignalReceived(VoiceSignal.State(GEN_1, VoiceWireState.CLOSED, false, VoiceMode.CONTINUOUS), GEN_1)
+        val closed = signalReceived(VoiceSignal.State(GEN_1, VoiceWireState.CLOSED, false, VoiceMode.CONTINUOUS), GEN_1)
         mailbox.offer(closed)
 
         assertEquals(closed, mailbox.poll(), "terminal peer state outranks both critical and coalesced work")
@@ -270,7 +270,7 @@ class VoiceInputMailboxTest {
     @Test
     fun `a terminal signal is drained unchanged -- never rewritten into a local teardown input`() {
         val mailbox = VoiceInputMailbox()
-        val closed = VoiceInput.SignalReceived(VoiceSignal.State(null, VoiceWireState.CLOSED, false, VoiceMode.CONTINUOUS), GEN_1)
+        val closed = signalReceived(VoiceSignal.State(null, VoiceWireState.CLOSED, false, VoiceMode.CONTINUOUS), GEN_1)
         mailbox.offer(closed)
 
         val drained = mailbox.poll()
@@ -290,14 +290,14 @@ class VoiceInputMailboxTest {
         repeat(4) { i ->
             val outcome =
                 mailbox.offer(
-                    VoiceInput.SignalReceived(VoiceSignal.State(GEN_1, VoiceWireState.CLOSED, false, VoiceMode.CONTINUOUS), GEN_1),
+                    signalReceived(VoiceSignal.State(GEN_1, VoiceWireState.CLOSED, false, VoiceMode.CONTINUOUS), GEN_1),
                 )
             assertIs<VoiceMailboxOutcome.Accepted>(outcome, "entry $i should still fit under capacity")
         }
 
         val overflow =
             mailbox.offer(
-                VoiceInput.SignalReceived(VoiceSignal.State(GEN_1, VoiceWireState.FAILED, false, VoiceMode.CONTINUOUS), GEN_1),
+                signalReceived(VoiceSignal.State(GEN_1, VoiceWireState.FAILED, false, VoiceMode.CONTINUOUS), GEN_1),
             )
         assertIs<VoiceMailboxOutcome.TerminalPeerStateOverflow>(overflow)
         assertEquals(1, mailbox.overflowCount)
@@ -314,7 +314,7 @@ class VoiceInputMailboxTest {
         repeat(10_000) { i ->
             val wire = if (i % 2 == 0) VoiceWireState.CLOSED else VoiceWireState.FAILED
             val outcome =
-                mailbox.offer(VoiceInput.SignalReceived(VoiceSignal.State(GEN_1, wire, false, VoiceMode.CONTINUOUS), GEN_1))
+                mailbox.offer(signalReceived(VoiceSignal.State(GEN_1, wire, false, VoiceMode.CONTINUOUS), GEN_1))
             if (outcome is VoiceMailboxOutcome.TerminalPeerStateOverflow) overflowed++
         }
         assertTrue(overflowed > 0, "10,000 terminal signals must eventually overflow an 8-deep lane")
@@ -343,7 +343,7 @@ class VoiceInputMailboxTest {
         val mailbox = VoiceInputMailbox(criticalCapacity = 32)
         var overflowed = 0
         repeat(10_000) {
-            val outcome = mailbox.offer(VoiceInput.SignalReceived(VoiceSignal.Offer(GEN_1, SDP), GEN_1))
+            val outcome = mailbox.offer(signalReceived(VoiceSignal.Offer(GEN_1, SDP), GEN_1))
             if (outcome is VoiceMailboxOutcome.CriticalOverflow) overflowed++
         }
         assertTrue(overflowed > 0, "10,000 offers must eventually overflow a 32-deep lane")
@@ -383,7 +383,7 @@ class VoiceInputMailboxTest {
     @Test
     fun `flooding ICE cannot starve or evict a critical offer`() {
         val mailbox = VoiceInputMailbox(iceCapacity = 4)
-        mailbox.offer(VoiceInput.SignalReceived(VoiceSignal.Offer(GEN_1, SDP), GEN_1))
+        mailbox.offer(signalReceived(VoiceSignal.Offer(GEN_1, SDP), GEN_1))
         repeat(1_000) { i -> mailbox.offer(VoiceInput.LocalCandidateGathered(GEN_1, "c$i", null, 0)) }
 
         val first = mailbox.poll()
@@ -398,7 +398,7 @@ class VoiceInputMailboxTest {
         val mailbox = VoiceInputMailbox()
         repeat(500) { i ->
             val state = if (i % 2 == 0) VoiceWireState.ACTIVE else VoiceWireState.CONNECTING
-            mailbox.offer(VoiceInput.SignalReceived(VoiceSignal.State(GEN_1, state, false, VoiceMode.CONTINUOUS), GEN_1))
+            mailbox.offer(signalReceived(VoiceSignal.State(GEN_1, state, false, VoiceMode.CONTINUOUS), GEN_1))
         }
         val next = mailbox.poll()
         assertIs<VoiceInput.SignalReceived>(next)
@@ -413,7 +413,7 @@ class VoiceInputMailboxTest {
         val mailbox = VoiceInputMailbox()
         mailbox.offer(VoiceInput.MuteRequested(true))
         mailbox.offer(VoiceInput.RemoteTrackChanged(GEN_1, present = true))
-        mailbox.offer(VoiceInput.SignalReceived(VoiceSignal.State(GEN_1, VoiceWireState.ACTIVE, false, VoiceMode.CONTINUOUS), GEN_1))
+        mailbox.offer(signalReceived(VoiceSignal.State(GEN_1, VoiceWireState.ACTIVE, false, VoiceMode.CONTINUOUS), GEN_1))
         mailbox.offer(VoiceInput.MuteRequested(false))
 
         val drained = generateSequence { mailbox.poll() }.toList()
@@ -440,7 +440,7 @@ class VoiceInputMailboxTest {
         repeat(2) { i -> mailbox.offer(VoiceInput.LocalCandidateGathered(GEN_1, "c$i", null, 0)) }
         mailbox.offer(VoiceInput.MuteRequested(true))
         repeat(2) {
-            mailbox.offer(VoiceInput.SignalReceived(VoiceSignal.State(GEN_1, VoiceWireState.CLOSED, false, VoiceMode.CONTINUOUS), GEN_1))
+            mailbox.offer(signalReceived(VoiceSignal.State(GEN_1, VoiceWireState.CLOSED, false, VoiceMode.CONTINUOUS), GEN_1))
         }
 
         val outcome = mailbox.offer(VoiceInput.StopRequested)
@@ -454,8 +454,8 @@ class VoiceInputMailboxTest {
         mailbox.offer(VoiceInput.StartRequested(GEN_1))
         mailbox.offer(VoiceInput.LocalCandidateGathered(GEN_1, CANDIDATE, null, 0))
         mailbox.offer(VoiceInput.MuteRequested(true))
-        mailbox.offer(VoiceInput.SignalReceived(VoiceSignal.State(GEN_1, VoiceWireState.CLOSED, false, VoiceMode.CONTINUOUS), GEN_1))
-        mailbox.offer(VoiceInput.ControlLinkLost)
+        mailbox.offer(signalReceived(VoiceSignal.State(GEN_1, VoiceWireState.CLOSED, false, VoiceMode.CONTINUOUS), GEN_1))
+        mailbox.offer(VoiceInput.ControlLinkLost(CONTROL_A))
 
         mailbox.clear()
 
@@ -485,8 +485,8 @@ class VoiceInputMailboxTest {
     @Test
     fun `a send failure discards no queued peer signal`() {
         val mailbox = VoiceInputMailbox()
-        mailbox.offer(VoiceInput.SignalReceived(VoiceSignal.Offer(GEN_2, SDP), GEN_2))
-        mailbox.offer(VoiceInput.SignalReceived(VoiceSignal.IceCandidate(GEN_2, CANDIDATE, null, 0), GEN_2))
+        mailbox.offer(signalReceived(VoiceSignal.Offer(GEN_2, SDP), GEN_2))
+        mailbox.offer(signalReceived(VoiceSignal.IceCandidate(GEN_2, CANDIDATE, null, 0), GEN_2))
 
         mailbox.offer(VoiceInput.NegotiationSendFailed(GEN_1))
 
@@ -501,7 +501,7 @@ class VoiceInputMailboxTest {
     @Test
     fun `a send failure outranks the critical lane so the table is reset before a queued offer is reduced`() {
         val mailbox = VoiceInputMailbox()
-        mailbox.offer(VoiceInput.SignalReceived(VoiceSignal.Offer(GEN_2, SDP), GEN_2))
+        mailbox.offer(signalReceived(VoiceSignal.Offer(GEN_2, SDP), GEN_2))
         mailbox.offer(VoiceInput.NegotiationSendFailed(GEN_1))
 
         assertEquals(VoiceInput.NegotiationSendFailed(GEN_1), mailbox.poll())
@@ -510,9 +510,9 @@ class VoiceInputMailboxTest {
     @Test
     fun `a send failure never displaces a queued teardown, and a teardown never displaces it`() {
         val linkLost = VoiceInputMailbox()
-        linkLost.offer(VoiceInput.ControlLinkLost)
+        linkLost.offer(VoiceInput.ControlLinkLost(CONTROL_A))
         linkLost.offer(VoiceInput.NegotiationSendFailed(GEN_1))
-        assertEquals(VoiceInput.ControlLinkLost, linkLost.poll(), "the lifetime boundary still applies first")
+        assertEquals(VoiceInput.ControlLinkLost(CONTROL_A), linkLost.poll(), "the lifetime boundary still applies first")
         assertEquals(VoiceInput.NegotiationSendFailed(GEN_1), linkLost.poll(), "and the send failure survives it")
 
         val stop = VoiceInputMailbox()
@@ -525,10 +525,10 @@ class VoiceInputMailboxTest {
     @Test
     fun `a link loss never erases a pending stop, but still takes ownership of the queued peer signals`() {
         val mailbox = VoiceInputMailbox()
-        mailbox.offer(VoiceInput.SignalReceived(VoiceSignal.Offer(GEN_1, SDP), GEN_1))
+        mailbox.offer(signalReceived(VoiceSignal.Offer(GEN_1, SDP), GEN_1))
         mailbox.offer(VoiceInput.StopRequested)
 
-        mailbox.offer(VoiceInput.ControlLinkLost)
+        mailbox.offer(VoiceInput.ControlLinkLost(CONTROL_A))
 
         assertEquals(
             VoiceInput.StopRequested,
@@ -542,13 +542,26 @@ class VoiceInputMailboxTest {
     @Test
     fun `a stop offered over a pending link loss still replaces it`() {
         val mailbox = VoiceInputMailbox()
-        mailbox.offer(VoiceInput.ControlLinkLost)
+        mailbox.offer(VoiceInput.ControlLinkLost(CONTROL_A))
         mailbox.offer(VoiceInput.StopRequested)
         assertEquals(VoiceInput.StopRequested, mailbox.poll(), "a stop is the strict superset and wins")
         assertEquals(null, mailbox.poll())
     }
 
+    /**
+     * The existing suite is entirely about **one** control lifetime, so every signal in it is
+     * admitted by [CONTROL_A] and every link loss retires [CONTROL_A]. Stating that explicitly is
+     * the point of STATUS §4 problem 60: "which lifetime" used to be unaskable here.
+     */
+    private fun signalReceived(
+        signal: VoiceSignal,
+        freshVoiceSessionId: VoiceSessionId,
+        controlGeneration: Long = CONTROL_A,
+    ) = VoiceInput.SignalReceived(signal, controlGeneration, freshVoiceSessionId)
+
     private companion object {
+        /** One authentication generation, for the suite that predates the question. */
+        const val CONTROL_A = 7L
         val GEN_1 = VoiceSessionId("11111111111111111111111111111111")
         val GEN_2 = VoiceSessionId("22222222222222222222222222222222")
         const val SDP = "v=0\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\na=mid:0\r\n"

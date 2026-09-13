@@ -219,6 +219,11 @@ enum class VoiceSignalDropReason {
      * Distinct from `VoiceSignalRelay.droppedRetiredGeneration`, which counts a frame that had
      * *already* lost its lifetime when it arrived (ADR-025). This one counts a frame that was
      * admitted perfectly legitimately and then outlived the link that admitted it.
+     *
+     * Since STATUS §4 problem 60 it is the sum of [VoiceInputMailbox]'s two counters — the signals
+     * a retirement found already queued, and the ones that arrived after it. Both name the same
+     * fact ("this signal's admitting control generation is retired") caught at the two different
+     * instants it can be caught at, and only the mailbox needs to tell them apart.
      */
     RETIRED_CONTROL_LIFETIME,
 }
@@ -268,6 +273,22 @@ sealed class VoiceInput {
      */
     data class SignalReceived(
         val signal: VoiceSignal,
+        /**
+         * **The control authentication generation that admitted this frame** — the one
+         * `ReadFrameBinding` captured when the frame was read, carried unchanged through
+         * `VoiceSignalRelay.deliver` and `VoiceSignalSink.submit` (STATUS §4 problem 60,
+         * ADR-020 Amendment A7).
+         *
+         * Receiver-local provenance: it is **not** on the wire, it is not negotiated, and no peer
+         * can influence it. This reducer reads it nowhere — it is [VoiceInputMailbox]'s, and only
+         * [VoiceInputMailbox]'s, because the question it answers ("which control lifetime is this
+         * semantic work's?") is a lifetime question and not a negotiation one.
+         *
+         * It is a different identity from [freshVoiceSessionId] and from `voice_session_id`, and
+         * the three must never be conflated: `voice_session_id` owns one WebRTC negotiation, this
+         * owns the authenticated control lifetime that let the frame in.
+         */
+        val controlGeneration: Long,
         val freshVoiceSessionId: VoiceSessionId,
     ) : VoiceInput()
 
@@ -308,8 +329,29 @@ sealed class VoiceInput {
         val failed: Boolean,
     ) : VoiceInput()
 
-    /** The control plane was lost. §7.8: media goes, local capture stays, and voice does not retry. */
-    object ControlLinkLost : VoiceInput()
+    /**
+     * The control plane was lost. §7.8: media goes, local capture stays, and voice does not retry.
+     *
+     * [retiredControlGeneration] is **the authentication generation that ended**, taken from the
+     * `AuthenticatedConnection` record the dying connection owned and captured before that record
+     * was cleared (STATUS §4 problem 60, ADR-020 Amendment A7). It is what makes this a statement
+     * about *one identified lifetime* rather than about whatever happens to be queued when it is
+     * applied — see [VoiceInputMailbox.offer].
+     *
+     * Null means **no control lifetime ended**, and there are exactly two such producers:
+     *
+     * - a connection that died before it was ever authenticated, so nothing voice-related was ever
+     *   admitted under it and there is nothing to retire;
+     * - the mailbox-overflow degrade, which is a *local* fact about this device's own bounded queue
+     *   and not a lifetime boundary at all (CLAUDE.md rule 22's parenthetical, now with the
+     *   identity it was missing).
+     *
+     * Either way the reducer's response is identical — it never reads this field — and the
+     * difference is entirely in what the mailbox is thereby entitled to discard.
+     */
+    data class ControlLinkLost(
+        val retiredControlGeneration: Long?,
+    ) : VoiceInput()
 
     /**
      * An outbound frame this negotiation **depended on** could not be put on the wire
@@ -366,13 +408,15 @@ object VoiceNegotiation {
             VoiceInput.StopRequested -> stop(state)
             is VoiceInput.MuteRequested -> mute(state, input.muted)
             is VoiceInput.ModeSelected -> modeSelected(state, input.mode)
+            // `controlGeneration` is deliberately not read: it is a control-lifetime identity, and
+            // this table decides negotiations. `VoiceInputMailbox` is where it is used.
             is VoiceInput.SignalReceived -> signal(state, input.signal, input.freshVoiceSessionId)
             is VoiceInput.LocalOfferCreated -> localOfferCreated(state, input.voiceSessionId, input.sdp)
             is VoiceInput.LocalAnswerCreated -> localAnswerCreated(state, input.voiceSessionId, input.sdp)
             is VoiceInput.LocalCandidateGathered -> localCandidateGathered(state, input)
             is VoiceInput.RemoteTrackChanged -> remoteTrackChanged(state, input)
             is VoiceInput.MediaConnectivityChanged -> connectivity(state, input)
-            VoiceInput.ControlLinkLost -> controlLinkLost(state)
+            is VoiceInput.ControlLinkLost -> controlLinkLost(state)
             is VoiceInput.NegotiationSendFailed -> negotiationSendFailed(state, input.voiceSessionId)
         }
 

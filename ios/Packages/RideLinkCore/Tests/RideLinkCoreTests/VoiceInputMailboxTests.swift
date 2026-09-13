@@ -8,6 +8,9 @@ import XCTest
 /// pure classification-and-capacity logic those tests rely on. Mirror of
 /// `com.ridelink.core.voice.VoiceInputMailboxTest` on Android.
 final class VoiceInputMailboxTests: XCTestCase {
+    /// One control authentication generation, for the suite that predates the question (STATUS §4
+    /// problem 60).
+    private let controlA: Int64 = 7
     private let genA = VoiceSessionId("11111111111111111111111111111111")
     private let genB = VoiceSessionId("22222222222222222222222222222222")
     private let sdp = "v=0\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\na=mid:0\r\n"
@@ -18,7 +21,7 @@ final class VoiceInputMailboxTests: XCTestCase {
     func testStopAndControlLinkLostLandInTheAlwaysAcceptingTeardownLane() {
         var mailbox = VoiceInputMailbox()
         XCTAssertEqual(mailbox.offer(.stopRequested), .accepted(lane: .teardown))
-        XCTAssertEqual(mailbox.offer(.controlLinkLost), .accepted(lane: .teardown))
+        XCTAssertEqual(mailbox.offer(.controlLinkLost(retiredControlGeneration: controlA)), .accepted(lane: .teardown))
     }
 
     func testStartEngineOfferAnswerCallbacksConnectivityAndPeerOfferAnswerAreCritical() {
@@ -31,11 +34,11 @@ final class VoiceInputMailboxTests: XCTestCase {
             .accepted(lane: .critical)
         )
         XCTAssertEqual(
-            mailbox.offer(.signalReceived(signal: .offer(voiceSessionId: genA, sdp: sdp), freshVoiceSessionId: genA)),
+            mailbox.offer(.signalReceived(signal: .offer(voiceSessionId: genA, sdp: sdp), controlGeneration: controlA, freshVoiceSessionId: genA)),
             .accepted(lane: .critical)
         )
         XCTAssertEqual(
-            mailbox.offer(.signalReceived(signal: .answer(voiceSessionId: genA, sdp: sdp), freshVoiceSessionId: genA)),
+            mailbox.offer(.signalReceived(signal: .answer(voiceSessionId: genA, sdp: sdp), controlGeneration: controlA, freshVoiceSessionId: genA)),
             .accepted(lane: .critical)
         )
     }
@@ -48,7 +51,7 @@ final class VoiceInputMailboxTests: XCTestCase {
         )
         let iceSignal = VoiceSignal.iceCandidate(voiceSessionId: genA, candidate: candidate, sdpMid: nil, sdpMlineIndex: 0)
         XCTAssertEqual(
-            mailbox.offer(.signalReceived(signal: iceSignal, freshVoiceSessionId: genA)),
+            mailbox.offer(.signalReceived(signal: iceSignal, controlGeneration: controlA, freshVoiceSessionId: genA)),
             .accepted(lane: .ice)
         )
     }
@@ -68,7 +71,7 @@ final class VoiceInputMailboxTests: XCTestCase {
             var fresh = VoiceInputMailbox()
             let stateSignal = VoiceSignal.state(voiceSessionId: genA, state: wire, micMuted: false, mode: .continuous)
             XCTAssertEqual(
-                fresh.offer(.signalReceived(signal: stateSignal, freshVoiceSessionId: genA)),
+                fresh.offer(.signalReceived(signal: stateSignal, controlGeneration: controlA, freshVoiceSessionId: genA)),
                 .accepted(lane: .coalesced),
                 "wire state \(wire) must coalesce, not be treated as terminal"
             )
@@ -79,18 +82,18 @@ final class VoiceInputMailboxTests: XCTestCase {
         var mailbox = VoiceInputMailbox()
         let closedSignal = VoiceSignal.state(voiceSessionId: genA, state: .closed, micMuted: false, mode: .continuous)
         XCTAssertEqual(
-            mailbox.offer(.signalReceived(signal: closedSignal, freshVoiceSessionId: genA)),
+            mailbox.offer(.signalReceived(signal: closedSignal, controlGeneration: controlA, freshVoiceSessionId: genA)),
             .accepted(lane: .terminalPeerState)
         )
         let failedSignal = VoiceSignal.state(voiceSessionId: genA, state: .failed, micMuted: false, mode: .continuous)
         XCTAssertEqual(
-            mailbox.offer(.signalReceived(signal: failedSignal, freshVoiceSessionId: genA)),
+            mailbox.offer(.signalReceived(signal: failedSignal, controlGeneration: controlA, freshVoiceSessionId: genA)),
             .accepted(lane: .terminalPeerState)
         )
         // A nil voice_session_id is legal for `closed` (PROTOCOL §7.4) and must classify the same way.
         let closedNoId = VoiceSignal.state(voiceSessionId: nil, state: .closed, micMuted: false, mode: .continuous)
         XCTAssertEqual(
-            mailbox.offer(.signalReceived(signal: closedNoId, freshVoiceSessionId: genA)),
+            mailbox.offer(.signalReceived(signal: closedNoId, controlGeneration: controlA, freshVoiceSessionId: genA)),
             .accepted(lane: .terminalPeerState)
         )
     }
@@ -103,8 +106,8 @@ final class VoiceInputMailboxTests: XCTestCase {
         _ = mailbox.offer(.localCandidateGathered(voiceSessionId: genA, candidate: candidate, sdpMid: nil, sdpMlineIndex: 0))
         _ = mailbox.offer(.muteRequested(muted: true))
         let closedSignal = VoiceSignal.state(voiceSessionId: genA, state: .closed, micMuted: false, mode: .continuous)
-        _ = mailbox.offer(.signalReceived(signal: closedSignal, freshVoiceSessionId: genA))
-        _ = mailbox.offer(.controlLinkLost)
+        _ = mailbox.offer(.signalReceived(signal: closedSignal, controlGeneration: controlA, freshVoiceSessionId: genA))
+        _ = mailbox.offer(.controlLinkLost(retiredControlGeneration: controlA))
 
         guard case .controlLinkLost? = mailbox.poll() else { return XCTFail("expected controlLinkLost first") }
         // The terminal peer state is **not** polled next any more: it is a peer signal, and the
@@ -131,7 +134,7 @@ final class VoiceInputMailboxTests: XCTestCase {
             .state(voiceSessionId: genA, state: .closed, micMuted: false, mode: .continuous),
         ]
         for signal in signals {
-            _ = mailbox.offer(.signalReceived(signal: signal, freshVoiceSessionId: genA))
+            _ = mailbox.offer(.signalReceived(signal: signal, controlGeneration: controlA, freshVoiceSessionId: genA))
         }
         // ...alongside local work in every lane a peer signal can also occupy.
         _ = mailbox.offer(.startRequested(freshVoiceSessionId: genA))
@@ -139,7 +142,7 @@ final class VoiceInputMailboxTests: XCTestCase {
         _ = mailbox.offer(.muteRequested(muted: true))
         _ = mailbox.offer(.modeSelected(mode: .ptt))
 
-        _ = mailbox.offer(.controlLinkLost)
+        _ = mailbox.offer(.controlLinkLost(retiredControlGeneration: controlA))
 
         XCTAssertEqual(mailbox.discardedRetiredSignalCount, 5, "every queued peer signal is discarded, and counted")
         var drained: [VoiceInput] = []
@@ -162,7 +165,7 @@ final class VoiceInputMailboxTests: XCTestCase {
     /// nothing, and a peer signal that arrived before the press is still delivered.
     func testStopRequestedSharesTheTeardownLaneButDiscardsNothing() {
         var mailbox = VoiceInputMailbox()
-        _ = mailbox.offer(.signalReceived(signal: .offer(voiceSessionId: genA, sdp: "sdp"), freshVoiceSessionId: genA))
+        _ = mailbox.offer(.signalReceived(signal: .offer(voiceSessionId: genA, sdp: "sdp"), controlGeneration: controlA, freshVoiceSessionId: genA))
 
         _ = mailbox.offer(.stopRequested)
 
@@ -175,7 +178,7 @@ final class VoiceInputMailboxTests: XCTestCase {
 
     func testOnlyTheLatestTeardownRequestSurvivesButItIsNeverLost() {
         var mailbox = VoiceInputMailbox()
-        _ = mailbox.offer(.controlLinkLost)
+        _ = mailbox.offer(.controlLinkLost(retiredControlGeneration: controlA))
         _ = mailbox.offer(.stopRequested)
 
         guard case .stopRequested? = mailbox.poll() else { return XCTFail("expected the latest teardown request") }
@@ -201,13 +204,13 @@ final class VoiceInputMailboxTests: XCTestCase {
         var mailbox = VoiceInputMailbox()
         let closed = VoiceSignal.state(voiceSessionId: genA, state: .closed, micMuted: false, mode: .continuous)
         let active = VoiceSignal.state(voiceSessionId: genA, state: .active, micMuted: false, mode: .continuous)
-        _ = mailbox.offer(.signalReceived(signal: closed, freshVoiceSessionId: genA))
-        _ = mailbox.offer(.signalReceived(signal: active, freshVoiceSessionId: genA))
+        _ = mailbox.offer(.signalReceived(signal: closed, controlGeneration: controlA, freshVoiceSessionId: genA))
+        _ = mailbox.offer(.signalReceived(signal: active, controlGeneration: controlA, freshVoiceSessionId: genA))
 
-        guard case .signalReceived(let first, _)? = mailbox.poll(), first == closed else {
+        guard case .signalReceived(let first, _, _)? = mailbox.poll(), first == closed else {
             return XCTFail("the terminal CLOSED must survive intact and drain first")
         }
-        guard case .signalReceived(let second, _)? = mailbox.poll(), second == active else {
+        guard case .signalReceived(let second, _, _)? = mailbox.poll(), second == active else {
             return XCTFail("the ordinary ACTIVE update is still delivered, just after")
         }
         XCTAssertNil(mailbox.poll())
@@ -217,13 +220,13 @@ final class VoiceInputMailboxTests: XCTestCase {
         var mailbox = VoiceInputMailbox()
         let failed = VoiceSignal.state(voiceSessionId: genA, state: .failed, micMuted: false, mode: .continuous)
         let connecting = VoiceSignal.state(voiceSessionId: genA, state: .connecting, micMuted: false, mode: .continuous)
-        _ = mailbox.offer(.signalReceived(signal: failed, freshVoiceSessionId: genA))
-        _ = mailbox.offer(.signalReceived(signal: connecting, freshVoiceSessionId: genA))
+        _ = mailbox.offer(.signalReceived(signal: failed, controlGeneration: controlA, freshVoiceSessionId: genA))
+        _ = mailbox.offer(.signalReceived(signal: connecting, controlGeneration: controlA, freshVoiceSessionId: genA))
 
-        guard case .signalReceived(let first, _)? = mailbox.poll(), first == failed else {
+        guard case .signalReceived(let first, _, _)? = mailbox.poll(), first == failed else {
             return XCTFail("the terminal FAILED must survive intact and drain first")
         }
-        guard case .signalReceived(let second, _)? = mailbox.poll(), second == connecting else {
+        guard case .signalReceived(let second, _, _)? = mailbox.poll(), second == connecting else {
             return XCTFail("expected the ordinary CONNECTING update next")
         }
         XCTAssertNil(mailbox.poll())
@@ -235,9 +238,9 @@ final class VoiceInputMailboxTests: XCTestCase {
             _ = mailbox.offer(.localCandidateGathered(voiceSessionId: genA, candidate: "c\(i)", sdpMid: nil, sdpMlineIndex: 0))
         }
         let closed = VoiceSignal.state(voiceSessionId: genA, state: .closed, micMuted: false, mode: .continuous)
-        _ = mailbox.offer(.signalReceived(signal: closed, freshVoiceSessionId: genA))
+        _ = mailbox.offer(.signalReceived(signal: closed, controlGeneration: controlA, freshVoiceSessionId: genA))
 
-        guard case .signalReceived(let signal, _)? = mailbox.poll(), signal == closed else {
+        guard case .signalReceived(let signal, _, _)? = mailbox.poll(), signal == closed else {
             return XCTFail("a terminal peer state must never queue behind an ICE flood")
         }
     }
@@ -247,9 +250,9 @@ final class VoiceInputMailboxTests: XCTestCase {
         _ = mailbox.offer(.muteRequested(muted: true))
         _ = mailbox.offer(.startRequested(freshVoiceSessionId: genA))
         let closed = VoiceSignal.state(voiceSessionId: genA, state: .closed, micMuted: false, mode: .continuous)
-        _ = mailbox.offer(.signalReceived(signal: closed, freshVoiceSessionId: genA))
+        _ = mailbox.offer(.signalReceived(signal: closed, controlGeneration: controlA, freshVoiceSessionId: genA))
 
-        guard case .signalReceived(let signal, _)? = mailbox.poll(), signal == closed else {
+        guard case .signalReceived(let signal, _, _)? = mailbox.poll(), signal == closed else {
             return XCTFail("terminal peer state outranks both critical and coalesced work")
         }
         guard case .startRequested? = mailbox.poll() else { return XCTFail("expected the critical start next") }
@@ -259,14 +262,14 @@ final class VoiceInputMailboxTests: XCTestCase {
     func testATerminalSignalIsDrainedUnchangedNeverRewrittenIntoALocalTeardownInput() {
         var mailbox = VoiceInputMailbox()
         let closed = VoiceSignal.state(voiceSessionId: nil, state: .closed, micMuted: false, mode: .continuous)
-        _ = mailbox.offer(.signalReceived(signal: closed, freshVoiceSessionId: genA))
+        _ = mailbox.offer(.signalReceived(signal: closed, controlGeneration: controlA, freshVoiceSessionId: genA))
 
         // Remote CLOSED must remain a `.signalReceived` carrying the original `VoiceSignal.state` all
         // the way to `VoiceNegotiation`, which has its own, distinct remote-teardown handling
         // (`teardownFromPeer`) -- the mailbox must not fold it into `.stopRequested`, whose reducer
         // path has different local-lifecycle semantics (it may release local capture; a remote
         // CLOSED must not).
-        guard case .signalReceived(let signal, _)? = mailbox.poll() else {
+        guard case .signalReceived(let signal, _, _)? = mailbox.poll() else {
             return XCTFail("expected a signalReceived input, not a rewritten local teardown")
         }
         XCTAssertEqual(signal, closed)
@@ -281,14 +284,14 @@ final class VoiceInputMailboxTests: XCTestCase {
         let closed = VoiceSignal.state(voiceSessionId: genA, state: .closed, micMuted: false, mode: .continuous)
         for i in 0..<4 {
             XCTAssertEqual(
-                mailbox.offer(.signalReceived(signal: closed, freshVoiceSessionId: genA)),
+                mailbox.offer(.signalReceived(signal: closed, controlGeneration: controlA, freshVoiceSessionId: genA)),
                 .accepted(lane: .terminalPeerState),
                 "entry \(i) should still fit under capacity"
             )
         }
 
         let failed = VoiceSignal.state(voiceSessionId: genA, state: .failed, micMuted: false, mode: .continuous)
-        XCTAssertEqual(mailbox.offer(.signalReceived(signal: failed, freshVoiceSessionId: genA)), .terminalOverflow)
+        XCTAssertEqual(mailbox.offer(.signalReceived(signal: failed, controlGeneration: controlA, freshVoiceSessionId: genA)), .terminalOverflow)
         XCTAssertEqual(mailbox.overflowCount, 1)
 
         var drained = 0
@@ -306,7 +309,7 @@ final class VoiceInputMailboxTests: XCTestCase {
         for i in 0..<10_000 {
             let wire: VoiceWireState = i % 2 == 0 ? .closed : .failed
             let signal = VoiceSignal.state(voiceSessionId: genA, state: wire, micMuted: false, mode: .continuous)
-            if mailbox.offer(.signalReceived(signal: signal, freshVoiceSessionId: genA)) == .terminalOverflow {
+            if mailbox.offer(.signalReceived(signal: signal, controlGeneration: controlA, freshVoiceSessionId: genA)) == .terminalOverflow {
                 overflowed += 1
             }
         }
@@ -335,7 +338,7 @@ final class VoiceInputMailboxTests: XCTestCase {
         var overflowed = 0
         for _ in 0..<10_000 {
             let signal = VoiceSignal.offer(voiceSessionId: genA, sdp: sdp)
-            if mailbox.offer(.signalReceived(signal: signal, freshVoiceSessionId: genA)) == .criticalOverflow {
+            if mailbox.offer(.signalReceived(signal: signal, controlGeneration: controlA, freshVoiceSessionId: genA)) == .criticalOverflow {
                 overflowed += 1
             }
         }
@@ -374,11 +377,11 @@ final class VoiceInputMailboxTests: XCTestCase {
 
     func testFloodingIceCannotStarveOrEvictACriticalOffer() {
         var mailbox = VoiceInputMailbox(criticalCapacity: VoiceInputMailbox.criticalCapacity, iceCapacity: 4)
-        _ = mailbox.offer(.signalReceived(signal: .offer(voiceSessionId: genA, sdp: sdp), freshVoiceSessionId: genA))
+        _ = mailbox.offer(.signalReceived(signal: .offer(voiceSessionId: genA, sdp: sdp), controlGeneration: controlA, freshVoiceSessionId: genA))
         for i in 0..<1_000 {
             _ = mailbox.offer(.localCandidateGathered(voiceSessionId: genA, candidate: "c\(i)", sdpMid: nil, sdpMlineIndex: 0))
         }
-        guard case .signalReceived(let signal, _)? = mailbox.poll(), case .offer = signal else {
+        guard case .signalReceived(let signal, _, _)? = mailbox.poll(), case .offer = signal else {
             return XCTFail("expected the offer to be drained first")
         }
     }
@@ -390,9 +393,9 @@ final class VoiceInputMailboxTests: XCTestCase {
         for i in 0..<500 {
             let wire: VoiceWireState = i % 2 == 0 ? .active : .connecting
             let signal = VoiceSignal.state(voiceSessionId: genA, state: wire, micMuted: false, mode: .continuous)
-            _ = mailbox.offer(.signalReceived(signal: signal, freshVoiceSessionId: genA))
+            _ = mailbox.offer(.signalReceived(signal: signal, controlGeneration: controlA, freshVoiceSessionId: genA))
         }
-        guard case .signalReceived(let signal, _)? = mailbox.poll(), case .state(_, let wire, _, _) = signal else {
+        guard case .signalReceived(let signal, _, _)? = mailbox.poll(), case .state(_, let wire, _, _) = signal else {
             return XCTFail("expected the coalesced peer-state entry")
         }
         XCTAssertEqual(wire, .connecting, "the 500th (index 499, odd) update is the newest")
@@ -404,7 +407,7 @@ final class VoiceInputMailboxTests: XCTestCase {
         _ = mailbox.offer(.muteRequested(muted: true))
         _ = mailbox.offer(.remoteTrackChanged(voiceSessionId: genA, present: true))
         let stateSignal = VoiceSignal.state(voiceSessionId: genA, state: .active, micMuted: false, mode: .continuous)
-        _ = mailbox.offer(.signalReceived(signal: stateSignal, freshVoiceSessionId: genA))
+        _ = mailbox.offer(.signalReceived(signal: stateSignal, controlGeneration: controlA, freshVoiceSessionId: genA))
         _ = mailbox.offer(.muteRequested(muted: false))
 
         var drained: [VoiceInput] = []
@@ -434,7 +437,7 @@ final class VoiceInputMailboxTests: XCTestCase {
         }
         _ = mailbox.offer(.muteRequested(muted: true))
         let closed = VoiceSignal.state(voiceSessionId: genA, state: .closed, micMuted: false, mode: .continuous)
-        for _ in 0..<2 { _ = mailbox.offer(.signalReceived(signal: closed, freshVoiceSessionId: genA)) }
+        for _ in 0..<2 { _ = mailbox.offer(.signalReceived(signal: closed, controlGeneration: controlA, freshVoiceSessionId: genA)) }
 
         XCTAssertEqual(mailbox.offer(.stopRequested), .accepted(lane: .teardown))
         guard case .stopRequested? = mailbox.poll() else {
@@ -448,8 +451,8 @@ final class VoiceInputMailboxTests: XCTestCase {
         _ = mailbox.offer(.localCandidateGathered(voiceSessionId: genA, candidate: candidate, sdpMid: nil, sdpMlineIndex: 0))
         _ = mailbox.offer(.muteRequested(muted: true))
         let closed = VoiceSignal.state(voiceSessionId: genA, state: .closed, micMuted: false, mode: .continuous)
-        _ = mailbox.offer(.signalReceived(signal: closed, freshVoiceSessionId: genA))
-        _ = mailbox.offer(.controlLinkLost)
+        _ = mailbox.offer(.signalReceived(signal: closed, controlGeneration: controlA, freshVoiceSessionId: genA))
+        _ = mailbox.offer(.controlLinkLost(retiredControlGeneration: controlA))
 
         mailbox.clear()
 
@@ -462,11 +465,11 @@ final class VoiceInputMailboxTests: XCTestCase {
 
     func testASendFailureDiscardsNoQueuedPeerSignal() {
         var mailbox = VoiceInputMailbox()
-        _ = mailbox.offer(.signalReceived(signal: .offer(voiceSessionId: genB, sdp: sdp), freshVoiceSessionId: genB))
+        _ = mailbox.offer(.signalReceived(signal: .offer(voiceSessionId: genB, sdp: sdp), controlGeneration: controlA, freshVoiceSessionId: genB))
         _ = mailbox.offer(
             .signalReceived(
                 signal: .iceCandidate(voiceSessionId: genB, candidate: candidate, sdpMid: nil, sdpMlineIndex: 0),
-                freshVoiceSessionId: genB
+                controlGeneration: controlA, freshVoiceSessionId: genB
             )
         )
 
@@ -479,14 +482,14 @@ final class VoiceInputMailboxTests: XCTestCase {
         var drained: [VoiceInput] = []
         while let next = mailbox.poll() { drained.append(next) }
         XCTAssertTrue(
-            drained.contains { if case .signalReceived(.offer, _) = $0 { return true } else { return false } },
+            drained.contains { if case .signalReceived(.offer, _, _) = $0 { return true } else { return false } },
             "the successor lifetime's offer must still be there; drained=\(drained)"
         )
     }
 
     func testASendFailureOutranksTheCriticalLane() {
         var mailbox = VoiceInputMailbox()
-        _ = mailbox.offer(.signalReceived(signal: .offer(voiceSessionId: genB, sdp: sdp), freshVoiceSessionId: genB))
+        _ = mailbox.offer(.signalReceived(signal: .offer(voiceSessionId: genB, sdp: sdp), controlGeneration: controlA, freshVoiceSessionId: genB))
         _ = mailbox.offer(.negotiationSendFailed(voiceSessionId: genA))
 
         guard case .negotiationSendFailed? = mailbox.poll() else {
@@ -496,7 +499,7 @@ final class VoiceInputMailboxTests: XCTestCase {
 
     func testASendFailureNeverDisplacesAQueuedTeardownAndIsNeverDisplacedByOne() {
         var linkLost = VoiceInputMailbox()
-        _ = linkLost.offer(.controlLinkLost)
+        _ = linkLost.offer(.controlLinkLost(retiredControlGeneration: controlA))
         _ = linkLost.offer(.negotiationSendFailed(voiceSessionId: genA))
         guard case .controlLinkLost? = linkLost.poll() else {
             return XCTFail("the lifetime boundary still applies first")
@@ -514,10 +517,10 @@ final class VoiceInputMailboxTests: XCTestCase {
 
     func testALinkLossNeverErasesAPendingStopButStillOwnsTheQueuedPeerSignals() {
         var mailbox = VoiceInputMailbox()
-        _ = mailbox.offer(.signalReceived(signal: .offer(voiceSessionId: genA, sdp: sdp), freshVoiceSessionId: genA))
+        _ = mailbox.offer(.signalReceived(signal: .offer(voiceSessionId: genA, sdp: sdp), controlGeneration: controlA, freshVoiceSessionId: genA))
         _ = mailbox.offer(.stopRequested)
 
-        _ = mailbox.offer(.controlLinkLost)
+        _ = mailbox.offer(.controlLinkLost(retiredControlGeneration: controlA))
 
         guard case .stopRequested? = mailbox.poll() else {
             return XCTFail("the stop is what `shutdown()` completes on; nothing may replace it (ADR-026)")
@@ -531,7 +534,7 @@ final class VoiceInputMailboxTests: XCTestCase {
 
     func testAStopOfferedOverAPendingLinkLossStillReplacesIt() {
         var mailbox = VoiceInputMailbox()
-        _ = mailbox.offer(.controlLinkLost)
+        _ = mailbox.offer(.controlLinkLost(retiredControlGeneration: controlA))
         _ = mailbox.offer(.stopRequested)
         guard case .stopRequested? = mailbox.poll() else {
             return XCTFail("a stop is the strict superset and wins")

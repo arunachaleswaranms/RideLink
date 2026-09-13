@@ -2,7 +2,6 @@ import Foundation
 import RideLinkCore
 @testable import RideLinkPlatform
 
-/// Records what an authenticated peer's `VOICE_*` frames actually deliver.
 /// Records what the receiver's `AUDIO_STATE` sink actually got (PROTOCOL §4.4).
 final class AudioStateSpy: AudioStateSink, @unchecked Sendable {
     private let lock = NSLock()
@@ -21,9 +20,16 @@ final class AudioStateSpy: AudioStateSink, @unchecked Sendable {
     }
 }
 
+/// Records what an authenticated peer's `VOICE_*` frames actually deliver, **and which control
+/// authentication generation admitted each one** (STATUS §4 problem 60).
+///
+/// The generation is recorded rather than ignored for the same reason `ManifestSpy` records it: the
+/// claim under test is that the relay passes on the frame's *own* provenance and never substitutes a
+/// live read, and a spy that dropped the parameter could not tell the two apart.
 final class VoiceSignalSpy: VoiceSignalSink, @unchecked Sendable {
     private let lock = NSLock()
     private var log: [VoiceSignal] = []
+    private var generationLog: [Int64] = []
 
     var received: [VoiceSignal] {
         lock.lock()
@@ -31,10 +37,38 @@ final class VoiceSignalSpy: VoiceSignalSink, @unchecked Sendable {
         return log
     }
 
-    func submit(_ signal: VoiceSignal) {
+    /// One entry per `received` entry, in the same order.
+    var generations: [Int64] {
+        lock.lock()
+        defer { lock.unlock() }
+        return generationLog
+    }
+
+    func submit(_ signal: VoiceSignal, controlGeneration: Int64) {
         lock.lock()
         defer { lock.unlock() }
         log.append(signal)
+        generationLog.append(controlGeneration)
+    }
+}
+
+/// The one control authentication generation every suite written before STATUS §4 problem 60 is about.
+///
+/// Those suites all describe a **single** control lifetime — a signal admitted by it, and its own link
+/// loss — so naming one generation for both is exactly faithful to what they assert, and it is what
+/// keeps them honest regressions rather than tests that happen to pass because everything is
+/// indistinguishable. A suite that needs two lifetimes says so explicitly instead of using these.
+let testControlGenerationA: Int64 = 1
+
+extension VoiceController {
+    /// `testControlGenerationA` admitted this signal.
+    nonisolated func submit(_ signal: VoiceSignal) {
+        submit(signal, controlGeneration: testControlGenerationA)
+    }
+
+    /// `testControlGenerationA` is the lifetime that ended.
+    func onControlLinkLost() {
+        onControlLinkLost(retiredControlGeneration: testControlGenerationA)
     }
 }
 

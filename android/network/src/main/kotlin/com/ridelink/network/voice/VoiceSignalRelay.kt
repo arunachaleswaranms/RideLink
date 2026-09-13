@@ -119,6 +119,13 @@ class VoiceSignalRelay internal constructor(
      *
      * This is a refusal rather than a relabelling on purpose: there is no ledger here that a retired
      * generation's frame has to reach, unlike Phase 5's (ADR-024 Amendment A6).
+     *
+     * **This check is liveness, not provenance, and it is not on its own sufficient** (STATUS §4
+     * problem 60). Nothing spans the read of [liveGeneration] and the [VoiceSignalSink.submit]
+     * below — `endConnection` clears the authenticated record from another coroutine — so a frame
+     * can pass here and be overtaken by the entire teardown before it is queued. What makes that
+     * harmless is that [generation] travels with it: `VoiceInputMailbox` refuses a signal whose
+     * admitting generation has been retired, whenever it arrives.
      */
     fun deliver(
         type: String,
@@ -130,7 +137,12 @@ class VoiceSignalRelay internal constructor(
             return
         }
         when (val result = VoiceSignalCodec.parse(type, payload)) {
-            is VoiceSignalCodec.Result.Parsed -> sink?.submit(result.signal)
+            // [generation] — this frame's own, from its `ReadFrameBinding` — and never
+            // `liveGeneration()`. They were just proved equal, so substituting the live read would
+            // be indistinguishable *here* and wrong everywhere downstream: the sink's consumer
+            // decides against the generation it is given long after this returns, and a value read
+            // from live state is exactly ADR-024 Amendment A7's defect (STATUS §4 problem 60).
+            is VoiceSignalCodec.Result.Parsed -> sink?.submit(result.signal, generation)
             is VoiceSignalCodec.Result.Rejected -> rejections.merge(result.reason, 1) { a, b -> a + b }
         }
     }

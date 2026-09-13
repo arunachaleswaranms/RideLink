@@ -5,6 +5,7 @@ import com.ridelink.core.protocol.VoiceSessionId
 import com.ridelink.core.protocol.VoiceSignal
 import com.ridelink.core.protocol.VoiceWireState
 import com.ridelink.core.voice.VoiceEngineEvent
+import com.ridelink.core.voice.VoiceSignalDropReason
 import com.ridelink.core.voice.VoiceStatus
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
@@ -196,16 +197,18 @@ class VoiceControllerLinkLossOrderingTest {
         withControllerManual(isLocalLeader = false) { answerer, fakes, dispatcher ->
             answerer.start()
             dispatcher.runAll()
-            answerer.submit(VoiceSignal.Offer(genAt(OFFER_ID), SDP))
-            answerer.onControlLinkLost()
+            answerer.submit(VoiceSignal.Offer(genAt(OFFER_ID), SDP), CONTROL_A)
+            answerer.onControlLinkLost(CONTROL_A)
             dispatcher.runAll()
             val openedBefore = fakes.audio.openCaptureCount
             val closedBefore = fakes.audio.closeCaptureCount
 
-            // PROTOCOL §7.8: the control ladder reconnected and voice is rebuilt.
+            // PROTOCOL §7.8: the control ladder reconnected and voice is rebuilt. The offer below is
+            // the **successor** lifetime's, so it names `CONTROL_B` — that is what distinguishes it
+            // from the retired one above, and saying so is the whole of STATUS §4 problem 60.
             answerer.start()
             dispatcher.runAll()
-            answerer.submit(VoiceSignal.Offer(genAt(OFFER_ID + 1), SDP))
+            answerer.submit(VoiceSignal.Offer(genAt(OFFER_ID + 1), SDP), CONTROL_B)
             dispatcher.runAll()
 
             assertTrue(
@@ -329,7 +332,7 @@ class VoiceControllerLinkLossOrderingTest {
             assertTrue(answerer.diagnostics.value.localAudioOpen)
 
             // Lifetime A: the peer offered and this side is answering.
-            answerer.submit(VoiceSignal.Offer(genAt(OFFER_ID), SDP))
+            answerer.submit(VoiceSignal.Offer(genAt(OFFER_ID), SDP), CONTROL_A)
             dispatcher.runAll()
             fakes.transport.parkWhen = { it is VoiceSignal.Answer }
             fakes.engine.emit(VoiceEngineEvent.AnswerCreated(genAt(OFFER_ID), SDP))
@@ -337,13 +340,14 @@ class VoiceControllerLinkLossOrderingTest {
             assertTrue(fakes.transport.parked, "the answer's write must really be in flight for this to be the case")
 
             // Lifetime A ends. The consumer is parked, so nothing drains yet.
-            answerer.onControlLinkLost()
+            answerer.onControlLinkLost(CONTROL_A)
             dispatcher.runAll()
 
             // The ladder reconnects, lifetime B authenticates, and B's peer offers. `VoiceSignalRelay`
             // admitted this frame against a live generation, so ADR-025 is satisfied: it is genuinely
-            // the successor's work.
-            answerer.submit(VoiceSignal.Offer(genAt(OFFER_ID + 1), SDP))
+            // the successor's work — and since problem 60 it *says* so, rather than being
+            // indistinguishable from A's.
+            answerer.submit(VoiceSignal.Offer(genAt(OFFER_ID + 1), SDP), CONTROL_B)
 
             // Only now does lifetime A's write report that it failed.
             fakes.transport.release(false)
@@ -445,6 +449,141 @@ class VoiceControllerLinkLossOrderingTest {
             )
         }
 
+    /**
+     * **P60-1 — STATUS §4 problem 60, Window 1.** A retired lifetime's signal *admitted after* its own
+     * link loss has already been applied.
+     *
+     * Reachable because nothing spans `VoiceSignalRelay.deliver`'s liveness check and its
+     * `sink.submit`: `endConnection` clears the authenticated record from another coroutine, so a
+     * frame can pass the check and be overtaken by the entire teardown — the link loss included —
+     * before it is queued. Problem 50's discard runs at **offer** time and so cannot see it, and the
+     * table is by then in `IDLE` with `voiceSessionId = null`, which is exactly the state
+     * `offerReceived` accepts any generation in.
+     *
+     * This is the same failure problem 50 closed, reached by the one route its fix left open, and it
+     * must now be refused by identity: A is retired, so A's work is inert whenever it arrives.
+     */
+    @Test
+    fun `a retired lifetime's offer submitted after its link loss cannot begin a negotiation`() =
+        withControllerManual(isLocalLeader = false) { answerer, fakes, dispatcher ->
+            answerer.start()
+            dispatcher.runAll()
+            assertTrue(answerer.diagnostics.value.localAudioOpen, "the answerer's capture must be open for this to be the real case")
+
+            // Lifetime A ends and the teardown is fully applied — the consumer is not starved here.
+            answerer.onControlLinkLost(CONTROL_A)
+            dispatcher.runAll()
+            val calls = fakes.engine.calls.toList()
+            val stopAt = calls.indexOf("stop")
+            assertTrue(stopAt >= 0, "ControlLinkLost must have stopped the media transport; calls=$calls")
+
+            // ...and only now does A's in-flight frame reach the mailbox.
+            answerer.submit(VoiceSignal.Offer(genAt(OFFER_ID), SDP), CONTROL_A)
+            dispatcher.runAll()
+
+            val afterTeardown =
+                fakes.engine.calls
+                    .toList()
+                    .drop(stopAt + 1)
+            assertFalse(
+                afterTeardown.any { it.startsWith("start(") },
+                "a retired lifetime's offer must not rebuild the peer connection; after stop=$afterTeardown",
+            )
+            assertFalse(
+                afterTeardown.contains("applyRemote(OFFER)"),
+                "a retired lifetime's offer must not be applied; after stop=$afterTeardown",
+            )
+            assertFalse(
+                afterTeardown.contains("createAnswer"),
+                "a retired lifetime's offer must not be answered; after stop=$afterTeardown",
+            )
+            assertEquals(VoiceStatus.IDLE, answerer.diagnostics.value.status)
+            assertTrue(
+                fakes.transport.sent.none { it is VoiceSignal.Answer },
+                "no answer may be produced for a retired lifetime's offer",
+            )
+            assertEquals(
+                1,
+                answerer.diagnostics.value.droppedSignals[VoiceSignalDropReason.RETIRED_CONTROL_LIFETIME],
+                "and the refusal is surfaced, not silent",
+            )
+        }
+
+    /**
+     * **P60-2 — STATUS §4 problem 60, Window 2.** A successor lifetime's offer, queued *before* the
+     * predecessor's link loss is delivered.
+     *
+     * `VoiceLifetimeProvenanceTest` proves the ordering is production's and needs no race:
+     * `ControlEvent.LinkLost` reaches this controller through `SessionCoordinator`'s event consumer,
+     * while `ControlSessionManager.promote` authenticates a successor without waiting on that
+     * consumer at all — so with the loss still unconsumed, generation 2's own `VOICE_OFFER` is
+     * admitted and reaches the sink. Before this fix the loss then discarded it, and since a peer
+     * never re-sends an offer, voice was wedged for the ride segment exactly as in problem 56.
+     */
+    @Test
+    fun `a successor's queued offer survives a delayed link loss for the predecessor`() =
+        withControllerManual(isLocalLeader = false) { answerer, fakes, dispatcher ->
+            answerer.start()
+            dispatcher.runAll()
+            val startsBefore = fakes.engine.calls.count { it.startsWith("start(") }
+
+            // Lifetime B is already authenticated and its peer has offered. Nothing has told this
+            // controller that lifetime A ended yet.
+            answerer.submit(VoiceSignal.Offer(genAt(OFFER_ID + 1), SDP), CONTROL_B)
+            // ...and only now is A's link loss delivered, out of the coordinator's event queue.
+            answerer.onControlLinkLost(CONTROL_A)
+            dispatcher.runAll()
+
+            val calls = fakes.engine.calls.toList()
+            assertTrue(
+                calls.contains("applyRemote(OFFER)"),
+                "the successor lifetime's offer must survive the predecessor's link loss; calls=$calls",
+            )
+            assertTrue(calls.contains("createAnswer"), "and must still be answered; calls=$calls")
+            assertTrue(
+                calls.count { it.startsWith("start(") } > startsBefore,
+                "the peer connection is rebuilt for the successor; calls=$calls",
+            )
+            assertEquals(
+                VoiceStatus.NEGOTIATING,
+                answerer.diagnostics.value.status,
+                "a retired lifetime's boundary may not retire the successor's negotiation",
+            )
+            assertEquals(
+                null,
+                answerer.diagnostics.value.droppedSignals[VoiceSignalDropReason.RETIRED_CONTROL_LIFETIME],
+                "nothing belonging to the retired lifetime was queued, so nothing may be discarded",
+            )
+        }
+
+    /**
+     * P60-2's harder sibling: **both** lifetimes have queued work when the predecessor's loss lands.
+     * A's must go and B's must stay, from one `offer` call, with no ordering to appeal to.
+     */
+    @Test
+    fun `a delayed link loss discards only the retired lifetime's queued offer`() =
+        withControllerManual(isLocalLeader = false) { answerer, fakes, dispatcher ->
+            answerer.start()
+            dispatcher.runAll()
+
+            answerer.submit(VoiceSignal.Offer(genAt(OFFER_ID), SDP), CONTROL_A)
+            answerer.submit(VoiceSignal.Offer(genAt(OFFER_ID + 1), SDP), CONTROL_B)
+            answerer.onControlLinkLost(CONTROL_A)
+            dispatcher.runAll()
+
+            val calls = fakes.engine.calls.toList()
+            assertTrue(calls.contains("createAnswer"), "B's offer is answered; calls=$calls")
+            assertTrue(
+                calls.contains("start(${genAt(OFFER_ID + 1).value})"),
+                "and the rebuilt peer connection belongs to B's offer, not A's; calls=$calls",
+            )
+            assertFalse(
+                calls.contains("start(${genAt(OFFER_ID).value})"),
+                "A's retired offer must never have started anything; calls=$calls",
+            )
+            assertEquals(VoiceStatus.NEGOTIATING, answerer.diagnostics.value.status)
+        }
+
     // --- harness ---------------------------------------------------------------------------------
 
     private class ManualDispatcher : CoroutineDispatcher() {
@@ -505,6 +644,14 @@ class VoiceControllerLinkLossOrderingTest {
 
         /** Far clear of the harness's own fresh-id counter, so a collision cannot mask a result. */
         const val OFFER_ID = 900
+
+        /**
+         * Two **control authentication** generations, which are a different identity from the
+         * `voice_session_id`s above: `ControlSessionManager.activateAuthenticatedSession` allocates
+         * these, strictly increasing, one per trust-gate pass (STATUS §4 problem 60).
+         */
+        const val CONTROL_A = 1L
+        const val CONTROL_B = 2L
 
         fun genAt(n: Int): VoiceSessionId = VoiceSessionId(n.toString().padStart(32, '0'))
     }

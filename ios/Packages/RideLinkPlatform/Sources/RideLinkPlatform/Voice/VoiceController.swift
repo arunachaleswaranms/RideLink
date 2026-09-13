@@ -276,9 +276,15 @@ public actor VoiceController: VoiceSignalSink {
     /// (ARCHITECTURE §6.3/§6.4). Nothing is retried here — PROTOCOL §10's ladder is the only reconnect
     /// loop in the app, and a second one competing with it is the bug the §2e hardening pass fixed for
     /// the control plane.
-    public func onControlLinkLost() {
+    /// - Parameter retiredControlGeneration: **which** authentication generation ended, from
+    ///   `.linkLost` (STATUS §4 problem 60). Nil when the connection never authenticated, and
+    ///   therefore never admitted any semantic voice work to own. This controller is deliberately
+    ///   retained across a control reconnect, so "the link is gone" and "*whose* link is gone" are
+    ///   different questions and only the second one can safely decide what queued peer work is
+    ///   discarded — see `VoiceInputMailbox.offer`.
+    public func onControlLinkLost(retiredControlGeneration: Int64?) {
         lastFailure = .controlLinkLost
-        mailbox.offer(.controlLinkLost, doorbell: doorbell)
+        mailbox.offer(.controlLinkLost(retiredControlGeneration: retiredControlGeneration), doorbell: doorbell)
     }
 
     /// A `VOICE_*` frame that has **already** passed the ADR-019 trust gate. There is no other entry
@@ -288,8 +294,19 @@ public actor VoiceController: VoiceSignalSink {
     /// `nonisolated` and non-async so the control read loop is never blocked by it, even under a flood
     /// of frames from an authenticated peer -- `mailbox.offer` only ever touches an in-memory,
     /// lock-guarded deque/dictionary, never suspends, and never grows without bound.
-    public nonisolated func submit(_ signal: VoiceSignal) {
-        mailbox.offer(.signalReceived(signal: signal, freshVoiceSessionId: newVoiceSessionId()), doorbell: doorbell)
+    /// `controlGeneration` is carried into the input unchanged and is **never** re-derived here:
+    /// reading a live generation to label a frame that has already been read is exactly ADR-024
+    /// Amendment A7's defect, and a `VoiceController` that outlives a reconnect has no live generation
+    /// of its own to read in any case.
+    public nonisolated func submit(_ signal: VoiceSignal, controlGeneration: Int64) {
+        mailbox.offer(
+            .signalReceived(
+                signal: signal,
+                controlGeneration: controlGeneration,
+                freshVoiceSessionId: newVoiceSessionId()
+            ),
+            doorbell: doorbell
+        )
     }
 
     /// Releases every task this controller owns. After this, no callback can mutate anything.
@@ -335,6 +352,14 @@ public actor VoiceController: VoiceSignalSink {
             } else if let next = mailbox.poll() {
                 await apply(next)
             } else {
+                // A wake that applied nothing is still a wake that may have something to report: an
+                // input the mailbox **refused** rings this doorbell and then leaves the queues empty,
+                // so without this the retired-lifetime refusal count could only ever surface on the
+                // back of some *later* applied input (STATUS §4 problem 60). A counter that is only
+                // observable by accident is not surfaced. Safe here and nowhere else: this is the
+                // single consumer, so the state `publishDiagnostics` reads is not being mutated
+                // underneath it.
+                publishDiagnostics()
                 return
             }
         }
@@ -703,7 +728,10 @@ public actor VoiceController: VoiceSignalSink {
         diagnostics.queuedCandidates = pending.count
         diagnostics.droppedQueuedCandidates = pending.droppedCount
         let mailboxOverflows = mailbox.overflowCount
-        let retiredSignalDiscards = mailbox.discardedRetiredSignalCount
+        // Discarded **and** refused: the mailbox keeps the two apart because they are the same fact
+        // caught at its two different instants, and the diagnostics screen has one reason for "a peer
+        // signal its own control lifetime had already outlived" (STATUS §4 problem 60).
+        let retiredSignalDiscards = mailbox.discardedRetiredSignalCount + mailbox.refusedRetiredSignalCount
         // Both of these are counted by the mailbox, one layer earlier than every reason the table
         // itself produces -- so they are merged in here rather than living in `dropCounts`.
         var droppedSignals = dropCounts
@@ -768,7 +796,10 @@ private final class VoiceInputMailboxBox: @unchecked Sendable {
             // degrade -- media stops, local capture and the TLS control session both survive -- is
             // the same safe response an actual control-link blip already produces, applied one layer
             // earlier. The teardown lane always accepts.
-            _ = mailbox.offer(.controlLinkLost)
+            // `retiredControlGeneration: nil` -- an overflow is a local fact about *this* device's
+            // bounded queue, not a control-lifetime boundary, so it retires nothing and owns nobody's
+            // queued work (STATUS §4 problem 60). The degrade the reducer performs is identical.
+            _ = mailbox.offer(.controlLinkLost(retiredControlGeneration: nil))
         }
         lock.unlock()
         doorbell.signal()
@@ -790,6 +821,13 @@ private final class VoiceInputMailboxBox: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         return mailbox.discardedRetiredSignalCount
+    }
+
+    /// See `VoiceInputMailbox.refusedRetiredSignalCount` (STATUS §4 problem 60).
+    var refusedRetiredSignalCount: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return mailbox.refusedRetiredSignalCount
     }
 
     func clear() {

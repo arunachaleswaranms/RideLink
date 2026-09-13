@@ -240,16 +240,25 @@ final class VoiceControllerMailboxTests: XCTestCase {
             (await harness.controller.currentDiagnostics().droppedSignals[.inputMailboxOverflow] ?? 0) > 0
         }
         // Let the residual backlog fully settle before judging the state a clean slate. The overflow
-        // degrade forces a `.controlLinkLost` through the always-accepting teardown lane, and since
-        // STATUS §4 problem 50 that teardown also **discards** the peer offers queued below it --
-        // consistently for the synthetic degrade and for a real link loss, because in both cases the
-        // reducer is about to be reset to `.idle` and must not then be handed a queued offer, which
-        // is exactly the state `offerReceived` accepts any generation in. So the backlog now settles
-        // as `.retiredControlLifetime` rather than as role-violation drops.
+        // degrade forces a `.controlLinkLost` through the always-accepting teardown lane -- but it
+        // names **no** retired generation, because an overflow is a local fact about this device's
+        // own bound and not a control-lifetime boundary (STATUS §4 problem 60). So it discards
+        // nothing: every offer still queued was admitted by a lifetime that is still live, and
+        // deleting live work because something else went wrong is the defect problem 60 is about.
+        //
+        // This is a deliberate narrowing of what problem 50's fix did here. The backlog therefore
+        // settles as role-violation drops again -- this controller is the **offerer**, and PROTOCOL
+        // §7.3 says an offerer never accepts a peer `VOICE_OFFER` -- which is both bounded and
+        // exactly what would have happened had the flood never overflowed at all.
         try await harness.awaitCondition {
-            (await harness.controller.currentDiagnostics().droppedSignals[.retiredControlLifetime] ?? 0)
+            (await harness.controller.currentDiagnostics().droppedSignals[.roleViolation] ?? 0)
                 >= VoiceInputMailbox.criticalCapacity
         }
+        let retiredDiscards = await harness.controller.currentDiagnostics().droppedSignals[.retiredControlLifetime] ?? 0
+        XCTAssertEqual(
+            retiredDiscards, 0,
+            "an overflow retires no control lifetime, so it may discard no peer signal"
+        )
         let settledStatus = await harness.controller.currentDiagnostics().status
         XCTAssertEqual(settledStatus, .idle, "nothing ever started, so the flood must settle back to idle")
 

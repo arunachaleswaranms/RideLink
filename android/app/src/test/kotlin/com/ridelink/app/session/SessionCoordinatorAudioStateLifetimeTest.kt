@@ -14,6 +14,7 @@ import com.ridelink.core.model.SessionId
 import com.ridelink.core.model.SpkiHash
 import com.ridelink.core.protocol.AudioStateEpoch
 import com.ridelink.core.protocol.AudioStateMessage
+import com.ridelink.core.protocol.VoiceSessionId
 import com.ridelink.core.protocol.VoiceSignal
 import com.ridelink.core.security.InMemoryTrustedPeerStore
 import com.ridelink.core.sessionfsm.SessionEvent
@@ -27,6 +28,7 @@ import com.ridelink.core.voice.VoiceEngine
 import com.ridelink.core.voice.VoiceEngineConfig
 import com.ridelink.core.voice.VoiceEngineDiagnostics
 import com.ridelink.core.voice.VoiceEngineEvent
+import com.ridelink.core.voice.VoiceSignalDropReason
 import com.ridelink.core.voice.VoiceSignalTransport
 import com.ridelink.network.control.ControlChannel
 import com.ridelink.network.control.ControlEvent
@@ -193,7 +195,65 @@ class SessionCoordinatorAudioStateLifetimeTest {
             coordinator.awaitPeerRevision(41)
         }
 
+    // --- STATUS §4 problem 60: which lifetime a link loss ends --------------------------------------
+
+    /**
+     * **The coordinator seam of problem 60.** `ControlEvent.LinkLost` now names the authentication
+     * generation that ended, and this is the assertion that the name survives the hop into voice: the
+     * coordinator forwards `event.retiredAuthGeneration` and never re-reads a live one.
+     *
+     * The interleaving is production's, not contrived — `VoiceLifetimeProvenanceTest` proves it needs
+     * no race. `handleControlEvent` runs from a flow collector, while `ControlSessionManager.promote`
+     * authenticates a successor without waiting on that collector, so by the time a `LinkLost` is
+     * applied the retained `VoiceController` may already hold — or be about to be handed — the
+     * successor's admitted frames.
+     *
+     * The link loss is applied and **settled** before the successor's frame arrives, so the verdict is
+     * the retired-generation floor's and not a race between this thread and the mailbox consumer.
+     */
+    @Test
+    fun `a LinkLost naming the predecessor generation leaves a successor's later signal admissible`() =
+        withCoordinator { coordinator, _ ->
+            val voice = requireNotNull(lastVoiceController) { "Connected must have built a voice controller" }
+
+            coordinator.handleControlEvent(ControlEvent.LinkLost(LinkLossReason.NETWORK, retiredAuthGeneration = 1L))
+            coordinator.settle()
+            voice.submit(VoiceSignal.Offer(VoiceSessionId("9".repeat(32)), MINIMAL_SDP), controlGeneration = 2L)
+            coordinator.settle()
+
+            assertEquals(
+                null,
+                voice.diagnostics.value.droppedSignals[VoiceSignalDropReason.RETIRED_CONTROL_LIFETIME],
+                "generation 1 ending retires nothing of generation 2's",
+            )
+        }
+
+    /** The other half, through the same seam: the lifetime that *did* end still owns its own work. */
+    @Test
+    fun `a LinkLost naming a generation refuses that generation's later signal`() =
+        withCoordinator { coordinator, _ ->
+            val voice = requireNotNull(lastVoiceController)
+
+            coordinator.handleControlEvent(ControlEvent.LinkLost(LinkLossReason.NETWORK, retiredAuthGeneration = 2L))
+            coordinator.settle()
+            voice.submit(VoiceSignal.Offer(VoiceSessionId("9".repeat(32)), MINIMAL_SDP), controlGeneration = 2L)
+            coordinator.settle()
+
+            assertEquals(
+                1,
+                voice.diagnostics.value.droppedSignals[VoiceSignalDropReason.RETIRED_CONTROL_LIFETIME],
+                "its own lifetime ended, so this frame is the loss's to refuse",
+            )
+        }
+
     // --- harness ------------------------------------------------------------------------------------
+
+    /**
+     * The controller [withCoordinator]'s `buildVoiceController` most recently produced, so a test can
+     * drive the *inbound* side of it directly. `SessionCoordinator` keeps it private on purpose
+     * (CLAUDE.md rule 8), and this is the seam rather than a second owner.
+     */
+    private var lastVoiceController: VoiceController? = null
 
     /**
      * @param connect whether to walk the FSM to `CONNECTED` first. Only the rows that need the
@@ -231,15 +291,17 @@ class SessionCoordinatorAudioStateLifetimeTest {
                         ),
                     foregroundService = { },
                     buildVoiceController = { isLocalLeader ->
-                        VoiceController(
-                            scope = scope,
-                            engine = FixtureVoiceEngine(),
-                            audioSession = FixtureVoiceAudioSession(),
-                            transport = FixtureVoiceTransport(),
-                            isLocalLeader = isLocalLeader,
-                            localTrackId = "test-track",
-                            audioProcessing = AudioProcessingConfig(),
-                        )
+                        lastVoiceController =
+                            VoiceController(
+                                scope = scope,
+                                engine = FixtureVoiceEngine(),
+                                audioSession = FixtureVoiceAudioSession(),
+                                transport = FixtureVoiceTransport(),
+                                isLocalLeader = isLocalLeader,
+                                localTrackId = "test-track",
+                                audioProcessing = AudioProcessingConfig(),
+                            )
+                        requireNotNull(lastVoiceController)
                     },
                 )
             if (connect) coordinator.reachConnected()
@@ -443,6 +505,7 @@ class SessionCoordinatorAudioStateLifetimeTest {
         const val TIMEOUT_MS = 5_000L
         const val POLL_MS = 2L
         const val SETTLE_MS = 50L
+        const val MINIMAL_SDP = "v=0\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\na=mid:0\r\n"
         val LOCAL_IDENTITY =
             LocalHandshakeIdentity(
                 displayName = "test-device",

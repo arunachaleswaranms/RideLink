@@ -83,8 +83,23 @@ sealed class ControlEvent {
         val remotePeerId: PeerId,
     ) : ControlEvent()
 
+    /**
+     * The surviving control connection ended.
+     *
+     * [retiredAuthGeneration] is **the authentication generation that ended with it** — the one
+     * [ControlSessionManager.activateAuthenticatedSession] bound to that connection — or null when
+     * the connection never reached the trust gate, and so never authorised anything that could still
+     * be in flight (STATUS §4 problem 60, ADR-020 Amendment A7).
+     *
+     * It exists because this event is delivered **asynchronously**: `SessionCoordinator` consumes it
+     * from a flow, and by the time it does, `promote` may already have authenticated a *successor*
+     * whose own frames are queued downstream. A consumer that treats "a link was lost" as "discard
+     * whatever voice work is queued" therefore deletes the successor's. Naming the generation is what
+     * turns that into a question with an answer.
+     */
     data class LinkLost(
         val reason: LinkLossReason,
+        val retiredAuthGeneration: Long? = null,
     ) : ControlEvent()
 
     object DuplicateConnectionClosed : ControlEvent()
@@ -403,7 +418,9 @@ class ControlSessionManager(
     ) {
         scope.launch {
             if (!attemptConnection(host, port, local)) {
-                _events.tryEmit(ControlEvent.LinkLost(LinkLossReason.NETWORK))
+                // A dial that never connected authenticated nothing, so there is no generation to
+                // retire — `retiredAuthGeneration` is null by construction, not by omission.
+                _events.tryEmit(ControlEvent.LinkLost(LinkLossReason.NETWORK, retiredAuthGeneration = null))
             }
         }
     }
@@ -1024,6 +1041,12 @@ class ControlSessionManager(
             activeSocket = null
             endedDeliberately = reason != LinkLossReason.NETWORK
         }
+        // Captured **before** the record is cleared, and identity-checked against the socket that is
+        // actually ending, so it is the generation this connection's own activation assigned and not
+        // whatever happens to be authenticated (ADR-024 Amendment A7's rule, applied to the boundary
+        // itself). Null here means this connection never passed the trust gate, so it never admitted
+        // a `VOICE_*` frame and there is no semantic work for its loss to own (STATUS §4 problem 60).
+        val retiredAuthGeneration = authenticatedConnection?.takeIf { it.socket === socket }?.generation
         authenticatedConnection = null
         pendingActivation = null
         // A six-digit code belongs to one live TLS session (PROTOCOL §4.5.1). The moment that
@@ -1039,11 +1062,11 @@ class ControlSessionManager(
         when (reason) {
             LinkLossReason.NETWORK -> {
                 _diagnostics.update { it.copy(controlState = ControlState.RECONNECTING) }
-                _events.tryEmit(ControlEvent.LinkLost(reason))
+                _events.tryEmit(ControlEvent.LinkLost(reason, retiredAuthGeneration))
             }
             LinkLossReason.BYE -> {
                 _diagnostics.update { it.copy(controlState = ControlState.ENDED) }
-                _events.tryEmit(ControlEvent.LinkLost(reason))
+                _events.tryEmit(ControlEvent.LinkLost(reason, retiredAuthGeneration))
             }
             LinkLossReason.DUPLICATE_CONNECTION, LinkLossReason.USER_ENDED -> Unit
         }

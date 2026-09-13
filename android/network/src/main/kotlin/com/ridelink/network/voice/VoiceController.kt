@@ -382,19 +382,34 @@ class VoiceController(
      * (ARCHITECTURE §6.3/§6.4). Nothing is retried here — PROTOCOL §10's ladder is the only
      * reconnect loop in the app, and a second one competing with it is the bug the §2e hardening
      * pass fixed for the control plane.
+     *
+     * @param retiredControlGeneration **which** authentication generation ended, from
+     *   `ControlEvent.LinkLost` (STATUS §4 problem 60). Null when the connection never authenticated,
+     *   and therefore never admitted any semantic voice work to own. This controller is deliberately
+     *   retained across a control reconnect, so "the link is gone" and "*whose* link is gone" are
+     *   different questions and only the second one can safely decide what queued peer work is
+     *   discarded — see `VoiceInputMailbox.offer`.
      */
-    fun onControlLinkLost() {
+    fun onControlLinkLost(retiredControlGeneration: Long?) {
         lastFailure = VoiceFailure.CONTROL_LINK_LOST
-        offer(VoiceInput.ControlLinkLost)
+        offer(VoiceInput.ControlLinkLost(retiredControlGeneration))
     }
 
     /**
      * A `VOICE_*` frame that has **already** passed the ADR-019 trust gate. There is no other entry
      * point: an unauthenticated peer's frame is dropped by `ControlSessionManager` before it can
      * reach this method (PROTOCOL §7.1).
+     *
+     * [controlGeneration] is carried into the input unchanged and is **never** re-derived here:
+     * reading a live generation to label a frame that has already been read is exactly ADR-024
+     * Amendment A7's defect, and a `VoiceController` that outlives a reconnect has no live
+     * generation of its own to read in any case.
      */
-    override fun submit(signal: VoiceSignal) {
-        offer(VoiceInput.SignalReceived(signal, newVoiceSessionId()))
+    override fun submit(
+        signal: VoiceSignal,
+        controlGeneration: Long,
+    ) {
+        offer(VoiceInput.SignalReceived(signal, controlGeneration, newVoiceSessionId()))
     }
 
     /**
@@ -470,7 +485,10 @@ class VoiceController(
     private fun offer(input: VoiceInput) {
         val outcome = synchronized(mailboxLock) { mailbox.offer(input) }
         if (outcome is VoiceMailboxOutcome.CriticalOverflow || outcome is VoiceMailboxOutcome.TerminalPeerStateOverflow) {
-            synchronized(mailboxLock) { mailbox.offer(VoiceInput.ControlLinkLost) }
+            // `retiredControlGeneration = null`: an overflow is a local fact about *this* device's
+            // bounded queue, not a control-lifetime boundary, so it retires nothing and owns nobody's
+            // queued work (STATUS §4 problem 60). The degrade the reducer performs is identical.
+            synchronized(mailboxLock) { mailbox.offer(VoiceInput.ControlLinkLost(null)) }
         }
         doorbell.trySend(Unit)
     }
@@ -503,6 +521,14 @@ class VoiceController(
                 apply(next)
             }
         }
+        // A wake that applied nothing is still a wake that may have something to report: an input the
+        // mailbox **refused** rings this doorbell and then leaves the queues empty, so without this
+        // the retired-lifetime refusal count could only ever surface on the back of some *later*
+        // applied input (STATUS §4 problem 60). A counter that is only observable by accident is not
+        // surfaced. Safe here and nowhere else: this is the single consumer, so the state
+        // [publishDiagnostics] reads is not being mutated underneath it, and `MutableStateFlow`
+        // swallows an unchanged value.
+        publishDiagnostics()
     }
 
     /**
@@ -886,7 +912,11 @@ class VoiceController(
             synchronized(mailboxLock) {
                 DiagnosticsSnapshot(
                     mailboxOverflows = mailbox.overflowCount,
-                    retiredSignalDiscards = mailbox.discardedRetiredSignalCount,
+                    // Discarded **and** refused: the mailbox keeps the two apart because they are the
+                    // same fact caught at its two different instants, and the diagnostics screen has
+                    // one reason for "a peer signal its own control lifetime had already outlived"
+                    // (STATUS §4 problem 60).
+                    retiredSignalDiscards = mailbox.discardedRetiredSignalCount + mailbox.refusedRetiredSignalCount,
                     transmission = transmission,
                     setup = setup,
                 )

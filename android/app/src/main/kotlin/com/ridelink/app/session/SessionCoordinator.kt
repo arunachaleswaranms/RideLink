@@ -661,7 +661,12 @@ class SessionCoordinator(
                 // -> foreground-service-stop -> teardown order. A second, eager, fire-and-forget
                 // release here raced that ordering and could tell the platform capture was safe to
                 // reclaim before it actually was.
-                voice?.onControlLinkLost()
+                // The generation the event names, never a live read (STATUS §4 problem 60). This
+                // consumer is asynchronous with respect to `endConnection`, and an inbound promotion
+                // can authenticate a successor without passing through it at all, so by the time
+                // this runs the controller's mailbox may already hold the *successor's* admitted
+                // frames. Naming the retired lifetime is what stops this discarding them.
+                voice?.onControlLinkLost(event.retiredAuthGeneration)
             }
             ControlEvent.DuplicateConnectionClosed,
             ControlEvent.ReconnectBudgetExhausted,

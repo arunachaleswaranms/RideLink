@@ -60,7 +60,20 @@ public enum ControlEvent: Sendable {
     /// and always immediately before `.connected` — it is what carries `PAIRING -> CONNECTING` for
     /// a known peer, now that `.connected` no longer doubles as implicit pairing success.
     case peerTrusted(remotePeerId: PeerId)
-    case linkLost(reason: LinkLossReason)
+    /// The surviving control connection ended.
+    ///
+    /// `retiredAuthGeneration` is **the authentication generation that ended with it** — the one
+    /// `activateAuthenticatedSession` bound to that connection — or nil when the connection never
+    /// reached the trust gate, and so never authorised anything that could still be in flight
+    /// (STATUS §4 problem 60, ADR-020 Amendment A7).
+    ///
+    /// It exists because this event is delivered **asynchronously**: `SessionCoordinator` consumes it
+    /// from a channel and then defers the voice half into a `Task`, and by the time either runs,
+    /// `promote` may already have authenticated a *successor* whose own frames are queued downstream.
+    /// A consumer that treats "a link was lost" as "discard whatever voice work is queued" therefore
+    /// deletes the successor's. Naming the generation is what turns that into a question with an
+    /// answer.
+    case linkLost(reason: LinkLossReason, retiredAuthGeneration: Int64?)
     case duplicateConnectionClosed
     case reconnectBudgetExhausted
     /// The peer is unknown and PROTOCOL §4.5 pairing is required. Raised only on the **surviving**
@@ -451,7 +464,9 @@ public actor ControlSessionManager {
         Task {
             let succeeded = await self.attemptConnection(host: host, port: port, local: local)
             if !succeeded {
-                self.emit(.linkLost(reason: .network))
+                // A dial that never connected authenticated nothing, so there is no generation to
+                // retire — nil by construction, not by omission.
+                self.emit(.linkLost(reason: .network, retiredAuthGeneration: nil))
             }
         }
     }
@@ -1002,6 +1017,13 @@ public actor ControlSessionManager {
         guard activeSocket === socket else { return }
         activeSocket = nil
         endedDeliberately = reason != .network
+        // Captured **before** the record is cleared, and identity-checked against the connection that
+        // is actually ending, so it is the generation this connection's own activation assigned and
+        // not whatever happens to be authenticated (ADR-024 Amendment A7's rule, applied to the
+        // boundary itself). Nil here means this connection never passed the trust gate, so it never
+        // admitted a `VOICE_*` frame and there is no semantic work for its loss to own (STATUS §4
+        // problem 60).
+        let retiredAuthGeneration = authenticatedConnection.flatMap { $0.connection === socket ? $0.generation : nil }
         authenticatedConnection = nil
         pendingActivation = nil
         // A six-digit code belongs to one live TLS session (PROTOCOL §4.5.1). The moment that
@@ -1017,10 +1039,10 @@ public actor ControlSessionManager {
         switch reason {
         case .network:
             updateDiagnostics { $0.controlState = .reconnecting }
-            emit(.linkLost(reason: reason))
+            emit(.linkLost(reason: reason, retiredAuthGeneration: retiredAuthGeneration))
         case .bye:
             updateDiagnostics { $0.controlState = .ended }
-            emit(.linkLost(reason: reason))
+            emit(.linkLost(reason: reason, retiredAuthGeneration: retiredAuthGeneration))
         case .duplicateConnection, .userEnded:
             break
         }

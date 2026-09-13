@@ -783,7 +783,7 @@ public final class SessionCoordinator {
         }
         // Only after the FSM has been moved: `beginReconnect` requires `.reconnecting`, which is
         // exactly what the transition above establishes.
-        if case .linkLost(.network) = event { beginReconnectIfPossible() }
+        if case .linkLost(.network, _) = event { beginReconnectIfPossible() }
     }
 
     /// `async` (ADR-023 Amendment A3) purely to `await` the two `sharedLibrary` calls below to
@@ -819,12 +819,20 @@ public final class SessionCoordinator {
             publishAudioState(force: true)
             await sharedLibrary?.handleConnected()
             await syncPlayback?.handleConnected(isLocalLeader: isLocalLeader)
-        case .linkLost:
+        case .linkLost(_, let retiredAuthGeneration):
             // PROTOCOL §7.8: media goes, the capture device stays (ARCHITECTURE §6.3/§6.4), and nothing
             // is retried here — §10's control ladder is the app's only reconnect loop.
             if let voice {
                 let controller = voice
-                launchInSession { _ in await controller.onControlLinkLost() }
+                // The generation the event names, never a live read (STATUS §4 problem 60). This
+                // consumer is asynchronous with respect to `endConnection` and the call below is
+                // deferred once more into a `Task`, while an inbound promotion can authenticate a
+                // successor without passing through either — so by the time it runs, the controller's
+                // mailbox may already hold the *successor's* admitted frames. Naming the retired
+                // lifetime is what stops this discarding them.
+                launchInSession { _ in
+                    await controller.onControlLinkLost(retiredControlGeneration: retiredAuthGeneration)
+                }
             }
             // A `BYE`'s own release is **not** started here. `handleControlEvent` applies the FSM
             // transition this same event implies right after this method returns, and `BYE` always

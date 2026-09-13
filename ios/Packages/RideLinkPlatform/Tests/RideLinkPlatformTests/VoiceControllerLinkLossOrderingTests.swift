@@ -143,13 +143,16 @@ final class VoiceControllerLinkLossOrderingTests: XCTestCase {
         let harness = try await Harness(isLocalLeader: false)
         await harness.controller.start()
         try await harness.awaitAudioCall("open")
-        await harness.controller.onControlLinkLost()
+        await harness.controller.onControlLinkLost(retiredControlGeneration: Self.controlA)
         try await harness.awaitEngineCall("stop")
         let before = await harness.audio.captureCounts()
 
+        // The offer below is the **successor** lifetime's, so it names `controlB` — that is what
+        // distinguishes it from the retired lifetime's, and saying so is the whole of STATUS §4
+        // problem 60.
         await harness.controller.start()
         try await harness.settle()
-        harness.controller.submit(.offer(voiceSessionId: Self.genAt(901), sdp: Self.sdp))
+        harness.controller.submit(.offer(voiceSessionId: Self.genAt(901), sdp: Self.sdp), controlGeneration: Self.controlB)
         try await harness.awaitEngineCall("applyRemote(OFFER)")
         try await harness.awaitEngineCall("createAnswer")
 
@@ -174,19 +177,20 @@ final class VoiceControllerLinkLossOrderingTests: XCTestCase {
         try await harness.settle()
 
         // Lifetime A: the peer offered and this side is answering.
-        harness.controller.submit(.offer(voiceSessionId: Self.genAt(900), sdp: Self.sdp))
+        harness.controller.submit(.offer(voiceSessionId: Self.genAt(900), sdp: Self.sdp), controlGeneration: Self.controlA)
         try await harness.awaitEngineCall("createAnswer")
         await harness.transport.armSendGate(.offerOrAnswer)
         await harness.engine.emit(.answerCreated(voiceSessionId: Self.genAt(900), sdp: Self.sdp))
         try await harness.awaitCondition { await harness.transport.isSendGateHolding() }
 
         // Lifetime A ends. The consumer is parked inside the send, so nothing drains yet.
-        await harness.controller.onControlLinkLost()
+        await harness.controller.onControlLinkLost(retiredControlGeneration: Self.controlA)
 
         // The ladder reconnects, lifetime B authenticates, and B's peer offers. `VoiceSignalRelay`
         // admitted this frame against a live generation, so ADR-025 is satisfied: it is genuinely the
-        // successor's work.
-        harness.controller.submit(.offer(voiceSessionId: Self.genAt(901), sdp: Self.sdp))
+        // successor's work — and since problem 60 it *says* so, rather than being indistinguishable
+        // from A's.
+        harness.controller.submit(.offer(voiceSessionId: Self.genAt(901), sdp: Self.sdp), controlGeneration: Self.controlB)
 
         // Only now does lifetime A's write report that it failed.
         await harness.transport.releaseSendGate(result: false)
@@ -271,6 +275,149 @@ final class VoiceControllerLinkLossOrderingTests: XCTestCase {
             .filter { if case .offer = $0 { return true } else { return false } }.count
     }
 
+    /// **P60-1 — STATUS §4 problem 60, Window 1.** A retired lifetime's signal *admitted after* its own
+    /// link loss has already been applied.
+    ///
+    /// Reachable because nothing spans `VoiceSignalRelay.deliver`'s liveness check and its
+    /// `sink.submit`: `endConnection` clears the authenticated record from another actor, so a frame
+    /// can pass the check and be overtaken by the entire teardown — the link loss included — before it
+    /// is queued. Problem 50's discard runs at **offer** time and so cannot see it, and the table is by
+    /// then in `.idle` with `voiceSessionId = nil`, which is exactly the state `offerReceived` accepts
+    /// any generation in.
+    ///
+    /// This is the same failure problem 50 closed, reached by the one route its fix left open, and it
+    /// must now be refused by identity: A is retired, so A's work is inert whenever it arrives.
+    func testARetiredLifetimesOfferSubmittedAfterItsLinkLossCannotBeginANegotiation() async throws {
+        let harness = try await Harness(isLocalLeader: false)
+        await harness.controller.start()
+        try await harness.awaitAudioCall("open")
+
+        // Lifetime A ends and the teardown is fully applied — the consumer is not starved here.
+        await harness.controller.onControlLinkLost(retiredControlGeneration: Self.controlA)
+        try await harness.awaitEngineCall("stop")
+        try await harness.settle()
+        let calls = await harness.engine.recordedCalls()
+        let stopAt = try XCTUnwrap(calls.lastIndex(of: "stop"), "the link loss must stop the media transport")
+
+        // ...and only now does A's in-flight frame reach the mailbox.
+        harness.controller.submit(.offer(voiceSessionId: Self.genAt(900), sdp: Self.sdp), controlGeneration: Self.controlA)
+        try await harness.settle()
+
+        let afterTeardown = Array((await harness.engine.recordedCalls())[(stopAt + 1)...])
+        XCTAssertFalse(
+            afterTeardown.contains { $0.hasPrefix("start(") },
+            "a retired lifetime's offer must not rebuild the peer connection; after stop=\(afterTeardown)"
+        )
+        XCTAssertFalse(
+            afterTeardown.contains("applyRemote(OFFER)"),
+            "a retired lifetime's offer must not be applied; after stop=\(afterTeardown)"
+        )
+        XCTAssertFalse(
+            afterTeardown.contains("createAnswer"),
+            "a retired lifetime's offer must not be answered; after stop=\(afterTeardown)"
+        )
+        let status = await harness.controller.currentDiagnostics().status
+        XCTAssertEqual(status, .idle)
+        let sent = await harness.transport.sentSignals()
+        XCTAssertFalse(
+            sent.contains { if case .answer = $0 { return true } else { return false } },
+            "no answer may be produced for a retired lifetime's offer"
+        )
+        let refusals = await harness.controller.currentDiagnostics().droppedSignals[.retiredControlLifetime]
+        XCTAssertEqual(refusals, 1, "and the refusal is surfaced, not silent")
+        await harness.controller.shutdown()
+    }
+
+    /// **P60-2 — STATUS §4 problem 60, Window 2.** A successor lifetime's offer, queued *before* the
+    /// predecessor's link loss is delivered.
+    ///
+    /// `VoiceLifetimeProvenanceTests` proves the ordering is production's and needs no race:
+    /// `.linkLost` reaches this controller through `SessionCoordinator`'s event consumer and then one
+    /// further `launchInSession` `Task`, while `ControlSessionManager.promote` authenticates a
+    /// successor without waiting on either — so with the loss still unconsumed, generation 2's own
+    /// `VOICE_OFFER` is admitted and reaches the sink. Before this fix the loss then discarded it, and
+    /// since a peer never re-sends an offer, voice was wedged for the ride segment exactly as in
+    /// problem 56.
+    ///
+    /// The consumer is **parked inside a send** for the duration, the way the problem-57 regression
+    /// above parks it. That is what makes "both are queued when the boundary is offered" a fact rather
+    /// than a race against a real task: on this platform `submit` is `nonisolated` and needs none of
+    /// the actor's time, so without the park the consumer could drain either one first.
+    func testASuccessorsQueuedOfferSurvivesADelayedLinkLossForThePredecessor() async throws {
+        let harness = try await Harness(isLocalLeader: false)
+        await harness.controller.start()
+        try await harness.settle()
+
+        // Lifetime A: the peer offered and this side is answering. Parking the answer's write is what
+        // stops the consumer, so everything offered after this is genuinely still queued.
+        harness.controller.submit(.offer(voiceSessionId: Self.genAt(900), sdp: Self.sdp), controlGeneration: Self.controlA)
+        try await harness.awaitEngineCall("createAnswer")
+        await harness.transport.armSendGate(.offerOrAnswer)
+        await harness.engine.emit(.answerCreated(voiceSessionId: Self.genAt(900), sdp: Self.sdp))
+        try await harness.awaitCondition { await harness.transport.isSendGateHolding() }
+
+        // Lifetime B is already authenticated and its peer has offered...
+        harness.controller.submit(.offer(voiceSessionId: Self.genAt(901), sdp: Self.sdp), controlGeneration: Self.controlB)
+        // ...and only now is A's link loss delivered, out of the coordinator's event queue.
+        await harness.controller.onControlLinkLost(retiredControlGeneration: Self.controlA)
+
+        await harness.transport.releaseSendGate(result: true)
+        try await harness.awaitEngineCall("start(\(Self.genAt(901).value))")
+        try await harness.settle()
+
+        let calls = await harness.engine.recordedCalls()
+        let stopAt = try XCTUnwrap(calls.lastIndex(of: "stop"), "the retired lifetime's media must be stopped")
+        let afterTeardown = Array(calls[(stopAt + 1)...])
+        XCTAssertTrue(
+            afterTeardown.contains("applyRemote(OFFER)"),
+            "the successor lifetime's offer must survive the predecessor's link loss; after stop=\(afterTeardown)"
+        )
+        XCTAssertTrue(afterTeardown.contains("createAnswer"), "and must still be answered; after stop=\(afterTeardown)")
+        XCTAssertTrue(
+            afterTeardown.contains("start(\(Self.genAt(901).value))"),
+            "the rebuilt peer connection is the successor's; after stop=\(afterTeardown)"
+        )
+        let status = await harness.controller.currentDiagnostics().status
+        XCTAssertEqual(status, .negotiating, "a retired lifetime's boundary may not retire the successor's negotiation")
+        await harness.controller.shutdown()
+    }
+
+    /// P60-3 at the controller: **both** lifetimes have work queued when the predecessor's boundary is
+    /// offered, and only the predecessor's may be discarded. Same park, same reason.
+    func testADelayedLinkLossDiscardsOnlyTheRetiredLifetimesQueuedOffer() async throws {
+        let harness = try await Harness(isLocalLeader: false)
+        await harness.controller.start()
+        try await harness.settle()
+
+        // Park the consumer on lifetime A's own answer, so the two offers below are both still queued
+        // when the boundary arrives.
+        harness.controller.submit(.offer(voiceSessionId: Self.genAt(899), sdp: Self.sdp), controlGeneration: Self.controlA)
+        try await harness.awaitEngineCall("createAnswer")
+        await harness.transport.armSendGate(.offerOrAnswer)
+        await harness.engine.emit(.answerCreated(voiceSessionId: Self.genAt(899), sdp: Self.sdp))
+        try await harness.awaitCondition { await harness.transport.isSendGateHolding() }
+
+        harness.controller.submit(.offer(voiceSessionId: Self.genAt(900), sdp: Self.sdp), controlGeneration: Self.controlA)
+        harness.controller.submit(.offer(voiceSessionId: Self.genAt(901), sdp: Self.sdp), controlGeneration: Self.controlB)
+        await harness.controller.onControlLinkLost(retiredControlGeneration: Self.controlA)
+
+        await harness.transport.releaseSendGate(result: true)
+        try await harness.awaitEngineCall("start(\(Self.genAt(901).value))")
+        try await harness.settle()
+
+        let calls = await harness.engine.recordedCalls()
+        let stopAt = try XCTUnwrap(calls.lastIndex(of: "stop"))
+        let afterTeardown = Array(calls[(stopAt + 1)...])
+        XCTAssertTrue(afterTeardown.contains("createAnswer"), "B's offer is answered; after stop=\(afterTeardown)")
+        XCTAssertFalse(
+            afterTeardown.contains("start(\(Self.genAt(900).value))"),
+            "A's retired offer must never start anything after the boundary; after stop=\(afterTeardown)"
+        )
+        let status = await harness.controller.currentDiagnostics().status
+        XCTAssertEqual(status, .negotiating)
+        await harness.controller.shutdown()
+    }
+
     // MARK: - harness
 
     private final class Harness {
@@ -329,6 +476,12 @@ final class VoiceControllerLinkLossOrderingTests: XCTestCase {
     }
 
     private static let sdp = "v=0\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\na=mid:0\r\n"
+
+    /// Two **control authentication** generations, which are a different identity from the
+    /// `voice_session_id`s above: `ControlSessionManager.activateAuthenticatedSession` allocates
+    /// these, strictly increasing, one per trust-gate pass (STATUS §4 problem 60).
+    private static let controlA: Int64 = 1
+    private static let controlB: Int64 = 2
     /// A trivially thread-safe counter; `newVoiceSessionId` is a `@Sendable` closure.
     private final class ManagedAtomicCounter: @unchecked Sendable {
         private let lock = NSLock()
