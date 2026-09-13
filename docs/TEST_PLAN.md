@@ -733,6 +733,42 @@ depends on how fast the consumer happens to be scheduled — the mailbox's own b
 enforced synchronously regardless, but a *test* asserting overflow occurred needs the flood to win
 deterministically, not by chance on a fast machine.
 
+### 3.1c Voice lifetime across a control-session boundary — problems 50 and 56
+
+Added by the thirty-fifth session (`docs/STATUS.md` §2al, [ADR-020 Amendment A5](DECISIONS/ADR-020-webrtc-voice-foundation.md)).
+Both defects were **reproduced against unmodified production code before either was fixed**, and every
+regression below was re-run against the pre-fix sources to confirm it fails there — a regression that
+has never been seen to fail proves nothing.
+
+`VoiceControllerLinkLossOrderingTest` (Android) / `VoiceControllerLinkLossOrderingTests` (iOS):
+
+| ID | Interleaving | Pass condition |
+|---|---|---|
+| P50-A | A remote `VOICE_OFFER` is queued, then `ControlLinkLost` is queued, then the consumer runs | After the teardown's `stop`, **no** `start(…)`, `applyRemote(OFFER)` or `createAnswer`; status `IDLE`; no answer on the wire |
+| P50-B | The same for a queued `VOICE_ANSWER` | No `applyRemote(ANSWER)`; status `IDLE` (already inert via the generation guard — pinned so it stays that way) |
+| P50-C | The same for a queued `VOICE_ICE` | No `addRemoteCandidate` reaches the engine |
+| P50-D | The same for a terminal `VOICE_STATE` | Controller idle; nothing rebuilds the peer connection |
+| P50-E | The same for a queued peer `VOICE_STATE { negotiating }` on the **offerer** | No `start(…)`, no `createOffer`; status `IDLE` |
+| P50-F | A **fresh** offer after the link is restored | Still applied and answered; capture neither reopened nor closed |
+| P56-A | Start Voice pressed while the ladder is reconnecting (`send` returns false), then a reconnect | The rebuild puts a **new** offer on the wire; capture never closed |
+| P56-B | The same reached the other way — `StartRequested` and `ControlLinkLost` queued together | Identical outcome |
+
+Determinism differs by platform and the difference is deliberate: Android uses a `ManualDispatcher`,
+iOS uses `FakeVoiceAudioSession.armOpenGate()` to park the consumer inside `startLocalAudio` — a Swift
+actor is reentrant, so `submit` and `onControlLinkLost` still reach the mailbox while it is parked.
+
+`VoiceInputMailboxTest[s]` pins the ownership rule itself: a `ControlLinkLost` discards **every**
+queued peer signal and **no** local input, and `StopRequested` — which shares the teardown lane but is
+not a lifetime boundary — discards nothing.
+
+**Stress:** Android 30 consecutive clean runs, iOS 41, 0 failures each.
+
+**Not proven by any of this.** No real WebRTC, no real socket, no device. These are controller and
+mailbox properties; whether a real peer recovers a real voice session across a real Wi-Fi blip is
+**V-01…V-11**'s question and remains pending.
+
+---
+
 ### 3.1 The secure control channel — what is proven on a laptop, and what is not
 
 Phase 1b's security path is exercised end to end by `TlsControlChannelTest` (Android) and
@@ -932,6 +968,41 @@ No latency, throughput or storage-pressure number exists for either indexer or p
 (intercom + music coexistence on real hardware) is unchanged — Phase 3 built the player and library
 that A-01 will eventually exercise, but implemented none of the ducking/focus-arbitration behaviour
 A-01 tests, by design (Phase 6's job).
+
+---
+
+### 4.4 Phase 5 scheduled playback and drift — what the laptop now proves, and what it cannot
+
+Added by the thirty-fifth session (`docs/STATUS.md` §2al.3, closing §4 problem 41). STATUS previously
+recorded the iOS half as needing a simulator. **It does not**: `AVAudioEngine`, `AVAudioPlayerNode`
+and `AVAudioUnitVarispeed` are all available on macOS, which is why `AVAudioEnginePlayer` carries no
+`#if os(iOS)` gate. `Phase5RealPlayerTests` therefore runs in CI on every push, against the
+**production** player and the **production** `MonotonicDeadlineSleeper` — not a fake.
+
+**Proven, on the laptop/CI, against `test-media/synthetic/normal.m4a`:**
+
+| # | Claim | How it is measured |
+|---|---|---|
+| 1 | A future scheduled start does not fire early | An observation taken part-way through the wait, not the absence of a state never looked for |
+| 2 | A start lands at its monotonic deadline | Wake error **5.4 ms** single, **0.2–5.0 ms** over ten consecutive arms (Android emulator: 1.4–3.1 ms) |
+| 3 | An overdue deadline returns at once | Elapsed < 20 ms for a deadline 1 s in the past |
+| 4 | ±0.002 reaches the real varispeed node | Reported rate equals the requested rate |
+| 5 | The node is genuinely in the signal path | Wall-clock play-out of the 0.509 s fixture: **0.574 s / 0.308 s / 1.076 s** at rate 1.0 / 2.0 / 0.5 |
+| 6 | Correction ends at exactly 1.0 | Exact equality, not an epsilon (ADR-004, brief §38) |
+| 7 | A hard seek lands, and `load -> seek -> start` plays from the seek | Real position after the real seek |
+| 8 | `stop` leaves the engine reusable, and repeated cycles do not wedge it | 8 load/seek/play/stop cycles |
+
+**Measurement note, kept because it nearly produced a false finding.** Claim 5 measures time to the
+real segment-completion callback, **never `positionMs`**: `positionMs` derives from
+`playerTime(forNodeTime:)`, the player node's own output timeline, which is not a reliable witness to
+what a downstream unit does with those frames. A first attempt measured `positionMs` over a fixed
+600 ms window — longer than the 509 ms fixture — so both runs had simply ended, and the result read as
+"varispeed does nothing".
+
+**Not proven by any of the above.** There is no second device, no Bluetooth hop and no speaker in any
+of it. Every figure is a *software* figure in the same sense `SyncPlaybackDiagnostics.lastScheduleErrorUs`
+is. **§5.2's S-01…S-12 remain the only thing that can produce an alignment figure**, and the <100 ms
+product target and <50 ms stretch target must still not be described as approached.
 
 ---
 

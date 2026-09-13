@@ -458,7 +458,11 @@ The critical and ICE lanes, their capacities, and their overflow behaviour are u
 generation guard (Amendment A2, finding 1) is unchanged and its tests remain green.
 
 
-## Amendment A3 — 12 September 2026 — `VOICE_*` carries its control-session provenance
+## Amendment A4 — 12 September 2026 — `VOICE_*` carries its control-session provenance
+
+*(Renumbered from "A3" on 13 September 2026: two amendments were both written as A3. The 3 September
+entry above is the one `docs/STATUS.md` links to by anchor, so this later one takes A4. No content
+changed.)*
 
 [ADR-025 §2](ADR-025-inbound-control-frame-provenance.md) applies ADR-024 Amendment A7's rule to this
 ADR's message family: `VoiceSignalRelay.deliver` now takes the frame's authorising generation and
@@ -484,3 +488,114 @@ the reducer's correct behaviours are exactly what made a stale frame harmful:
 
 Both are pinned by `RetiredSessionProvenanceTest[s]`, which verify-fail against unmodified `326a145`.
 No wire change; `protocol/vectors/voice-signal/` and `voice-fsm/` regenerate byte-identically.
+
+
+## Amendment A5 — 13 September 2026 — a retired control lifetime's queued work may not negotiate, and an offer that was never sent may not look sent
+
+*Thirty-fifth session, the final Phase 5 software-closure audit. Two confirmed defects, both
+reproduced deterministically on both platforms before anything was changed, and both **outside**
+ADR-025's scope — which is the point of recording them here.*
+
+### The distinction that matters
+
+Amendment A4 (ADR-025) closed the question "was this frame's control session still live **when the
+frame arrived**?" Both defects below answer a different question, and neither is a provenance defect:
+
+> A frame that was admitted **entirely legitimately** — read while its control generation was live,
+> correctly passed by `VoiceSignalRelay.deliver` — can still be sitting in `VoiceInputMailbox` when
+> that lifetime ends.
+
+`VoiceInputMailbox` drains `TEARDOWN` before `CRITICAL` **on purpose**, so a stop or link loss is
+never delayed behind a flood. The consequence nobody had traced is that `ControlLinkLost` is applied
+*first*, resetting `VoiceNegotiation` to `IDLE`/`voiceSessionId = null` — and the queued frame is
+then reduced against that reset state.
+
+### Finding 1 (STATUS problem 50) — CONFIRMED, and reachable
+
+The mailbox's own doc claimed anything queued below a teardown "becomes inert on its own (the
+existing `VoiceEngineGeneration` / `voice_session_id` guard)". **That claim was false**, and
+precisely for the two branches that *begin* a negotiation rather than advance one:
+
+| branch | guard | after `controlLinkLost` |
+|---|---|---|
+| `answerReceived` | `state.voiceSessionId != answer.voiceSessionId` → drop | `null != id` → **dropped** ✅ |
+| `candidateReceived` | same shape | **dropped** ✅ |
+| `offerReceived` | `if (voiceSessionId != null && … && isNegotiationLive)` | `voiceSessionId` **is** null → guard **skipped** ❌ |
+| `peerWantsVoice` | `if (status.isNegotiationLive)` … `if (!localAudioOpen)` | `IDLE` + capture still open → **starts a negotiation** ❌ |
+
+Both vulnerable branches are guarded only *when there is a generation to compare*, and a teardown
+removes exactly that. `localAudioOpen` is deliberately preserved across a link loss (ARCHITECTURE
+§6.3/§6.4 — the capture device stays open for the ride segment), which is what puts the state into
+the one shape `offerReceived` accepts any generation in.
+
+Observed, on both platforms, after `StopMediaTransport` had already run: `engine.start(…)` rebuilt
+the peer connection, `applyRemote(OFFER)` applied the retired peer's SDP, `createAnswer` answered it,
+and the controller reported `negotiating` for a peer it had no link to.
+
+**Fix — the teardown that jumps the queue owns the remote work it jumped.** `VoiceInputMailbox.offer`
+discards every queued `SignalReceived` when a `ControlLinkLost` is offered, counting them as
+`VoiceSignalDropReason.RETIRED_CONTROL_LIFETIME`.
+
+Why **offer** time and not apply time, which is what makes this exact rather than a race:
+`ControlSessionManager.endConnection` clears `authenticatedConnection` **before** it emits
+`LinkLost`, and `VoiceSignalRelay.deliver` refuses any frame whose generation is not the live one.
+So nothing remote can enter the mailbox between the lifetime ending and this call, and a *later*
+lifetime's frames are offered strictly after it and are untouched. This is therefore not a blanket
+flush: it cannot discard a valid fresh generation's work even if the consumer is starved for an
+entire reconnect. A queue-contents check at *apply* time would have rested on exactly that timing
+assumption — the kind ADR-024 Amendment A6 explicitly rejected.
+
+Local inputs are deliberately kept. This user's consent, the engine's own callbacks and the intercom
+gate's state are not the retired peer's to withdraw, and the engine callbacks carry their own
+`voice_session_id` guard already. `StopRequested` shares the teardown lane and discards **nothing**:
+a user pressing End Voice is not a control-lifetime boundary.
+
+The overflow-induced synthetic `ControlLinkLost` discards too, and consistently so: in both cases the
+reducer is about to be reset to `IDLE` and must not then be handed a queued offer.
+
+### Finding 2 (STATUS problem 56) — CONFIRMED, and it needs no race at all
+
+Found while tracing Finding 1. `VoiceController.perform` **discarded the `Boolean`** that
+`VoiceSignalTransport.send` returns, for every action.
+
+`VoiceSignalRelay.send` returns false whenever there is no authenticated writer — which is the whole
+window between a link loss and PROTOCOL §10's ladder reconnecting. So:
+
+1. the user presses Start Voice while the ladder is reconnecting;
+2. an offer is created and "sent" into a `null` writer; the send fails silently;
+3. the table still advances to `NEGOTIATING`;
+4. `SessionCoordinator.attachVoice` rebuilds voice on the next `Connected` — and
+   `VoiceNegotiation.start` is **idempotent against a live negotiation**, deliberately, so that two
+   Start presses make one offer. The rebuild is a **no-op**;
+5. the peer's own `negotiating` intent hits the same idempotence coming back.
+
+**Voice is wedged for the rest of the ride segment, with no error anywhere.** STATUS's own note on
+problem 50 had reasoned that the resulting negotiation "has no writer and its `SendAnswer` fails
+closed" — this is that assumption tested, and it does not hold: failing closed on the wire left the
+*local* state advanced, which is the more damaging half.
+
+**Fix.** `SendOffer` and `SendAnswer` now force the degrade `offer` already uses for a critical-lane
+overflow: a `ControlLinkLost`, which resets the table to `IDLE` and drops the media transport while
+**keeping this user's capture device open**, which is exactly the state a reconnect rebuild needs to
+find. Deliberately **not** applied to `SendVoiceState` or `SendCandidate` — a lost state update is
+carried by the next one and trickle ICE is designed to lose candidates; neither strands a
+negotiation, and tearing media down for one would turn a recoverable blip into a rebuild.
+
+### What did not change
+
+No wire change, no new message type, no new `VoiceInput`, no change to `VoiceNegotiation`'s table and
+therefore **no vector change** — `protocol/vectors/voice-fsm/` passes unmodified on both platforms.
+The leader is still always the offerer, ICE is still an empty server list, `stop()` and `release()`
+are still two calls, `VOICE_*` is still absent from the pre-authentication allowlist, and
+`VoiceController` is still retained across a control reconnect with capture open.
+
+One new `VoiceSignalDropReason` (`RETIRED_CONTROL_LIFETIME`) is produced by the mailbox rather than by
+the table, exactly as `INPUT_MAILBOX_OVERFLOW` already is.
+
+### A note on the harness that hid Finding 2
+
+The iOS `VoiceController` test harness minted **one** `voice_session_id` for every call. Under that
+generator Finding 2 is invisible: the stranded `NEGOTIATING` state accepts the *next* negotiation's
+engine callback as its own, because the ids happen to be equal, and the wedge looks like health. The
+harness now mints a fresh id per negotiation the way `VoiceSessionIdGenerator` does. **A test double
+that is more deterministic than production can be deterministic about the wrong thing.**
