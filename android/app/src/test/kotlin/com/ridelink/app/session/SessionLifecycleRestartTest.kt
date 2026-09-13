@@ -698,7 +698,10 @@ class SessionLifecycleRestartTest {
     }
 
     private class NoOpVoiceTransport : VoiceSignalTransport {
-        override suspend fun send(signal: VoiceSignal): Boolean = false
+        override suspend fun send(
+            signal: VoiceSignal,
+            controlGeneration: Long?,
+        ): Boolean = false
     }
 
     private fun withSession(body: suspend (Sut) -> Unit) =

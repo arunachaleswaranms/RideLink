@@ -434,7 +434,10 @@ class SessionCoordinatorAudioStateLifetimeTest {
     }
 
     private class FixtureVoiceTransport : VoiceSignalTransport {
-        override suspend fun send(signal: VoiceSignal): Boolean = false
+        override suspend fun send(
+            signal: VoiceSignal,
+            controlGeneration: Long?,
+        ): Boolean = false
     }
 
     private class FixtureVoiceAudioSession : VoiceAudioSession {

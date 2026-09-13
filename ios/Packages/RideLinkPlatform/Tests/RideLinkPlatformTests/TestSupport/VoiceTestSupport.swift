@@ -260,13 +260,37 @@ actor RecordingVoiceTransport: VoiceSignalTransport {
     }
 
     private var log: [VoiceSignal] = []
+    private var generationLog: [Int64?] = []
+    private var attemptLog: [(VoiceSignal, Int64?)] = []
     var accept = true
     private var armedGate: SendGate?
     private var parked: CheckedContinuation<Bool, Never>?
 
+    /// Which control lifetime owns the surviving connection, as `VoiceSignalRelay` would see it
+    /// (ADR-020 Amendment A9). nil — the default — means **this fake refuses nothing**, which is
+    /// exactly what every suite written before Amendment A9 assumes: they describe one control
+    /// lifetime and assert what the table decided to send, not which connection it landed on.
+    ///
+    /// A suite that is about two lifetimes sets it, and then this fake enforces production's rule: a
+    /// frame authorised by a generation that no longer owns the connection is refused, so the
+    /// controller's `degradeIfUnsent` path runs for real rather than being simulated.
+    private var liveGeneration: Int64?
+    private var liveGenerationSet = false
+
     init() {}
 
+    func setLiveGeneration(_ generation: Int64?) {
+        liveGeneration = generation
+        liveGenerationSet = true
+    }
+
     func sentSignals() -> [VoiceSignal] { log }
+
+    /// One entry per `sentSignals()` entry, in the same order: the lifetime the frame was authorised by.
+    func sentGenerations() -> [Int64?] { generationLog }
+
+    /// Every attempted send, refused ones included — the only way to see a refusal at all.
+    func attemptedSends() -> [(VoiceSignal, Int64?)] { attemptLog }
 
     /// Models a control link with no authenticated writer: `VoiceSignalRelay.send` returns false for
     /// the whole window between a link loss and the §10 ladder reconnecting (STATUS §4 problem 56).
@@ -293,17 +317,31 @@ actor RecordingVoiceTransport: VoiceSignalTransport {
         parked = nil
     }
 
-    func send(_ signal: VoiceSignal) async -> Bool {
+    func send(_ signal: VoiceSignal, controlGeneration: Int64?) async -> Bool {
+        attemptLog.append((signal, controlGeneration))
         if let gate = armedGate, Self.matches(gate, signal) {
             armedGate = nil
             let result = await withCheckedContinuation { continuation in self.parked = continuation }
-            guard result else { return false }
-            log.append(signal)
+            // Production's rule, and read **after** the park: `VoiceSignalRelay` resolves the writer at
+            // the instant of the write, which is the whole point of parking one.
+            guard result, isBound(controlGeneration) else { return false }
+            record(signal, controlGeneration)
             return true
         }
-        guard accept else { return false }
-        log.append(signal)
+        guard accept, isBound(controlGeneration) else { return false }
+        record(signal, controlGeneration)
         return true
+    }
+
+    private func isBound(_ controlGeneration: Int64?) -> Bool {
+        guard liveGenerationSet else { return true }
+        guard let controlGeneration else { return false }
+        return controlGeneration == liveGeneration
+    }
+
+    private func record(_ signal: VoiceSignal, _ controlGeneration: Int64?) {
+        log.append(signal)
+        generationLog.append(controlGeneration)
     }
 
     private static func matches(_ gate: SendGate, _ signal: VoiceSignal) -> Bool {

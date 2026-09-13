@@ -253,6 +253,8 @@ class FakeVoiceAudioSession : VoiceAudioSession {
 /** Records the `VOICE_*` frames the controller decided to send. */
 class RecordingVoiceTransport : VoiceSignalTransport {
     private val log = CopyOnWriteArrayList<VoiceSignal>()
+    private val generationLog = CopyOnWriteArrayList<Long?>()
+    private val attemptLog = CopyOnWriteArrayList<Pair<VoiceSignal, Long?>>()
     var accept = true
 
     /**
@@ -270,7 +272,25 @@ class RecordingVoiceTransport : VoiceSignalTransport {
 
     private var gate: CompletableDeferred<Boolean>? = null
 
+    /**
+     * Which control lifetime owns the surviving connection, as `VoiceSignalRelay` would see it
+     * (ADR-020 Amendment A9). `null` — the default — means **this fake refuses nothing**, which is
+     * exactly what every suite written before Amendment A9 assumes: they describe one control
+     * lifetime and assert what the table decided to send, not which socket it landed on.
+     *
+     * A suite that is about two lifetimes sets it, and then this fake enforces production's rule:
+     * a frame authorised by a generation that no longer owns the connection is refused, so the
+     * controller's `degradeIfUnsent` path runs for real rather than being simulated.
+     */
+    var liveGeneration: (() -> Long?)? = null
+
     val sent: List<VoiceSignal> get() = log.toList()
+
+    /** One entry per [sent] entry, in the same order: the lifetime the frame was authorised by. */
+    val sentGenerations: List<Long?> get() = generationLog.toList()
+
+    /** Every attempted send, refused ones included — the only way to see a refusal at all. */
+    val attempted: List<Pair<VoiceSignal, Long?>> get() = attemptLog.toList()
 
     /** True while a [send] is suspended waiting for [release]. */
     val parked: Boolean get() = gate?.isCompleted == false
@@ -282,8 +302,12 @@ class RecordingVoiceTransport : VoiceSignalTransport {
         gate = null
     }
 
-    override suspend fun send(signal: VoiceSignal): Boolean {
-        val accepted =
+    override suspend fun send(
+        signal: VoiceSignal,
+        controlGeneration: Long?,
+    ): Boolean {
+        attemptLog.add(signal to controlGeneration)
+        val parked =
             if (parkWhen?.invoke(signal) == true) {
                 val pending = CompletableDeferred<Boolean>()
                 gate = pending
@@ -292,7 +316,14 @@ class RecordingVoiceTransport : VoiceSignalTransport {
             } else {
                 accept
             }
-        if (accepted) log.add(signal)
+        // Production's rule, and read **after** the park: `VoiceSignalRelay` resolves the writer at
+        // the instant of the write, which is the whole point of parking one.
+        val bound = liveGeneration?.let { live -> controlGeneration != null && controlGeneration == live() } ?: true
+        val accepted = parked && bound
+        if (accepted) {
+            log.add(signal)
+            generationLog.add(controlGeneration)
+        }
         return accepted
     }
 }
