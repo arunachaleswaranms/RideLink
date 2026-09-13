@@ -987,14 +987,15 @@ and `AVAudioUnitVarispeed` are all available on macOS, which is why `AVAudioEngi
 | 2 | A start **never wakes before** its deadline | Asserted strictly, per sample — this is `MonotonicDeadlineSleeper`'s own loop condition and holds on any machine |
 | 3 | An overdue deadline returns at once | Elapsed < 20 ms for a deadline 1 s in the past |
 | 4 | ±0.002 reaches the real varispeed node | Reported rate equals the requested rate |
-| 5 | The node is genuinely in the signal path | Wall-clock play-out of the 0.509 s fixture: **0.574 s / 0.308 s / 1.076 s** at rate 1.0 / 2.0 / 0.5 |
+| 5 | The node is genuinely in the signal path | Wall-clock play-out of the 0.509 s fixture: **0.574 s / 0.308 s / 1.076 s** at rate 1.0 / 2.0 / 0.5 — and **0.597 / 0.314 / 1.092 s** on the CI runner, i.e. within 4 %, unlike the wake error's ~20× spread. Resampling is the code's property; scheduling stall is the host's |
 | 6 | Correction ends at exactly 1.0 | Exact equality, not an epsilon (ADR-004, brief §38) |
 | 7 | A hard seek lands, and `load -> seek -> start` plays from the seek | Real position after the real seek |
 | 8 | `stop` leaves the engine reusable, and repeated cycles do not wedge it | 8 load/seek/play/stop cycles |
 
 **How late a wake is, is a property of the host, not of RideLink.** Measured: **5.4 ms** single and
 **0.2–5.0 ms** over ten arms on the development laptop (Android emulator: 1.4–3.1 ms), against
-**5.8–115.4 ms** for the same code on a shared GitHub `macos-26` runner. An initial 50 ms assertion
+**5.8–130.0 ms** for the same code on a shared GitHub `macos-26` runner (81.0 ms for the single arm).
+Every one of those was *after* the deadline; none was early. An initial 50 ms assertion
 failed in CI, and it was catching the runner. The suite therefore asserts the portable claim strictly
 and keeps only a loose structural bound on magnitude, reporting the actual numbers every run. **Do not
 tighten that bound to make a figure look better — it would test somebody else's machine.**

@@ -4892,13 +4892,19 @@ seek, `stop` leaves the engine reusable, and repeated cycles do not wedge it. Me
 
 | figure | this machine | GitHub `macos-26` runner |
 |---|---|---|
-| scheduled-start wake error (single) | **5.4 ms** | — |
-| wake error over 10 consecutive arms | **0.2 – 5.0 ms** | **5.8 – 115.4 ms** |
-| play-out of the ~0.509 s fixture at rate 1.0 / 2.0 / 0.5 | **0.574 s / 0.308 s / 1.076 s** | — |
+| scheduled-start wake error (single) | **5.4 ms** | **81.0 ms** |
+| wake error over 10 consecutive arms | **0.2 – 5.0 ms** | **5.8 – 130.0 ms** (two runs) |
+| play-out of the ~0.509 s fixture at rate 1.0 / 2.0 / 0.5 | **0.574 s / 0.308 s / 1.076 s** | **0.597 s / 0.314 s / 1.092 s** |
+
+**The two rows behave completely differently across hosts, and that is the finding.** The wake error
+is ~20× worse on the shared runner; the varispeed play-out is within 4 % of the laptop's. So the
+resampling result is a property of `AVAudioUnitVarispeed` and the scheduling result is a property of
+whoever is running the VM — which is why only the first is asserted tightly.
 
 The laptop figures are comparable to the Android emulator's measured 1.4–3.1 ms. **The CI column is
 recorded on purpose**: an initial 50 ms assertion failed there, and the honest reading is that it was
-catching the runner rather than a regression. `Task.sleep` overshoot on a shared virtualised host is
+catching the runner rather than a regression (CI's own green run then measured up to 130 ms, all of
+them **after** the deadline, never before). `Task.sleep` overshoot on a shared virtualised host is
 not a property of RideLink. The test now asserts strictly the claim that *is* portable — the sleeper
 never wakes **before** its deadline, which is its own loop condition — and keeps a deliberately loose
 upper bound that only a structural defect (a whole extra coarse cycle, the wrong quantity) could
