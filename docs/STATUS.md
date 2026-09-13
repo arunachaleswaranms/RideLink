@@ -5690,8 +5690,17 @@ Not blocking Phase 1. Answers needed before Phase 6.
 
 ## 7. Next exact task
 
-**Phase 5 — synchronized playback. SOFTWARE CLOSURE IS STILL *NOT* CLAIMED. REAL-DEVICE
-SYNCHRONIZED-PLAYBACK GATE PENDING.** Every laptop-runnable gate is green on both platforms. The task
+**Phase 5 — synchronized playback. SOFTWARE CLOSURE IS CLAIMED (§2al). REAL-DEVICE
+SYNCHRONIZED-PLAYBACK GATE PENDING.**
+
+The thirty-fifth session closed the last three rows that withheld it — **41** by executing iOS's
+production scheduled start and varispeed (which never needed a simulator), **50** by confirming it was
+reachable and fixing it, and **56**, which it found inside problem 50's own stated mitigation. The
+second-session lifecycle was swept fifty times and nothing was found. **42** and **43** are classified,
+not blockers: see §2al and the two bullets in §4. The wire did not move and no vector changed.
+
+Read the rest of this section as history: the reasoning below is why closure was withheld through the
+preceding passes, and it still explains *how* this codebase fails. Every laptop-runnable gate is green on both platforms. The task
 §7 previously named — fix the generation-origin defect A7 confirmed in Phase 4's manifest/transfer
 dispatch — **is done** (§2ai, ADR-025 §1 / ADR-023 Amendment A6, §4 problem 44 resolved). Every
 pre-existing vector set still regenerates byte-for-byte identically: the wire has not moved in any of
@@ -5816,16 +5825,24 @@ stopped short:
 
 **Immediately actionable next steps, in order:**
 
-1. **Independently verify ADR-025** (§2ai), and A1–A7 with it (§2ab–§2ah). Re-derive each finding from
-   the production code, not from this file. Start where §7's list above says this pass stopped short —
-   and in particular ask of every remaining "this family is exempt" whether the exemption has a gate
-   of its own.
-2. **Audit the area problem 53 made unobservable** (§2ak). Everything whose defect requires a *second*
-   session to notice has never been auditable: problem 54 was one button press away on `e48cf8a` and
-   survived thirteen audits for exactly that reason. Sweep for anything else that is installed once
-   per process, latched once per process, or reset on a boundary that never used to be crossed twice
-   — and do it with an end→restart harness, not by reading.
-3. **Run the scheduled-start path on the iOS simulator** (§4 problem 41's remaining half). The Android emulator half is done; there is no `Context`-shaped obstacle on iOS either.
+1. ~~**Independently verify ADR-025**~~ and ~~**audit the area problem 53 made unobservable**~~ and
+   ~~**run the iOS scheduled-start path**~~ — **all three done in §2al**, which confirmed problem 50,
+   found problem 56, closed problem 41 by execution and swept the second-session lifecycle fifty times
+   on both platforms without finding anything. **Software closure is claimed.** What §2al could *not*
+   do is anything involving a second device, which is why every step below is now hardware.
+2. **Get two real devices into this loop.** Unchanged since Phase 1a and now the **only** thing
+   blocking every remaining gate: (a) enable USB debugging on the OnePlus Nord 5; (b) set up a
+   development provisioning profile for the iPhone 17 Pro Max.
+3. **Run the Phase 5 gate**: S-01…S-12 (TEST_PLAN §5.2). This is the only thing that produces an
+   alignment figure or a drift p95 — **neither exists today**, and §2al.3's millisecond figures are
+   software wake errors, not audible alignment.
+4. **A twelfth audit is still worth running, and its brief is different from the eleven before it.**
+   Those all asked "is this code correct?" §2al found that two of the three rows it was handed were
+   *described* wrongly in this file, in opposite directions. So the next pass should audit **the
+   claims**, not only the code: take §4's rows and §3's "proven" column and re-derive reachability and
+   severity from production for each. A row that argues a problem is harmless is the highest-value
+   place to look — that is exactly where problem 56 was hiding.
+5. **Run the scheduled-start path on a real iPhone** (the half §2al genuinely could not reach). `AVAudioUnitVarispeed` is proven to resample on macOS; it has never run on the phone's own audio stack either.
 4. **Get two real devices into this loop.** Unchanged since Phase 1a and now blocking five gates: (a) enable USB debugging on the OnePlus Nord 5; (b) set up a development-team signing identity for the iPhone 17 Pro Max.
 5. **Run the Phase 1a gate**: I-01, I-05, I-06, I-07, I-08, I-14, I-15, I-17, I-22 — and **I-26**, ADR-026's own two-device gate (end a ride, start another, without relaunching).
 6. **Run the Phase 5 gate**: S-01…S-12 (TEST_PLAN §5.2). This is the only thing that produces an alignment figure or a drift p95 — neither exists today, and nothing in this audit changed that.
