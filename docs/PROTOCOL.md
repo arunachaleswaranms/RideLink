@@ -1066,6 +1066,31 @@ after the successor's `VOICE_OFFER` has already been applied. Note the direction
 time and generations strictly increase, so a newer lifetime having existed proves the owner's has
 ended. A negotiation that no boundary could retire would be a worse failure than the one this fixes.
 
+**Which lifetime may answer a held offer.** §7.3's held `VOICE_OFFER` — the one an answerer keeps
+because its user has not consented yet — is negotiation state too, and it belongs to the control
+lifetime that **delivered** it. Local consent arriving under a *different* lifetime does not transfer
+it (ADR-020 Amendment A9, STATUS §4 problem 63). If the consenting lifetime is **newer**, the held
+offer is discarded and the answerer states §7.3's intent-to-talk afresh instead: the offerer's own
+link died with the lifetime that carried the offer, so it has already torn its side down and no longer
+holds that `voice_session_id`, and answering it would name a generation the peer would refuse while
+moving the negotiation's owner to a lifetime whose boundary is not the one that should retire it. This
+is the same "rebuild as a fresh negotiation" the reconnect row above requires, reached through the
+mechanism that already exists rather than a second one. If the consenting lifetime is **older**, the
+press is the stale thing: consent is recorded and capture opened (ARCHITECTURE §6.4 may give no second
+foreground-visible chance) but no negotiation is started, and the held offer — the only copy the peer
+will ever send — is left for its own lifetime's consent.
+
+**Which link a `VOICE_*` frame may be written on.** Every outbound `VOICE_*` frame belongs to a
+negotiation, and therefore to that negotiation's control lifetime; it may be written **only** to the
+connection that lifetime owns (ADR-020 Amendment A9, STATUS §4 problem 64). Everything between the
+decision to send and the write suspends — the input queue's single consumer, the media engine's
+offer/answer callback, the transport's own dispatch and write lock — so the connection that is
+authenticated when the write happens is not necessarily the one that authorised the frame. A frame
+whose lifetime no longer owns the surviving connection is **refused, not redirected**, and the
+negotiation degrades exactly as it does for any other unsendable offer or answer. This too is
+receiver-local: there is no new field and nothing about it appears on the wire; the peer's view is
+simply that the frame was never sent.
+
 ### 7.9 Test vectors
 
 `protocol/vectors/voice-signal/` pins the message layer — every field, every bound, every

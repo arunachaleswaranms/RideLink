@@ -886,6 +886,64 @@ so it needs the fuller suite's contention to surface. Recorded as `docs/STATUS.m
 rather than fixed here, because it is not this change's and fixing it would edit a suite this change
 does not otherwise touch. **Every P61 row passed every run on both platforms.**
 
+#### Cross-lifetime authority: held offers and outbound sends (ADR-020 Amendment A9, §4 problems 63 and 64)
+
+`VoiceCrossLifetimeAuthorityTest` (Android) / `VoiceCrossLifetimeAuthorityTests` (iOS) — the review
+**of** Amendment A8. A8 gave a negotiation an owner; these are the two questions it did not ask, and
+production answered both wrongly. Same determinism sources as the P61 rows above, with the two new
+drop counters (`RETIRED_HELD_OFFER`, `SUPERSEDED_START_LIFETIME`) playing the role
+`SUPERSEDED_CONTROL_LIFETIME` plays there: they make a refusal observable, so no assertion has to
+sleep.
+
+`RecordingVoiceTransport` on both platforms now models production's outbound rule — a frame is written
+to the connection its authorising lifetime owns, or to none at all. It is **off by default**, so every
+suite written before this amendment is unchanged; only a suite that is about two lifetimes turns it on.
+
+| ID | Case | Pass condition |
+|---|---|---|
+| P63-A | A's offer held (no consent), A dies, B authenticates, tap Start **before** A's boundary is consumed | A's SDP is **not** applied and **not** answered; nothing naming A's `voice_session_id` is written; §7.3's intent-to-talk goes out on **B**; `RETIRED_HELD_OFFER` counted; capture opened once, closed zero. Then A's boundary is inert, B's fresh offer is answered under **B's own** `voice_session_id`, and capture is still never reopened |
+| P63-B | The opposite ordering: B's offer held, then a tap authorised by **A** is drained | No negotiation, nothing sent, no media touched; capture still opens (ARCHITECTURE §6.4); `SUPERSEDED_START_LIFETIME` counted; **B's held offer survives** and B's own consent then answers it, with capture opened exactly once across both presses |
+| P63-C | A held offer answered by **its own** lifetime's consent | Answered exactly as before Amendment A9, nothing counted. The fix must not make the ordinary path a refusal |
+| P64-A | An offerer's Start authorised by A, drained after B authenticated | Every attempt names **A**; nothing is written at all; the offer *is* attempted and refused rather than skipped; the negotiation degrades; capture opened once, closed zero. The rebuild under B then writes a **fresh** `voice_session_id` on B's wire, with capture still opened once |
+| P64-B | The answerer's intent-to-talk, same ordering | Refused and **degraded** — problem 59's wedge stays closed — then B's own intent goes out on B |
+| P64-C | The offer's write **parked inside `perform`**, the lifetime replaced underneath it, a `StopRequested` queued behind it, then the write released reporting success | The parked offer never lands on the successor; the queued stop is **not** erased (capture released exactly once); the failure never speaks as `ControlLinkLost` |
+| P64-D | `createOffer` dispatched under A, its callback resuming after B is live | The `voice_session_id` guard alone would pass it — the negotiation it names *is* live — so what refuses it is the owner the `SendOffer` carries. Nothing written; the offer attempt names A; the negotiation degrades |
+| P64-E | A refused send degrades, then A's boundary, then B's rebuild | B's rebuild survives everything A left behind: fresh `voice_session_id`, no SDP authorised by A ever written, capture opened once and never closed |
+| P64-P | Two real TLS sessions on one real `ControlSessionManager` (`VoiceLifetimeProvenanceTest[s]`) | `send(offer, generation 1)` after generation 2 authenticates returns **false**, is counted, and **never reaches the successor's peer**; `send(offer, nil)` likewise; `send(offer, generation 2)` is delivered, and the peer reads exactly one frame |
+
+The pure table's half is in `VoiceNegotiationVectorTest[s]`: four new rows for the held-offer and
+stale-press rules (both directions, plus the same-lifetime and no-owner cases), a `control_generation`
+on every outbound action in all 81 rows, and a new property on both platforms — *every outbound action
+names a control lifetime the table already held*, non-null and drawn from the state the table held
+before or after the transition, never invented.
+
+**Pre-fix proof, per half.** With **only** the held-offer rule reverted, P63-A and P63-B fail and all
+four P64 rows pass. With **only** the transport binding reverted, P64-A…D fail and both P63 rows pass.
+Neither fix is carrying the other. The original defect was first reproduced against *entirely
+unmodified* production sources — see `docs/STATUS.md` §2ap.1 for the trace.
+
+**Deliberately not asserted.** A stale `NegotiationSendFailed` applied *after* a successor's rebuild
+has been reduced is unreachable: the `SEND_FAILURE` lane outranks `CRITICAL` and the single consumer is
+parked inside `perform` for as long as the write is, so the failure is always reduced first. The
+reducer's guard against that ordering stays pinned in
+`negotiation-send-failed-from-a-retired-generation-is-inert`. Writing a controller test for it would
+have asserted a state no production ordering can produce — the Android draft of exactly that test
+passed **vacuously**, and the iOS run is what exposed it.
+
+**Stress:** 50 consecutive clean runs of the Android focused lifetime suite
+(`VoiceCrossLifetimeAuthorityTest`, `VoiceControlLifetimeOwnershipTest`,
+`VoiceControllerLinkLossOrderingTest`, `VoiceControllerMailboxTest`, `VoiceControllerStopAwaitTest`,
+`VoiceLifetimeProvenanceTest`) and 50 of the iOS equivalents — **0 failures each**, plus 20/20 on the
+whole Android `:network` suite and 10/10 on `test assembleDebug assembleRelease` together.
+
+**Two honest caveats.** The iOS 50-run loop first failed at run 12, and the defect was in **this
+pass's own new test**, not in production: `P64-P` reconnected before the manager had observed the
+first connection's loss, so `promote` sometimes left the successor unauthenticated. Both platforms now
+gate on `liveAuthenticatedGeneration()` going null and then reaching 2 — an observable, not a sleep —
+and the loop is 50/50. And one **unattributed** failure of `RetiredConnectionPairingTest` was seen
+once and did not reproduce in 30 further runs on this branch or 20 on the pre-change baseline; it is
+recorded as `docs/STATUS.md` §4 problem 65 rather than assigned to either side.
+
 `VoiceInputMailboxTest[s]` pins the lane and capacity rules within one control lifetime: a
 `ControlLinkLost` discards that lifetime's queued peer signals and **no** local input; `StopRequested` — which shares the teardown lane but is not
 a lifetime boundary — discards nothing, **and is never displaced by a `ControlLinkLost`** (the link

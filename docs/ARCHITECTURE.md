@@ -140,7 +140,7 @@ what "everything difficult lives there" means in practice for Phase 2b:
 |---|---|
 | `SessionFsm` | the session state machine (Phase 1a) |
 | `SessionGate` | which FSM event a control event implies — the trust gate ([ADR-019](DECISIONS/ADR-019-connected-means-authenticated.md)) |
-| `VoiceNegotiation` | who offers, what a stale callback may do, when capture is released, and **which authenticated control lifetime owns a live negotiation** ([ADR-020](DECISIONS/ADR-020-webrtc-voice-foundation.md) and its Amendment A8) |
+| `VoiceNegotiation` | who offers, what a stale callback may do, when capture is released, **which authenticated control lifetime owns a live negotiation**, and **which lifetime each outbound frame may be written on** ([ADR-020](DECISIONS/ADR-020-webrtc-voice-foundation.md) and its Amendments A8 and A9) |
 | `IntercomTransmission` | whether outbound audio leaves this phone ([ADR-021](DECISIONS/ADR-021-intercom-transmission-and-capture-ownership.md) §4) |
 | `AudioSessionLifecycle` | the platform audio session's route transitions, interruptions, resets and generation guard (ADR-021 §5) |
 | `RideStartPolicy` | whether an intercom start is legal (§6.4) |
