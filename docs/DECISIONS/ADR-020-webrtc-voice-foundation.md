@@ -739,3 +739,169 @@ capture open — no part of this touches the capture device.
 **Unlike A5, this does change the pure table**, so `protocol/vectors/voice-fsm/` gains four rows for
 the new input (its two accepting cases and its two guard cases) and a new file-level invariant.
 `tools/generate_voice_fsm_vectors.py` is the thing edited; the JSON is generated.
+
+---
+
+## Amendment A7 — 13 September 2026 — semantic voice work carries the control generation that admitted it, and a lifetime boundary names the one that ended
+
+**Status:** accepted.
+**Closes:** `docs/STATUS.md` §4 problem 60, which A6 opened and deliberately left open.
+**Opens:** `docs/STATUS.md` §4 problem 61 (see "The residue", below).
+
+### What A6 left
+
+A6 gave `ControlLinkLost` ownership of the remote signals queued below it (problem 50's fix) and took
+**offer time** as the instant at which that ownership was least wrong. A6 then re-audited its own
+claim and found it false in both directions, recorded the two windows as problem 60, and named the
+fix without doing it. This amendment does it.
+
+The defect in one line: **the discard had no lifetime identity.** `VoiceInput.SignalReceived` carried
+no control generation and `VoiceInput.ControlLinkLost` carried none either, so the mailbox could only
+express "discard every remote signal queued *right now*" — a statement about arrival order. Arrival
+order is not ownership, and the two windows are the two ways that shows.
+
+### Window 1 — a retired lifetime's signal admitted after its own boundary
+
+`VoiceSignalRelay.deliver` reads `liveGeneration()`, finds a match, parses, and calls `sink.submit`.
+Nothing spans the read and the submit: on Android `endConnection` runs on another coroutine, on iOS on
+another actor, and on neither platform is there a lock, a barrier or a suspension the teardown must
+wait behind. So a frame can pass the liveness check, be overtaken by the **entire** teardown — link
+loss included — and be offered afterwards. The discard runs at offer time and cannot see it, and the
+table is by then `IDLE` with `voiceSessionId = null`, which is exactly the state `offerReceived`
+accepts any generation in. That is problem 50's failure reached by the one route problem 50's fix left
+open: an SDP answered on a dead link.
+
+**Verdict: confirmed, and narrow.** It needs a thread or task to be descheduled between two adjacent
+unsynchronised reads of shared state. It is bounded to a single in-flight frame — `endConnection`
+closes the socket, so the read loop ends — and it is not reproducible at any seam the relay exposes.
+It is a real race all the same: "very unlikely" is not a serialization invariant, and nothing in
+production makes the ordering safe.
+
+### Window 2 — a successor lifetime's signal deleted by a delayed boundary
+
+`ControlEvent.LinkLost` does not reach `VoiceController` from `endConnection`. It is emitted into a
+flow (Android) or a handler feeding an ordered channel (iOS), consumed by `SessionCoordinator`, and on
+iOS deferred once more into `launchInSession`. Meanwhile `ControlSessionManager.promote` requires only
+that `activeSocket` be null — which `endConnection` has already done — so an **inbound** promotion
+authenticates a successor, starts its read loop and admits its frames **without waiting on that
+consumer at all**. `attachVoice` keeps the same `VoiceController` across a reconnect by design, and
+`ControlRelays.resetCounters` detaches no sink (problem 54), so the successor's frames reach the
+mailbox normally. The predecessor's link loss then arrives and deletes them.
+
+**Verdict: confirmed, wide, and not a race.** `VoiceLifetimeProvenanceTest[s]` holds a
+coordinator-shaped consumer on the link loss it is handed and shows generation 2 authenticating and
+its own `VOICE_OFFER` reaching the voice sink while that loss is still unconsumed. A peer does not
+re-send an offer, so deleting it wedges voice for the ride segment — problem 56's failure mode, down a
+different path.
+
+### The decision
+
+**Preserve the generation that authorised the work all the way to the semantic consumer.** This is
+ADR-025's provenance model, applied one layer below where ADR-025 stopped:
+
+1. `VoiceSignalSink.submit(signal, controlGeneration)`. The value is the frame's own —
+   `ReadFrameBinding.generation`, handed to `VoiceSignalRelay.deliver` and passed on unchanged.
+   `deliver` still *compares* it against `liveGeneration()` and still refuses a mismatch; what it must
+   never do is substitute the live read, because downstream the question stops being "is a session
+   live" and becomes "whose semantic work is this".
+2. `VoiceInput.SignalReceived(signal, controlGeneration, freshVoiceSessionId)`. Three identities, none
+   interchangeable: `controlGeneration` owns the authenticated control lifetime that admitted the
+   frame, `voice_session_id` owns one WebRTC negotiation, `freshVoiceSessionId` is an unused id the
+   reducer may consume. `VoiceNegotiation` reads the first **nowhere** — it is a lifetime concern, and
+   the table decides negotiations.
+3. `VoiceInput.ControlLinkLost(retiredControlGeneration)`, filled from
+   `ControlEvent.LinkLost(reason, retiredAuthGeneration)`, which `endConnection` captures from the
+   `AuthenticatedConnection` record **before** clearing it and identity-checks against the socket that
+   is actually ending. Null means no control lifetime ended — a connection that never authenticated,
+   or the mailbox-overflow degrade.
+4. `VoiceInputMailbox` decides on identity, at **both** instants, because either alone is
+   insufficient: a signal already queued when its lifetime is retired is **discarded**, and one
+   arriving afterwards is **refused** (`VoiceMailboxOutcome.RetiredGeneration`, counted in
+   `refusedRetiredSignalCount`, deliberately *not* an overflow).
+
+The invariant:
+
+> A semantic `VOICE_*` input may affect `VoiceNegotiation` only while the control generation that
+> admitted it has not been retired. Retiring generation A may discard or refuse A's semantic work, and
+> may never discard or refuse B's.
+
+### Retired-generation state: a monotonic floor, and why that is exact
+
+`retiredControlGenerationFloor` is one `Long?`/`Int64?` that only ever rises. That rests on facts
+about the producer, so they are stated rather than assumed, and
+`VoiceLifetimeProvenanceTest[s]` pins the one that is not obvious:
+
+- `activateAuthenticatedSession` is the only allocator, it does `authenticationGeneration += 1`, and
+  **nothing resets it** — `shutdown()` un-latches the manager for reuse without touching the counter,
+  which is exactly the path a full session restart takes.
+- A genuinely new ride session builds a **new** `VoiceController` and therefore a new mailbox with a
+  null floor: `SessionCoordinator.retireSession` clears `voice` synchronously and `attachVoice`
+  constructs a fresh one. The floor cannot outlive the counter that produced it.
+- Arrival order is irrelevant to it. ADR-024 Amendment A7 made generation *arrival* non-monotonic on
+  purpose; retirement is a statement about a lifetime, not about when its frames turn up. `max` is
+  what makes a link loss for an older generation arriving after a newer one has been retired add
+  nothing.
+
+A bounded set was considered and **rejected**: a bound must evict, and an evicted entry is a retired
+lifetime silently becoming live again. Monotonicity is what makes one number both exact and free of
+unbounded memory.
+
+### The second half of retirement, which a boundary alone cannot give
+
+A floor fed only by `ControlLinkLost` would still rest on that boundary arriving before the retired
+lifetime's late frame — the very timing assumption this amendment removes. So the mailbox also tracks
+`newestAdmittedControlGeneration` and treats a signal from any strictly older generation as stale.
+The inference is sound because `ControlSessionManager` holds exactly one `authenticatedConnection` at
+a time and allocates a strictly greater generation for each: **observing a frame admitted by B proves
+A ended before B was activated.**
+
+This is what closes Window 1 with no boundary in sight, and one lane makes it load-bearing rather than
+tidy. `COALESCED` is one slot per kind, latest wins, and PROTOCOL §7.3's `negotiating` intent-to-talk
+lives in it — so a retired lifetime's peer state arriving late would **overwrite** the successor's
+intent, losing the one message that starts the successor's negotiation. Coalescing *within* one live
+lifetime is untouched: the comparison is strictly `<`.
+
+### The overflow degrade is deliberately narrowed
+
+`VoiceController.offer` still answers a `CriticalOverflow`/`TerminalPeerStateOverflow` by forcing
+`ControlLinkLost` through the always-accepting teardown lane — but it now names **no** generation, so
+it retires nothing and **discards nothing**. CLAUDE.md rule 22's parenthetical licensed the old
+behaviour on the grounds that an overflow "is decided now, about the lifetime that is live now, so it
+owns what it discards". Under lifetime identity it owns nothing: no lifetime ended, every queued
+signal belongs to one that is still live, and deleting live work because something else went wrong is
+the defect this amendment exists to remove. The degrade itself is unchanged — the reducer still
+returns to `IDLE` and still stops the media transport — and the residual backlog then drains through
+the ordinary reducer path, which is what would have happened had the flood never overflowed.
+
+### The residue — problem 61, recorded rather than half-fixed
+
+A `ControlLinkLost(A)` applied **after** a successor's work has already been *reduced* returns the
+successor's live negotiation to `IDLE`. Suppressing such a boundary was implemented, tested, and
+**rejected**: admission is not application. A successor's admitted offer can be dropped by
+`offerReceived`'s `GENERATION_MISMATCH` against a still-live predecessor negotiation, so "a newer
+generation admitted something" does not imply its negotiation is live — and suppressing on that
+premise leaves a dead lifetime's negotiation standing, which then refuses every offer the successor
+sends. Both orderings wedge; the difference is only which one.
+
+Closing it properly means the pure table knowing which control lifetime owns a negotiation, which
+`StartRequested` (a local press, admitted by no frame) has no answer for. That is an ADR-scale change
+to `VoiceNegotiation` and its vectors, and it is **not** problem 60's. It is recorded as
+`docs/STATUS.md` §4 problem 61, with the regression that keeps the teardown unsuppressed in the
+meantime.
+
+### What did not change
+
+**No wire change, and no protocol vector change.** Control generation is receiver-local provenance
+derived from the authenticated connection: it is not on the wire, not negotiated, and not
+peer-influenceable. `protocol/vectors/voice-fsm/` is untouched *because* the reducer reads neither new
+field — the vector readers pass a constant, and that constant is itself the assertion that this is a
+lifetime concern and not a negotiation one. `vectors/session-gate/` is untouched for the same reason:
+`SessionGate` reads only `LinkLossReason`.
+
+The leader is still always the offerer, ICE is still an empty server list, `stop()` and `release()`
+are still two calls, `VOICE_*` is still absent from the pre-authentication allowlist, and
+`VoiceController` is still retained across a control reconnect with capture open. An ordinary
+reconnect still keeps the microphone open, stops the old media transport, retires the old lifetime's
+signalling, admits the successor's, and rebuilds per §7.8. A6's `NegotiationSendFailed` is untouched
+and stays negotiation-scoped: a failed send still never speaks as a lifetime boundary, and still
+retires no control generation.

@@ -742,11 +742,15 @@ defect here was **reproduced against unmodified production code before it was fi
 regression below was re-run against the pre-fix sources to confirm it fails there — a regression that
 has never been seen to fail proves nothing.
 
-**One caveat this section must carry, because A5 asserted the opposite.** The problem-50 discard is
-scoped by **arrival order**, not by lifetime identity. A5's claim that offer time makes it "exact
-rather than a race" is false in both directions and is now `docs/STATUS.md` §4 problem 60 — open,
-classified, and not closed by anything below. Nothing in this section proves that a retired frame
-cannot be admitted *after* the discard, or a successor's *before* it.
+**The caveat this section carried is gone, and what replaced it is below.** The problem-50 discard used
+to be scoped by **arrival order** rather than by lifetime identity, and A5's claim that offer time made
+it "exact rather than a race" was false in both directions (`docs/STATUS.md` §4 problem 60). ADR-020
+Amendment A7 closed it: every semantic `VOICE_*` input now carries the control generation that admitted
+it, every lifetime boundary names the generation that ended, and the rows below are joined by the P60
+rows that pin the identity itself. **One residue is still open and is not closed by anything here** —
+a boundary applied after a successor's work has already been *reduced* retires the successor's
+negotiation (§4 problem 61). The rows below prove nothing about that case, and the one obvious fix for
+it was implemented and rejected as strictly worse.
 
 `VoiceControllerLinkLossOrderingTest` (Android) / `VoiceControllerLinkLossOrderingTests` (iOS):
 
@@ -763,6 +767,9 @@ cannot be admitted *after* the discard, or a successor's *before* it.
 | **A-1** | A `SendOffer`/`SendAnswer` **parks in flight**; the lifetime ends; a successor authenticates and its peer's fresh `VOICE_OFFER` is admitted; only then does the parked send report `false` | The successor's offer is **applied and answered**; status `NEGOTIATING` on the successor's generation. *Problem 57* |
 | **A-2** | The same parked send, but a `StopRequested` is queued before it reports `false` | The stop is still applied — capture released exactly once. A degrade may not erase the input `shutdown()`/`retireSession` completes on (ADR-026 / rule 21). *Problem 57* |
 | **P59** | An **answerer** presses Start Voice while the ladder is reconnecting, so its intent-to-talk `VOICE_STATE { negotiating }` cannot be sent; then a reconnect | The rebuild puts a **new** `negotiating` intent on the wire; capture never closed. *Problem 59 — problem 56's untouched half* |
+| **P60-1** | Generation A's link loss is applied **first**, and only then is A's in-flight `VOICE_OFFER` submitted (Window 1) | The offer is **refused**: no `start(…)`, no `applyRemote(OFFER)`, no `createAnswer`, no answer on the wire, status `IDLE`, and one `RETIRED_CONTROL_LIFETIME` drop — surfaced, not silent. *Problem 60* |
+| **P60-2** | Generation B's `VOICE_OFFER` is queued, and only then is generation **A**'s link loss delivered (Window 2) | B's offer is **applied and answered** on B's own generation; status `NEGOTIATING`; **no** `RETIRED_CONTROL_LIFETIME` drop. *Problem 60* |
+| **P60-3c** | Both A's and B's offers are queued when A's boundary is offered | Only B's survives and is answered; A's never starts anything after the boundary. *Problem 60* |
 
 Determinism differs by platform and the difference is deliberate: Android uses a `ManualDispatcher`,
 iOS uses `FakeVoiceAudioSession.armOpenGate()` to park the consumer inside `startLocalAudio` — a Swift
@@ -773,8 +780,65 @@ which suspends the controller's single consumer *inside* `perform`. That is the 
 `VoiceSignalRelay.send` suspends at `withContext(ioDispatcher)`, a write lock and a socket `flush()`
 on Android, and at three actor-releasing `await`s on iOS — not a contrivance.
 
-`VoiceInputMailboxTest[s]` pins the ownership rules themselves: a `ControlLinkLost` discards **every**
-queued peer signal and **no** local input; `StopRequested` — which shares the teardown lane but is not
+**P60-2 and P60-3c park the same transport on iOS, and that is a correction rather than a preference.**
+Written without it they submitted a signal and then delivered a boundary, relying on the real consumer
+task not draining in between — which it sometimes did: 3 failures in 50 runs, and the failure was a
+real defect (§4 problem 61) rather than flake. Parking the consumer inside a send makes "both are
+queued when the boundary is offered" a fact. Android's `ManualDispatcher` already gave that for free.
+
+### 3.1c Lifetime identity itself — ADR-020 Amendment A7
+
+The rows above are the *controller's* behaviour. Two more suites pin the identity the controller now
+decides on, and they exist because a controller test alone cannot distinguish "the right rule" from
+"the right ordering on this machine".
+
+`VoiceMailboxLifetimeIdentityTest` (Android) / `VoiceMailboxLifetimeIdentityTests` (iOS) — the pure
+half. Every case is a straight-line sequence of `offer` calls with **no scheduling in it at all**,
+which is the point: if any answer depended on when something ran, the file could not exist.
+
+| ID | Case | Pass condition |
+|---|---|---|
+| P60-3 | A's and B's signals both queued, then A retires | A's is discarded and counted; B's survives, carrying B's generation |
+| P60-4 | A retires first, then A's and B's signals arrive | A's is **refused** (`RetiredGeneration`, counted, and **not** an overflow); B's is accepted. Verdicts identical to P60-3 — the only difference is arrival order, which is what must not matter |
+| P60-4a | Every lane a peer signal can occupy (critical / ICE / terminal / coalesced) | A retirement reaches all four and **no** local input; B's four are then all accepted |
+| P60-4b | A's late signal offered while B's is queued, with **no** boundary delivered at all | Refused — B's admitted work is itself the proof that A ended. The `COALESCED` slot still holds B's §7.3 intent-to-talk |
+| P60-4c | Two peer states from the **same** generation | Still coalesce to the newest — the comparison is strictly `<` |
+| P60-5 | A → B → C, retiring A then B, with late signals from each | Every retired generation's work is inert; C's is accepted; a late boundary for an *older* generation cannot lower the floor |
+| P60-6 | A genuinely new session's mailbox | No floor, nothing retired. The producer half is `VoiceLifetimeProvenanceTest[s]` below |
+| P60-7 | `StopRequested` | Retires nothing, discards nothing, and is never displaced by a link loss (problem 57 / ADR-026 rule 21) |
+| P60-8 | `NegotiationSendFailed` | Retires no control generation and discards no successor work — a send failure stays negotiation-scoped (problem 57) |
+| P60-9 | A link loss naming **no** generation (the mailbox-overflow degrade) | Tears down, retires nothing, discards nothing |
+| P60-10 | A link loss offered when a newer generation has already admitted work | **Still delivered to the reducer.** The teardown is never suppressed — see §4 problem 61 for why suppressing it is worse |
+
+`VoiceLifetimeProvenanceTest` (Android) / `VoiceLifetimeProvenanceTests` (iOS) — the production half,
+against real `ControlSessionManager` code:
+
+| ID | Case | Pass condition |
+|---|---|---|
+| P60-R1 | `deliver` with a `liveGeneration` supplier that **changes between calls** | The sink is handed the frame's own generation, not the one live afterwards. Anything that re-read live state to label the frame would be caught here |
+| P60-R2 | `deliver` with a frame whose own generation is not live | Still refused and counted (ADR-025 unchanged) |
+| P60-R3 | One manager: connect, `shutdown()`, connect again | `authenticationGeneration` strictly increases and is **never reset** — the fact the monotonic floor rests on |
+| P60-R4 | Two real TLS sessions on one manager, with a coordinator-shaped consumer **held** on generation 1's `LinkLost` | Generation 2 authenticates and its own `VOICE_OFFER` reaches the voice sink, labelled generation 2, with the loss still unconsumed. This is Window 2, and it is not a race |
+| P60-R5 | A dial that never connected | Its `LinkLost` names **no** generation — nothing authenticated, so nothing is retired |
+
+`SessionCoordinatorAudioStateLifetimeTest` (Android only) adds the two coordinator rows: a `LinkLost`
+naming the predecessor leaves a successor's later signal admissible, and one naming a generation
+refuses that generation's. **There is no iOS equivalent**, because `ios/RideLink/` has no test bundle
+at all (`docs/STATUS.md` §4 problem 48). Both ends of the iOS wiring are tested and the wiring itself
+is one exhaustive pattern match; that is not the same as testing the middle.
+
+**Pre-fix proof.** Every row above was run against the focused production change **reverted** to its
+pre-amendment arrival-order semantics, on both platforms. Android: 10 of 13 pure rows, all three
+controller rows and one coordinator row fail. iOS: 10 of 13 pure rows and 11 assertions across the
+controller rows fail. The two characteristic outputs are the defects themselves — Window 1 as
+`after stop=[start(…900), applyRemote(OFFER), createAnswer]`, Window 2 as
+`calls=[setMicrophoneMuted(true), stop]` with status `idle`.
+
+**Stress:** 50 consecutive clean runs per suite per platform, 0 failures, after the iOS controller
+rows were made deterministic.
+
+`VoiceInputMailboxTest[s]` pins the lane and capacity rules within one control lifetime: a
+`ControlLinkLost` discards that lifetime's queued peer signals and **no** local input; `StopRequested` — which shares the teardown lane but is not
 a lifetime boundary — discards nothing, **and is never displaced by a `ControlLinkLost`** (the link
 loss's discard still happens; only its slot is yielded, and a `StopRequested` offered over a pending
 `ControlLinkLost` still replaces it); and a `NegotiationSendFailed` discards nothing, outranks the
