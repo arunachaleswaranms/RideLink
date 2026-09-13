@@ -600,17 +600,26 @@ public final class SessionCoordinator {
         // between two links, which records consent and starts no negotiation — see
         // `VoiceInput.startRequested`'s `controlGeneration` (STATUS §4 problem 61).
         let generation = controlSessionManager.liveAuthenticatedGeneration()
-        Task { await voice.start(controlGeneration: generation) }
+        // **Session-owned, not unstructured** (ADR-026 rule 21, STATUS §4 problem 67). `start` is
+        // actor-isolated on the controller — unlike `setPushToTalkHeld`, it stamps `VoiceSetupTimeline`
+        // — so this press cannot reach the bounded mailbox without a hop, and a bare `Task` here is a
+        // continuation this session started that nothing cancels and nothing joins. `retireSession`
+        // could then emit `.teardownComplete` with a press still in flight against the controller it is
+        // about to shut down. `launchInSession` is the registry that makes cancellation *and* joining
+        // the session's, and it is the only thing that changes: the hop itself stays, because it is
+        // what the actor requires, and STATUS §4 problem 66 is about what the table does with a press
+        // that arrives late rather than about preventing one.
+        launchInSession { _ in await voice.start(controlGeneration: generation) }
     }
 
     public func endIntercom() {
         guard let voice else { return }
-        Task { await voice.stop() }
+        launchInSession { _ in await voice.stop() }
     }
 
     public func setMicrophoneMuted(_ muted: Bool) {
         guard let voice else { return }
-        Task { await voice.setMicrophoneMuted(muted) }
+        launchInSession { _ in await voice.setMicrophoneMuted(muted) }
     }
 
     /// The PTT control's current position. Gates the outbound WebRTC track and **nothing else** — no
@@ -657,7 +666,7 @@ public final class SessionCoordinator {
             // rebuilds under is the lifetime that emitted this `.connected`, and it becomes the owner
             // of the rebuilt negotiation (STATUS §4 problem 61).
             if voiceDiagnostics.localAudioOpen {
-                Task { await voice.start(controlGeneration: authGeneration) }
+                launchInSession { _ in await voice.start(controlGeneration: authGeneration) }
             }
             return
         }
