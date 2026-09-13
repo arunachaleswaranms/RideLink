@@ -122,15 +122,21 @@ class VoiceCrossLifetimeAuthorityTest {
         }
 
     /**
-     * **P63-B — the opposite ordering, which the same rule has to get right in the other direction.**
+     * **P63-B1 — the opposite ordering, which A9 got safe and A10 got live** (STATUS §4 problem 66).
      *
      * The press is the stale thing: the user tapped Start while A was live, the tap sat in the
-     * mailbox, and B's offer was admitted and reduced first. Answering B's offer *under A* would send
-     * an answer no link could carry and destroy the only copy of that offer. Consent is honoured;
-     * the negotiation is not started; B's held offer survives for B's own consent to answer.
+     * mailbox, and B's offer was admitted and reduced first. A9 refused the press outright and left
+     * B's offer held — safe, and **not live**: the offerer sends one `VOICE_OFFER` per
+     * `voice_session_id` (PROTOCOL §7.4), `attachVoice`'s §7.8 rebuild has already run and found no
+     * open capture, and the user has already consented, so nothing would press Start again.
+     *
+     * A10 separates the press's two halves. Its **control authority** is stale and contributes
+     * nothing; its **consent** is ride-segment state and is exactly as valid as when the user tapped.
+     * The held offer supplies the authenticated lifetime and the `voice_session_id`, so the
+     * negotiation is B's from creation — and progresses from this one event, with no second press.
      */
     @Test
-    fun `a start authorised by a retired lifetime keeps a newer lifetime's held offer intact`() =
+    fun `a start authorised by a retired lifetime answers a newer lifetime's held offer under that lifetime`() =
         withController(isLocalLeader = false) { answerer, fakes, dispatcher, live ->
             answerer.submit(VoiceSignal.Offer(genAt(B_OFFER), SDP_B), CONTROL_B)
             dispatcher.runAll()
@@ -140,30 +146,124 @@ class VoiceCrossLifetimeAuthorityTest {
             answerer.start(CONTROL_A)
             dispatcher.runAll()
 
-            assertEquals(VoiceStatus.IDLE, answerer.diagnostics.value.status, "a dead lifetime starts no negotiation")
-            assertTrue(fakes.transport.sent.isEmpty(), "and sends nothing; sent=${fakes.transport.sent}")
-            // The capture gate's own `setMicrophoneMuted` is not a negotiation effect: opening the
-            // device is what the consent *did*, and ADR-021 §4 routes the gate's absolute value
-            // through the table on every intercom input. Nothing that touches WebRTC may appear.
-            assertTrue(
-                fakes.engine.calls.none { it.startsWith("start(") || it.startsWith("applyRemote") || it == "createAnswer" },
-                "and touches no media; calls=${fakes.engine.calls}",
+            val calls = fakes.engine.calls.toList()
+            assertTrue(calls.contains("applyRemote(OFFER)"), "B's offer must be applied; calls=$calls")
+            assertTrue(calls.contains("createAnswer"), "calls=$calls")
+            val diagnostics = answerer.diagnostics.value
+            assertEquals(VoiceStatus.NEGOTIATING, diagnostics.status)
+            assertEquals(
+                genAt(B_OFFER).toString(),
+                diagnostics.voiceSessionPrefix,
+                "B's own id, never a fresh one",
             )
-            assertEquals(1, fakes.audio.openCaptureCount, "but consent is still consent (ARCHITECTURE §6.4)")
+            assertTrue(diagnostics.localAudioOpen, "consent is consent")
+            assertNull(
+                diagnostics.droppedSignals[VoiceSignalDropReason.SUPERSEDED_START_LIFETIME],
+                "the press was not refused — only its control authority was ignored",
+            )
+            assertNull(
+                diagnostics.droppedSignals[VoiceSignalDropReason.RETIRED_HELD_OFFER],
+                "and B's offer was not discarded",
+            )
+            assertEquals(1, fakes.audio.openCaptureCount)
+            assertEquals(0, fakes.audio.closeCaptureCount)
+        }
+
+    /**
+     * **P63-B2 — the answer that negotiation produces is B's, on B's link.**
+     *
+     * The press named A. Nothing the press authored may name A, because the authority the answer
+     * carries came from the held offer rather than from the press — problem 64's transport rule is
+     * the enforcement, and [RecordingVoiceTransport.liveGeneration] is production's own.
+     */
+    @Test
+    fun `the answer a stale start produces is written on the held offer's own lifetime`() =
+        withController(isLocalLeader = false) { answerer, fakes, dispatcher, live ->
+            answerer.submit(VoiceSignal.Offer(genAt(B_OFFER), SDP_B), CONTROL_B)
+            dispatcher.runAll()
+            live.set(CONTROL_B)
+            answerer.start(CONTROL_A)
+            dispatcher.runAll()
+
+            answerer.emitAnswer(fakes, genAt(B_OFFER))
+            dispatcher.runAll()
+
+            assertTrue(
+                fakes.transport.attempted.none { it.second == CONTROL_A },
+                "nothing the stale press produced may even be attempted on A; attempts=${fakes.transport.attempted}",
+            )
+            val sent = fakes.transport.sent
+            assertTrue(
+                sent.any { it is VoiceSignal.Answer && it.namesSession(genAt(B_OFFER)) },
+                "sent=$sent",
+            )
+            assertTrue(
+                sent.any {
+                    it is VoiceSignal.State && it.voiceSessionId == genAt(B_OFFER) && it.state == VoiceWireState.CONNECTING
+                },
+                "§7.4's connecting, naming B's generation; sent=$sent",
+            )
+            assertTrue(fakes.transport.sentGenerations.all { it == CONTROL_B }, "generations=${fakes.transport.sentGenerations}")
+            assertEquals(VoiceStatus.CONNECTING, answerer.diagnostics.value.status)
+        }
+
+    /**
+     * **P63-B3 — A's delayed boundary is inert against the negotiation it did not own.**
+     *
+     * Amendment A8's rule, and exactly why the owner had to stay B in P63-B1: had the press moved
+     * ownership to A, A's own boundary would then have torn down a negotiation live on B's link.
+     */
+    @Test
+    fun `a delayed boundary for the stale press's lifetime does not retire the held offer's negotiation`() =
+        withController(isLocalLeader = false) { answerer, fakes, dispatcher, live ->
+            answerer.submit(VoiceSignal.Offer(genAt(B_OFFER), SDP_B), CONTROL_B)
+            dispatcher.runAll()
+            live.set(CONTROL_B)
+            answerer.start(CONTROL_A)
+            dispatcher.runAll()
+            fakes.engine.calls.clear()
+
+            answerer.onControlLinkLost(CONTROL_A)
+            dispatcher.runAll()
+
+            assertEquals(
+                VoiceStatus.NEGOTIATING,
+                answerer.diagnostics.value.status,
+                "B's negotiation survives A's boundary",
+            )
             assertEquals(
                 1,
-                answerer.diagnostics.value.droppedSignals[VoiceSignalDropReason.SUPERSEDED_START_LIFETIME],
-                "and the refusal is surfaced",
+                answerer.diagnostics.value.droppedSignals[VoiceSignalDropReason.SUPERSEDED_CONTROL_LIFETIME],
+                "and the preserved successor is surfaced",
             )
+            assertFalse(fakes.engine.calls.contains("stop"), "no media was torn down; calls=${fakes.engine.calls}")
+            assertEquals(0, fakes.audio.closeCaptureCount)
+        }
 
-            // B's own consent answers B's own held offer — the only copy, still there.
-            answerer.start(CONTROL_B)
+    /** **P63-B4 — B's own boundary retires it, normally.** §7.8: media goes, capture stays. */
+    @Test
+    fun `the held offer's own lifetime still retires the negotiation it established`() =
+        withController(isLocalLeader = false) { answerer, fakes, dispatcher, live ->
+            answerer.submit(VoiceSignal.Offer(genAt(B_OFFER), SDP_B), CONTROL_B)
             dispatcher.runAll()
-            val calls = fakes.engine.calls.toList()
-            assertTrue(calls.contains("applyRemote(OFFER)"), "calls=$calls")
-            assertTrue(calls.contains("createAnswer"), "calls=$calls")
-            assertEquals(VoiceStatus.NEGOTIATING, answerer.diagnostics.value.status)
-            assertEquals(1, fakes.audio.openCaptureCount, "capture opened once across both presses")
+            live.set(CONTROL_B)
+            answerer.start(CONTROL_A)
+            dispatcher.runAll()
+            fakes.engine.calls.clear()
+
+            answerer.onControlLinkLost(CONTROL_B)
+            dispatcher.runAll()
+
+            val diagnostics = answerer.diagnostics.value
+            assertEquals(VoiceStatus.IDLE, diagnostics.status, "the negotiation resets")
+            assertNull(diagnostics.voiceSessionPrefix)
+            assertTrue(diagnostics.localAudioOpen, "capture is the ride segment's, not the link's")
+            assertTrue(fakes.engine.calls.contains("stop"), "calls=${fakes.engine.calls}")
+            assertFalse(
+                fakes.engine.calls.contains("release"),
+                "and is never released by a link loss; calls=${fakes.engine.calls}",
+            )
+            assertEquals(0, fakes.audio.closeCaptureCount)
         }
 
     /** A held offer answered by **its own** lifetime's consent is untouched — A8's behaviour, kept. */

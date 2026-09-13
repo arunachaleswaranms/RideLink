@@ -88,13 +88,18 @@ final class VoiceCrossLifetimeAuthorityTests: XCTestCase {
         await harness.controller.shutdown()
     }
 
-    /// **P63-B — the opposite ordering, which the same rule has to get right in the other direction.**
+    /// **P63-B1 — the opposite ordering, which A9 got safe and A10 got live** (STATUS §4 problem 66).
     ///
-    /// The press is the stale thing: the user tapped Start while A was live, the tap sat in the mailbox,
-    /// and B's offer was admitted and reduced first. Answering B's offer *under A* would send an answer
-    /// no link could carry and destroy the only copy of that offer. Consent is honoured; the negotiation
-    /// is not started; B's held offer survives for B's own consent to answer.
-    func testAStartAuthorisedByARetiredLifetimeKeepsANewerLifetimesHeldOfferIntact() async throws {
+    /// The press is the stale thing: the user tapped Start while A was live, the tap sat in the mailbox, and
+    /// B's offer was admitted and reduced first. A9 refused the press outright and left B's offer held — safe,
+    /// and **not live**: the offerer sends one `VOICE_OFFER` per `voice_session_id` (PROTOCOL §7.4), the §7.8
+    /// rebuild has already run, and the user has already consented, so nothing would have pressed Start again.
+    ///
+    /// A10 separates the press's two halves. Its **control authority** is stale and contributes nothing; its
+    /// **consent** is ride-segment state and is exactly as valid as when the user tapped. The held offer
+    /// supplies the authenticated lifetime and the `voice_session_id`, so the negotiation is B's from
+    /// creation — and progresses from this one event, with no second press anywhere.
+    func testAStartAuthorisedByARetiredLifetimeAnswersANewerLifetimesHeldOfferUnderThatLifetime() async throws {
         let harness = try await Harness(isLocalLeader: false)
 
         harness.controller.submit(.offer(voiceSessionId: Self.bOffer, sdp: Self.sdpB), controlGeneration: Self.controlB)
@@ -102,24 +107,107 @@ final class VoiceCrossLifetimeAuthorityTests: XCTestCase {
 
         await harness.setLiveGeneration(Self.controlB)
         await harness.controller.start(controlGeneration: Self.controlA)
-        try await harness.awaitDrop(.supersededStartLifetime, 1)
+        try await harness.awaitEngineCall("createAnswer")
+
+        let calls = await harness.engine.recordedCalls()
+        XCTAssertTrue(calls.contains("applyRemote(OFFER)"), "B's offer must be applied; calls=\(calls)")
+        // Published one drain later than the engine call — see `VoiceConsentAcrossLifetimesTests`.
+        try await harness.awaitCondition { await harness.controller.currentDiagnostics().localAudioOpen }
+        let diagnostics = await harness.controller.currentDiagnostics()
+        XCTAssertEqual(diagnostics.status, .negotiating)
+        XCTAssertEqual(diagnostics.voiceSessionPrefix, Self.bOffer.description, "B's own id, never a fresh one")
+        XCTAssertTrue(diagnostics.localAudioOpen, "consent is consent")
+        XCTAssertNil(
+            diagnostics.droppedSignals[.supersededStartLifetime],
+            "the press was not refused — only its control authority was ignored"
+        )
+        XCTAssertNil(diagnostics.droppedSignals[.retiredHeldOffer], "and B's offer was not discarded")
+        let counts = await harness.audio.captureCounts()
+        XCTAssertEqual(counts.opened, 1)
+        XCTAssertEqual(counts.closed, 0)
+        await harness.controller.shutdown()
+    }
+
+    /// **P63-B2 — the answer that negotiation produces is B's, on B's link.**
+    ///
+    /// The press named A. Nothing the press authored may name A, because the authority the answer carries
+    /// came from the held offer rather than from the press (problem 64's transport rule is the enforcement).
+    func testTheAnswerAStaleStartProducesIsWrittenOnTheHeldOffersOwnLifetime() async throws {
+        let harness = try await Harness(isLocalLeader: false)
+        harness.controller.submit(.offer(voiceSessionId: Self.bOffer, sdp: Self.sdpB), controlGeneration: Self.controlB)
+        try await harness.awaitPeerRequest()
+        await harness.setLiveGeneration(Self.controlB)
+        await harness.controller.start(controlGeneration: Self.controlA)
+        try await harness.awaitEngineCall("createAnswer")
+
+        await harness.engine.emit(.answerCreated(voiceSessionId: Self.bOffer, sdp: Self.sdpB))
+        try await harness.awaitSent { signals in signals.contains { if case .answer = $0 { true } else { false } } }
+
+        let attempts = await harness.transport.attemptedSends()
+        XCTAssertFalse(
+            attempts.contains { _, generation in generation == Self.controlA },
+            "nothing the stale press produced may even be attempted on A; attempts=\(attempts.map(\.1))"
+        )
+        let sent = await harness.transport.sentSignals()
+        XCTAssertTrue(
+            sent.contains { if case .answer(let id, _) = $0 { id == Self.bOffer } else { false } },
+            "sent=\(sent)"
+        )
+        XCTAssertTrue(
+            sent.contains { if case .state(let id, let wire, _, _) = $0 { id == Self.bOffer && wire == .connecting } else { false } },
+            "§7.4's connecting, naming B's generation; sent=\(sent)"
+        )
+        let status = await harness.controller.currentDiagnostics().status
+        XCTAssertEqual(status, .connecting)
+        await harness.controller.shutdown()
+    }
+
+    /// **P63-B3 — A's delayed boundary is inert against the negotiation it did not own.**
+    ///
+    /// This is Amendment A8's rule, and it is exactly why the owner had to stay B in P63-B1: had the press
+    /// moved ownership to A, A's own boundary would then have torn down a negotiation live on B's link.
+    func testADelayedBoundaryForTheStalePressesLifetimeDoesNotRetireTheHeldOffersNegotiation() async throws {
+        let harness = try await Harness(isLocalLeader: false)
+        harness.controller.submit(.offer(voiceSessionId: Self.bOffer, sdp: Self.sdpB), controlGeneration: Self.controlB)
+        try await harness.awaitPeerRequest()
+        await harness.setLiveGeneration(Self.controlB)
+        await harness.controller.start(controlGeneration: Self.controlA)
+        try await harness.awaitEngineCall("createAnswer")
+        await harness.engine.clearCalls()
+
+        await harness.controller.onControlLinkLost(retiredControlGeneration: Self.controlA)
+        try await harness.awaitDrop(.supersededControlLifetime, 1)
 
         let status = await harness.controller.currentDiagnostics().status
-        XCTAssertEqual(status, .idle, "a dead lifetime starts no negotiation")
-        let sent = await harness.transport.sentSignals()
-        XCTAssertTrue(sent.isEmpty, "and sends nothing; sent=\(sent)")
+        XCTAssertEqual(status, .negotiating, "B's negotiation survives A's boundary")
         let calls = await harness.engine.recordedCalls()
-        XCTAssertFalse(calls.contains("createAnswer"), "and touches no media; calls=\(calls)")
+        XCTAssertFalse(calls.contains("stop"), "and no media was torn down; calls=\(calls)")
         let counts = await harness.audio.captureCounts()
-        XCTAssertEqual(counts.opened, 1, "but consent is still consent (ARCHITECTURE §6.4)")
+        XCTAssertEqual(counts.closed, 0)
+        await harness.controller.shutdown()
+    }
 
-        // B's own consent answers B's own held offer — the only copy, still there.
-        await harness.controller.start(controlGeneration: Self.controlB)
+    /// **P63-B4 — B's own boundary retires it, normally.** §7.8: media goes, capture stays.
+    func testTheHeldOffersOwnLifetimeStillRetiresTheNegotiationItEstablished() async throws {
+        let harness = try await Harness(isLocalLeader: false)
+        harness.controller.submit(.offer(voiceSessionId: Self.bOffer, sdp: Self.sdpB), controlGeneration: Self.controlB)
+        try await harness.awaitPeerRequest()
+        await harness.setLiveGeneration(Self.controlB)
+        await harness.controller.start(controlGeneration: Self.controlA)
         try await harness.awaitEngineCall("createAnswer")
-        let after = await harness.engine.recordedCalls()
-        XCTAssertTrue(after.contains("applyRemote(OFFER)"), "calls=\(after)")
-        let openedAgain = await harness.audio.captureCounts()
-        XCTAssertEqual(openedAgain.opened, 1, "capture opened once across both presses")
+        await harness.engine.clearCalls()
+
+        await harness.controller.onControlLinkLost(retiredControlGeneration: Self.controlB)
+        try await harness.awaitCondition { await harness.engine.recordedCalls().contains("stop") }
+
+        let diagnostics = await harness.controller.currentDiagnostics()
+        XCTAssertEqual(diagnostics.status, .idle, "the negotiation resets")
+        XCTAssertNil(diagnostics.voiceSessionPrefix)
+        XCTAssertTrue(diagnostics.localAudioOpen, "capture is the ride segment's, not the link's")
+        let calls = await harness.engine.recordedCalls()
+        XCTAssertFalse(calls.contains("release"), "and is never released by a link loss; calls=\(calls)")
+        let counts = await harness.audio.captureCounts()
+        XCTAssertEqual(counts.closed, 0)
         await harness.controller.shutdown()
     }
 
