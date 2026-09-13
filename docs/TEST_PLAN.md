@@ -879,9 +879,12 @@ P61 row passed every run on both platforms, and the Android loop recorded one fa
 **not** a P61 row and **not** a product defect — `VoiceControllerIntercomTest > a link loss keeps
 capture and the rebuild does not reopen it` asserts on a *published diagnostics field* immediately
 after awaiting an *engine call* that `stopMediaTransport` records **before** `publishEngineDiagnostics`
-runs, so the snapshot it reads can still be the pre-boundary one. It is a pre-existing test-side race,
-measured at 0/60 in isolation and reproduced on the pre-change baseline; it is recorded as
-`docs/STATUS.md` §4 problem 62 rather than fixed here, because it is not this change's.
+runs, so the snapshot it reads can still be the pre-boundary one. It is a **pre-existing** test-side
+race: 1 failure in 50 on this branch, **1 in 50 on the pre-change baseline** (PR #2's head, `eb26a84`,
+where a *different* test of the same class fails the same way), and 0 in 60 with the class run alone,
+so it needs the fuller suite's contention to surface. Recorded as `docs/STATUS.md` §4 problem 62
+rather than fixed here, because it is not this change's and fixing it would edit a suite this change
+does not otherwise touch. **Every P61 row passed every run on both platforms.**
 
 `VoiceInputMailboxTest[s]` pins the lane and capacity rules within one control lifetime: a
 `ControlLinkLost` discards that lifetime's queued peer signals and **no** local input; `StopRequested` — which shares the teardown lane but is not
