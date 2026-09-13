@@ -4890,13 +4890,19 @@ at its monotonic deadline, an overdue deadline returns at once, ±0.002 reaches 
 node, correction returns to **exactly** 1.0, a hard seek lands, `load -> seek -> start` plays from the
 seek, `stop` leaves the engine reusable, and repeated cycles do not wedge it. Measured:
 
-| figure | value |
-|---|---|
-| scheduled-start wake error (single) | **5.4 ms** |
-| wake error over 10 consecutive arms | **0.2 – 5.0 ms** |
-| play-out of the ~0.509 s fixture at rate 1.0 / 2.0 / 0.5 | **0.574 s / 0.308 s / 1.076 s** |
+| figure | this machine | GitHub `macos-26` runner |
+|---|---|---|
+| scheduled-start wake error (single) | **5.4 ms** | — |
+| wake error over 10 consecutive arms | **0.2 – 5.0 ms** | **5.8 – 115.4 ms** |
+| play-out of the ~0.509 s fixture at rate 1.0 / 2.0 / 0.5 | **0.574 s / 0.308 s / 1.076 s** | — |
 
-Comparable to the Android emulator's measured 1.4–3.1 ms.
+The laptop figures are comparable to the Android emulator's measured 1.4–3.1 ms. **The CI column is
+recorded on purpose**: an initial 50 ms assertion failed there, and the honest reading is that it was
+catching the runner rather than a regression. `Task.sleep` overshoot on a shared virtualised host is
+not a property of RideLink. The test now asserts strictly the claim that *is* portable — the sleeper
+never wakes **before** its deadline, which is its own loop condition — and keeps a deliberately loose
+upper bound that only a structural defect (a whole extra coarse cycle, the wrong quantity) could
+exceed. Magnitude is reported as a measurement, not asserted as a budget.
 
 **One methodological note worth keeping.** The varispeed assertion measures wall-clock time to the
 real segment-completion callback, **not** `positionMs`. `positionMs` comes from
