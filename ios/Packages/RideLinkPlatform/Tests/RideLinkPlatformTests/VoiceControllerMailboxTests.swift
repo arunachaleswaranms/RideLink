@@ -239,12 +239,16 @@ final class VoiceControllerMailboxTests: XCTestCase {
         try await harness.awaitCondition {
             (await harness.controller.currentDiagnostics().droppedSignals[.inputMailboxOverflow] ?? 0) > 0
         }
-        // Let the residual backlog (all role-violation drops, since this side never became the
-        // answerer) fully settle before judging the state a clean slate. Exactly `criticalCapacity`
-        // offers were ever accepted into the lane -- the rest were refused outright by the overflow
-        // check above and never reach the reducer at all.
+        // Let the residual backlog fully settle before judging the state a clean slate. The overflow
+        // degrade forces a `.controlLinkLost` through the always-accepting teardown lane, and since
+        // STATUS §4 problem 50 that teardown also **discards** the peer offers queued below it --
+        // consistently for the synthetic degrade and for a real link loss, because in both cases the
+        // reducer is about to be reset to `.idle` and must not then be handed a queued offer, which
+        // is exactly the state `offerReceived` accepts any generation in. So the backlog now settles
+        // as `.retiredControlLifetime` rather than as role-violation drops.
         try await harness.awaitCondition {
-            (await harness.controller.currentDiagnostics().droppedSignals[.roleViolation] ?? 0) >= VoiceInputMailbox.criticalCapacity
+            (await harness.controller.currentDiagnostics().droppedSignals[.retiredControlLifetime] ?? 0)
+                >= VoiceInputMailbox.criticalCapacity
         }
         let settledStatus = await harness.controller.currentDiagnostics().status
         XCTAssertEqual(settledStatus, .idle, "nothing ever started, so the flood must settle back to idle")

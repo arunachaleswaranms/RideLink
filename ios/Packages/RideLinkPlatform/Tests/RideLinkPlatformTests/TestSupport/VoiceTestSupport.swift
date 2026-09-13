@@ -143,6 +143,8 @@ actor FakeVoiceAudioSession: VoiceAudioSession {
     /// How many times the capture path was **actually** opened (a no-op re-open does not count).
     private(set) var openCaptureCount = 0
     private(set) var closeCaptureCount = 0
+    private var openGateArmed = false
+    private var openGate: CheckedContinuation<Void, Never>?
 
     init() {}
 
@@ -163,7 +165,33 @@ actor FakeVoiceAudioSession: VoiceAudioSession {
         sink?(next)
     }
 
+    /// Suspends the next `open()` until `releaseOpenGate()` is called.
+    ///
+    /// The mailbox consumer runs `startLocalAudio` inside `apply`, so gating `open` parks the consumer
+    /// mid-input at a known point. That is what makes an interleaving deterministic on this platform:
+    /// `VoiceController` is an actor with a doorbell-driven consumer task and no injectable dispatcher,
+    /// so there is no `ManualDispatcher` equivalent of Android's -- but a Swift actor is reentrant, so
+    /// `submit` (nonisolated) and `onControlLinkLost` (isolated) both still run while the consumer is
+    /// suspended here. Used by `VoiceControllerLinkLossOrderingTests`.
+    func armOpenGate() {
+        openGateArmed = true
+    }
+
+    func releaseOpenGate() {
+        openGateArmed = false
+        openGate?.resume()
+        openGate = nil
+    }
+
+    /// True once the consumer is actually parked inside `open()`, as opposed to merely armed. Tests
+    /// wait on this so the interleaving is a fact rather than a hope.
+    func isGateHolding() -> Bool { openGate != nil }
+
     func open() async -> Result<Void, VoiceAudioSessionError> {
+        if openGateArmed {
+            openGateArmed = false
+            await withCheckedContinuation { continuation in self.openGate = continuation }
+        }
         calls.append("open")
         // The real sessions are idempotent — `IosVoiceAudioSession.open` returns early when already
         // open, and `AndroidVoiceAudioSession` likewise — so an already-open session does not count as a
@@ -192,6 +220,10 @@ actor RecordingVoiceTransport: VoiceSignalTransport {
     init() {}
 
     func sentSignals() -> [VoiceSignal] { log }
+
+    /// Models a control link with no authenticated writer: `VoiceSignalRelay.send` returns false for
+    /// the whole window between a link loss and the §10 ladder reconnecting (STATUS §4 problem 56).
+    func setAccept(_ value: Bool) { accept = value }
 
     func send(_ signal: VoiceSignal) async -> Bool {
         guard accept else { return false }

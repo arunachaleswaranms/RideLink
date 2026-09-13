@@ -425,6 +425,33 @@ public actor VoiceController: VoiceSignalSink {
     }
 
     // swiftlint:disable:next cyclomatic_complexity
+    /// STATUS §4 problem 56. The `Bool` from `VoiceSignalTransport.send` used to be discarded for
+    /// every action in `perform` -- and for an offer or an answer that silently loses a
+    /// **negotiation**, not just a frame.
+    ///
+    /// `VoiceSignalRelay.send` returns false whenever there is no authenticated writer -- which is
+    /// exactly the window between a link loss and the §10 ladder reconnecting. A Start pressed in that
+    /// window created an offer nothing could carry, and the table still advanced to `.negotiating`.
+    /// `VoiceNegotiation.start` is idempotent against a live negotiation on purpose (two Start presses
+    /// must make one offer), so `SessionCoordinator.attachVoice`'s reconnect rebuild then did nothing
+    /// at all, the peer's own `negotiating` intent hit the same idempotence coming back, and voice
+    /// stayed wedged for the rest of the ride segment with no error anywhere.
+    ///
+    /// The response is the degrade `offer` already uses for a critical-lane overflow, and for the same
+    /// reason: a critical thing could not happen, so mirror a real control-link blip rather than invent
+    /// a new failure path. It resets the table to `.idle` and drops the media transport while
+    /// **keeping this user's capture device open** (ARCHITECTURE §6.3/§6.4), which is precisely the
+    /// state a reconnect rebuild needs to find.
+    ///
+    /// Deliberately **not** applied to `.sendVoiceState` or `.sendCandidate`: a lost state update is
+    /// carried by the next one, and trickle ICE is designed to lose candidates. Neither strands a
+    /// negotiation, and tearing media down for one would turn a recoverable blip into a rebuild.
+    private func degradeIfUnsent(_ sent: Bool) {
+        guard !sent else { return }
+        lastFailure = .controlLinkLost
+        mailbox.offer(.controlLinkLost, doorbell: doorbell)
+    }
+
     private func perform(_ action: VoiceAction) async {
         switch action {
         case .startLocalAudio:
@@ -441,10 +468,10 @@ public actor VoiceController: VoiceSignalSink {
             _ = await engine.applyRemoteDescription(kind: .answer, sdp: sdp)
         case .sendOffer(let id, let sdp):
             mark(.localDescription)
-            _ = await transport.send(.offer(voiceSessionId: id, sdp: sdp))
+            degradeIfUnsent(await transport.send(.offer(voiceSessionId: id, sdp: sdp)))
         case .sendAnswer(let id, let sdp):
             mark(.localDescription)
-            _ = await transport.send(.answer(voiceSessionId: id, sdp: sdp))
+            degradeIfUnsent(await transport.send(.answer(voiceSessionId: id, sdp: sdp)))
         case .sendVoiceState(let id, let wire, let micMuted, let mode):
             _ = await transport.send(.state(voiceSessionId: id, state: wire, micMuted: micMuted, mode: mode))
         case .sendCandidate(let id, let candidate, let mid, let index):
@@ -653,8 +680,12 @@ public actor VoiceController: VoiceSignalSink {
         diagnostics.queuedCandidates = pending.count
         diagnostics.droppedQueuedCandidates = pending.droppedCount
         let mailboxOverflows = mailbox.overflowCount
+        let retiredSignalDiscards = mailbox.discardedRetiredSignalCount
+        // Both of these are counted by the mailbox, one layer earlier than every reason the table
+        // itself produces -- so they are merged in here rather than living in `dropCounts`.
         var droppedSignals = dropCounts
         if mailboxOverflows > 0 { droppedSignals[.inputMailboxOverflow] = mailboxOverflows }
+        if retiredSignalDiscards > 0 { droppedSignals[.retiredControlLifetime] = retiredSignalDiscards }
         diagnostics.droppedSignals = droppedSignals
         diagnostics.rebuildCount = rebuildCount
         diagnostics.unexpectedCandidateTypeSeen = unexpectedCandidateSeen
@@ -730,6 +761,12 @@ private final class VoiceInputMailboxBox: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         return mailbox.overflowCount
+    }
+
+    var discardedRetiredSignalCount: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return mailbox.discardedRetiredSignalCount
     }
 
     func clear() {

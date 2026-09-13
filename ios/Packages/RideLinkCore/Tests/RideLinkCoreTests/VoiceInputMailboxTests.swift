@@ -107,11 +107,70 @@ final class VoiceInputMailboxTests: XCTestCase {
         _ = mailbox.offer(.controlLinkLost)
 
         guard case .controlLinkLost? = mailbox.poll() else { return XCTFail("expected controlLinkLost first") }
-        guard case .signalReceived? = mailbox.poll() else { return XCTFail("expected the terminal peer state next") }
+        // The terminal peer state is **not** polled next any more: it is a peer signal, and the
+        // control lifetime that admitted it ended when `.controlLinkLost` was offered (STATUS §4
+        // problem 50). The local inputs behind it are untouched and still come back in lane order.
+        XCTAssertEqual(mailbox.discardedRetiredSignalCount, 1)
         guard case .startRequested? = mailbox.poll() else { return XCTFail("expected startRequested next") }
         guard case .localCandidateGathered? = mailbox.poll() else { return XCTFail("expected the ICE item next") }
         guard case .muteRequested? = mailbox.poll() else { return XCTFail("expected the coalesced mute last") }
         XCTAssertNil(mailbox.poll())
+        XCTAssertNotNil(closedSignal)
+    }
+
+    /// STATUS §4 problem 50, at the layer that owns it. A `.controlLinkLost` ends the lifetime that
+    /// admitted every queued peer signal, and it outranks all of them -- so it discards them rather
+    /// than letting the reducer see them after it has reset itself to `.idle`.
+    func testControlLinkLostDiscardsEveryQueuedPeerSignalAndNoLocalInput() {
+        var mailbox = VoiceInputMailbox()
+        let signals: [VoiceSignal] = [
+            .offer(voiceSessionId: genA, sdp: "sdp"),
+            .answer(voiceSessionId: genA, sdp: "sdp"),
+            .iceCandidate(voiceSessionId: genA, candidate: candidate, sdpMid: nil, sdpMlineIndex: 0),
+            .state(voiceSessionId: genA, state: .negotiating, micMuted: false, mode: .continuous),
+            .state(voiceSessionId: genA, state: .closed, micMuted: false, mode: .continuous),
+        ]
+        for signal in signals {
+            _ = mailbox.offer(.signalReceived(signal: signal, freshVoiceSessionId: genA))
+        }
+        // ...alongside local work in every lane a peer signal can also occupy.
+        _ = mailbox.offer(.startRequested(freshVoiceSessionId: genA))
+        _ = mailbox.offer(.localCandidateGathered(voiceSessionId: genA, candidate: candidate, sdpMid: nil, sdpMlineIndex: 0))
+        _ = mailbox.offer(.muteRequested(muted: true))
+        _ = mailbox.offer(.modeSelected(mode: .ptt))
+
+        _ = mailbox.offer(.controlLinkLost)
+
+        XCTAssertEqual(mailbox.discardedRetiredSignalCount, 5, "every queued peer signal is discarded, and counted")
+        var drained: [VoiceInput] = []
+        while let next = mailbox.poll() { drained.append(next) }
+        for input in drained {
+            if case .signalReceived = input {
+                XCTFail("no peer signal may survive the lifetime that admitted it")
+            }
+        }
+        XCTAssertEqual(drained.count, 5, "the teardown plus the four local inputs, and nothing else")
+        guard case .controlLinkLost = drained[0] else { return XCTFail("teardown first") }
+        guard case .startRequested = drained[1] else { return XCTFail("local intent is not the peer's to withdraw") }
+        guard case .localCandidateGathered = drained[2] else { return XCTFail("engine callbacks survive") }
+        guard case .muteRequested = drained[3] else { return XCTFail("mute survives") }
+        guard case .modeSelected = drained[4] else { return XCTFail("mode survives") }
+    }
+
+    /// The deliberate asymmetry. `.stopRequested` shares the teardown lane but is **not** a control
+    /// lifetime boundary -- the link is still up when a user presses End Voice -- so it discards
+    /// nothing, and a peer signal that arrived before the press is still delivered.
+    func testStopRequestedSharesTheTeardownLaneButDiscardsNothing() {
+        var mailbox = VoiceInputMailbox()
+        _ = mailbox.offer(.signalReceived(signal: .offer(voiceSessionId: genA, sdp: "sdp"), freshVoiceSessionId: genA))
+
+        _ = mailbox.offer(.stopRequested)
+
+        XCTAssertEqual(mailbox.discardedRetiredSignalCount, 0)
+        guard case .stopRequested? = mailbox.poll() else { return XCTFail("expected the teardown first") }
+        guard case .signalReceived? = mailbox.poll() else {
+            return XCTFail("a local stop does not end the control lifetime")
+        }
     }
 
     func testOnlyTheLatestTeardownRequestSurvivesButItIsNeverLost() {

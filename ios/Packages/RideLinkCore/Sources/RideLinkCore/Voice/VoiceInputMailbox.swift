@@ -4,9 +4,13 @@ import Foundation
 ///
 /// Priority order for `VoiceInputMailbox.poll` is `.teardown` > `.terminalPeerState` > `.critical` >
 /// `.ice` > `.coalesced`: a pending stop or link loss must never sit behind a flood of trickle-ICE or
-/// peer-state spam, and once it is applied the reducer resets to a fresh generation, so anything stale
-/// still queued below it becomes inert on its own (the existing `VoiceEngineGeneration` /
-/// `voice_session_id` guard). `.terminalPeerState` sits directly below `.teardown` and above
+/// peer-state spam. That ordering is deliberate, and it is also why `.controlLinkLost` discards the
+/// remote signals it outranks -- see `VoiceInputMailbox.offer`. This doc used to claim that anything
+/// stale queued below a teardown "becomes inert on its own" via the `VoiceEngineGeneration` /
+/// `voice_session_id` guard. **That was false** for the two branches that *begin* a negotiation rather
+/// than advance one (`offerReceived`'s full accept and `peerWantsVoice`): both are guarded only when
+/// `voiceSessionId` is non-nil, and a teardown resets it to nil, so the guard is skipped exactly when
+/// it is needed (STATUS §4 problem 50). `.terminalPeerState` sits directly below `.teardown` and above
 /// `.critical` so a peer's own teardown signal is never delayed behind a flood of offers/answers, and
 /// strictly above `.coalesced` so it can never be classified alongside -- and therefore silently
 /// overwritten by -- an ordinary peer-state update.
@@ -89,6 +93,14 @@ public struct VoiceInputMailbox: Sendable {
     /// well-formed input could not be held as it arrived."
     public private(set) var overflowCount = 0
 
+    /// How many queued peer signals were discarded because the control lifetime that admitted them
+    /// ended before they were applied (STATUS §4 problem 50).
+    ///
+    /// Surfaced rather than silent, for the same reason `overflowCount` is: "the peer's offer never
+    /// arrived" and "it arrived and its link died before we got to it" are different facts, and only
+    /// the second one says the ride hit a blip rather than a bug.
+    public private(set) var discardedRetiredSignalCount = 0
+
     public init(
         criticalCapacity: Int = VoiceInputMailbox.criticalCapacity,
         iceCapacity: Int = VoiceBounds.maxQueuedCandidates,
@@ -103,6 +115,27 @@ public struct VoiceInputMailbox: Sendable {
     public mutating func offer(_ input: VoiceInput) -> VoiceMailboxOutcome {
         switch Self.lane(for: input) {
         case .teardown:
+            // STATUS §4 problem 50. A `.controlLinkLost` ends the control lifetime that admitted every
+            // `.signalReceived` currently queued below it, and this lane outranks all of them -- so
+            // applying it first would reset the reducer and *then* hand it a retired peer's offer,
+            // which `offerReceived` would accept as a fresh one (its generation guard is skipped when
+            // `voiceSessionId` is nil) and answer on a dead link.
+            //
+            // The teardown that jumps the queue takes ownership of the remote work it jumped. Doing it
+            // here, at **offer** time, is what makes it exact rather than a race: `endConnection`
+            // clears the authenticated connection *before* it emits `.linkLost`, and
+            // `VoiceSignalRelay.deliver` refuses any frame whose generation is not the live one, so
+            // nothing remote can be offered between the lifetime ending and this call. A later
+            // lifetime's frames are offered strictly after it and are untouched -- which is why this is
+            // not a blanket flush and cannot discard a valid fresh generation's work, even if the
+            // consumer is starved for the whole reconnect.
+            //
+            // Local inputs are deliberately kept: this user's consent, the engine's own callbacks and
+            // the intercom gate's state are not the retired peer's to withdraw, and the engine
+            // callbacks carry their own `voice_session_id` guard already. `.stopRequested` shares this
+            // lane but is **not** a lifetime boundary -- the link is still up when a user presses End
+            // Voice -- so it discards nothing.
+            if case .controlLinkLost = input { discardRetiredRemoteSignals() }
             teardown = input
             return .accepted(lane: .teardown)
         case .terminalPeerState:
@@ -134,6 +167,30 @@ public struct VoiceInputMailbox: Sendable {
             coalesced[key] = input
             if !replaced { coalesceOrder.append(key) }
             return replaced ? .coalesced : .accepted(lane: .coalesced)
+        }
+    }
+
+    /// Removes every queued `.signalReceived` -- and nothing else -- from the four lanes that can hold
+    /// one. See `offer`'s `.teardown` branch for why this is the teardown's responsibility and why
+    /// offer time is the only instant at which it is exact.
+    private mutating func discardRetiredRemoteSignals() {
+        func isPeerSignal(_ input: VoiceInput) -> Bool {
+            if case .signalReceived = input { return true }
+            return false
+        }
+        discardedRetiredSignalCount +=
+            terminalPeerState.filter(isPeerSignal).count
+                + critical.filter(isPeerSignal).count
+                + ice.filter(isPeerSignal).count
+                + coalesced.values.filter(isPeerSignal).count
+        terminalPeerState.removeAll(where: isPeerSignal)
+        critical.removeAll(where: isPeerSignal)
+        ice.removeAll(where: isPeerSignal)
+        // The only coalesced kind a peer produces is `.peerState`; mute/mode/remote-track are local.
+        let retiredKeys = coalesced.filter { isPeerSignal($0.value) }.map(\.key)
+        for key in retiredKeys {
+            coalesced.removeValue(forKey: key)
+            coalesceOrder.removeAll { $0 == key }
         }
     }
 
