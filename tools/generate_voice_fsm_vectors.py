@@ -117,8 +117,50 @@ def row(name: str, before: dict, inp: dict, actions: list[dict], after: dict) ->
     return {"name": name, "state": before, "input": inp, "expect": {"actions": actions, "state": after}}
 
 
-def send_state(vsid: str | None, wire: str, mic_muted: bool = False, mode: str = "CONTINUOUS") -> dict:
-    return {"kind": "SendVoiceState", "voice_session_id": vsid, "state": wire, "mic_muted": mic_muted, "mode": mode}
+def send_state(
+    vsid: str | None,
+    wire: str,
+    mic_muted: bool = False,
+    mode: str = "CONTINUOUS",
+    owner: int | None = CTL_A,
+) -> dict:
+    return {
+        "kind": "SendVoiceState",
+        "voice_session_id": vsid,
+        "state": wire,
+        "mic_muted": mic_muted,
+        "mode": mode,
+        "control_generation": owner,
+    }
+
+
+# Every action that puts a frame on the wire names **the control lifetime whose connection it may be
+# written to** (STATUS §4 problem 64, ADR-020 Amendment A9). It defaults to CTL_A for the same reason
+# `state()`'s owner does — a row that does not say otherwise is a row about one control lifetime —
+# and the rows that are about two name it. It is receiver-local: nothing here is serialised to a peer.
+def send_offer(vsid: str, sdp: str, owner: int | None = CTL_A) -> dict:
+    return {"kind": "SendOffer", "voice_session_id": vsid, "sdp": sdp, "control_generation": owner}
+
+
+def send_answer(vsid: str, sdp: str, owner: int | None = CTL_A) -> dict:
+    return {"kind": "SendAnswer", "voice_session_id": vsid, "sdp": sdp, "control_generation": owner}
+
+
+def send_candidate(
+    vsid: str,
+    candidate: str,
+    sdp_mid: str | None,
+    sdp_mline_index: int,
+    owner: int | None = CTL_A,
+) -> dict:
+    return {
+        "kind": "SendCandidate",
+        "voice_session_id": vsid,
+        "candidate": candidate,
+        "sdp_mid": sdp_mid,
+        "sdp_mline_index": sdp_mline_index,
+        "control_generation": owner,
+    }
 
 
 def drop(reason: str) -> dict:
@@ -610,7 +652,7 @@ def build() -> list[dict]:
             "local-offer-created-is-sent",
             state(OFFERER, NEGOTIATING, VSID_A, local_audio_open=True),
             {"kind": "LocalOfferCreated", "voice_session_id": VSID_A, "sdp": SDP},
-            [{"kind": "SendOffer", "voice_session_id": VSID_A, "sdp": SDP}],
+            [send_offer(VSID_A, SDP)],
             state(OFFERER, NEGOTIATING, VSID_A, local_audio_open=True),
         )
     )
@@ -635,7 +677,7 @@ def build() -> list[dict]:
             ),
             {"kind": "LocalAnswerCreated", "voice_session_id": VSID_A, "sdp": SDP},
             [
-                {"kind": "SendAnswer", "voice_session_id": VSID_A, "sdp": SDP},
+                send_answer(VSID_A, SDP),
                 send_state(VSID_A, "connecting"),
             ],
             state(
@@ -668,13 +710,7 @@ def build() -> list[dict]:
                 "sdp_mline_index": 0,
             },
             [
-                {
-                    "kind": "SendCandidate",
-                    "voice_session_id": VSID_A,
-                    "candidate": CANDIDATE,
-                    "sdp_mid": "0",
-                    "sdp_mline_index": 0,
-                }
+                send_candidate(VSID_A, CANDIDATE, "0", 0)
             ],
             state(OFFERER, CONNECTING, VSID_A, local_audio_open=True, remote_description_applied=True),
         )
@@ -1187,7 +1223,9 @@ def build() -> list[dict]:
                 "fresh_voice_session_id": VSID_FRESH,
                 "control_generation": CTL_B,
             },
-            [send_state(VSID_FRESH, "negotiating"), {"kind": "CreateOffer", "voice_session_id": VSID_FRESH}],
+            # The intent that began it arrived on B's link, so B is both the owner and the only
+            # connection this offer's `VOICE_STATE` may be written to.
+            [send_state(VSID_FRESH, "negotiating", owner=CTL_B), {"kind": "CreateOffer", "voice_session_id": VSID_FRESH}],
             state(
                 OFFERER,
                 NEGOTIATING,
@@ -1237,7 +1275,7 @@ def build() -> list[dict]:
             "the-reconnect-rebuild-starts-the-negotiation-the-gap-press-could-not",
             state(OFFERER, IDLE, None, local_audio_open=True),
             {"kind": "StartRequested", "fresh_voice_session_id": VSID_FRESH, "control_generation": CTL_B},
-            [send_state(VSID_FRESH, "negotiating"), {"kind": "CreateOffer", "voice_session_id": VSID_FRESH}],
+            [send_state(VSID_FRESH, "negotiating", owner=CTL_B), {"kind": "CreateOffer", "voice_session_id": VSID_FRESH}],
             state(
                 OFFERER,
                 NEGOTIATING,
@@ -1257,6 +1295,140 @@ def build() -> list[dict]:
             {"kind": "StartRequested", "fresh_voice_session_id": VSID_FRESH, "control_generation": CTL_B},
             [],
             state(OFFERER, NEGOTIATING, VSID_A, local_audio_open=True, negotiation_control_generation=CTL_A),
+        )
+    )
+    # --- a held offer may not cross a control lifetime (STATUS §4 problem 63) ------------------
+    #
+    # ADR-020 Amendment A9. A `VOICE_OFFER` held for want of local consent (§7.3) is negotiation
+    # state, and A8 already gave it an owner. What A8 did not do is ask whether the *consent* that
+    # answers it belongs to the same lifetime. It did not, and the answer branch then set the owner
+    # to the press's lifetime — so a successor's Start adopted a dead lifetime's SDP, reused a
+    # `voice_session_id` the offerer had already discarded with its own copy of that link, and left
+    # the predecessor's boundary inert. PROTOCOL §7.8 wants a reconnect to rebuild voice as a
+    # **fresh** negotiation; this was the one path that quietly did the opposite.
+    #
+    # Both directions are here, because the press and the offer can go stale relative to each other
+    # either way round and only one of the two is about the offer.
+    rows.append(
+        row(
+            "a-held-offer-from-a-retired-lifetime-is-discarded-rather-than-answered",
+            state(
+                ANSWERER,
+                IDLE,
+                None,
+                peer_voice_enabled=True,
+                peer_reported_state=NEGOTIATING,
+                held_remote_offer={"voice_session_id": VSID_A, "sdp": SDP},
+                negotiation_control_generation=CTL_A,
+            ),
+            {"kind": "StartRequested", "fresh_voice_session_id": VSID_FRESH, "control_generation": CTL_B},
+            [
+                {"kind": "StartLocalAudio"},
+                drop("RETIRED_HELD_OFFER"),
+                # §7.3's intent-to-talk, on B's link — never an answer naming A's generation.
+                send_state(None, "negotiating", owner=CTL_B),
+            ],
+            state(
+                ANSWERER,
+                NEGOTIATING,
+                None,
+                local_audio_open=True,
+                peer_voice_enabled=True,
+                peer_reported_state=NEGOTIATING,
+                negotiation_control_generation=CTL_B,
+            ),
+        )
+    )
+    rows.append(
+        row(
+            # The same lifetime that delivered the offer is the one consenting: answered, unchanged.
+            "a-held-offer-is-still-answered-by-the-lifetime-that-delivered-it",
+            state(
+                ANSWERER,
+                IDLE,
+                None,
+                peer_voice_enabled=True,
+                peer_reported_state=NEGOTIATING,
+                held_remote_offer={"voice_session_id": VSID_A, "sdp": SDP},
+                negotiation_control_generation=CTL_B,
+            ),
+            {"kind": "StartRequested", "fresh_voice_session_id": VSID_FRESH, "control_generation": CTL_B},
+            [
+                {"kind": "StartLocalAudio"},
+                {"kind": "ApplyRemoteOffer", "voice_session_id": VSID_A, "sdp": SDP},
+                {"kind": "DrainQueuedCandidates"},
+                {"kind": "CreateAnswer", "voice_session_id": VSID_A},
+            ],
+            state(
+                ANSWERER,
+                NEGOTIATING,
+                VSID_A,
+                local_audio_open=True,
+                remote_description_applied=True,
+                peer_voice_enabled=True,
+                peer_reported_state=NEGOTIATING,
+                negotiation_control_generation=CTL_B,
+            ),
+        )
+    )
+    rows.append(
+        row(
+            # The opposite ordering: the *press* is the stale thing, because a newer lifetime's offer
+            # was reduced while the tap sat in the mailbox. Consent is honoured — ARCHITECTURE §6.4
+            # may give no second foreground-visible chance to open capture — and nothing else is.
+            # Answering under A would put an answer on a link that is gone *and* destroy the only
+            # copy of B's offer, which a peer never re-sends.
+            "a-start-from-a-retired-lifetime-consents-without-touching-a-newer-lifetimes-held-offer",
+            state(
+                ANSWERER,
+                IDLE,
+                None,
+                peer_voice_enabled=True,
+                peer_reported_state=NEGOTIATING,
+                held_remote_offer={"voice_session_id": VSID_B, "sdp": SDP},
+                negotiation_control_generation=CTL_B,
+            ),
+            {"kind": "StartRequested", "fresh_voice_session_id": VSID_FRESH, "control_generation": CTL_A},
+            [{"kind": "StartLocalAudio"}, drop("SUPERSEDED_START_LIFETIME")],
+            state(
+                ANSWERER,
+                IDLE,
+                None,
+                local_audio_open=True,
+                peer_voice_enabled=True,
+                peer_reported_state=NEGOTIATING,
+                held_remote_offer={"voice_session_id": VSID_B, "sdp": SDP},
+                negotiation_control_generation=CTL_B,
+            ),
+        )
+    )
+    rows.append(
+        row(
+            # And an offerer's press from a retired lifetime, which has no held offer to protect but
+            # is refused for the same reason: there is no link for the offer it would author.
+            "an-offerers-start-from-a-retired-lifetime-consents-and-starts-no-negotiation",
+            state(
+                OFFERER,
+                IDLE,
+                None,
+                peer_voice_enabled=True,
+                peer_reported_state=NEGOTIATING,
+                negotiation_control_generation=None,
+            ),
+            {"kind": "StartRequested", "fresh_voice_session_id": VSID_FRESH, "control_generation": CTL_A},
+            # Nothing owned, so nothing proves this press's lifetime is over: it proceeds normally.
+            # The refusal below is the *owned* case, and the two rows together are what say the
+            # table refuses on evidence rather than on suspicion.
+            [{"kind": "StartLocalAudio"}, send_state(VSID_FRESH, "negotiating"), {"kind": "CreateOffer", "voice_session_id": VSID_FRESH}],
+            state(
+                OFFERER,
+                NEGOTIATING,
+                VSID_FRESH,
+                local_audio_open=True,
+                peer_voice_enabled=True,
+                peer_reported_state=NEGOTIATING,
+                negotiation_control_generation=CTL_A,
+            ),
         )
     )
     # --- NegotiationSendFailed (STATUS §4 problems 56/57/59) ---------------------------------

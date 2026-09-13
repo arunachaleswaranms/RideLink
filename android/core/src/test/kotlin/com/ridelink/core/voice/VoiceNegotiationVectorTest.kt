@@ -143,6 +143,45 @@ class VoiceNegotiationVectorTest {
     }
 
     /**
+     * **Every action that puts a frame on the wire names the control lifetime whose connection it
+     * may be written to, and that lifetime is one the table was already holding** (STATUS §4 problem
+     * 64, ADR-020 Amendment A9).
+     *
+     * Two halves, and both matter. **Non-null**, because `VoiceSignalTransport.send` treats a null
+     * authorisation as a refusal — a transition that produced one would silently stop voice sending
+     * anything at all. And **one of the two owners the row mentions**, because the alternative is a
+     * table that invents a generation, which is the inbound defect (ADR-024 Amendment A7) pointing
+     * outwards: the value has to come from state the table already held, never from anywhere else.
+     *
+     * The exact value per row is pinned by the rows themselves; this is what stops a *new* branch
+     * being added without one.
+     */
+    @Test
+    fun `every outbound action names a control lifetime the table already held`() {
+        var covered = 0
+        for (element in doc["rows"]!!.jsonArray) {
+            val row = element.jsonObject
+            val before = state(row["state"]!!.jsonObject)
+            val outcome = VoiceNegotiation.reduce(before, input(row["input"]!!.jsonObject))
+            val permitted = setOfNotNull(before.negotiationControlGeneration, outcome.state.negotiationControlGeneration)
+            for (action in outcome.actions.filterIsInstance<OutboundVoiceAction>()) {
+                val owner = action.controlGeneration
+                assertTrue(
+                    owner != null,
+                    "row ${row.string("name")} would send $action authorised by nobody, which can never be written",
+                )
+                assertTrue(
+                    owner in permitted,
+                    "row ${row.string("name")} sends $action under $owner, which the table never held " +
+                        "(it held $permitted)",
+                )
+                covered += 1
+            }
+        }
+        assertTrue(covered > 0, "the file must contain outbound rows for this to mean anything")
+    }
+
+    /**
      * The ownership rule as a property over every role and status rather than the seven rows that
      * name it: **a boundary older than the owner is inert, and every other boundary tears down.**
      *
@@ -355,14 +394,25 @@ class VoiceNegotiationVectorTest {
             "ReleaseLocalAudio", "SurfacePeerVoiceRequest",
             -> kind
             "CreateOffer", "CreateAnswer" -> "$kind(${spec.string("voice_session_id")})"
-            "ApplyRemoteOffer", "ApplyRemoteAnswer", "SendOffer", "SendAnswer" ->
+            "ApplyRemoteOffer", "ApplyRemoteAnswer" ->
                 "$kind(${spec.string("voice_session_id")},${spec.string("sdp")})"
+            // Every outbound kind below carries `control_generation`, read with
+            // [requiredNullableLong] so a row that forgets it fails rather than quietly meaning
+            // "whichever lifetime is around" — which is the defect ADR-020 Amendment A9 closes.
+            "SendOffer", "SendAnswer" ->
+                "$kind(${spec.string("voice_session_id")},${spec.string("sdp")}," +
+                    "${spec.requiredNullableLong("control_generation")})"
             "SendVoiceState" ->
                 "SendVoiceState(${spec.nullableString("voice_session_id")}," +
-                    "${spec.string("state")},${spec.bool("mic_muted")},${spec.string("mode")})"
-            "ApplyRemoteCandidate", "QueueRemoteCandidate", "SendCandidate" ->
+                    "${spec.string("state")},${spec.bool("mic_muted")},${spec.string("mode")}," +
+                    "${spec.requiredNullableLong("control_generation")})"
+            "ApplyRemoteCandidate", "QueueRemoteCandidate" ->
                 "$kind(${spec.string("voice_session_id")},${spec.string("candidate")}," +
                     "${spec.nullableString("sdp_mid")},${spec.int("sdp_mline_index")})"
+            "SendCandidate" ->
+                "SendCandidate(${spec.string("voice_session_id")},${spec.string("candidate")}," +
+                    "${spec.nullableString("sdp_mid")},${spec.int("sdp_mline_index")}," +
+                    "${spec.requiredNullableLong("control_generation")})"
             "SetMicrophoneMuted" -> "SetMicrophoneMuted(${spec.bool("muted")})"
             "RecordDroppedSignal" -> "RecordDroppedSignal(${spec.string("reason")})"
             else -> error("unknown action kind in vectors: $kind")
@@ -379,11 +429,13 @@ class VoiceNegotiationVectorTest {
             is VoiceAction.CreateAnswer -> "CreateAnswer(${action.voiceSessionId.value})"
             is VoiceAction.ApplyRemoteOffer -> "ApplyRemoteOffer(${action.voiceSessionId.value},${action.sdp})"
             is VoiceAction.ApplyRemoteAnswer -> "ApplyRemoteAnswer(${action.voiceSessionId.value},${action.sdp})"
-            is VoiceAction.SendOffer -> "SendOffer(${action.voiceSessionId.value},${action.sdp})"
-            is VoiceAction.SendAnswer -> "SendAnswer(${action.voiceSessionId.value},${action.sdp})"
+            is VoiceAction.SendOffer ->
+                "SendOffer(${action.voiceSessionId.value},${action.sdp},${action.controlGeneration})"
+            is VoiceAction.SendAnswer ->
+                "SendAnswer(${action.voiceSessionId.value},${action.sdp},${action.controlGeneration})"
             is VoiceAction.SendVoiceState ->
                 "SendVoiceState(${action.voiceSessionId?.value}," +
-                    "${action.state.wire},${action.micMuted},${action.mode.name})"
+                    "${action.state.wire},${action.micMuted},${action.mode.name},${action.controlGeneration})"
             is VoiceAction.ApplyRemoteCandidate ->
                 "ApplyRemoteCandidate(${action.voiceSessionId.value},${action.candidate}," +
                     "${action.sdpMid},${action.sdpMlineIndex})"
@@ -392,7 +444,7 @@ class VoiceNegotiationVectorTest {
                     "${action.sdpMid},${action.sdpMlineIndex})"
             is VoiceAction.SendCandidate ->
                 "SendCandidate(${action.voiceSessionId.value},${action.candidate}," +
-                    "${action.sdpMid},${action.sdpMlineIndex})"
+                    "${action.sdpMid},${action.sdpMlineIndex},${action.controlGeneration})"
             is VoiceAction.SetMicrophoneMuted -> "SetMicrophoneMuted(${action.muted})"
             is VoiceAction.RecordDroppedSignal -> "RecordDroppedSignal(${action.reason.name})"
         }
@@ -437,7 +489,7 @@ class VoiceNegotiationVectorTest {
         val GENERATION_GUARD_REASONS =
             setOf(VoiceSignalDropReason.GENERATION_MISMATCH, VoiceSignalDropReason.STALE_ENGINE_CALLBACK)
 
-        const val EXPECTED_MINIMUM_ROWS = 73
+        const val EXPECTED_MINIMUM_ROWS = 81
         const val VSID_A = "5e2a9c40b7f13d86e0a4c95b28f7d613"
         const val VSID_FRESH = "ffeeddccbbaa99887766554433221100"
     }

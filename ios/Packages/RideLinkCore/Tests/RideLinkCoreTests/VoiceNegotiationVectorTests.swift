@@ -15,7 +15,7 @@ final class VoiceNegotiationVectorTests: XCTestCase {
     /// identity is a receiver-local concern and not a wire one.
     private let vectorControlGeneration: Int64 = 1
 
-    private let expectedMinimumRows = 73
+    private let expectedMinimumRows = 81
     private let vsidA = "5e2a9c40b7f13d86e0a4c95b28f7d613"
     private let vsidFresh = "ffeeddccbbaa99887766554433221100"
 
@@ -134,6 +134,46 @@ final class VoiceNegotiationVectorTests: XCTestCase {
                 """
             )
         }
+    }
+
+    /// **Every action that puts a frame on the wire names the control lifetime whose connection it may
+    /// be written to, and that lifetime is one the table was already holding** (STATUS §4 problem 64,
+    /// ADR-020 Amendment A9).
+    ///
+    /// Two halves, and both matter. **Non-nil**, because `VoiceSignalTransport.send` treats a nil
+    /// authorisation as a refusal — a transition that produced one would silently stop voice sending
+    /// anything at all. And **one of the two owners the row mentions**, because the alternative is a
+    /// table that invents a generation, which is the inbound defect (ADR-024 Amendment A7) pointing
+    /// outwards: the value has to come from state the table already held, never from anywhere else.
+    ///
+    /// The exact value per row is pinned by the rows themselves; this is what stops a *new* branch
+    /// being added without one. The mirror is Kotlin's
+    /// `every outbound action names a control lifetime the table already held`.
+    func testEveryOutboundActionNamesAControlLifetimeTheTableAlreadyHeld() throws {
+        var covered = 0
+        for element in try rows() {
+            guard let row = element as? [String: Any] else { return XCTFail("row is not an object") }
+            let before = state(row.dict("state"))
+            let outcome = VoiceNegotiation.reduce(state: before, input: input(row.dict("input")))
+            let permitted = Set([before.negotiationControlGeneration, outcome.state.negotiationControlGeneration]
+                .compactMap { $0 })
+            for action in outcome.actions where action.isOutbound {
+                guard let owner = action.controlGeneration else {
+                    XCTFail("""
+                    row \(row.str("name")) would send \(action) authorised by nobody,                     which can never be written
+                    """)
+                    continue
+                }
+                XCTAssertTrue(
+                    permitted.contains(owner),
+                    """
+                    row \(row.str("name")) sends \(action) under \(owner),                     which the table never held (it held \(permitted))
+                    """
+                )
+                covered += 1
+            }
+        }
+        XCTAssertGreaterThan(covered, 0, "the file must contain outbound rows for this to mean anything")
     }
 
     /// The ownership rule as a property over every role and status rather than the seven rows that
@@ -359,6 +399,13 @@ final class VoiceNegotiationVectorTests: XCTestCase {
     /// Compares actions as a canonical label rather than by constructing an expected value per case. A
     /// label keeps the failure message readable — `sendVoiceState(nil,connecting,…)` says what went
     /// wrong; a structural diff of two enum payloads does not.
+    /// Kotlin renders a null `Long?` as "null"; Swift's own interpolation of `Optional<Int64>` would
+    /// render "nil" and, worse, differently again for `.some`. One spelling, so the two platforms'
+    /// labels are the same strings for the same actions.
+    private func describe(_ generation: Int64?) -> String {
+        generation.map(String.init) ?? "null"
+    }
+
     // swiftlint:disable:next cyclomatic_complexity
     private func actionLabel(_ spec: [String: Any]) -> String {
         let kind = spec.str("kind")
@@ -368,15 +415,26 @@ final class VoiceNegotiationVectorTests: XCTestCase {
             return kind
         case "CreateOffer", "CreateAnswer":
             return "\(kind)(\(spec.str("voice_session_id")))"
-        case "ApplyRemoteOffer", "ApplyRemoteAnswer", "SendOffer", "SendAnswer":
+        case "ApplyRemoteOffer", "ApplyRemoteAnswer":
             return "\(kind)(\(spec.str("voice_session_id")),\(spec.str("sdp")))"
+        // Every outbound kind below carries `control_generation`, read with `requiredInt64Opt` so a
+        // row that forgets it fails rather than quietly meaning "whichever lifetime is around" —
+        // which is the defect ADR-020 Amendment A9 closes.
+        case "SendOffer", "SendAnswer":
+            return "\(kind)(\(spec.str("voice_session_id")),\(spec.str("sdp")),"
+                + "\(describe(spec.requiredInt64Opt("control_generation"))))"
         case "SendVoiceState":
             let id = spec.strOpt("voice_session_id") ?? "nil"
-            return "SendVoiceState(\(id),\(spec.str("state")),\(spec.boolVal("mic_muted")),\(spec.str("mode")))"
-        case "ApplyRemoteCandidate", "QueueRemoteCandidate", "SendCandidate":
+            return "SendVoiceState(\(id),\(spec.str("state")),\(spec.boolVal("mic_muted")),\(spec.str("mode")),"
+                + "\(describe(spec.requiredInt64Opt("control_generation"))))"
+        case "ApplyRemoteCandidate", "QueueRemoteCandidate":
             let mid = spec.strOpt("sdp_mid") ?? "nil"
             return "\(kind)(\(spec.str("voice_session_id")),\(spec.str("candidate")),"
                 + "\(mid),\(spec.int("sdp_mline_index")))"
+        case "SendCandidate":
+            let mid = spec.strOpt("sdp_mid") ?? "nil"
+            return "SendCandidate(\(spec.str("voice_session_id")),\(spec.str("candidate")),"
+                + "\(mid),\(spec.int("sdp_mline_index")),\(describe(spec.requiredInt64Opt("control_generation"))))"
         case "SetMicrophoneMuted":
             return "SetMicrophoneMuted(\(spec.boolVal("muted")))"
         case "RecordDroppedSignal":
@@ -398,16 +456,17 @@ final class VoiceNegotiationVectorTests: XCTestCase {
         case .createAnswer(let id): return "CreateAnswer(\(id.value))"
         case .applyRemoteOffer(let id, let sdp): return "ApplyRemoteOffer(\(id.value),\(sdp))"
         case .applyRemoteAnswer(let id, let sdp): return "ApplyRemoteAnswer(\(id.value),\(sdp))"
-        case .sendOffer(let id, let sdp): return "SendOffer(\(id.value),\(sdp))"
-        case .sendAnswer(let id, let sdp): return "SendAnswer(\(id.value),\(sdp))"
-        case .sendVoiceState(let id, let state, let micMuted, let mode):
-            return "SendVoiceState(\(id?.value ?? "nil"),\(state.wire),\(micMuted),\(mode.rawValue.uppercased()))"
+        case .sendOffer(let id, let sdp, let owner): return "SendOffer(\(id.value),\(sdp),\(describe(owner)))"
+        case .sendAnswer(let id, let sdp, let owner): return "SendAnswer(\(id.value),\(sdp),\(describe(owner)))"
+        case .sendVoiceState(let id, let state, let micMuted, let mode, let owner):
+            return "SendVoiceState(\(id?.value ?? "nil"),\(state.wire),\(micMuted),"
+                + "\(mode.rawValue.uppercased()),\(describe(owner)))"
         case .applyRemoteCandidate(let id, let candidate, let mid, let index):
             return "ApplyRemoteCandidate(\(id.value),\(candidate),\(mid ?? "nil"),\(index))"
         case .queueRemoteCandidate(let id, let candidate, let mid, let index):
             return "QueueRemoteCandidate(\(id.value),\(candidate),\(mid ?? "nil"),\(index))"
-        case .sendCandidate(let id, let candidate, let mid, let index):
-            return "SendCandidate(\(id.value),\(candidate),\(mid ?? "nil"),\(index))"
+        case .sendCandidate(let id, let candidate, let mid, let index, let owner):
+            return "SendCandidate(\(id.value),\(candidate),\(mid ?? "nil"),\(index),\(describe(owner)))"
         case .setMicrophoneMuted(let muted): return "SetMicrophoneMuted(\(muted))"
         case .recordDroppedSignal(let reason): return "RecordDroppedSignal(\(reason.rawValue))"
         }

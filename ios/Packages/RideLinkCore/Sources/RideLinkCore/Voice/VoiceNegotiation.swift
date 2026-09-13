@@ -173,6 +173,70 @@ public enum VoiceSignalDropReason: String, Sendable, Equatable {
     /// arrived late and was correctly ignored"), and a silent no-op would make the one case this
     /// amendment exists for the only one with no evidence that it happened.
     case supersededControlLifetime = "SUPERSEDED_CONTROL_LIFETIME"
+    /// A `HeldRemoteOffer` discarded because the control lifetime that delivered it is **older** than
+    /// the one authorising the local consent that would have answered it (STATUS §4 problem 63,
+    /// ADR-020 Amendment A9).
+    ///
+    /// The peer that sent that offer tore its own negotiation down when *its* copy of that link died,
+    /// so answering the offer would name a `voice_session_id` the peer no longer holds — and worse,
+    /// would move the negotiation's owner to the consenting lifetime, leaving the boundary that could
+    /// still have retired it inert. PROTOCOL §7.8 wants a **fresh** negotiation after a reconnect, and
+    /// an answerer reaches one by stating its intent again, not by answering a dead lifetime's SDP.
+    case retiredHeldOffer = "RETIRED_HELD_OFFER"
+    /// A `.startRequested` whose authorising control lifetime is **older** than the lifetime that owns
+    /// negotiation state this side already holds (STATUS §4 problem 63, ADR-020 Amendment A9) — the
+    /// opposite ordering to `.retiredHeldOffer`, and reachable the same way: the press was queued
+    /// while its lifetime was live and drained after a successor's frame had been reduced.
+    ///
+    /// The press's *consent* is still honoured — capture opens, because ARCHITECTURE §6.4 may give no
+    /// second foreground-visible chance — but it establishes **no** negotiation: there is no link left
+    /// to negotiate over, and a negotiation owned by a lifetime that has ended is exactly what
+    /// ADR-020 Amendment A8 exists to prevent being created.
+    case supersededStartLifetime = "SUPERSEDED_START_LIFETIME"
+}
+
+/// **An action that puts a `VOICE_*` frame on the control connection, and the control lifetime that
+/// authorises it to** (STATUS §4 problem 64, ADR-020 Amendment A9).
+///
+/// `controlGeneration` is the `VoiceNegotiationState.negotiationControlGeneration` of the negotiation
+/// this frame belongs to, captured by the very transition that produced the action. It is **not** a
+/// `voice_session_id` (that owns one WebRTC negotiation) and **not** a `revision_epoch` (ADR-021 A7's
+/// sender lifetime): it is the authenticated control lifetime whose connection this frame may be
+/// written to, and no other.
+///
+/// Why it is on the action rather than derived by the driver. `VoiceSignalTransport.send` suspends —
+/// an actor hop, a write lock, a socket flush — and so does every engine callback that leads to one,
+/// so the instant an action is *performed* is not the instant it was *authorised*. A driver that asked
+/// "which connection is authenticated now" at performance time would answer a different question,
+/// which is ADR-024 Amendment A7's defect in the outbound direction: an offer authorised by a lifetime
+/// that had since ended was written to its successor's socket, where the peer accepted it as current.
+/// Carrying the value means the transport can *compare* rather than re-read.
+///
+/// Nil would mean "authorised by no control lifetime". No transition produces one — every branch that
+/// sends holds negotiation state, and negotiation state always names its owner, which
+/// `VoiceNegotiationVectorTests` asserts over every row — and the transport therefore treats nil as a
+/// refusal rather than as permission to use whatever is live.
+public extension VoiceAction {
+    /// Whether this action puts a `VOICE_*` frame on the control connection. The mirror of Android's
+    /// `OutboundVoiceAction` marker, which a Swift enum cannot express as a conformance.
+    var isOutbound: Bool {
+        switch self {
+        case .sendOffer, .sendAnswer, .sendVoiceState, .sendCandidate: true
+        default: false
+        }
+    }
+
+    /// The control lifetime this action is authorised to be written on, or nil when it is not an
+    /// outbound action at all — read together with `isOutbound`, never on its own.
+    var controlGeneration: Int64? {
+        switch self {
+        case .sendOffer(_, _, let owner): owner
+        case .sendAnswer(_, _, let owner): owner
+        case .sendVoiceState(_, _, _, _, let owner): owner
+        case .sendCandidate(_, _, _, _, let owner): owner
+        default: nil
+        }
+    }
 }
 
 /// What the driver is asked to do. Every payload is a plain value (see `VoiceSignal`'s note).
@@ -184,12 +248,24 @@ public enum VoiceAction: Sendable, Equatable {
     case createAnswer(voiceSessionId: VoiceSessionId)
     case applyRemoteOffer(voiceSessionId: VoiceSessionId, sdp: String)
     case applyRemoteAnswer(voiceSessionId: VoiceSessionId, sdp: String)
-    case sendOffer(voiceSessionId: VoiceSessionId, sdp: String)
-    case sendAnswer(voiceSessionId: VoiceSessionId, sdp: String)
-    case sendVoiceState(voiceSessionId: VoiceSessionId?, state: VoiceWireState, micMuted: Bool, mode: VoiceMode)
+    case sendOffer(voiceSessionId: VoiceSessionId, sdp: String, controlGeneration: Int64?)
+    case sendAnswer(voiceSessionId: VoiceSessionId, sdp: String, controlGeneration: Int64?)
+    case sendVoiceState(
+        voiceSessionId: VoiceSessionId?,
+        state: VoiceWireState,
+        micMuted: Bool,
+        mode: VoiceMode,
+        controlGeneration: Int64?
+    )
     case applyRemoteCandidate(voiceSessionId: VoiceSessionId, candidate: String, sdpMid: String?, sdpMlineIndex: Int)
     /// A locally gathered candidate, to be trickled to the peer as `VOICE_ICE`.
-    case sendCandidate(voiceSessionId: VoiceSessionId, candidate: String, sdpMid: String?, sdpMlineIndex: Int)
+    case sendCandidate(
+        voiceSessionId: VoiceSessionId,
+        candidate: String,
+        sdpMid: String?,
+        sdpMlineIndex: Int,
+        controlGeneration: Int64?
+    )
     /// §7.4: a candidate that arrived before the remote description. Bounded by `PendingCandidates`.
     case queueRemoteCandidate(voiceSessionId: VoiceSessionId, candidate: String, sdpMid: String?, sdpMlineIndex: Int)
     case drainQueuedCandidates
@@ -387,12 +463,32 @@ public enum VoiceNegotiation {
         // `.startRequested`'s `controlGeneration` for why this is not a refusal and not a negotiation
         // owned by nobody.
         guard let owner else { return VoiceOutcome(state: next, actions: actions) }
+
+        // **A press authorised by a lifetime older than the one that owns state we are already
+        // holding is a press from a lifetime that has ended** (STATUS §4 problem 63). Generations
+        // strictly increase and one connection is authenticated at a time, so the existence of
+        // newer-owned state proves this press's link is gone. Consent is still honoured — capture is
+        // the one thing ARCHITECTURE §6.4 may never give a second chance to open — but there is
+        // nothing to negotiate over, and a negotiation owned by a dead lifetime is what Amendment A8
+        // exists to prevent. The held offer is left exactly where it is: it belongs to the newer
+        // lifetime, and a press from an older one has no standing to consume it.
+        let existing = state.negotiationControlGeneration
+        if let existing, existing > owner {
+            actions.append(.recordDroppedSignal(reason: .supersededStartLifetime))
+            return VoiceOutcome(state: next, actions: actions)
+        }
         next.negotiationControlGeneration = owner
 
         switch state.role {
         case .offerer:
             actions.append(
-                .sendVoiceState(voiceSessionId: fresh, state: .negotiating, micMuted: state.micMuted, mode: state.mode)
+                .sendVoiceState(
+                    voiceSessionId: fresh,
+                    state: .negotiating,
+                    micMuted: state.micMuted,
+                    mode: state.mode,
+                    controlGeneration: owner
+                )
             )
             actions.append(.createOffer(voiceSessionId: fresh))
             next.status = .negotiating
@@ -400,7 +496,20 @@ public enum VoiceNegotiation {
             next.remoteDescriptionApplied = false
             next.heldRemoteOffer = nil
         case .answerer:
-            if let held = state.heldRemoteOffer {
+            // **A held offer may be answered only by the lifetime that delivered it** (STATUS §4
+            // problem 63, ADR-020 Amendment A9). `existing` names that lifetime, and `existing >
+            // owner` was already refused above, so what is left here is `existing == owner` — answer
+            // it — or `existing < owner`, where the offerer's own link died with the lifetime that
+            // carried it and the offerer has therefore already torn its side down. Answering then
+            // would name a `voice_session_id` the peer no longer holds *and* move the owner to the
+            // consenting lifetime, so the predecessor's boundary could never retire it. §7.8 wants a
+            // fresh negotiation; an answerer reaches one by stating its intent again, which is
+            // exactly the no-held-offer branch below.
+            let held = (existing == nil || existing == owner) ? state.heldRemoteOffer : nil
+            if state.heldRemoteOffer != nil, held == nil {
+                actions.append(.recordDroppedSignal(reason: .retiredHeldOffer))
+            }
+            if let held {
                 // The offerer got there first and we held its offer for want of local consent (§7.3).
                 // Consent has now arrived, so answer the offer we already have rather than asking the
                 // offerer to send it again.
@@ -415,11 +524,18 @@ public enum VoiceNegotiation {
                 // An answerer never offers. It states its intent and waits (§7.3). The id is nil
                 // because the offerer, not this side, creates one.
                 actions.append(
-                    .sendVoiceState(voiceSessionId: nil, state: .negotiating, micMuted: state.micMuted, mode: state.mode)
+                    .sendVoiceState(
+                        voiceSessionId: nil,
+                        state: .negotiating,
+                        micMuted: state.micMuted,
+                        mode: state.mode,
+                        controlGeneration: owner
+                    )
                 )
                 next.status = .negotiating
                 next.voiceSessionId = nil
                 next.remoteDescriptionApplied = false
+                next.heldRemoteOffer = nil
             }
         }
         return VoiceOutcome(state: next, actions: actions)
@@ -434,7 +550,15 @@ public enum VoiceNegotiation {
         // teardown signal; PROTOCOL §7.4 deliberately has no separate VOICE_END.
         if let id = state.voiceSessionId {
             actions.append(
-                .sendVoiceState(voiceSessionId: id, state: .closed, micMuted: state.micMuted, mode: state.mode)
+                // The lifetime that owns the negotiation being closed, read before the reset below —
+                // a `closed` naming this generation belongs to this generation's link and no other.
+                .sendVoiceState(
+                    voiceSessionId: id,
+                    state: .closed,
+                    micMuted: state.micMuted,
+                    mode: state.mode,
+                    controlGeneration: state.negotiationControlGeneration
+                )
             )
         }
         actions.append(.stopMediaTransport)
@@ -463,7 +587,8 @@ public enum VoiceNegotiation {
                     voiceSessionId: id,
                     state: state.status.wire,
                     micMuted: state.micMuted,
-                    mode: mode
+                    mode: mode,
+                    controlGeneration: state.negotiationControlGeneration
                 )
             )
         }
@@ -478,7 +603,13 @@ public enum VoiceNegotiation {
         if state.localAudioOpen { actions.append(.setMicrophoneMuted(muted: muted)) }
         if let id = state.voiceSessionId {
             actions.append(
-                .sendVoiceState(voiceSessionId: id, state: state.status.wire, micMuted: muted, mode: state.mode)
+                .sendVoiceState(
+                    voiceSessionId: id,
+                    state: state.status.wire,
+                    micMuted: muted,
+                    mode: state.mode,
+                    controlGeneration: state.negotiationControlGeneration
+                )
             )
         }
         var next = state
@@ -582,7 +713,10 @@ public enum VoiceNegotiation {
     ) -> VoiceOutcome {
         if state.voiceSessionId != id { return dropped(state, .staleEngineCallback) }
         if state.status != .negotiating { return dropped(state, .unexpectedForStatus) }
-        return VoiceOutcome(state: state, actions: [.sendOffer(voiceSessionId: id, sdp: sdp)])
+        return VoiceOutcome(
+            state: state,
+            actions: [.sendOffer(voiceSessionId: id, sdp: sdp, controlGeneration: state.negotiationControlGeneration)]
+        )
     }
 
     private static func localAnswerCreated(
@@ -597,8 +731,14 @@ public enum VoiceNegotiation {
         return VoiceOutcome(
             state: next,
             actions: [
-                .sendAnswer(voiceSessionId: id, sdp: sdp),
-                .sendVoiceState(voiceSessionId: id, state: .connecting, micMuted: state.micMuted, mode: state.mode),
+                .sendAnswer(voiceSessionId: id, sdp: sdp, controlGeneration: state.negotiationControlGeneration),
+                .sendVoiceState(
+                    voiceSessionId: id,
+                    state: .connecting,
+                    micMuted: state.micMuted,
+                    mode: state.mode,
+                    controlGeneration: state.negotiationControlGeneration
+                ),
             ]
         )
     }
@@ -613,7 +753,15 @@ public enum VoiceNegotiation {
         if state.voiceSessionId != id { return dropped(state, .staleEngineCallback) }
         return VoiceOutcome(
             state: state,
-            actions: [.sendCandidate(voiceSessionId: id, candidate: candidate, sdpMid: mid, sdpMlineIndex: index)]
+            actions: [
+                .sendCandidate(
+                    voiceSessionId: id,
+                    candidate: candidate,
+                    sdpMid: mid,
+                    sdpMlineIndex: index,
+                    controlGeneration: state.negotiationControlGeneration
+                ),
+            ]
         )
     }
 
@@ -639,7 +787,13 @@ public enum VoiceNegotiation {
                 state: next,
                 actions: [
                     .stopMediaTransport,
-                    .sendVoiceState(voiceSessionId: id, state: .failed, micMuted: state.micMuted, mode: state.mode),
+                    .sendVoiceState(
+                        voiceSessionId: id,
+                        state: .failed,
+                        micMuted: state.micMuted,
+                        mode: state.mode,
+                        controlGeneration: state.negotiationControlGeneration
+                    ),
                 ]
             )
         }
@@ -648,7 +802,13 @@ public enum VoiceNegotiation {
             return VoiceOutcome(
                 state: next,
                 actions: [
-                    .sendVoiceState(voiceSessionId: id, state: .active, micMuted: state.micMuted, mode: state.mode),
+                    .sendVoiceState(
+                        voiceSessionId: id,
+                        state: .active,
+                        micMuted: state.micMuted,
+                        mode: state.mode,
+                        controlGeneration: state.negotiationControlGeneration
+                    ),
                 ]
             )
         }
@@ -657,7 +817,13 @@ public enum VoiceNegotiation {
             return VoiceOutcome(
                 state: next,
                 actions: [
-                    .sendVoiceState(voiceSessionId: id, state: .connecting, micMuted: state.micMuted, mode: state.mode),
+                    .sendVoiceState(
+                        voiceSessionId: id,
+                        state: .connecting,
+                        micMuted: state.micMuted,
+                        mode: state.mode,
+                        controlGeneration: state.negotiationControlGeneration
+                    ),
                 ]
             )
         }
@@ -752,7 +918,13 @@ public enum VoiceNegotiation {
             actions: [
                 .applyRemoteAnswer(voiceSessionId: id, sdp: sdp),
                 .drainQueuedCandidates,
-                .sendVoiceState(voiceSessionId: id, state: .connecting, micMuted: state.micMuted, mode: state.mode),
+                .sendVoiceState(
+                    voiceSessionId: id,
+                    state: .connecting,
+                    micMuted: state.micMuted,
+                    mode: state.mode,
+                    controlGeneration: state.negotiationControlGeneration
+                ),
             ]
         )
     }
@@ -861,7 +1033,13 @@ public enum VoiceNegotiation {
         return VoiceOutcome(
             state: next,
             actions: [
-                .sendVoiceState(voiceSessionId: fresh, state: .negotiating, micMuted: state.micMuted, mode: state.mode),
+                .sendVoiceState(
+                    voiceSessionId: fresh,
+                    state: .negotiating,
+                    micMuted: state.micMuted,
+                    mode: state.mode,
+                    controlGeneration: owner
+                ),
                 .createOffer(voiceSessionId: fresh),
             ]
         )
