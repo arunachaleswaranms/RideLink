@@ -56,6 +56,12 @@ public actor TransferRelay {
         self.liveGeneration = liveGeneration
     }
 
+
+    /// Read-only, `internal`, for the tests that assert **whose** sink this is — see
+    /// `SessionTeardownOwnershipTests` and `docs/STATUS.md` §4 problem 54. Android's equivalent field
+    /// is a plain `var`, so this only restores the readability the mirror already had.
+    var sinkForTest: (any TransferSink)? { sink }
+
     public func setSink(_ sink: (any TransferSink)?) {
         self.sink = sink
     }
@@ -109,8 +115,8 @@ public actor TransferRelay {
         preAuthenticationDrops += 1
     }
 
-    public func reset() {
-        sink = nil
+    /// See `AudioStateRelay.resetCounters()`: the counters, never the sink.
+    public func resetCounters() {
         rejections.removeAll()
         preAuthenticationDrops = 0
         retiredGenerationDrops = 0

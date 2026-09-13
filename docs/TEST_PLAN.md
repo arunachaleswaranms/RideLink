@@ -40,7 +40,8 @@ can be exhaustive
 | Area | Cases |
 |---|---|
 | Envelope codec | round-trip all types; unknown field ignored; unknown `type` ignored; missing required field rejected; `v` mismatch rejected; **262 144 + 1 bytes rejected**; length prefix larger than the cap rejected *without reading the body*; malformed UTF-8 rejected; `payload: null` rejected |
-| Session FSM | every legal transition; **every illegal transition rejected without crashing**; `RECONNECTING` returns to the state it left; `BYE` suppresses reconnect; `ENDING` is the only path that releases audio; **closing a duplicate connection produces no transition and no `reconnect_count` increment** |
+| Session FSM | every legal transition; **every illegal transition rejected without crashing**; `RECONNECTING` returns to the state it left; `BYE` suppresses reconnect; **the audio-release effect appears on exactly the two deliberate ends and on nothing else** — `ENDING`, and the user's retry out of `DISCONNECTED` (ADR-026); asserted in both directions, so an edit that attached it to `RECONNECTING` fails; **closing a duplicate connection produces no transition and no `reconnect_count` increment** |
+| Session lifecycle — end and restart (ADR-026) | `ENDING -> IDLE` reached by **production** emitting `TeardownComplete` (never injected by a test); a stalled capture release holds `ENDING` open and a successor is refused outright; a retired session's parked teardown cannot clear the successor's voice controller, relay sinks or sender lifetime; a successor's `startListening` waits for the predecessor's teardown; a link blip is not a session end (epoch, capture and foreground service all survive); `RetryRequested` reaches `DISCOVERING` from `DISCONNECTED` and is refused everywhere else; `shutdown()` detaches only the sinks the session installed. Android `SessionLifecycleRestartTest` (13 cases) + `SessionTeardownOwnerTest` (3); iOS `SessionTeardownOwnershipTests` (5) — see §3.1c for what iOS **cannot** cover |
 | Connection dedup | larger `conn_tiebreak`'s outbound connection survives; both peers compute the same verdict from the same pair; equal tiebreak ⇒ both close and regenerate; inbound connection while `CONNECTED` ⇒ `session_already_active` with no state change; **`HELLO` applied at most once**; the loser never reaches capability exchange |
 | SAS derivation | the ten vectors of [PROTOCOL §4.5.2](PROTOCOL.md#452-sas-golden-vectors); output is **always exactly 6 characters**, all digits; `000000` renders as six zeroes; leading-zero cases; values at and past 999 999; big-endian byte order (a little-endian reading must fail the vectors); bytes 4…31 of the exporter output do not affect the result |
 | SPKI identity | `identity_spki_sha256` formatting (`sha256:` + 64 lowercase hex, uppercase **rejected**); pin match; **pin mismatch ⇒ `pin_mismatch`, never auto-re-pair**; certificate re-issued with unchanged SPKI ⇒ still trusted; expired certificate ⇒ `certificate_invalid`, *not* `pin_mismatch`, and it outranks a pin mismatch; `HELLO.identity_spki_sha256` disagreeing with the TLS certificate ⇒ `identity_mismatch`, checked **before** pairing is offered |
@@ -150,6 +151,47 @@ cases and **none of them can open or close the capture device**.
 | Route `confidence` | Still `assumed` on both platforms, and both mappers' tests still **assert** `assumed`. A-12/A-13 are what change that |
 | Any route-transition *duration* | The instrumentation exists and is unit-tested; the number it would record is IA-03's and has never been measured on a device |
 | **Mouth-to-ear latency** | A-09/V-11. The setup timings this phase adds measure how long the app took to bring voice up; they include no Bluetooth hop, no encoder and no jitter buffer, and **network RTT is not latency** |
+
+### 3.1bb Session lifecycle — end and restart (ADR-026), and the iOS half that is not covered
+
+**Proven, on Android, against production seams.** `SessionLifecycleRestartTest` (13 cases) drives a
+real `SessionCoordinator`, a real `ControlSessionManager` and a real `VoiceController` through the
+whole end-and-restart cycle. **Nothing in it injects `TeardownComplete` or `RetryRequested`** — the
+entire point is to watch production emit them — and the only seams used (`applyEvent`,
+`handleControlEvent`, both already `internal` for `SessionCoordinatorEndingEffectTest`) stand in for a
+socket, never for a lifecycle decision.
+
+| Property | Case |
+|---|---|
+| A peer `BYE` reaches `IDLE` with nothing injecting the event | `a peer BYE ends in IDLE without anything injecting TeardownComplete` — and capture release, the foreground-service stop and the control-plane shutdown are all asserted to have happened **before** `IDLE` |
+| The user ending the ride does the same | `the user ending the session reaches IDLE the same way` |
+| A stalled release holds `ENDING` open, and a successor is refused outright | `a stalled release holds ENDING open and refuses a successor outright` — the "prove it is impossible" half: on the `ENDING` path a successor genuinely cannot begin |
+| A retired session's **parked** teardown cannot clear the successor's voice sink, `AUDIO_STATE` sink, sender lifetime or controller | `a parked teardown from the retired session cannot clear the successor's state` — the adversarial interleaving, reached through the retry path |
+| A successor's `startListening` waits for the predecessor's teardown | `a successor's control plane waits for the predecessor's teardown`, and `stop then start discovery serialises the two sessions' control planes` |
+| A link blip is **not** a session end | `a link blip keeps the sender lifetime, the capture device and the foreground service` |
+| Retry recovers an exhausted budget, mints a new sender lifetime, and is refused from every other state | `an exhausted reconnect budget is recoverable…`, `a user retry releases capture…`, `retry is refused from every state but DISCONNECTED` |
+| A second session genuinely connects and builds its own voice subsystem | `the second session reaches CONNECTED and attaches its own voice subsystem` |
+| `shutdown()` detaches only the sinks the session installed | `TeardownTest#shutdown detaches only the sinks the session owned` (`:network`), mirrored by `SessionTeardownOwnershipTests` |
+
+**Every one of those was verified to fail against the genuine pre-fix behaviour**, by mutating the
+production source one property at a time — see `docs/STATUS.md` §2ak for the table of six mutations
+and which cases each one broke, including the one mutation the suite does **not** deterministically
+catch and why.
+
+**Not proven, and it must not be reported as passing:**
+
+- **iOS's app-target `SessionCoordinator` has no test bundle at all** (§4 problem 22), so the iOS
+  *wiring* — which effects `retireSession` awaits, in which order, and that `.teardownComplete` is
+  the last statement of the same task — is covered by **code inspection against the Android mirror
+  and nothing else**. What iOS does have directly: `SessionTeardownOwnershipTests` (5 cases) over the
+  real `SessionTeardownOwner` — the ownership primitive the coordinator is built on, extracted into
+  `RideLinkPlatform` for exactly this reason — and over a real `ControlSessionManager` for the sink-
+  ownership and diagnostics-reset halves.
+- **No restart has happened on a phone.** `NsdManager`/`NWBrowser` teardown-and-restart, a second
+  real mDNS advertisement on the same process, and a real second TLS session after a real `BYE` are
+  all untested. TEST_PLAN **I-06** is the row that will change that, and it is pending.
+- **The foreground service has still never started**, so "the foreground service is stopped exactly
+  once on a deliberate end" is proven against a counting fake, not against `RideForegroundService`.
 
 ### 3.1c Phase 5 synchronized playback — what is proven on a laptop, and what is not
 
@@ -904,7 +946,8 @@ Wi-Fi only, no Bluetooth audio yet. This is where most cross-platform defects wi
 | I-03 | Kill and reopen both apps | reconnects silently, **no code prompt** | 1 |
 | I-04 | Edit one device's stored pin to a wrong SPKI value, reconnect | refused with `pin_mismatch`, surfaced as a security warning, **no auto re-pair** | 1 |
 | I-05 | Aeroplane-mode one phone 10 s, restore | `RECONNECTING` → returns to the state it left; `reconnect_count` = 1 | 1 |
-| I-06 | Aeroplane-mode 3 min | `DISCONNECTED`; recovers on manual retry | 1 |
+| I-06 | Aeroplane-mode 3 min | `DISCONNECTED`; recovers on the **Retry** button, which re-enters `DISCOVERING` and finds the peer again. **Runnable for the first time as of ADR-026** — before it, `RetryRequested` had no emitter and the only recovery was a force-quit. Still pending: it is a two-device row | 1 |
+| I-26 | End a ride deliberately (**End Session** on one phone), then start a second ride from the same app process, on both phones, without relaunching | `ENDING -> IDLE` completes on its own; a second discovery session advertises and browses again on real `NsdManager`/`NWBrowser`; a second TLS session reaches `CONNECTED`; the shared catalogue and synchronised playback both still work in it (the §4 problem 54 half); the peer adopts the new `revision_epoch` at `revision` 1. **The real-device gate for ADR-026** | 1 |
 | I-07 | Repeat I-01…I-03 on an Android hotspot, then an iPhone hotspot | all three topologies work, or the failure is documented with a reason | 1 |
 | I-08 | Observe clock sync for 5 min | offset stddev < 5 ms; no step > 30 ms | 1 |
 | I-09 | Both phones tap *play* within ~100 ms | exactly one track plays; both agree; no double-skip | 5 |

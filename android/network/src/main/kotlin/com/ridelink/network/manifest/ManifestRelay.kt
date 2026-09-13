@@ -104,8 +104,8 @@ class ManifestRelay internal constructor(
         droppedPreAuthentication += 1
     }
 
-    fun reset() {
-        sink = null
+    /** See [com.ridelink.network.control.ControlRelays.resetCounters]: the counters, never [sink]. */
+    fun resetCounters() {
         rejections.clear()
         droppedPreAuthentication = 0
         droppedRetiredGeneration = 0

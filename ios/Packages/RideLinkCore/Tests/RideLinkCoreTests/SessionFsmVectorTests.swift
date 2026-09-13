@@ -68,10 +68,15 @@ final class SessionFsmVectorTests: XCTestCase {
             XCTAssertEqual(newState, expectedTo, "[\(name)] resulting state mismatch")
 
             let expectedEffects = (vector["effects"] as? [String]) ?? []
-            if expectedEffects.contains("RELEASE_AUDIO_AND_STOP_FOREGROUND_SERVICE") {
-                let hasReleaseEffect = effects.contains { if case .releaseAudioAndStopForegroundService = $0 { return true }; return false }
-                XCTAssertTrue(hasReleaseEffect, "[\(name)] expected the audio-release effect on entering \(expectedTo.status)")
-            }
+            // Asserted in **both** directions. Presence alone would let a future edit attach the release
+            // effect to every transition and still pass — including to `RECONNECTING`, which is the one
+            // thing ARCHITECTURE §3 rule 3 exists to forbid.
+            let hasReleaseEffect = effects.contains { if case .releaseAudioAndStopForegroundService = $0 { return true }; return false }
+            XCTAssertEqual(
+                expectedEffects.contains("RELEASE_AUDIO_AND_STOP_FOREGROUND_SERVICE"),
+                hasReleaseEffect,
+                "[\(name)] the audio-release effect on \(from.status) -> \(expectedTo.status) must match the vector exactly"
+            )
             let hasLogEffect = effects.contains { if case .logTransition = $0 { return true }; return false }
             XCTAssertTrue(hasLogEffect, "[\(name)] every real transition must be logged (ARCHITECTURE §3 rule 5)")
         }

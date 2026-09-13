@@ -36,6 +36,8 @@ import com.ridelink.network.voice.VoiceController
 import com.ridelink.network.voice.VoiceDiagnostics
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -325,13 +327,98 @@ class SessionCoordinator(
         publishAudioState(force = false)
     }
 
-    private var sessionJob: Job? = null
+    /**
+     * Everything one discovery session launches, under one [Job].
+     *
+     * A [SupervisorJob] for [AppContainer][com.ridelink.app.di.AppContainer]'s reason — the control
+     * event collector, the advertiser and the browser are siblings and one of them failing must not
+     * cancel the others — and a *child* of the app scope, so process shutdown still reaches it.
+     *
+     * The point of the job is not cancellation but **completion**: `cancelAndJoin()` on it is what
+     * lets a teardown state, rather than hope, that no continuation this session started is still
+     * running. `NsdDiscoveryController`'s two `callbackFlow`s make that concrete — their
+     * `awaitClose` handlers are where `unregisterService`/`stopServiceDiscovery` actually happen, so
+     * a cancel that is not joined leaves mDNS still advertising.
+     */
+    private class SessionRuntime(
+        parent: CoroutineScope,
+    ) {
+        val job = SupervisorJob(parent.coroutineContext[Job])
+        val scope = CoroutineScope(parent.coroutineContext + job)
+    }
+
+    private var sessionRuntime: SessionRuntime? = null
+
+    /**
+     * True from the moment a discovery session asks the control plane to start until its teardown
+     * has shut it down again.
+     *
+     * Deliberately not inferred from `sessionRuntime != null`: a teardown must know whether to call
+     * [ControlSessionManager.shutdown] at all, and shutting down a manager that was never started
+     * would publish `ControlState.ENDED` over a cold `IDLE` app.
+     */
+    private var controlPlaneStarted = false
+
+    /** The single owner of teardown ordering and completion — see [SessionTeardownOwner]. */
+    private val teardown = SessionTeardownOwner(scope)
+
     private var connectAttempted = false
     private var lastPeerHost: String? = null
     private var lastPeerPort: Int? = null
 
-    fun startDiscovery() {
-        if (!applyEvent(SessionEvent.StartDiscovery)) return
+    /**
+     * ARCHITECTURE §3's `IDLE -> DISCOVERING`. Rejected from every other state by [SessionFsm],
+     * which is the point: this is the *only* way a first session starts.
+     */
+    fun startDiscovery() = beginDiscoverySession(SessionEvent.StartDiscovery, retireHere = true)
+
+    /**
+     * ARCHITECTURE §3's `DISCONNECTED -> DISCOVERING`, and the second half of `docs/STATUS.md` §4
+     * problem 53: `SessionFsm` has always had this transition and **nothing ever emitted
+     * `RetryRequested`**, so a rider whose reconnect budget ran out had no way back to discovery
+     * short of force-quitting the app.
+     *
+     * **Deliberately a user action, never an automatic one.** PROTOCOL §10's ladder is the app's one
+     * reconnect loop and it has a 120 s budget on purpose; re-entering discovery by itself once that
+     * budget is spent would be an unbounded background loop wearing the radio for a peer that may
+     * simply be switched off. `DISCONNECTED` is ARCHITECTURE §3's "awaiting user", and this is the
+     * user.
+     *
+     * The exhausted session is genuinely retired first — capture, the foreground service, its
+     * listener, its collectors and its control manager all go — and the new one is a new *discovery*
+     * session in the full sense of PROTOCOL §4.4: a fresh `revision_epoch`, an empty peer inbox, a
+     * fresh peer list. The retirement is not done *here*: `RetryRequested` is one of ARCHITECTURE
+     * §3 rule 3's two deliberate ends, so [SessionFsm] emits
+     * [Effect.ReleaseAudioAndStopForegroundService] for it and [runEffect] has already retired the
+     * session by the time [beginDiscoverySession] resumes — which is why it passes `retireHere =
+     * false`. One owner, reached two ways, never two owners.
+     */
+    fun retryDiscovery() = beginDiscoverySession(SessionEvent.RetryRequested, retireHere = false)
+
+    /**
+     * The user ending the ride from **this** phone (ARCHITECTURE §3's `UserEnded`), as opposed to the
+     * peer's `BYE` that `SessionGate` already turns into the same `ENDING`.
+     *
+     * Legal from `CONNECTED`, `RIDE_ACTIVE`, `RECONNECTING` and `DISCONNECTED`; rejected and logged
+     * anywhere else. Everything after the transition is `ENDING`'s one effect (see [runEffect]):
+     * release capture, stop the foreground service, retire the session, and only then tell the FSM
+     * the teardown is complete.
+     */
+    fun endSession() {
+        applyEvent(SessionEvent.UserEnded)
+    }
+
+    private fun beginDiscoverySession(
+        event: SessionEvent,
+        retireHere: Boolean,
+    ) {
+        if (!applyEvent(event)) return
+        // `StartDiscovery` carries no FSM effect, so the (from a cold `IDLE`, empty) retirement
+        // happens here; `RetryRequested` carries the deliberate-end effect and [runEffect] has
+        // already done it, synchronously, inside the `applyEvent` above. Either way the successor
+        // waits on the one owner's latest job rather than on a reference of its own.
+        if (retireHere) retireSession(SessionEnd.DISCOVERY_RESTART)
+        val previousSession = teardown.pending
         connectAttempted = false
         _discoveredPeers.value = emptyList()
         _discoveryCount.value = 0
@@ -347,37 +434,132 @@ class SessionCoordinator(
         _peerAudioState.value = null
         _lastIntercomRefusal.value = null
 
-        sessionJob =
-            scope.launch {
-                launch {
-                    controlSessionManager.events.collect { event -> handleControlEvent(event) }
-                }
-                val port = controlSessionManager.startListening(localIdentity)
-                launch {
-                    // The Bonjour/mDNS instance name is derived from the rotating discovery
-                    // handle inside NsdDiscoveryController.advertise() itself — never the device
-                    // model/name (this session's brief §6) — so no name is passed in here.
-                    discovery.advertise(port).collect { advertiseState ->
-                        logger.debug("SessionCoordinator", "advertise: $advertiseState")
-                    }
-                }
-                launch {
-                    discovery.browse().collect { event -> handleDiscoveryEvent(event) }
+        controlPlaneStarted = true
+        val runtime = SessionRuntime(scope)
+        sessionRuntime = runtime
+        runtime.scope.launch {
+            // **Nothing shared is touched until the previous session is terminal.** The control
+            // manager, the mDNS advertiser and the browser are one instance each for the whole
+            // process, so a teardown still in flight would otherwise un-latch what this session has
+            // just latched — `shutdown()` setting `isShutDown` and closing the listener that
+            // `startListening` below had already bound is the worst of them, and it leaves the new
+            // session permanently unable to accept a connection.
+            previousSession?.join()
+            launch {
+                controlSessionManager.events.collect { event -> handleControlEvent(event) }
+            }
+            val port = controlSessionManager.startListening(localIdentity)
+            launch {
+                // The Bonjour/mDNS instance name is derived from the rotating discovery
+                // handle inside NsdDiscoveryController.advertise() itself — never the device
+                // model/name (this session's brief §6) — so no name is passed in here.
+                discovery.advertise(port).collect { advertiseState ->
+                    logger.debug("SessionCoordinator", "advertise: $advertiseState")
                 }
             }
+            launch {
+                discovery.browse().collect { event -> handleDiscoveryEvent(event) }
+            }
+        }
     }
 
     fun cancelDiscovery() {
-        applyEvent(SessionEvent.CancelDiscovery)
-        teardownSession()
+        if (!applyEvent(SessionEvent.CancelDiscovery)) return
+        retireSession(SessionEnd.DISCOVERY_RESTART)
         _discoveredPeers.value = emptyList()
     }
 
-    private fun teardownSession() {
-        releaseVoice()
-        sessionJob?.cancel()
-        sessionJob = null
-        scope.launch { controlSessionManager.shutdown() }
+    /**
+     * Why a session is being retired: the two facts that differ between the paths, and nothing else.
+     * The teardown *steps* are identical in all three — that is the point of there being one owner.
+     */
+    private enum class SessionEnd(
+        /**
+         * ARCHITECTURE §3 rule 3's deliberate end. The foreground service is stopped once — and only
+         * once — capture release is proven. Capture itself is released on every path (there is
+         * simply none to release before the trust gate); the foreground service is what the rule is
+         * actually about, because stopping it over an unproven release orphans the microphone.
+         */
+        val stopsForegroundService: Boolean,
+        /** Only `ENDING` has an `IDLE` to reach, so only `ENDING` has a `TeardownComplete` to emit. */
+        val signalsTeardownComplete: Boolean,
+    ) {
+        /** `ENDING`: a peer `BYE`, the user ending the ride, or an acknowledged fatal error. */
+        ENDING(stopsForegroundService = true, signalsTeardownComplete = true),
+
+        /** `DISCONNECTED -> DISCOVERING`: rule 3's *other* deliberate end (see [SessionFsm]). */
+        USER_RETRY(stopsForegroundService = true, signalsTeardownComplete = false),
+
+        /**
+         * Stop Discovery, and the (normally empty) retirement a cold Start Discovery performs.
+         * Neither can have reached the trust gate, so there is no capture and no foreground service
+         * to speak of — and rule 3 forbids touching the latter from here in any case.
+         */
+        DISCOVERY_RESTART(stopsForegroundService = false, signalsTeardownComplete = false),
+    }
+
+    /**
+     * **Retires the current session and returns the job that completes when it is terminal.**
+     *
+     * Everything above the `teardown.retire` call runs **synchronously**, on the caller's stack,
+     * before this function returns: after it, no field this coordinator holds belongs to the session
+     * being retired, so nothing the asynchronous half does can reach a *successor's* voice
+     * controller, sinks, runtime or diagnostics. Each captured reference is the ownership token for
+     * its own object — no counter is invented, because the reference itself already answers "whose?"
+     * exactly (ADR-024 Amendment A3's lesson, at the session layer).
+     *
+     * The asynchronous half then, in order:
+     *
+     * 1. **releases capture and awaits it**, then stops the foreground service if — and only if —
+     *    the release is proven (problem 32; a `TimedOut` must never be read as proof);
+     * 2. **cancels and joins** everything this session launched. `cancelAndJoin`, never `cancel`:
+     *    cancellation is a request, and `NsdDiscoveryController`'s `awaitClose` handlers — where
+     *    mDNS is actually unregistered — run after it. Joining is the proof;
+     * 3. **shuts the control plane down**, which writes the `BYE`, closes the socket and the
+     *    listener, and un-latches the manager for reuse.
+     *
+     * Only when all three have returned may `TeardownComplete` be emitted, and [SessionTeardownOwner]
+     * is what makes "only when" mean something — a successor joins the same job.
+     */
+    private fun retireSession(end: SessionEnd): Job {
+        val endingVoice = voice
+        if (endingVoice != null) {
+            voice = null
+            controlSessionManager.voice.sink = null
+            controlSessionManager.audioState.sink = null
+            _voiceDiagnostics.value = VoiceDiagnostics()
+        }
+        // Cancelled here rather than left to step 2 so that the controller's own teardown — which
+        // legitimately emits more diagnostics as it stops — cannot publish another `AUDIO_STATE` for
+        // a session that has already ended. The join in step 2 is what proves it has finished.
+        voiceDiagnosticsJob?.cancel()
+        voiceDiagnosticsJob = null
+        val endingRuntime = sessionRuntime
+        sessionRuntime = null
+        val endingControlPlane = controlPlaneStarted
+        controlPlaneStarted = false
+
+        return teardown.retire {
+            val release = endingVoice?.let { releaseAndShutdown(it) } ?: StopReleaseResult.AlreadyReleased
+            if (end.stopsForegroundService) {
+                when (release) {
+                    StopReleaseResult.Released, StopReleaseResult.AlreadyReleased -> foregroundService.stop()
+                    StopReleaseResult.TimedOut ->
+                        logger.warn(
+                            "SessionCoordinator",
+                            "audio release timed out on a deliberate end; leaving the foreground service running",
+                        )
+                }
+            }
+            endingRuntime?.job?.cancelAndJoin()
+            if (endingControlPlane) controlSessionManager.shutdown()
+            if (end.signalsTeardownComplete) {
+                // The event name is now literally true: every effect above has returned, and the
+                // only references to any of them were captured synchronously above, so no
+                // continuation of this session exists to mutate whatever starts next.
+                applyEvent(SessionEvent.TeardownComplete)
+            }
+        }
     }
 
     private fun handleDiscoveryEvent(event: DiscoveryEvent) {
@@ -511,8 +693,10 @@ class SessionCoordinator(
                 if (peerAudioStateInbox.accept(message)) _peerAudioState.value = message
             }
         controller.selectPolicy(_intercomPolicy.value)
+        // On the session's own runtime, not the app scope: this collector publishes `AUDIO_STATE`,
+        // so a teardown has to be able to prove it has *stopped*, not merely that it was asked to.
         voiceDiagnosticsJob =
-            scope.launch {
+            (sessionRuntime?.scope ?: scope).launch {
                 controller.diagnostics.collect { diagnostics ->
                     _voiceDiagnostics.value = diagnostics
                     // Every observable audio change publishes, and the publisher itself decides
@@ -525,34 +709,17 @@ class SessionCoordinator(
     }
 
     /**
-     * ARCHITECTURE §3 rule 3: only a deliberate end releases the audio session. The **only** caller
-     * left is [cancelDiscovery]'s defensive path through [teardownSession] — `voice` is always
-     * already null by the time that runs in every path this app actually exercises (a session ends
-     * either from `IDLE`/`DISCOVERING`, before `attachVoice` ever ran, or from `ENDING`, whose own
-     * effect uses [releaseVoiceAndAwait] below) — so this is fire-and-forget on purpose: it exists
-     * only so `teardownSession` can never be blocked on a `voice` that should not exist in its
-     * caller's paths, not as a second deliberate-release owner.
-     */
-    private fun releaseVoice() {
-        val controller = voice ?: return
-        voice = null
-        controlSessionManager.voice.sink = null
-        controlSessionManager.audioState.sink = null
-        voiceDiagnosticsJob?.cancel()
-        voiceDiagnosticsJob = null
-        scope.launch { controller.shutdown() }
-        _voiceDiagnostics.value = VoiceDiagnostics()
-    }
-
-    /**
-     * The **one** deliberate-ENDING release path (this phase's final hardening pass, problem 32):
-     * awaits capture release before returning, so [runEffect]'s `ENDING` handling can prove release
-     * happened before it ever asks the foreground service to stop.
+     * **The one release path, and it is awaited** (this phase's final hardening pass, problem 32).
      *
-     * [VoiceController.stopAndAwaitRelease] is itself bounded (Issue 2) — a timeout here is
-     * surfaced to the caller rather than silently treated as success, and [VoiceController.shutdown]
-     * still runs afterward regardless of the result, because this controller is being torn down
-     * either way and its tasks must not be leaked.
+     * [retireSession] calls it with the controller it captured synchronously, so this can never be
+     * handed a *successor's* controller — which is exactly what the old fire-and-forget
+     * `releaseVoice()` could do once `ENDING -> IDLE` became reachable, and why that function is
+     * gone rather than kept "for safety".
+     *
+     * [VoiceController.stopAndAwaitRelease] is itself bounded (Issue 2) — a timeout is surfaced to
+     * the caller rather than silently treated as success — and [VoiceController.shutdown] still runs
+     * afterward regardless, because this controller is being torn down either way and its tasks must
+     * not be leaked.
      *
      * This phase's closure-audit follow-up (problem 39): `stopAndAwaitRelease()`'s result is captured
      * *before* [VoiceController.shutdown] runs, but [shutdown] is not a second, independent wait — it
@@ -565,23 +732,16 @@ class SessionCoordinator(
      * was still waiting on) finishes running, including its `ReleaseLocalAudio` action if there was
      * one. By the time `shutdown()` returns below, that release is therefore proven complete — not
      * merely "no longer timed out", but actually done — so a stale `TimedOut` must not survive past
-     * this point: reporting it to [runEffect] would leave `RideForegroundService` running forever
+     * this point: reporting it to [retireSession] would leave `RideForegroundService` running forever
      * over a release that has already finished (the exact orphan-service failure mode
      * [StopReleaseResult] exists to make impossible to reach on purpose, now closed for the one path
      * that was still reaching it by accident). [StopReleaseResult.AlreadyReleased] needs no such
      * promotion: it means `stopAndAwaitRelease()` found nothing to release in the first place, so
      * `shutdown()` never registered a waiter for it either.
      */
-    private suspend fun releaseVoiceAndAwait(): StopReleaseResult {
-        val controller = voice ?: return StopReleaseResult.AlreadyReleased
+    private suspend fun releaseAndShutdown(controller: VoiceController): StopReleaseResult {
         val initialResult = controller.stopAndAwaitRelease()
-        voice = null
-        controlSessionManager.voice.sink = null
-        controlSessionManager.audioState.sink = null
-        voiceDiagnosticsJob?.cancel()
-        voiceDiagnosticsJob = null
         controller.shutdown()
-        _voiceDiagnostics.value = VoiceDiagnostics()
         return if (initialResult == StopReleaseResult.TimedOut) StopReleaseResult.Released else initialResult
     }
 
@@ -606,7 +766,10 @@ class SessionCoordinator(
             } else {
                 audioStatePublisher.next(route, mode) ?: return
             }
-        scope.launch {
+        // The session's own runtime, so the send is one of the continuations a teardown joins rather
+        // than one it merely outlives. The epoch fence below still stands on its own — it is what
+        // covers a publish raised outside any session at all, e.g. a mode change from `IDLE`.
+        (sessionRuntime?.scope ?: scope).launch {
             // ADR-021 Amendment A7 §4, which is ADR-024 Amendment A3/A5's rule applied outbound:
             // **authorised to build is not authorised to send.** The revision above was committed
             // synchronously, but the write below happens after a dispatch, and `startDiscovery` can
@@ -640,7 +803,7 @@ class SessionCoordinator(
         return when (val result = SessionFsm.transition(current, event)) {
             is FsmResult.Transitioned -> {
                 _state.value = result.newState
-                result.effects.forEach(::runEffect)
+                result.effects.forEach { effect -> runEffect(effect, result.newState) }
                 true
             }
             is FsmResult.Rejected -> {
@@ -654,40 +817,35 @@ class SessionCoordinator(
         }
     }
 
-    private fun runEffect(effect: Effect) {
+    /**
+     * @param newState the state this transition produced. Passed rather than re-read: which
+     *   deliberate end an [Effect.ReleaseAudioAndStopForegroundService] belongs to is a property of
+     *   *this* transition, and asking a mutable field for it later is the shape ADR-024 Amendment A7
+     *   and ADR-025 are both about.
+     */
+    private fun runEffect(
+        effect: Effect,
+        newState: FsmState,
+    ) {
         when (effect) {
             is Effect.LogTransition ->
                 logger.info("SessionCoordinator", "${effect.from.status} -> ${effect.to.status} (${effect.trigger})")
             is Effect.ReleaseAudioAndStopForegroundService -> {
-                // This phase's final hardening pass, problem 32: this effect's name promised a
-                // foreground-service stop it never actually performed — `releaseVoice()` alone is
-                // fire-and-forget, and nothing here ever called `RideForegroundService.stop`. Fixed
-                // by making this the **one** owner of the ENDING order (ARCHITECTURE §6.4): release
-                // is awaited to a proven result first; the foreground service is stopped only when
-                // that result is not a timeout; and session teardown (control/discovery) always runs
-                // last, regardless, because the control session and discovery are being torn down
-                // either way.
+                // This phase's final hardening pass, problem 32 made this the **one** owner of the
+                // `ENDING` order (ARCHITECTURE §6.4): release is awaited to a proven result first;
+                // the foreground service is stopped only when that result is not a timeout; and the
+                // session teardown (control/discovery) always runs last.
                 //
-                // The closure-audit follow-up (problem 39): `releaseVoiceAndAwait()` never actually
-                // hands this `when` a stale `TimedOut` any more — see its own doc — so in today's code
-                // this branch is reached only while the release is genuinely still unresolved (a real
-                // stall, not merely a caller that stopped waiting on one that had already finished).
-                // Kept as the exhaustive `else` of a sealed result rather than removed: it is this
-                // `when`, not `releaseVoiceAndAwait()`, that is the last line of defence against ever
-                // stopping the foreground service on an unproven release, and it must stay correct on
-                // its own even if a future caller reaches it with a genuine timeout again.
+                // `docs/STATUS.md` §4 problem 53 adds the step that was missing after all of that —
+                // `TeardownComplete`, the only event that opens `ENDING -> IDLE`, which nothing in
+                // the app had ever emitted. It is emitted by [retireSession], as the last statement
+                // of the same job that performs the teardown, which is what makes the event name
+                // true rather than merely plausible: the alternative — emit here and let the cleanup
+                // trail behind — is the successor race this pass exists to close.
                 logger.info("SessionCoordinator", "release audio + stop foreground service")
-                scope.launch {
-                    when (val result = releaseVoiceAndAwait()) {
-                        StopReleaseResult.Released, StopReleaseResult.AlreadyReleased -> foregroundService.stop()
-                        StopReleaseResult.TimedOut ->
-                            logger.warn(
-                                "SessionCoordinator",
-                                "audio release timed out on ENDING; leaving the foreground service running",
-                            )
-                    }
-                    teardownSession()
-                }
+                retireSession(
+                    if (newState.status == SessionStatus.ENDING) SessionEnd.ENDING else SessionEnd.USER_RETRY,
+                )
             }
         }
     }

@@ -141,8 +141,23 @@ public actor AudioStateRelay {
         preAuthenticationDrops += 1
     }
 
-    public func reset() {
-        sink = nil
+    /// A control-session boundary: the per-session diagnostics counters go back to zero. **No sink is
+    /// detached here, and that is the fix** (`docs/STATUS.md` §4 problem 54).
+    ///
+    /// `ControlSessionManager.shutdown()` used to null every relay sink, on the reasoning that "a sink
+    /// attached by the previous session must not survive into the next". That is true of exactly two of
+    /// the five families and false of the other three, and the difference is *who installed the sink*:
+    /// `voice` and `audioState` are installed per authenticated session by `SessionCoordinator`, which
+    /// also detaches them — synchronously, at the instant it retires the session; `manifest`, `transfer`
+    /// and `playback` are installed **once per process** by `SharedLibraryCoordinator` and
+    /// `SyncPlaybackCoordinator`, which deliberately outlive a control-session boundary (that is what
+    /// ADR-023 §3's and ADR-025's per-frame generation is *for*) and which nothing ever re-installs.
+    /// Detaching those three here disabled Phase 4 and Phase 5 silently and permanently for the rest of
+    /// the process, from the first Stop Discovery onward.
+    ///
+    /// So the rule kept here is the narrow one that was always true: **a sink belongs to whoever
+    /// installed it, and only its installer may remove it.**
+    public func resetCounters() {
         rejections.removeAll()
         preAuthenticationDrops = 0
         retiredGenerationDrops = 0

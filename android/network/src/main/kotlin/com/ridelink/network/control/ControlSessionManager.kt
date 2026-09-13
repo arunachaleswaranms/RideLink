@@ -363,7 +363,11 @@ class ControlSessionManager(
      */
     suspend fun startListening(local: LocalHandshakeIdentity): Int {
         isShutDown = false
-        _diagnostics.update { it.copy(transportLabel = channel.transportLabel) }
+        // A **whole** fresh diagnostics row, not a copy of the previous session's: `shutdown()` leaves
+        // `controlState = ENDED` behind, and copying it forward made a brand-new session report the
+        // *previous* one's ending on the transport banner until a connection happened to promote it.
+        // Invisible until `docs/STATUS.md` §4 problem 53 made a second session reachable at all.
+        _diagnostics.value = ControlDiagnostics(transportLabel = channel.transportLabel)
         val bound = channel.bind()
         listener = bound
         acceptJob =
@@ -1168,15 +1172,22 @@ class ControlSessionManager(
         isShutDown = true
         pairing = null
         authenticatedConnection = null
-        // This manager is reused across sessions, so a sink still attached from the previous one must
-        // not survive into the next — the same hazard STATUS §2h fixed for control events, applied to
-        // the voice sink. The coordinator also detaches it, and doing both is deliberate: neither
-        // teardown path may depend on the other having run.
-        relays.reset()
+        // Counters only — see [ControlRelays.resetCounters]. This used to detach every relay sink,
+        // which silently killed Phase 4 and Phase 5 for the rest of the process (STATUS §4 problem
+        // 54): their sinks are installed once per process by coordinators that deliberately outlive
+        // a control-session boundary, and nothing re-installs them. The two per-session sinks
+        // (`voice`, `audioState`) are detached by `SessionCoordinator`, synchronously, at the
+        // instant it retires the session — before this ever runs.
+        relays.resetCounters()
         pendingActivation = null
         _pairingPrompt.value = null
         endedDeliberately = true
         reconnectController.cancel()
+        // …and reset, not merely cancel: `cancel()` leaves `attempt`/`elapsedMs` where the previous
+        // session spent them. `promote` resets them too, so this is not reachable today, but an
+        // exhausted 120 s budget handed to the next session is exactly the class of defect this
+        // pass exists to close — session-lifetime state surviving into a successor.
+        reconnectController.reset()
         acceptJob?.cancel()
         keepaliveJob?.cancel()
         clockSyncJob?.cancel()

@@ -135,8 +135,8 @@ public actor VoiceSignalRelay: VoiceSignalTransport {
         preAuthenticationDrops += 1
     }
 
-    public func reset() {
-        sink = nil
+    /// See `AudioStateRelay.resetCounters()`: the counters, never the sink.
+    public func resetCounters() {
         rejections.removeAll()
         preAuthenticationDrops = 0
         retiredGenerationDrops = 0
