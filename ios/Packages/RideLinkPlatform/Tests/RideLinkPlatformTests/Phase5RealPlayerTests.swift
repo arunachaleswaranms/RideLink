@@ -102,23 +102,112 @@ final class Phase5RealPlayerTests: XCTestCase {
 
     // MARK: - the ADR-024 A4 step sequence, on the real player
 
-    /// Requirements 6 and 7: a hard seek lands, and `load -> seek -> start` — the order
+    /// B-1, requirements 6 and 7: a hard seek lands, and `load -> seek -> start` — the order
     /// `SyncPlaybackCoordinator` actually issues once ADR-024 A4 split `prepare` into single-effect
-    /// steps — leaves the real player playing from the seeked position, not from zero.
-    func testLoadThenSeekThenStartPlaysFromTheSeekedPosition() async throws {
+    /// steps — leaves the real player **consuming frames** from the seeked position, not from zero.
+    ///
+    /// **This test replaces one that proved none of that** (STATUS §4 problem 58). Its predecessor
+    /// seeked to 1 500 ms in a fixture that is 509 ms long, so `scheduleFromCurrentOffset` computed
+    /// `remaining == 0` and scheduled nothing at all; `playCommand` then published `playing: true`
+    /// anyway and the assertion `playing && positionMs >= 1_500` matched that very state. It passed
+    /// in 38 ms — for half a second of audio that was never decoded.
+    ///
+    /// So the seek point here is **inside** the fixture, taken from the duration the decoder itself
+    /// reported rather than assumed, and the proof that frames really moved is three independent
+    /// observations: the position advances **past** the seek point while still playing, the segment
+    /// reaches its real `.dataPlayedBack` completion, and the wall-clock time to that completion
+    /// matches the audio that was actually left — materially less than the whole track.
+    func testLoadThenSeekThenStartPlaysTheSeekedContent() async throws {
         try await loadNormal()
+        let durationMs = await player.state.durationMs
+        XCTAssertGreaterThan(durationMs, 2 * Self.inRangeSeekMs, "the fixture must be long enough for this seek to be inside it")
 
-        await player.execute(.seek(positionMs: 1_500))
-        let seeked = try await firstState { $0.positionMs >= 1_400 }
-        XCTAssertGreaterThanOrEqual(seeked.positionMs, 1_400, "a hard seek must move the real player's position")
+        await player.execute(.seek(positionMs: Self.inRangeSeekMs))
+        let seeked = await player.state
+        XCTAssertEqual(
+            seeked.positionMs, Self.inRangeSeekMs, accuracy: 2,
+            "a hard seek must move the real player's reported position to what was asked for"
+        )
+        XCTAssertLessThanOrEqual(seeked.positionMs, durationMs, "a reported position may never exceed the track's duration")
+        XCTAssertFalse(seeked.playing, "a seek while paused must not start playback")
+
+        let startedAt = Date()
+        await player.execute(.play)
+
+        // Frames are being consumed: the node's own output timeline has moved past the seek point.
+        let advanced = try await firstState { $0.playing && $0.positionMs > Self.inRangeSeekMs }
+        XCTAssertGreaterThan(
+            advanced.positionMs, Self.inRangeSeekMs,
+            "playback must continue from the seek and advance, never sit still or restart at zero"
+        )
+
+        // And the real segment reaches its real completion callback.
+        let ended = try await firstState { !$0.playing && $0.durationMs > 0 && $0.positionMs >= $0.durationMs }
+        let elapsed = Date().timeIntervalSince(startedAt)
+        XCTAssertTrue(ended.ended, "the seeked segment must reach end-of-media, so a queue owner can advance")
+
+        let remainingSeconds = Double(durationMs - Self.inRangeSeekMs) / 1000.0
+        print(
+            "Phase5RealPlayerTests: in-range seek — duration=\(durationMs)ms seek=\(Self.inRangeSeekMs)ms "
+                + "remaining=\(remainingSeconds)s elapsed=\(elapsed)s"
+        )
+        XCTAssertGreaterThan(
+            elapsed, remainingSeconds * 0.5,
+            "playing out \(remainingSeconds)s of audio took \(elapsed)s — too fast to have decoded it"
+        )
+        XCTAssertLessThan(
+            elapsed, remainingSeconds + 1.0,
+            "playing out \(remainingSeconds)s of audio took \(elapsed)s — far longer than the audio that was left"
+        )
+        XCTAssertLessThan(
+            elapsed, Double(durationMs) / 1000.0 + 0.5,
+            "a seeked start must play less than the whole track; elapsed=\(elapsed)s duration=\(durationMs)ms"
+        )
+    }
+
+    /// B-2 — the contract for a seek **past** the end, which is reachable from the wire: PROTOCOL §5's
+    /// `target_position_ms` names a position in the *peer's* copy and nothing guarantees this side's
+    /// decoded length is identical (`PlaybackCodec` bounds it against `maxPositionMs`, not against the
+    /// loaded track).
+    ///
+    /// The chosen contract is **clamp**, because that is what `ExoPlayer.seekTo` already does on
+    /// Android and `ExoPlayerMusicPlayer` reports back whatever it clamped to — one question, one
+    /// answer, both platforms. What must never happen either way is the state problem 58 produced:
+    /// `playing == true` with **zero frames scheduled**, no completion callback, and therefore
+    /// `PlayerState.ended` false forever while the queue owner waits for a track end that cannot come.
+    func testASeekPastTheEndClampsAndReportsEndOfMediaRatherThanPlayingNothing() async throws {
+        try await loadNormal()
+        let durationMs = await player.state.durationMs
+
+        await player.execute(.seek(positionMs: durationMs + 5_000))
+        let seeked = await player.state
+        XCTAssertEqual(seeked.positionMs, durationMs, "a seek past the end clamps to the track's duration")
 
         await player.execute(.play)
-        let playing = try await firstState { $0.playing && $0.positionMs >= 1_500 }
-        XCTAssertGreaterThanOrEqual(
-            playing.positionMs, 1_500,
-            "playback must continue from the seek, never restart at zero"
+        let afterPlay = await player.state
+        XCTAssertFalse(
+            afterPlay.playing,
+            "nothing was scheduled, so the player must not claim to be playing (problem 58)"
         )
-        await player.execute(.pause)
+        XCTAssertEqual(afterPlay.positionMs, durationMs, "end-of-media reports the duration as the position")
+        XCTAssertTrue(afterPlay.ended, "a queue owner must be able to see this as a track end and advance")
+    }
+
+    /// B-2's other end. `PlaybackCodec.isValidPosition` already rejects a negative `target_position_ms`
+    /// on the wire, so this is defence in depth for the local paths — and it is what stops a negative
+    /// `startingFrame` reaching `AVAudioPlayerNode.scheduleSegment`.
+    func testANegativeSeekClampsToTheStartAndStillPlays() async throws {
+        try await loadNormal()
+        let durationMs = await player.state.durationMs
+
+        await player.execute(.seek(positionMs: -5_000))
+        let seeked = await player.state
+        XCTAssertEqual(seeked.positionMs, 0, "a negative seek clamps to the start of the track")
+
+        await player.execute(.play)
+        let ended = try await firstState { !$0.playing && $0.durationMs > 0 && $0.positionMs >= $0.durationMs }
+        XCTAssertTrue(ended.ended, "the whole track must still play out from the clamped start")
+        XCTAssertEqual(ended.positionMs, durationMs, "end-of-media reports the duration as the position")
     }
 
     /// Requirement 8: `stop` followed by a fresh `load` leaves the engine reusable. `clearSelection`
@@ -243,6 +332,12 @@ final class Phase5RealPlayerTests: XCTestCase {
     /// fine-stepped tail, or sleeps for the wrong quantity entirely. Those miss by hundreds of
     /// milliseconds or more, not by tens. The number that is actually *evidence* is the one every run
     /// prints, and `docs/TEST_PLAN.md` §4.4 records both ranges rather than only the flattering one.
+    /// Inside `normal.m4a`, which `afinfo` reports as 22 464 valid frames at 44 100 Hz = **509 ms**.
+    /// Chosen so that the audio left after the seek (~359 ms) comfortably outlasts the player's own
+    /// 250 ms position tick, which is what makes the "advanced past the seek point" observation
+    /// deterministic rather than a race against the segment ending.
+    private static let inRangeSeekMs: Int64 = 150
+
     private static let maxScheduleErrorUs: Int64 = 500_000
 
     private static let monotonicNowUs: @Sendable () -> Int64 = {
