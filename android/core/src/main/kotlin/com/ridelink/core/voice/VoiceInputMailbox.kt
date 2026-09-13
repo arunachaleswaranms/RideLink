@@ -7,8 +7,8 @@ import com.ridelink.core.protocol.VoiceWireState
 /**
  * Where a [VoiceInput] is classified before it ever reaches the pure [VoiceNegotiation] table.
  *
- * Priority order for [VoiceInputMailbox.poll] is [TEARDOWN] > [TERMINAL_PEER_STATE] > [CRITICAL] >
- * [ICE] > [COALESCED]: a pending stop or link loss must never sit behind a flood of trickle-ICE or
+ * Priority order for [VoiceInputMailbox.poll] is [TEARDOWN] > [SEND_FAILURE] > [TERMINAL_PEER_STATE] >
+ * [CRITICAL] > [ICE] > [COALESCED]: a pending stop or link loss must never sit behind a flood of trickle-ICE or
  * peer-state spam. That ordering is deliberate, and it is also why [VoiceInput.ControlLinkLost]
  * discards the remote signals it outranks — see [VoiceInputMailbox.offer]. This doc used to claim
  * that anything stale queued below a teardown "becomes inert on its own" via the
@@ -22,8 +22,31 @@ import com.ridelink.core.protocol.VoiceWireState
  * overwritten by — an ordinary peer-state update.
  */
 enum class VoiceMailboxLane {
-    /** [VoiceInput.StopRequested] / [VoiceInput.ControlLinkLost]. One slot, latest wins, never refused. */
+    /**
+     * [VoiceInput.StopRequested] / [VoiceInput.ControlLinkLost]. One slot, never refused.
+     *
+     * Latest wins with **one exception**: a pending [VoiceInput.StopRequested] is never displaced
+     * (STATUS §4 problem 57). A stop is a strict superset of a link loss — it also releases the
+     * capture device — and it is the only input `VoiceController.shutdown()` and
+     * `stopAndAwaitRelease()` can ever complete on, so overwriting one means an unbounded wait on a
+     * release that will now never be applied, and therefore a `SessionCoordinator.retireSession`
+     * that can never emit `TeardownComplete` (ADR-026 / rule 21).
+     */
     TEARDOWN,
+
+    /**
+     * [VoiceInput.NegotiationSendFailed]. One slot, latest wins, never refused.
+     *
+     * A lane of its own rather than a second occupant of [TEARDOWN], for two reasons that are both
+     * defects it closes (STATUS §4 problem 57). It must **outrank** [CRITICAL], because the whole
+     * point is to return the table to `IDLE` before the successor lifetime's queued
+     * `VOICE_OFFER` is reduced — reduced against a still-live retired negotiation, that offer is a
+     * `GENERATION_MISMATCH` and is dropped. And it must **not share** [TEARDOWN]'s single slot,
+     * because a send failure arriving from the consumer's own resume would otherwise replace a
+     * pending teardown, taking either the link loss's ownership of queued remote work or the stop's
+     * capture release with it.
+     */
+    SEND_FAILURE,
 
     /**
      * A peer's own `VOICE_STATE { state: closed | failed }`. Unlike an ordinary peer-state update
@@ -96,6 +119,7 @@ class VoiceInputMailbox(
     private val terminalPeerStateCapacity: Int = TERMINAL_PEER_STATE_CAPACITY,
 ) {
     private var teardown: VoiceInput? = null
+    private var sendFailure: VoiceInput? = null
     private val terminalPeerState = ArrayDeque<VoiceInput>()
     private val critical = ArrayDeque<VoiceInput>()
     private val ice = ArrayDeque<VoiceInput>()
@@ -129,14 +153,34 @@ class VoiceInputMailbox(
                 // peer's offer, which `offerReceived` would accept as a fresh one (its generation
                 // guard is skipped when `voiceSessionId` is null) and answer on a dead link.
                 //
-                // The teardown that jumps the queue takes ownership of the remote work it jumped.
-                // Doing it here, at **offer** time, is what makes it exact rather than a race:
-                // `endConnection` clears `authenticatedConnection` *before* it emits `LinkLost`, and
-                // `VoiceSignalRelay.deliver` refuses any frame whose generation is not the live one,
-                // so nothing remote can be offered between the lifetime ending and this call. A
-                // later lifetime's frames are offered strictly after it and are untouched — which is
-                // why this is not a blanket flush and cannot discard a valid fresh generation's work,
-                // even if the consumer is starved for the whole reconnect.
+                // The teardown that jumps the queue takes ownership of the remote work it jumped, and
+                // **offer** time is where that ownership is least wrong: a later lifetime's frames are
+                // normally offered strictly after this call and are untouched, so this is not a blanket
+                // flush, even if the consumer is starved for the whole reconnect.
+                //
+                // **This is scoped by arrival order, not by lifetime identity, and the difference is
+                // real** (STATUS §4 problem 60). The claim that used to stand here — "nothing remote
+                // can be offered between the lifetime ending and this call" — was re-audited and is
+                // **false as written**. It rests on two orderings neither this type nor its callers
+                // enforce. First, `VoiceSignalRelay.deliver` reads the live generation and then calls
+                // `sink.submit` with no lock spanning the two, while `endConnection` clears the
+                // authenticated connection from another coroutine — so a retired frame can pass the
+                // check, be overtaken by the whole teardown, and be offered *after* this discard.
+                // Second, `ControlEvent.LinkLost` reaches `VoiceController.onControlLinkLost` through
+                // `SessionCoordinator`'s event consumer, not synchronously from `endConnection`, while
+                // an **inbound** promotion can authenticate a successor without passing through that
+                // consumer at all — so a successor's frame can be offered before this runs.
+                //
+                // Both windows are instruction-wide and neither is reproducible at any seam this layer
+                // exposes, which is why they are recorded rather than papered over. What closes them by
+                // construction is carrying the admitting generation to the sink and giving this type a
+                // retired-generation floor, so "whose work is this" stops being a question about when
+                // it arrived. That is recorded as the follow-up in ADR-020 Amendment A3 rather than
+                // done here, because it changes `VoiceSignalSink` on both platforms.
+                //
+                // What is **not** in doubt any more is the other direction: a send whose `Boolean`
+                // came back late cannot reach this branch at all, because a send failure is
+                // `NegotiationSendFailed` and not a lifetime boundary (problem 57).
                 //
                 // Local inputs are deliberately kept: this user's consent, the engine's own
                 // callbacks and the intercom gate's state are not the retired peer's to withdraw,
@@ -144,7 +188,15 @@ class VoiceInputMailbox(
                 // `StopRequested` shares this lane but is **not** a lifetime boundary — the link is
                 // still up when a user presses End Voice — so it discards nothing.
                 if (input == VoiceInput.ControlLinkLost) discardRetiredRemoteSignals()
-                teardown = input
+                // Latest wins, except that a pending stop is never displaced — see [VoiceMailboxLane.TEARDOWN].
+                // The discard above still happened: ownership of the retired lifetime's queued remote work
+                // belongs to the link loss whether or not its own slot survives, and a `StopRequested`
+                // applied in its place tears the same media down and releases capture as well.
+                if (!(teardown == VoiceInput.StopRequested && input == VoiceInput.ControlLinkLost)) teardown = input
+                VoiceMailboxOutcome.Accepted(lane)
+            }
+            VoiceMailboxLane.SEND_FAILURE -> {
+                sendFailure = input
                 VoiceMailboxOutcome.Accepted(lane)
             }
             VoiceMailboxLane.TERMINAL_PEER_STATE -> {
@@ -189,6 +241,10 @@ class VoiceInputMailbox(
             teardown = null
             return it
         }
+        sendFailure?.let {
+            sendFailure = null
+            return it
+        }
         if (terminalPeerState.isNotEmpty()) return terminalPeerState.removeFirst()
         if (critical.isNotEmpty()) return critical.removeFirst()
         if (ice.isNotEmpty()) return ice.removeFirst()
@@ -196,14 +252,23 @@ class VoiceInputMailbox(
         return coalesced.remove(key)
     }
 
-    fun isEmpty(): Boolean = teardown == null && terminalPeerState.isEmpty() && critical.isEmpty() && ice.isEmpty() && coalesced.isEmpty()
+    fun isEmpty(): Boolean =
+        teardown == null &&
+            sendFailure == null &&
+            terminalPeerState.isEmpty() &&
+            critical.isEmpty() &&
+            ice.isEmpty() &&
+            coalesced.isEmpty()
 
     /** The whole queued backlog, for diagnostics only — nothing here decides anything from this. */
     val size: Int
-        get() = (if (teardown != null) 1 else 0) + terminalPeerState.size + critical.size + ice.size + coalesced.size
+        get() =
+            (if (teardown != null) 1 else 0) + (if (sendFailure != null) 1 else 0) +
+                terminalPeerState.size + critical.size + ice.size + coalesced.size
 
     fun clear() {
         teardown = null
+        sendFailure = null
         terminalPeerState.clear()
         critical.clear()
         ice.clear()
@@ -263,6 +328,7 @@ class VoiceInputMailbox(
         fun laneFor(input: VoiceInput): VoiceMailboxLane =
             when (input) {
                 VoiceInput.StopRequested, VoiceInput.ControlLinkLost -> VoiceMailboxLane.TEARDOWN
+                is VoiceInput.NegotiationSendFailed -> VoiceMailboxLane.SEND_FAILURE
                 is VoiceInput.StartRequested,
                 is VoiceInput.LocalOfferCreated,
                 is VoiceInput.LocalAnswerCreated,

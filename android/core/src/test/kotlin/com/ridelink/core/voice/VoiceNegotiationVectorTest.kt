@@ -198,6 +198,8 @@ class VoiceNegotiationVectorTest {
             "StartRequested" -> VoiceInput.StartRequested(VoiceSessionId(spec.string("fresh_voice_session_id")))
             "StopRequested" -> VoiceInput.StopRequested
             "ControlLinkLost" -> VoiceInput.ControlLinkLost
+            "NegotiationSendFailed" ->
+                VoiceInput.NegotiationSendFailed(spec.nullableString("voice_session_id")?.let { VoiceSessionId(it) })
             "MuteRequested" -> VoiceInput.MuteRequested(spec.bool("muted"))
             "ModeSelected" -> VoiceInput.ModeSelected(VoiceMode.valueOf(spec.string("mode")))
             "SignalReceived" ->

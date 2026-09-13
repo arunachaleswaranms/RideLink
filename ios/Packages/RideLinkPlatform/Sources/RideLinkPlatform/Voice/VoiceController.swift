@@ -425,8 +425,8 @@ public actor VoiceController: VoiceSignalSink {
     }
 
     // swiftlint:disable:next cyclomatic_complexity
-    /// STATUS §4 problem 56. The `Bool` from `VoiceSignalTransport.send` used to be discarded for
-    /// every action in `perform` -- and for an offer or an answer that silently loses a
+    /// STATUS §4 problems 56, 57 and 59. The `Bool` from `VoiceSignalTransport.send` used to be
+    /// discarded for every action in `perform` -- and for an offer or an answer that silently loses a
     /// **negotiation**, not just a frame.
     ///
     /// `VoiceSignalRelay.send` returns false whenever there is no authenticated writer -- which is
@@ -437,19 +437,34 @@ public actor VoiceController: VoiceSignalSink {
     /// at all, the peer's own `negotiating` intent hit the same idempotence coming back, and voice
     /// stayed wedged for the rest of the ride segment with no error anywhere.
     ///
-    /// The response is the degrade `offer` already uses for a critical-lane overflow, and for the same
-    /// reason: a critical thing could not happen, so mirror a real control-link blip rather than invent
-    /// a new failure path. It resets the table to `.idle` and drops the media transport while
-    /// **keeping this user's capture device open** (ARCHITECTURE §6.3/§6.4), which is precisely the
-    /// state a reconnect rebuild needs to find.
+    /// The response resets the table to `.idle` and drops the media transport while **keeping this
+    /// user's capture device open** (ARCHITECTURE §6.3/§6.4), which is precisely the state a reconnect
+    /// rebuild needs to find.
     ///
-    /// Deliberately **not** applied to `.sendVoiceState` or `.sendCandidate`: a lost state update is
-    /// carried by the next one, and trickle ICE is designed to lose candidates. Neither strands a
+    /// **It is `.negotiationSendFailed`, never `.controlLinkLost`** -- problem 57. The first
+    /// implementation of this fix reused the link-loss input because the table's *reaction* is the
+    /// same, but the two are not the same *event*, and `.controlLinkLost` carries two lifetime-boundary
+    /// powers a send failure has no right to. It owns every `.signalReceived` queued below it
+    /// (problem 50), and it occupies the single `.teardown` slot. Because `VoiceSignalRelay.send` is
+    /// three `await`s deep before a byte moves -- `authenticatedWriter()`, `activeSessionId()`, then the
+    /// writer -- and every one of them releases this actor, this `Bool` can arrive long after
+    /// PROTOCOL §10's ladder has authenticated a **successor** generation whose own `VOICE_OFFER` is
+    /// already queued (`submit` is `nonisolated` and needs none of this actor's time to enqueue one).
+    /// Injecting a lifetime boundary there discarded the successor's offer and wedged voice for the
+    /// ride segment, and injecting it over a pending `.stopRequested` erased a capture release
+    /// `SessionCoordinator.retireSession` waits on with no timeout.
+    ///
+    /// `voiceSessionId` is the generation the lost frame belonged to, so the reducer can refuse to act
+    /// on any other. Nil is not "unknown" -- it is an answerer's intent-to-talk, which names none.
+    ///
+    /// Deliberately **not** applied to `.sendCandidate`, nor to any `.sendVoiceState` other than that
+    /// intent (problem 59): trickle ICE is designed to lose candidates, and every other state update
+    /// either names a generation or is genuinely superseded by the next one. Neither strands a
     /// negotiation, and tearing media down for one would turn a recoverable blip into a rebuild.
-    private func degradeIfUnsent(_ sent: Bool) {
+    private func degradeIfUnsent(_ sent: Bool, voiceSessionId: VoiceSessionId?) {
         guard !sent else { return }
         lastFailure = .controlLinkLost
-        mailbox.offer(.controlLinkLost, doorbell: doorbell)
+        mailbox.offer(.negotiationSendFailed(voiceSessionId: voiceSessionId), doorbell: doorbell)
     }
 
     private func perform(_ action: VoiceAction) async {
@@ -468,12 +483,20 @@ public actor VoiceController: VoiceSignalSink {
             _ = await engine.applyRemoteDescription(kind: .answer, sdp: sdp)
         case .sendOffer(let id, let sdp):
             mark(.localDescription)
-            degradeIfUnsent(await transport.send(.offer(voiceSessionId: id, sdp: sdp)))
+            degradeIfUnsent(await transport.send(.offer(voiceSessionId: id, sdp: sdp)), voiceSessionId: id)
         case .sendAnswer(let id, let sdp):
             mark(.localDescription)
-            degradeIfUnsent(await transport.send(.answer(voiceSessionId: id, sdp: sdp)))
+            degradeIfUnsent(await transport.send(.answer(voiceSessionId: id, sdp: sdp)), voiceSessionId: id)
         case .sendVoiceState(let id, let wire, let micMuted, let mode):
-            _ = await transport.send(.state(voiceSessionId: id, state: wire, micMuted: micMuted, mode: mode))
+            let sent = await transport.send(.state(voiceSessionId: id, state: wire, micMuted: micMuted, mode: mode))
+            // STATUS §4 problem 59. One `VOICE_STATE` is not "carried by the next one": an answerer's
+            // intent-to-talk. It names no generation because the offerer has not made one yet (§7.3),
+            // it is the **only** wire effect an answerer's `start()` produces, and the table is already
+            // `.negotiating` by the time it is attempted -- so losing it wedges exactly as a lost offer
+            // does, and `attachVoice`'s rebuild finds a live negotiation and does nothing. Every other
+            // `VOICE_STATE` (a mute, a mode, a connectivity transition, a `closed`) either names a
+            // generation or is genuinely superseded by the next one, and is deliberately left alone.
+            if id == nil, wire == .negotiating { degradeIfUnsent(sent, voiceSessionId: nil) }
         case .sendCandidate(let id, let candidate, let mid, let index):
             // PROTOCOL §7.6 inspects the `typ` of every candidate this side **gathers** as well as
             // every one it receives. The gathering direction is the one that would reveal a STUN

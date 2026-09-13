@@ -200,6 +200,8 @@ final class VoiceNegotiationVectorTests: XCTestCase {
             return .stopRequested
         case "ControlLinkLost":
             return .controlLinkLost
+        case "NegotiationSendFailed":
+            return .negotiationSendFailed(voiceSessionId: spec.strOpt("voice_session_id").map(VoiceSessionId.init))
         case "MuteRequested":
             return .muteRequested(muted: spec.boolVal("muted"))
         case "ModeSelected":

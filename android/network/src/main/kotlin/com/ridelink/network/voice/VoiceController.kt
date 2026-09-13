@@ -594,16 +594,29 @@ class VoiceController(
             }
             is VoiceAction.SendOffer -> {
                 mark(VoiceSetupMark.LOCAL_DESCRIPTION)
-                degradeIfUnsent(transport.send(VoiceSignal.Offer(action.voiceSessionId, action.sdp)))
+                degradeIfUnsent(transport.send(VoiceSignal.Offer(action.voiceSessionId, action.sdp)), action.voiceSessionId)
             }
             is VoiceAction.SendAnswer -> {
                 mark(VoiceSetupMark.LOCAL_DESCRIPTION)
-                degradeIfUnsent(transport.send(VoiceSignal.Answer(action.voiceSessionId, action.sdp)))
+                degradeIfUnsent(transport.send(VoiceSignal.Answer(action.voiceSessionId, action.sdp)), action.voiceSessionId)
             }
-            is VoiceAction.SendVoiceState ->
-                transport.send(
-                    VoiceSignal.State(action.voiceSessionId, action.state, action.micMuted, action.mode),
-                )
+            is VoiceAction.SendVoiceState -> {
+                val sent =
+                    transport.send(
+                        VoiceSignal.State(action.voiceSessionId, action.state, action.micMuted, action.mode),
+                    )
+                // STATUS §4 problem 59. One `VOICE_STATE` is not "carried by the next one": an
+                // answerer's intent-to-talk. It names no generation because the offerer has not made
+                // one yet (§7.3), it is the **only** wire effect an answerer's `start()` produces, and
+                // the table is already `NEGOTIATING` by the time it is attempted — so losing it wedges
+                // exactly as a lost offer does, and `attachVoice`'s rebuild finds a live negotiation
+                // and does nothing. Every other `VOICE_STATE` (a mute, a mode, a connectivity
+                // transition, a `closed`) either names a generation or is genuinely superseded by the
+                // next one, and is deliberately left alone.
+                if (action.voiceSessionId == null && action.state == VoiceWireState.NEGOTIATING) {
+                    degradeIfUnsent(sent, null)
+                }
+            }
             is VoiceAction.ApplyRemoteCandidate -> {
                 noteCandidateType(action.candidate)
                 engine.addRemoteCandidate(action.candidate, action.sdpMid, action.sdpMlineIndex)
@@ -707,9 +720,9 @@ class VoiceController(
     }
 
     /**
-     * STATUS §4 problem 56. The `Boolean` from [VoiceSignalTransport.send] used to be discarded for
-     * every action here, and for an offer or an answer that silently loses a **negotiation**, not
-     * just a frame.
+     * STATUS §4 problems 56, 57 and 59. The `Boolean` from [VoiceSignalTransport.send] used to be
+     * discarded for every action here, and for an offer or an answer that silently loses a
+     * **negotiation**, not just a frame.
      *
      * `VoiceSignalRelay.send` returns false whenever there is no authenticated writer — which is
      * exactly the window between a link loss and the §10 ladder reconnecting. A Start pressed in
@@ -719,20 +732,39 @@ class VoiceController(
      * rebuild then did nothing at all, the peer's own `negotiating` intent hit the same idempotence
      * coming back, and voice stayed wedged for the rest of the ride segment with no error anywhere.
      *
-     * The response is the degrade `offer` already uses for a critical-lane overflow, and for the
-     * same reason: a critical thing could not happen, so mirror a real control-link blip rather than
-     * invent a new failure path. It resets the table to `IDLE` and drops the media transport while
-     * **keeping this user's capture device open** (ARCHITECTURE §6.3/§6.4), which is precisely the
-     * state a reconnect rebuild needs to find.
+     * The response resets the table to `IDLE` and drops the media transport while **keeping this
+     * user's capture device open** (ARCHITECTURE §6.3/§6.4), which is precisely the state a reconnect
+     * rebuild needs to find.
      *
-     * Deliberately **not** applied to `SendVoiceState` or `SendCandidate`: a lost state update is
-     * carried by the next one, and trickle ICE is designed to lose candidates. Neither strands a
+     * **It is [VoiceInput.NegotiationSendFailed], never [VoiceInput.ControlLinkLost]** — problem 57.
+     * The first implementation of this fix reused the link-loss input because the table's *reaction*
+     * is the same, but the two are not the same *event*, and `ControlLinkLost` carries two
+     * lifetime-boundary powers a send failure has no right to. It owns every `SignalReceived` queued
+     * below it (problem 50), and it occupies the single [VoiceMailboxLane.TEARDOWN] slot. Because
+     * `VoiceSignalRelay.send` suspends — `withContext(ioDispatcher)`, `ControlSocket.writeFrame`'s
+     * write lock, then a socket `flush()` — and reports `false` for a write that threw, this
+     * `Boolean` can arrive long after PROTOCOL §10's ladder has authenticated a **successor**
+     * generation whose own `VOICE_OFFER` is already queued. Injecting a lifetime boundary there
+     * discarded the successor's offer and wedged voice for the ride segment, and injecting it over a
+     * pending `StopRequested` erased a capture release `SessionCoordinator.retireSession` waits on
+     * with no timeout. Neither needs a race: the consumer is the one thread that both parks inside
+     * the send and runs this on resume.
+     *
+     * [voiceSessionId] is the generation the lost frame belonged to, so the reducer can refuse to act
+     * on any other. Null is not "unknown" — it is an answerer's intent-to-talk, which names none.
+     *
+     * Deliberately **not** applied to `SendCandidate`, nor to any `SendVoiceState` other than that
+     * intent (problem 59): trickle ICE is designed to lose candidates, and every other state update
+     * either names a generation or is genuinely superseded by the next one. Neither strands a
      * negotiation, and tearing media down for one would turn a recoverable blip into a rebuild.
      */
-    private fun degradeIfUnsent(sent: Boolean) {
+    private fun degradeIfUnsent(
+        sent: Boolean,
+        voiceSessionId: VoiceSessionId?,
+    ) {
         if (sent) return
         lastFailure = VoiceFailure.CONTROL_LINK_LOST
-        synchronized(mailboxLock) { mailbox.offer(VoiceInput.ControlLinkLost) }
+        synchronized(mailboxLock) { mailbox.offer(VoiceInput.NegotiationSendFailed(voiceSessionId)) }
         doorbell.trySend(Unit)
     }
 

@@ -310,6 +310,31 @@ sealed class VoiceInput {
 
     /** The control plane was lost. §7.8: media goes, local capture stays, and voice does not retry. */
     object ControlLinkLost : VoiceInput()
+
+    /**
+     * An outbound frame this negotiation **depended on** could not be put on the wire
+     * (STATUS §4 problems 56, 57 and 59).
+     *
+     * **This is not [ControlLinkLost], and conflating the two was a defect.** They ask the table for
+     * the same thing — drop the media transport, keep this user's capture device (ARCHITECTURE
+     * §6.3/§6.4), let PROTOCOL §10's ladder own the link — but they are different *events*:
+     *
+     * - [ControlLinkLost] is a **control-lifetime boundary**. The lifetime that admitted every
+     *   `SignalReceived` still queued has ended, which is why [VoiceInputMailbox] gives it ownership
+     *   of that queued remote work (problem 50).
+     * - This is a **local, in-lifetime** fact about one frame. `VoiceSignalTransport.send` suspends —
+     *   `withContext(ioDispatcher)`, a write lock, a socket flush — so its `Boolean` can arrive long
+     *   after the lifetime that authorised it has been replaced. Letting it speak for a lifetime
+     *   boundary let a retired send discard a **successor's** freshly admitted offer, and let it
+     *   displace a pending `StopRequested` in the one-slot teardown lane (problems 57 and 59).
+     *
+     * [voiceSessionId] is the generation the failed frame belonged to — null for an answerer's
+     * intent-to-talk, which names none (§7.3) — and the reducer refuses to act on any other, so this
+     * input can only ever retire the negotiation it was actually authorised by.
+     */
+    data class NegotiationSendFailed(
+        val voiceSessionId: VoiceSessionId?,
+    ) : VoiceInput()
 }
 
 data class VoiceOutcome(
@@ -348,6 +373,7 @@ object VoiceNegotiation {
             is VoiceInput.RemoteTrackChanged -> remoteTrackChanged(state, input)
             is VoiceInput.MediaConnectivityChanged -> connectivity(state, input)
             VoiceInput.ControlLinkLost -> controlLinkLost(state)
+            is VoiceInput.NegotiationSendFailed -> negotiationSendFailed(state, input.voiceSessionId)
         }
 
     // --- local user actions -------------------------------------------------------------------
@@ -479,6 +505,40 @@ object VoiceNegotiation {
         // Media goes; the capture device does not (ARCHITECTURE §6.3/§6.4 — see localAudioOpen).
         // No VOICE_STATE is sent: there is no link to send it on. And nothing is retried here —
         // PROTOCOL §10's control ladder is the only reconnect loop in the app (§7.8).
+        return VoiceOutcome(
+            VoiceNegotiationState(
+                role = state.role,
+                localAudioOpen = state.localAudioOpen,
+                micMuted = state.micMuted,
+                mode = state.mode,
+            ),
+            listOf(VoiceAction.StopMediaTransport),
+        )
+    }
+
+    /**
+     * [VoiceInput.NegotiationSendFailed]: the same degrade [controlLinkLost] performs, scoped to the
+     * one negotiation whose frame was lost.
+     *
+     * The generation guard is what makes this input safe to apply late. It is the same guard every
+     * engine callback carries ([localOfferCreated], [connectivity]) and it answers the same question:
+     * does the thing that produced this input still own the negotiation the table is holding? A send
+     * authorised by a retired generation names an id the table has already moved past — or the table
+     * has been reset to `IDLE` and holds none — and in both cases this is a no-op rather than a
+     * teardown of whatever came next.
+     *
+     * `null == null` is a deliberate match, not an accident: an answerer's intent-to-talk names no
+     * generation because the offerer has not created one yet (§7.3), so "the negotiation this side is
+     * holding also names none" is exactly the right identity for it. [VoiceStatus.isNegotiationLive]
+     * is what stops that matching an idle table.
+     */
+    @Suppress("ReturnCount") // one early-out per guard, in the order they have to be asked
+    private fun negotiationSendFailed(
+        state: VoiceNegotiationState,
+        voiceSessionId: VoiceSessionId?,
+    ): VoiceOutcome {
+        if (!state.status.isNegotiationLive) return dropped(state, VoiceSignalDropReason.UNEXPECTED_FOR_STATUS)
+        if (state.voiceSessionId != voiceSessionId) return dropped(state, VoiceSignalDropReason.GENERATION_MISMATCH)
         return VoiceOutcome(
             VoiceNegotiationState(
                 role = state.role,

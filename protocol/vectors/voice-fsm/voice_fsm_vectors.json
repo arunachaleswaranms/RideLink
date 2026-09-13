@@ -6,6 +6,7 @@
     "No row where the input's voice_session_id differs from the state's may produce any action other than RecordDroppedSignal. That is the \u00a77.2 generation guard.",
     "ControlLinkLost must never emit ReleaseLocalAudio: the capture device survives a link blip (ARCHITECTURE \u00a76.3/\u00a76.4).",
     "ControlLinkLost must never emit SendVoiceState: there is no link to send it on.",
+    "NegotiationSendFailed must never emit ReleaseLocalAudio or SendVoiceState, for ControlLinkLost's two reasons, and must never act on a generation other than the one the state holds \u2014 that guard is why it is a separate input rather than a second use of ControlLinkLost (STATUS \u00a74 problem 57).",
     "No ModeSelected row may emit any action other than SendVoiceState, and none may change the status: choosing a gate is a local policy change, not a state transition of the voice session (PROTOCOL \u00a77.4, ADR-021).",
     "No ModeSelected row may emit StartLocalAudio or ReleaseLocalAudio. PTT and VOX gate transmission, never the capture device (ARCHITECTURE \u00a76.3).",
     "No row whose input is a received signal may start a negotiation (CreateOffer/CreateAnswer) when local_audio_open is false. The microphone is never opened because a *peer* asked \u2014 only a local StartRequested, which is how consent arrives, may open it (ARCHITECTURE \u00a76.4)."
@@ -2265,6 +2266,160 @@
           "status": "IDLE",
           "voice_session_id": null,
           "local_audio_open": false,
+          "remote_description_applied": false,
+          "peer_voice_enabled": false,
+          "peer_reported_state": "IDLE",
+          "held_remote_offer": null,
+          "mic_muted": false,
+          "mode": "CONTINUOUS"
+        }
+      }
+    },
+    {
+      "name": "negotiation-send-failed-drops-media-but-keeps-capture",
+      "state": {
+        "role": "OFFERER",
+        "status": "NEGOTIATING",
+        "voice_session_id": "5e2a9c40b7f13d86e0a4c95b28f7d613",
+        "local_audio_open": true,
+        "remote_description_applied": false,
+        "peer_voice_enabled": false,
+        "peer_reported_state": "IDLE",
+        "held_remote_offer": null,
+        "mic_muted": false,
+        "mode": "CONTINUOUS"
+      },
+      "input": {
+        "kind": "NegotiationSendFailed",
+        "voice_session_id": "5e2a9c40b7f13d86e0a4c95b28f7d613"
+      },
+      "expect": {
+        "actions": [
+          {
+            "kind": "StopMediaTransport"
+          }
+        ],
+        "state": {
+          "role": "OFFERER",
+          "status": "IDLE",
+          "voice_session_id": null,
+          "local_audio_open": true,
+          "remote_description_applied": false,
+          "peer_voice_enabled": false,
+          "peer_reported_state": "IDLE",
+          "held_remote_offer": null,
+          "mic_muted": false,
+          "mode": "CONTINUOUS"
+        }
+      }
+    },
+    {
+      "name": "negotiation-send-failed-for-an-answerers-intent-names-no-generation",
+      "state": {
+        "role": "ANSWERER",
+        "status": "NEGOTIATING",
+        "voice_session_id": null,
+        "local_audio_open": true,
+        "remote_description_applied": false,
+        "peer_voice_enabled": false,
+        "peer_reported_state": "IDLE",
+        "held_remote_offer": null,
+        "mic_muted": false,
+        "mode": "CONTINUOUS"
+      },
+      "input": {
+        "kind": "NegotiationSendFailed",
+        "voice_session_id": null
+      },
+      "expect": {
+        "actions": [
+          {
+            "kind": "StopMediaTransport"
+          }
+        ],
+        "state": {
+          "role": "ANSWERER",
+          "status": "IDLE",
+          "voice_session_id": null,
+          "local_audio_open": true,
+          "remote_description_applied": false,
+          "peer_voice_enabled": false,
+          "peer_reported_state": "IDLE",
+          "held_remote_offer": null,
+          "mic_muted": false,
+          "mode": "CONTINUOUS"
+        }
+      }
+    },
+    {
+      "name": "negotiation-send-failed-from-a-retired-generation-is-inert",
+      "state": {
+        "role": "OFFERER",
+        "status": "NEGOTIATING",
+        "voice_session_id": "0123456789abcdef0123456789abcdef",
+        "local_audio_open": true,
+        "remote_description_applied": false,
+        "peer_voice_enabled": false,
+        "peer_reported_state": "IDLE",
+        "held_remote_offer": null,
+        "mic_muted": false,
+        "mode": "CONTINUOUS"
+      },
+      "input": {
+        "kind": "NegotiationSendFailed",
+        "voice_session_id": "5e2a9c40b7f13d86e0a4c95b28f7d613"
+      },
+      "expect": {
+        "actions": [
+          {
+            "kind": "RecordDroppedSignal",
+            "reason": "GENERATION_MISMATCH"
+          }
+        ],
+        "state": {
+          "role": "OFFERER",
+          "status": "NEGOTIATING",
+          "voice_session_id": "0123456789abcdef0123456789abcdef",
+          "local_audio_open": true,
+          "remote_description_applied": false,
+          "peer_voice_enabled": false,
+          "peer_reported_state": "IDLE",
+          "held_remote_offer": null,
+          "mic_muted": false,
+          "mode": "CONTINUOUS"
+        }
+      }
+    },
+    {
+      "name": "negotiation-send-failed-against-an-idle-table-is-inert",
+      "state": {
+        "role": "ANSWERER",
+        "status": "IDLE",
+        "voice_session_id": null,
+        "local_audio_open": true,
+        "remote_description_applied": false,
+        "peer_voice_enabled": false,
+        "peer_reported_state": "IDLE",
+        "held_remote_offer": null,
+        "mic_muted": false,
+        "mode": "CONTINUOUS"
+      },
+      "input": {
+        "kind": "NegotiationSendFailed",
+        "voice_session_id": null
+      },
+      "expect": {
+        "actions": [
+          {
+            "kind": "RecordDroppedSignal",
+            "reason": "UNEXPECTED_FOR_STATUS"
+          }
+        ],
+        "state": {
+          "role": "ANSWERER",
+          "status": "IDLE",
+          "voice_session_id": null,
+          "local_audio_open": true,
           "remote_description_applied": false,
           "peer_voice_enabled": false,
           "peer_reported_state": "IDLE",
