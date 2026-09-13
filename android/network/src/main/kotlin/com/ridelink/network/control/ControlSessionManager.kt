@@ -368,6 +368,21 @@ class ControlSessionManager(
                     AuthenticatedFrameWriter { envelope -> socket.writeFrame(envelope) }
                 }
             },
+            // ADR-020 Amendment A9's outbound half. Resolved from the **one immutable
+            // [AuthenticatedConnection] record**, never from `activeSocket` plus a separate
+            // generation read: the record pairs a socket with the generation its own activation
+            // assigned and is replaced whole, so there is no interleaving in which a successor's
+            // socket can be handed out under a predecessor's number. That is exactly the reasoning
+            // [ReadFrameBinding.of] uses inbound; this is the same record answering the same
+            // question in the other direction.
+            authenticatedWriterFor = { expected ->
+                val record = authenticatedConnection
+                if (record == null || record.generation != expected) {
+                    null
+                } else {
+                    AuthenticatedFrameWriter { envelope -> record.socket.writeFrame(envelope) }
+                }
+            },
             currentAuthGeneration = { authenticationGeneration },
             liveGeneration = { liveAuthenticatedGeneration },
         )

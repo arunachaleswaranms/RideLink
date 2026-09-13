@@ -269,7 +269,13 @@ public actor ControlSessionManager {
         monotonicNowUs: monotonicNowUs,
         nextSeq: { [seqCounter] in seqCounter.nextSeq() },
         activeSessionId: { [weak self] in await self?.currentSessionId() ?? SessionId("n/a") },
-        authenticatedWriter: { [weak self] in await self?.authenticatedWriter() },
+        // ADR-020 Amendment A9's outbound half, and only `voice` takes it. A `VOICE_*` frame is one
+        // step of a negotiation owned by a named control lifetime, and every step between that
+        // lifetime's authorisation and the write suspends — so "the authenticated writer, now" is not
+        // the connection the frame was authorised for.
+        authenticatedWriterFor: { [weak self] generation in
+            await self?.authenticatedWriter(for: generation)
+        },
         // ADR-025 §1: synchronous and non-isolated on purpose — a relay's `deliver` must never
         // `await` into this actor just to ask which session is live. nil when this manager is gone,
         // which matches no frame.
@@ -363,6 +369,27 @@ public actor ControlSessionManager {
     /// Non-nil only while the surviving connection has passed the trust gate. Returning a closure rather
     /// than the connection keeps `ControlConnection` — which is internal to this module — from leaking
     /// into the relay's signature, and keeps the relay unable to hold a socket across a teardown.
+    /// The same, **bound to one control lifetime** (STATUS §4 problem 64, ADR-020 Amendment A9).
+    ///
+    /// Resolved from the **one immutable `AuthenticatedConnection` record**, never from `activeSocket`
+    /// plus a separate generation read: the record pairs a connection with the generation its own
+    /// activation assigned and is replaced whole, so there is no interleaving in which a successor's
+    /// connection can be handed out under a predecessor's number. That is exactly the reasoning
+    /// `ReadFrameBinding.of` uses inbound; this is the same record answering the same question in the
+    /// other direction.
+    private func authenticatedWriter(for generation: Int64) -> AuthenticatedFrameWriter? {
+        guard let record = authenticatedConnection, record.generation == generation else { return nil }
+        let connection = record.connection
+        return { envelope in
+            do {
+                try await connection.writeFrame(envelope)
+                return true
+            } catch {
+                return false
+            }
+        }
+    }
+
     private func authenticatedWriter() -> AuthenticatedFrameWriter? {
         guard let socket = activeSocket, authenticated else { return nil }
         return { envelope in

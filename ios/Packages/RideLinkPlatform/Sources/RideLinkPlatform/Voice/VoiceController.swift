@@ -519,14 +519,25 @@ public actor VoiceController: VoiceSignalSink {
         case .applyRemoteAnswer(_, let sdp):
             mark(.remoteDescription)
             _ = await engine.applyRemoteDescription(kind: .answer, sdp: sdp)
-        case .sendOffer(let id, let sdp):
+        case .sendOffer(let id, let sdp, let owner):
             mark(.localDescription)
-            degradeIfUnsent(await transport.send(.offer(voiceSessionId: id, sdp: sdp)), voiceSessionId: id)
-        case .sendAnswer(let id, let sdp):
+            // `owner` -- the lifetime the reducing transition captured -- and never a live read here
+            // or in the transport (ADR-020 Amendment A9).
+            degradeIfUnsent(
+                await transport.send(.offer(voiceSessionId: id, sdp: sdp), controlGeneration: owner),
+                voiceSessionId: id
+            )
+        case .sendAnswer(let id, let sdp, let owner):
             mark(.localDescription)
-            degradeIfUnsent(await transport.send(.answer(voiceSessionId: id, sdp: sdp)), voiceSessionId: id)
-        case .sendVoiceState(let id, let wire, let micMuted, let mode):
-            let sent = await transport.send(.state(voiceSessionId: id, state: wire, micMuted: micMuted, mode: mode))
+            degradeIfUnsent(
+                await transport.send(.answer(voiceSessionId: id, sdp: sdp), controlGeneration: owner),
+                voiceSessionId: id
+            )
+        case .sendVoiceState(let id, let wire, let micMuted, let mode, let owner):
+            let sent = await transport.send(
+                .state(voiceSessionId: id, state: wire, micMuted: micMuted, mode: mode),
+                controlGeneration: owner
+            )
             // STATUS §4 problem 59. One `VOICE_STATE` is not "carried by the next one": an answerer's
             // intent-to-talk. It names no generation because the offerer has not made one yet (§7.3),
             // it is the **only** wire effect an answerer's `start()` produces, and the table is already
@@ -535,13 +546,14 @@ public actor VoiceController: VoiceSignalSink {
             // `VOICE_STATE` (a mute, a mode, a connectivity transition, a `closed`) either names a
             // generation or is genuinely superseded by the next one, and is deliberately left alone.
             if id == nil, wire == .negotiating { degradeIfUnsent(sent, voiceSessionId: nil) }
-        case .sendCandidate(let id, let candidate, let mid, let index):
+        case .sendCandidate(let id, let candidate, let mid, let index, let owner):
             // PROTOCOL §7.6 inspects the `typ` of every candidate this side **gathers** as well as
             // every one it receives. The gathering direction is the one that would reveal a STUN
             // server had been contacted, so missing it would miss the case the check is for.
             noteCandidateType(candidate)
             _ = await transport.send(
-                .iceCandidate(voiceSessionId: id, candidate: candidate, sdpMid: mid, sdpMlineIndex: index)
+                .iceCandidate(voiceSessionId: id, candidate: candidate, sdpMid: mid, sdpMlineIndex: index),
+                controlGeneration: owner
             )
         case .applyRemoteCandidate(_, let candidate, let mid, let index):
             noteCandidateType(candidate)

@@ -634,16 +634,25 @@ class VoiceController(
             }
             is VoiceAction.SendOffer -> {
                 mark(VoiceSetupMark.LOCAL_DESCRIPTION)
-                degradeIfUnsent(transport.send(VoiceSignal.Offer(action.voiceSessionId, action.sdp)), action.voiceSessionId)
+                // `action.controlGeneration` — the owner the reducing transition captured — and never
+                // a live read here or in the transport (ADR-020 Amendment A9).
+                degradeIfUnsent(
+                    transport.send(VoiceSignal.Offer(action.voiceSessionId, action.sdp), action.controlGeneration),
+                    action.voiceSessionId,
+                )
             }
             is VoiceAction.SendAnswer -> {
                 mark(VoiceSetupMark.LOCAL_DESCRIPTION)
-                degradeIfUnsent(transport.send(VoiceSignal.Answer(action.voiceSessionId, action.sdp)), action.voiceSessionId)
+                degradeIfUnsent(
+                    transport.send(VoiceSignal.Answer(action.voiceSessionId, action.sdp), action.controlGeneration),
+                    action.voiceSessionId,
+                )
             }
             is VoiceAction.SendVoiceState -> {
                 val sent =
                     transport.send(
                         VoiceSignal.State(action.voiceSessionId, action.state, action.micMuted, action.mode),
+                        action.controlGeneration,
                     )
                 // STATUS §4 problem 59. One `VOICE_STATE` is not "carried by the next one": an
                 // answerer's intent-to-talk. It names no generation because the offerer has not made
@@ -673,6 +682,7 @@ class VoiceController(
                         action.sdpMid,
                         action.sdpMlineIndex,
                     ),
+                    action.controlGeneration,
                 )
             }
             is VoiceAction.QueueRemoteCandidate -> {
