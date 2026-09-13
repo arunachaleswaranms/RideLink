@@ -306,6 +306,145 @@ class VoiceControllerLinkLossOrderingTest {
             )
         }
 
+    /**
+     * A-1 — STATUS §4 problem 57. **A send that failed is not a control lifetime that ended.**
+     *
+     * Problem 56's fix turned `transport.send(...) == false` into `VoiceInput.ControlLinkLost`,
+     * which is the input problem 50 gave *lifetime-boundary* semantics: offering it discards every
+     * queued `SignalReceived`, because the lifetime that admitted them has gone. A send failure is
+     * not that event. `VoiceSignalRelay.send` suspends — `withContext(ioDispatcher)`, then
+     * `ControlSocket.writeFrame`'s write lock and `flush()` — and reports `false` for a write that
+     * threw, so its `Boolean` can arrive after the §10 ladder has already authenticated a
+     * **successor** generation and that successor's own `VOICE_OFFER` has been admitted.
+     *
+     * The consumer is the single thread that both parks inside `perform` and runs `degradeIfUnsent`
+     * on resume, so the successor's frame is necessarily already queued when the degrade offers its
+     * teardown — no race is needed, only a send that outlives its lifetime.
+     */
+    @Test
+    fun `a send failing after a successor lifetime is live must not discard the successor's queued offer`() =
+        withControllerManual(isLocalLeader = false) { answerer, fakes, dispatcher ->
+            answerer.start()
+            dispatcher.runAll()
+            assertTrue(answerer.diagnostics.value.localAudioOpen)
+
+            // Lifetime A: the peer offered and this side is answering.
+            answerer.submit(VoiceSignal.Offer(genAt(OFFER_ID), SDP))
+            dispatcher.runAll()
+            fakes.transport.parkWhen = { it is VoiceSignal.Answer }
+            fakes.engine.emit(VoiceEngineEvent.AnswerCreated(genAt(OFFER_ID), SDP))
+            dispatcher.runAll()
+            assertTrue(fakes.transport.parked, "the answer's write must really be in flight for this to be the case")
+
+            // Lifetime A ends. The consumer is parked, so nothing drains yet.
+            answerer.onControlLinkLost()
+            dispatcher.runAll()
+
+            // The ladder reconnects, lifetime B authenticates, and B's peer offers. `VoiceSignalRelay`
+            // admitted this frame against a live generation, so ADR-025 is satisfied: it is genuinely
+            // the successor's work.
+            answerer.submit(VoiceSignal.Offer(genAt(OFFER_ID + 1), SDP))
+
+            // Only now does lifetime A's write report that it failed.
+            fakes.transport.release(false)
+            dispatcher.runAll()
+
+            val calls = fakes.engine.calls.toList()
+            val afterTeardown = calls.drop(calls.lastIndexOf("stop") + 1)
+            assertTrue(
+                afterTeardown.contains("applyRemote(OFFER)"),
+                "the successor lifetime's offer must survive a retired lifetime's send failure; after stop=$afterTeardown",
+            )
+            assertTrue(
+                afterTeardown.contains("createAnswer"),
+                "the successor lifetime's offer must still be answered; after stop=$afterTeardown",
+            )
+            assertEquals(
+                VoiceStatus.NEGOTIATING,
+                answerer.diagnostics.value.status,
+                "the successor's negotiation must be live; a retired send failure may not retire it",
+            )
+            assertTrue(
+                afterTeardown.contains("start(${genAt(OFFER_ID + 1).value})"),
+                "the rebuilt peer connection must belong to the successor's generation; after stop=$afterTeardown",
+            )
+        }
+
+    /**
+     * A-2 — the same problem reaching rule 21 rather than voice. [VoiceMailboxLane.TEARDOWN] is one
+     * slot, latest wins, so a degrade offered from the consumer's own resume **replaces** a
+     * `StopRequested` that `shutdown()`/`stopAndAwaitRelease()` is waiting on. Nothing then ever
+     * applies that stop: capture is never released, `pendingStopCompletions` is never resolved, and
+     * `SessionCoordinator.retireSession` — which awaits `shutdown()` with no timeout of its own by
+     * design (ADR-021 Amendment A4) — can never emit `TeardownComplete`, so the session can never
+     * reach `IDLE` (ADR-026).
+     */
+    @Test
+    fun `a send failing while a stop is pending must not erase the stop`() =
+        withControllerManual(isLocalLeader = true) { offerer, fakes, dispatcher ->
+            offerer.start()
+            dispatcher.runAll()
+            fakes.transport.parkWhen = { it is VoiceSignal.Offer }
+            fakes.engine.emit(VoiceEngineEvent.OfferCreated(genAt(1), SDP))
+            dispatcher.runAll()
+            assertTrue(fakes.transport.parked)
+
+            // The ride is ending: `retireSession` asks for the release it must prove happened.
+            offerer.stop()
+
+            fakes.transport.release(false)
+            dispatcher.runAll()
+
+            assertEquals(
+                1,
+                fakes.audio.closeCaptureCount,
+                "the pending StopRequested must still be applied; a failed send may not replace it",
+            )
+        }
+
+    /**
+     * P56-1 from the **answerer's** side — STATUS §4 problem 59, and the half of problem 56 its own
+     * fix left open.
+     *
+     * An answerer never offers (PROTOCOL §7.3). Its `start()` produces exactly one wire effect: a
+     * `VOICE_STATE { negotiating }` with **no** `voice_session_id`, which is the whole of its
+     * intent-to-talk — and the table advances to `NEGOTIATING` regardless of whether that frame
+     * reached anything. Problem 56's fix degrades a lost `SendOffer`/`SendAnswer` and deliberately
+     * exempts `SendVoiceState` because "a lost state update is carried by the next one". That is true
+     * of every `VOICE_STATE` except this one: there is no next one, `VoiceNegotiation.start` is
+     * idempotent against the live `NEGOTIATING` it just entered, so `attachVoice`'s reconnect rebuild
+     * is a no-op — and if the leader has not itself consented, `attachVoice` does not call `start()`
+     * there either, so nothing on either side ever asks again. Voice is wedged for the ride segment,
+     * which is problem 56's exact failure mode reached down the other role's path.
+     */
+    @Test
+    fun `an answerer's intent that could not be sent does not wedge voice for the rest of the segment`() =
+        withControllerManual(isLocalLeader = false) { answerer, fakes, dispatcher ->
+            // The link is down: `VoiceSignalRelay.send` finds no authenticated writer, exactly as in
+            // the window between a link loss and the §10 ladder reconnecting.
+            fakes.transport.accept = false
+            answerer.start()
+            dispatcher.runAll()
+
+            // The ladder reconnects and `attachVoice` rebuilds voice as a fresh negotiation (§7.8).
+            fakes.transport.accept = true
+            answerer.start()
+            dispatcher.runAll()
+
+            val intents =
+                fakes.transport.sent.filterIsInstance<VoiceSignal.State>().filter {
+                    it.state == VoiceWireState.NEGOTIATING
+                }
+            assertTrue(
+                intents.isNotEmpty(),
+                "after a reconnect the answerer must ask for voice again; sent=${fakes.transport.sent.map { it.kindName() }}",
+            )
+            assertTrue(
+                fakes.audio.closeCaptureCount == 0,
+                "no part of this degrade may close the capture device (ARCHITECTURE §6.3/§6.4)",
+            )
+        }
+
     // --- harness ---------------------------------------------------------------------------------
 
     private class ManualDispatcher : CoroutineDispatcher() {

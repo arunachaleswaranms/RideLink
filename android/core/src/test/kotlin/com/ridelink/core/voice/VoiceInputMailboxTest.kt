@@ -480,6 +480,74 @@ class VoiceInputMailboxTest {
         assertEquals(0, mailbox.size)
     }
 
+    // --- the send-failure lane (STATUS §4 problem 57) ---------------------------------------------
+
+    @Test
+    fun `a send failure discards no queued peer signal`() {
+        val mailbox = VoiceInputMailbox()
+        mailbox.offer(VoiceInput.SignalReceived(VoiceSignal.Offer(GEN_2, SDP), GEN_2))
+        mailbox.offer(VoiceInput.SignalReceived(VoiceSignal.IceCandidate(GEN_2, CANDIDATE, null, 0), GEN_2))
+
+        mailbox.offer(VoiceInput.NegotiationSendFailed(GEN_1))
+
+        assertEquals(0, mailbox.discardedRetiredSignalCount, "a send failure is not a control-lifetime boundary")
+        val drained = generateSequence { mailbox.poll() }.toList()
+        assertTrue(
+            drained.any { it is VoiceInput.SignalReceived && it.signal is VoiceSignal.Offer },
+            "the successor lifetime's offer must still be there; drained=$drained",
+        )
+    }
+
+    @Test
+    fun `a send failure outranks the critical lane so the table is reset before a queued offer is reduced`() {
+        val mailbox = VoiceInputMailbox()
+        mailbox.offer(VoiceInput.SignalReceived(VoiceSignal.Offer(GEN_2, SDP), GEN_2))
+        mailbox.offer(VoiceInput.NegotiationSendFailed(GEN_1))
+
+        assertEquals(VoiceInput.NegotiationSendFailed(GEN_1), mailbox.poll())
+    }
+
+    @Test
+    fun `a send failure never displaces a queued teardown, and a teardown never displaces it`() {
+        val linkLost = VoiceInputMailbox()
+        linkLost.offer(VoiceInput.ControlLinkLost)
+        linkLost.offer(VoiceInput.NegotiationSendFailed(GEN_1))
+        assertEquals(VoiceInput.ControlLinkLost, linkLost.poll(), "the lifetime boundary still applies first")
+        assertEquals(VoiceInput.NegotiationSendFailed(GEN_1), linkLost.poll(), "and the send failure survives it")
+
+        val stop = VoiceInputMailbox()
+        stop.offer(VoiceInput.StopRequested)
+        stop.offer(VoiceInput.NegotiationSendFailed(GEN_1))
+        assertEquals(VoiceInput.StopRequested, stop.poll())
+        assertEquals(VoiceInput.NegotiationSendFailed(GEN_1), stop.poll())
+    }
+
+    @Test
+    fun `a link loss never erases a pending stop, but still takes ownership of the queued peer signals`() {
+        val mailbox = VoiceInputMailbox()
+        mailbox.offer(VoiceInput.SignalReceived(VoiceSignal.Offer(GEN_1, SDP), GEN_1))
+        mailbox.offer(VoiceInput.StopRequested)
+
+        mailbox.offer(VoiceInput.ControlLinkLost)
+
+        assertEquals(
+            VoiceInput.StopRequested,
+            mailbox.poll(),
+            "the stop is what `shutdown()` completes on; nothing may replace it (ADR-026)",
+        )
+        assertEquals(1, mailbox.discardedRetiredSignalCount, "the link loss still owned the retired lifetime's offer")
+        assertEquals(null, mailbox.poll())
+    }
+
+    @Test
+    fun `a stop offered over a pending link loss still replaces it`() {
+        val mailbox = VoiceInputMailbox()
+        mailbox.offer(VoiceInput.ControlLinkLost)
+        mailbox.offer(VoiceInput.StopRequested)
+        assertEquals(VoiceInput.StopRequested, mailbox.poll(), "a stop is the strict superset and wins")
+        assertEquals(null, mailbox.poll())
+    }
+
     private companion object {
         val GEN_1 = VoiceSessionId("11111111111111111111111111111111")
         val GEN_2 = VoiceSessionId("22222222222222222222222222222222")

@@ -214,8 +214,16 @@ actor FakeVoiceAudioSession: VoiceAudioSession {
 
 /// Records the `VOICE_*` frames the controller decided to send.
 actor RecordingVoiceTransport: VoiceSignalTransport {
+    /// Which signal kinds park in `send` until `releaseSendGate` says what the write reported.
+    enum SendGate: Sendable, Equatable {
+        case offerOrAnswer
+        case voiceState
+    }
+
     private var log: [VoiceSignal] = []
     var accept = true
+    private var armedGate: SendGate?
+    private var parked: CheckedContinuation<Bool, Never>?
 
     init() {}
 
@@ -225,10 +233,47 @@ actor RecordingVoiceTransport: VoiceSignalTransport {
     /// the whole window between a link loss and the §10 ladder reconnecting (STATUS §4 problem 56).
     func setAccept(_ value: Bool) { accept = value }
 
+    /// Parks the next matching `send`, **suspending `VoiceController`'s consumer inside `perform`**,
+    /// until `releaseSendGate` supplies the result (STATUS §4 problem 57).
+    ///
+    /// This is the production shape, not a contrivance. `VoiceSignalRelay.send` is three `await`s deep
+    /// before a byte moves -- `authenticatedWriter()` and `activeSessionId()` both hop to the
+    /// `ControlSessionManager` actor, then the writer itself performs real I/O -- and it reports
+    /// `false` for a write that failed. So the `Bool` a `.sendOffer`/`.sendAnswer` finally produces can
+    /// arrive arbitrarily late, after the control lifetime that authorised it has been replaced.
+    /// Parking is how a test names that instant instead of racing for it.
+    func armSendGate(_ gate: SendGate) { armedGate = gate }
+
+    /// True once a `send` is actually parked, as opposed to merely armed.
+    func isSendGateHolding() -> Bool { parked != nil }
+
+    /// Reports `result` to whichever `send` is parked, and stops parking.
+    func releaseSendGate(result: Bool) {
+        armedGate = nil
+        parked?.resume(returning: result)
+        parked = nil
+    }
+
     func send(_ signal: VoiceSignal) async -> Bool {
+        if let gate = armedGate, Self.matches(gate, signal) {
+            armedGate = nil
+            let result = await withCheckedContinuation { continuation in self.parked = continuation }
+            guard result else { return false }
+            log.append(signal)
+            return true
+        }
         guard accept else { return false }
         log.append(signal)
         return true
+    }
+
+    private static func matches(_ gate: SendGate, _ signal: VoiceSignal) -> Bool {
+        switch (gate, signal) {
+        case (.offerOrAnswer, .offer), (.offerOrAnswer, .answer), (.voiceState, .state):
+            return true
+        default:
+            return false
+        }
     }
 }
 

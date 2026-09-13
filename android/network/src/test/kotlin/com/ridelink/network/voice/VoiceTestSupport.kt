@@ -220,12 +220,45 @@ class RecordingVoiceTransport : VoiceSignalTransport {
     private val log = CopyOnWriteArrayList<VoiceSignal>()
     var accept = true
 
+    /**
+     * Parks the next [send] whose signal matches, **suspending the controller's single consumer
+     * inside `perform`**, until [release] says what the write finally reported.
+     *
+     * This is the production shape, not a contrivance: `VoiceSignalRelay.send` suspends at
+     * `withContext(ioDispatcher)` and again inside `ControlSocket.writeFrame`'s write lock and
+     * `flush()`, and it reports `false` for a write that threw — so the value a `SendOffer`/
+     * `SendAnswer` finally produces can arrive arbitrarily late, after the control lifetime that
+     * authorised it has already been replaced. Parking is how a test names that instant instead of
+     * racing for it.
+     */
+    var parkWhen: ((VoiceSignal) -> Boolean)? = null
+
+    private var gate: CompletableDeferred<Boolean>? = null
+
     val sent: List<VoiceSignal> get() = log.toList()
 
+    /** True while a [send] is suspended waiting for [release]. */
+    val parked: Boolean get() = gate?.isCompleted == false
+
+    /** Reports [result] to whichever [send] is currently parked, and stops parking. */
+    fun release(result: Boolean) {
+        parkWhen = null
+        gate?.complete(result)
+        gate = null
+    }
+
     override suspend fun send(signal: VoiceSignal): Boolean {
-        if (!accept) return false
-        log.add(signal)
-        return true
+        val accepted =
+            if (parkWhen?.invoke(signal) == true) {
+                val pending = CompletableDeferred<Boolean>()
+                gate = pending
+                parkWhen = null
+                pending.await()
+            } else {
+                accept
+            }
+        if (accepted) log.add(signal)
+        return accepted
     }
 }
 

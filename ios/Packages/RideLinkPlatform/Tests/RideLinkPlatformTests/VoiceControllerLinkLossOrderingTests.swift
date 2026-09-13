@@ -159,6 +159,113 @@ final class VoiceControllerLinkLossOrderingTests: XCTestCase {
         await harness.controller.shutdown()
     }
 
+    /// A-1 — STATUS §4 problem 57. **A send that failed is not a control lifetime that ended.**
+    ///
+    /// Problem 56's fix turned `transport.send(...) == false` into `.controlLinkLost`, which is the
+    /// input problem 50 gave *lifetime-boundary* semantics: offering it discards every queued
+    /// `.signalReceived`. A send failure is not that event. On this platform `VoiceSignalRelay.send`
+    /// releases the `VoiceController` actor at `await transport.send(...)` and then suspends three more
+    /// times inside the relay, so its `Bool` can arrive after the §10 ladder has authenticated a
+    /// **successor** generation whose own `VOICE_OFFER` is already in the mailbox — `submit` is
+    /// `nonisolated` and needs none of this actor's time to put one there.
+    func testStaleSendFailureCannotDiscardASuccessorLifetimesQueuedOffer() async throws {
+        let harness = try await Harness(isLocalLeader: false)
+        await harness.controller.start()
+        try await harness.settle()
+
+        // Lifetime A: the peer offered and this side is answering.
+        harness.controller.submit(.offer(voiceSessionId: Self.genAt(900), sdp: Self.sdp))
+        try await harness.awaitEngineCall("createAnswer")
+        await harness.transport.armSendGate(.offerOrAnswer)
+        await harness.engine.emit(.answerCreated(voiceSessionId: Self.genAt(900), sdp: Self.sdp))
+        try await harness.awaitCondition { await harness.transport.isSendGateHolding() }
+
+        // Lifetime A ends. The consumer is parked inside the send, so nothing drains yet.
+        await harness.controller.onControlLinkLost()
+
+        // The ladder reconnects, lifetime B authenticates, and B's peer offers. `VoiceSignalRelay`
+        // admitted this frame against a live generation, so ADR-025 is satisfied: it is genuinely the
+        // successor's work.
+        harness.controller.submit(.offer(voiceSessionId: Self.genAt(901), sdp: Self.sdp))
+
+        // Only now does lifetime A's write report that it failed.
+        await harness.transport.releaseSendGate(result: false)
+        try await harness.awaitEngineCall("start(\(Self.genAt(901).value))")
+        try await harness.settle()
+
+        let calls = await harness.engine.recordedCalls()
+        let stopAt = try XCTUnwrap(calls.lastIndex(of: "stop"), "the degrade must stop the retired media transport")
+        let afterTeardown = Array(calls[(stopAt + 1)...])
+        XCTAssertTrue(
+            afterTeardown.contains("applyRemote(OFFER)"),
+            "the successor lifetime's offer must survive a retired lifetime's send failure; after stop=\(afterTeardown)"
+        )
+        XCTAssertTrue(
+            afterTeardown.contains("createAnswer"),
+            "the successor lifetime's offer must still be answered; after stop=\(afterTeardown)"
+        )
+        let status = await harness.controller.currentDiagnostics().status
+        XCTAssertEqual(status, .negotiating, "a retired send failure may not retire the successor's negotiation")
+        await harness.controller.shutdown()
+    }
+
+    /// A-2 — the same problem reaching rule 21 rather than voice. `.teardown` is one slot, latest wins,
+    /// so a degrade offered from the consumer's own resume **replaces** a `.stopRequested` that
+    /// `shutdown()` is waiting on. Nothing then ever applies that stop: capture is never released and
+    /// `SessionCoordinator.retireSession` — which awaits `shutdown()` with no timeout of its own by
+    /// design (ADR-021 Amendment A4) — can never emit `.teardownComplete`, so the session can never
+    /// reach `.idle` (ADR-026).
+    func testStaleSendFailureCannotEraseAPendingStop() async throws {
+        let harness = try await Harness(isLocalLeader: true)
+        await harness.controller.start()
+        try await harness.settle()
+
+        await harness.transport.armSendGate(.offerOrAnswer)
+        await harness.engine.emit(.offerCreated(voiceSessionId: Self.genAt(1), sdp: Self.sdp))
+        try await harness.awaitCondition { await harness.transport.isSendGateHolding() }
+
+        // The ride is ending: `retireSession` asks for the release it must prove happened.
+        await harness.controller.stop()
+        await harness.transport.releaseSendGate(result: false)
+
+        try await harness.awaitAudioCall("close")
+        let counts = await harness.audio.captureCounts()
+        XCTAssertEqual(counts.closed, 1, "the pending stop must still be applied; a failed send may not replace it")
+        await harness.controller.shutdown()
+    }
+
+    /// P56-1 from the **answerer's** side — STATUS §4 problem 59, and the half of problem 56 its own
+    /// fix left open.
+    ///
+    /// An answerer never offers (PROTOCOL §7.3). Its `start()` produces exactly one wire effect: a
+    /// `VOICE_STATE { negotiating }` with **no** `voice_session_id`, which is the whole of its
+    /// intent-to-talk — and the table advances to `.negotiating` regardless of whether that frame
+    /// reached anything. Problem 56's fix exempted `.sendVoiceState` because "a lost state update is
+    /// carried by the next one". That is true of every `VOICE_STATE` except this one: there is no next
+    /// one, `VoiceNegotiation.start` is idempotent against the live `.negotiating` it just entered, so
+    /// `attachVoice`'s reconnect rebuild is a no-op — and if the leader has not itself consented,
+    /// `attachVoice` does not call `start()` there either, so nothing on either side ever asks again.
+    func testAnAnswerersUnsentIntentDoesNotWedgeVoiceForTheSegment() async throws {
+        let harness = try await Harness(isLocalLeader: false)
+
+        // The link is down: `VoiceSignalRelay.send` finds no authenticated writer.
+        await harness.transport.setAccept(false)
+        await harness.controller.start()
+        try await harness.settle()
+
+        // The ladder reconnects and `attachVoice` rebuilds voice as a fresh negotiation (§7.8).
+        await harness.transport.setAccept(true)
+        await harness.controller.start()
+        try await harness.awaitSent { signal in
+            if case .state(_, let wire, _, _) = signal { return wire == .negotiating }
+            return false
+        }
+
+        let counts = await harness.audio.captureCounts()
+        XCTAssertEqual(counts.closed, 0, "no part of this degrade may close the capture device (ARCHITECTURE §6.3/§6.4)")
+        await harness.controller.shutdown()
+    }
+
     private func offerCount(_ harness: Harness) async -> Int {
         await harness.transport.sentSignals()
             .filter { if case .offer = $0 { return true } else { return false } }.count

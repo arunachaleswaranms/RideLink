@@ -458,6 +458,87 @@ final class VoiceInputMailboxTests: XCTestCase {
         XCTAssertEqual(mailbox.offer(.startRequested(freshVoiceSessionId: genB)), .accepted(lane: .critical))
     }
 
+    // MARK: - the send-failure lane (STATUS §4 problem 57)
+
+    func testASendFailureDiscardsNoQueuedPeerSignal() {
+        var mailbox = VoiceInputMailbox()
+        _ = mailbox.offer(.signalReceived(signal: .offer(voiceSessionId: genB, sdp: sdp), freshVoiceSessionId: genB))
+        _ = mailbox.offer(
+            .signalReceived(
+                signal: .iceCandidate(voiceSessionId: genB, candidate: candidate, sdpMid: nil, sdpMlineIndex: 0),
+                freshVoiceSessionId: genB
+            )
+        )
+
+        _ = mailbox.offer(.negotiationSendFailed(voiceSessionId: genA))
+
+        XCTAssertEqual(
+            mailbox.discardedRetiredSignalCount, 0,
+            "a send failure is not a control-lifetime boundary"
+        )
+        var drained: [VoiceInput] = []
+        while let next = mailbox.poll() { drained.append(next) }
+        XCTAssertTrue(
+            drained.contains { if case .signalReceived(.offer, _) = $0 { return true } else { return false } },
+            "the successor lifetime's offer must still be there; drained=\(drained)"
+        )
+    }
+
+    func testASendFailureOutranksTheCriticalLane() {
+        var mailbox = VoiceInputMailbox()
+        _ = mailbox.offer(.signalReceived(signal: .offer(voiceSessionId: genB, sdp: sdp), freshVoiceSessionId: genB))
+        _ = mailbox.offer(.negotiationSendFailed(voiceSessionId: genA))
+
+        guard case .negotiationSendFailed? = mailbox.poll() else {
+            return XCTFail("the table must be reset before a queued offer is reduced against it")
+        }
+    }
+
+    func testASendFailureNeverDisplacesAQueuedTeardownAndIsNeverDisplacedByOne() {
+        var linkLost = VoiceInputMailbox()
+        _ = linkLost.offer(.controlLinkLost)
+        _ = linkLost.offer(.negotiationSendFailed(voiceSessionId: genA))
+        guard case .controlLinkLost? = linkLost.poll() else {
+            return XCTFail("the lifetime boundary still applies first")
+        }
+        guard case .negotiationSendFailed? = linkLost.poll() else {
+            return XCTFail("and the send failure survives it")
+        }
+
+        var stop = VoiceInputMailbox()
+        _ = stop.offer(.stopRequested)
+        _ = stop.offer(.negotiationSendFailed(voiceSessionId: genA))
+        guard case .stopRequested? = stop.poll() else { return XCTFail("the stop still applies first") }
+        guard case .negotiationSendFailed? = stop.poll() else { return XCTFail("and the send failure survives it") }
+    }
+
+    func testALinkLossNeverErasesAPendingStopButStillOwnsTheQueuedPeerSignals() {
+        var mailbox = VoiceInputMailbox()
+        _ = mailbox.offer(.signalReceived(signal: .offer(voiceSessionId: genA, sdp: sdp), freshVoiceSessionId: genA))
+        _ = mailbox.offer(.stopRequested)
+
+        _ = mailbox.offer(.controlLinkLost)
+
+        guard case .stopRequested? = mailbox.poll() else {
+            return XCTFail("the stop is what `shutdown()` completes on; nothing may replace it (ADR-026)")
+        }
+        XCTAssertEqual(
+            mailbox.discardedRetiredSignalCount, 1,
+            "the link loss still owned the retired lifetime's offer"
+        )
+        XCTAssertNil(mailbox.poll())
+    }
+
+    func testAStopOfferedOverAPendingLinkLossStillReplacesIt() {
+        var mailbox = VoiceInputMailbox()
+        _ = mailbox.offer(.controlLinkLost)
+        _ = mailbox.offer(.stopRequested)
+        guard case .stopRequested? = mailbox.poll() else {
+            return XCTFail("a stop is the strict superset and wins")
+        }
+        XCTAssertNil(mailbox.poll())
+    }
+
     func testIsEmptyAndCountAgreeWithWhatHasActuallyBeenDrained() {
         var mailbox = VoiceInputMailbox()
         XCTAssertTrue(mailbox.isEmpty)
