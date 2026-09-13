@@ -1371,14 +1371,22 @@ def build() -> list[dict]:
             ),
         )
     )
+    # --- consent outlives a control lifetime; control authority does not (STATUS §4 problem 66) ---
+    #
+    # ADR-020 Amendment A10. The opposite ordering to the two rows above: the *press* is the stale
+    # thing, because a newer lifetime's offer was reduced while the tap sat in the mailbox. A9
+    # refused it outright, which was safe and **not live**: the offerer sends one VOICE_OFFER per
+    # voice_session_id (§7.4), attachVoice's §7.8 rebuild has already run and found no open capture,
+    # and the user has already consented — so the held offer stayed held for the rest of the ride
+    # segment.
+    #
+    # The two halves of a press separate. Its control authority is stale and contributes nothing; its
+    # consent is ride-segment state and is exactly as valid as when the user tapped. The held offer
+    # supplies the authenticated lifetime and the voice_session_id, so the negotiation is B's from
+    # creation — note negotiation_control_generation stays CTL_B, not the press's CTL_A.
     rows.append(
         row(
-            # The opposite ordering: the *press* is the stale thing, because a newer lifetime's offer
-            # was reduced while the tap sat in the mailbox. Consent is honoured — ARCHITECTURE §6.4
-            # may give no second foreground-visible chance to open capture — and nothing else is.
-            # Answering under A would put an answer on a link that is gone *and* destroy the only
-            # copy of B's offer, which a peer never re-sends.
-            "a-start-from-a-retired-lifetime-consents-without-touching-a-newer-lifetimes-held-offer",
+            "a-stale-start-answers-a-newer-lifetimes-held-offer-under-that-offers-own-lifetime",
             state(
                 ANSWERER,
                 IDLE,
@@ -1389,7 +1397,30 @@ def build() -> list[dict]:
                 negotiation_control_generation=CTL_B,
             ),
             {"kind": "StartRequested", "fresh_voice_session_id": VSID_FRESH, "control_generation": CTL_A},
-            [{"kind": "StartLocalAudio"}, drop("SUPERSEDED_START_LIFETIME")],
+            [
+                {"kind": "StartLocalAudio"},
+                {"kind": "ApplyRemoteOffer", "voice_session_id": VSID_B, "sdp": SDP},
+                {"kind": "DrainQueuedCandidates"},
+                {"kind": "CreateAnswer", "voice_session_id": VSID_B},
+            ],
+            state(
+                ANSWERER,
+                NEGOTIATING,
+                VSID_B,
+                local_audio_open=True,
+                remote_description_applied=True,
+                peer_voice_enabled=True,
+                peer_reported_state=NEGOTIATING,
+                negotiation_control_generation=CTL_B,
+            ),
+        )
+    )
+    rows.append(
+        row(
+            # The same press with capture already open. The only difference is that no StartLocalAudio
+            # is emitted — consent that is already recorded is not re-recorded — which is what says the
+            # progress comes from the held offer rather than from opening anything.
+            "a-stale-start-with-capture-already-open-still-answers-the-newer-held-offer",
             state(
                 ANSWERER,
                 IDLE,
@@ -1400,8 +1431,32 @@ def build() -> list[dict]:
                 held_remote_offer={"voice_session_id": VSID_B, "sdp": SDP},
                 negotiation_control_generation=CTL_B,
             ),
+            {"kind": "StartRequested", "fresh_voice_session_id": VSID_FRESH, "control_generation": CTL_A},
+            [
+                {"kind": "ApplyRemoteOffer", "voice_session_id": VSID_B, "sdp": SDP},
+                {"kind": "DrainQueuedCandidates"},
+                {"kind": "CreateAnswer", "voice_session_id": VSID_B},
+            ],
+            state(
+                ANSWERER,
+                NEGOTIATING,
+                VSID_B,
+                local_audio_open=True,
+                remote_description_applied=True,
+                peer_voice_enabled=True,
+                peer_reported_state=NEGOTIATING,
+                negotiation_control_generation=CTL_B,
+            ),
         )
     )
+    # SUPERSEDED_START_LIFETIME now has **no row**, and that is the finding rather than an omission.
+    # What it still covers is newer-owned negotiation state that is not a held offer, and no legal
+    # state has that shape: an owner is set only by a transition that also sets a live status or a
+    # held offer, a live status returns through start's idempotence, and only an answerer can hold an
+    # offer. `testNegotiationStateAndItsOwningControlLifetimeArePresentTogetherOrNotAtAll` is the
+    # assertion that says so — a row for the residue would fail it, which is how this was confirmed
+    # rather than assumed. The branch is kept as a fail-closed refusal, for the reason controlLinkLost
+    # keeps its null-owner branch: the alternative is a negotiation owned by a lifetime that has ended.
     rows.append(
         row(
             # And an offerer's press from a retired lifetime, which has no held offer to protect but

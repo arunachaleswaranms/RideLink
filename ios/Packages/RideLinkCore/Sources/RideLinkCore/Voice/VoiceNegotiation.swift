@@ -184,14 +184,24 @@ public enum VoiceSignalDropReason: String, Sendable, Equatable {
     /// an answerer reaches one by stating its intent again, not by answering a dead lifetime's SDP.
     case retiredHeldOffer = "RETIRED_HELD_OFFER"
     /// A `.startRequested` whose authorising control lifetime is **older** than the lifetime that owns
-    /// negotiation state this side already holds (STATUS §4 problem 63, ADR-020 Amendment A9) — the
-    /// opposite ordering to `.retiredHeldOffer`, and reachable the same way: the press was queued
-    /// while its lifetime was live and drained after a successor's frame had been reduced.
+    /// negotiation state this side already holds, **and that state is not a held remote offer**
+    /// (STATUS §4 problems 63 and 66, ADR-020 Amendments A9 and A10).
     ///
     /// The press's *consent* is still honoured — capture opens, because ARCHITECTURE §6.4 may give no
     /// second foreground-visible chance — but it establishes **no** negotiation: there is no link left
     /// to negotiate over, and a negotiation owned by a lifetime that has ended is exactly what
     /// ADR-020 Amendment A8 exists to prevent being created.
+    ///
+    /// Amendment A10 narrowed this to the residue. The case it used to cover — a *held remote offer*
+    /// owned by a newer lifetime — now progresses instead: the stale press contributes consent, the
+    /// held offer contributes the authenticated lifetime and the `voice_session_id`, and the answer
+    /// goes out on the offer's own link. Leaving it held was a liveness defect, because the peer sends
+    /// one offer per `voice_session_id` and nothing would have pressed Start a second time.
+    ///
+    /// What is left is unreachable by construction — an owner is set only alongside a live status or a
+    /// held offer, a live status returns before this, and only an answerer can hold an offer — and is
+    /// kept as a refusal rather than removed, for the same reason `controlLinkLost` keeps its
+    /// `owner == nil` branch: the alternative is a negotiation owned by a lifetime that has ended.
     case supersededStartLifetime = "SUPERSEDED_START_LIFETIME"
 }
 
@@ -467,13 +477,41 @@ public enum VoiceNegotiation {
         // **A press authorised by a lifetime older than the one that owns state we are already
         // holding is a press from a lifetime that has ended** (STATUS §4 problem 63). Generations
         // strictly increase and one connection is authenticated at a time, so the existence of
-        // newer-owned state proves this press's link is gone. Consent is still honoured — capture is
-        // the one thing ARCHITECTURE §6.4 may never give a second chance to open — but there is
-        // nothing to negotiate over, and a negotiation owned by a dead lifetime is what Amendment A8
-        // exists to prevent. The held offer is left exactly where it is: it belongs to the newer
-        // lifetime, and a press from an older one has no standing to consume it.
+        // newer-owned state proves this press's link is gone.
+        //
+        // What that press still carries is **consent**, which is ride-segment state and outlives a
+        // control reconnect by design (see `localAudioOpen`). So the two halves separate (ADR-020
+        // Amendment A10, STATUS §4 problem 66): its *control authority* is stale and contributes
+        // nothing, while its *consent* is exactly as valid as it was when the user tapped.
+        //
+        // When the newer-owned state is a held remote offer, that is enough to make progress — and it
+        // has to be, because there is no second event coming. The offerer sends one `VOICE_OFFER` per
+        // `voice_session_id` (PROTOCOL §7.4), `attachVoice`'s §7.8 rebuild has already run and found
+        // no open capture, and the user has already consented, so nothing will press Start again. The
+        // negotiation is built from the **held offer's** lifetime throughout: its `voice_session_id`,
+        // its generation on every outbound frame, its boundary as the one that retires it. The stale
+        // press authorises no write; the offer that lifetime delivered does.
         let existing = state.negotiationControlGeneration
         if let existing, existing > owner {
+            if state.role == .answerer, let held = state.heldRemoteOffer {
+                actions.append(.applyRemoteOffer(voiceSessionId: held.voiceSessionId, sdp: held.sdp))
+                actions.append(.drainQueuedCandidates)
+                actions.append(.createAnswer(voiceSessionId: held.voiceSessionId))
+                next.status = .negotiating
+                next.voiceSessionId = held.voiceSessionId
+                next.remoteDescriptionApplied = true
+                next.heldRemoteOffer = nil
+                // Deliberately **not** `owner`: the negotiation is the held offer's lifetime's from
+                // creation, which is what keeps Amendment A8's retirement rule pointed at the link the
+                // answer will actually go out on.
+                next.negotiationControlGeneration = existing
+                return VoiceOutcome(state: next, actions: actions)
+            }
+            // Newer-owned negotiation state that is *not* a held offer. Unreachable by construction —
+            // an owner is set only alongside a live status or a held offer, the live case returned
+            // above, and only an answerer can hold an offer — and refused rather than trusted, for
+            // `controlLinkLost`'s reason: a negotiation established by a lifetime that has ended is
+            // exactly what Amendment A8 exists to prevent being created.
             actions.append(.recordDroppedSignal(reason: .supersededStartLifetime))
             return VoiceOutcome(state: next, actions: actions)
         }
@@ -498,13 +536,18 @@ public enum VoiceNegotiation {
         case .answerer:
             // **A held offer may be answered only by the lifetime that delivered it** (STATUS §4
             // problem 63, ADR-020 Amendment A9). `existing` names that lifetime, and `existing >
-            // owner` was already refused above, so what is left here is `existing == owner` — answer
-            // it — or `existing < owner`, where the offerer's own link died with the lifetime that
-            // carried it and the offerer has therefore already torn its side down. Answering then
-            // would name a `voice_session_id` the peer no longer holds *and* move the owner to the
-            // consenting lifetime, so the predecessor's boundary could never retire it. §7.8 wants a
-            // fresh negotiation; an answerer reaches one by stating its intent again, which is
-            // exactly the no-held-offer branch below.
+            // owner` was handled above — it *answers* the offer, under the offer's own lifetime — so
+            // what is left here is `existing == owner`, answer it, or `existing < owner`, where the
+            // offerer's own link died with the lifetime that carried it and the offerer has therefore
+            // already torn its side down. Answering then would name a `voice_session_id` the peer no
+            // longer holds *and* move the owner to the consenting lifetime, so the predecessor's
+            // boundary could never retire it. §7.8 wants a fresh negotiation; an answerer reaches one
+            // by stating its intent again, which is exactly the no-held-offer branch below.
+            //
+            // The two orderings are not symmetric and the asymmetry is the point: `existing < owner`
+            // has a stale *remote SDP*, which nothing can repair; `existing > owner` has a stale
+            // *local control authority* beside a current remote offer, and consent is not control
+            // authority (Amendment A10).
             let held = (existing == nil || existing == owner) ? state.heldRemoteOffer : nil
             if state.heldRemoteOffer != nil, held == nil {
                 actions.append(.recordDroppedSignal(reason: .retiredHeldOffer))

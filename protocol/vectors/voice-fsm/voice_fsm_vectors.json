@@ -3169,7 +3169,7 @@
       }
     },
     {
-      "name": "a-start-from-a-retired-lifetime-consents-without-touching-a-newer-lifetimes-held-offer",
+      "name": "a-stale-start-answers-a-newer-lifetimes-held-offer-under-that-offers-own-lifetime",
       "state": {
         "role": "ANSWERER",
         "status": "IDLE",
@@ -3197,22 +3197,80 @@
             "kind": "StartLocalAudio"
           },
           {
-            "kind": "RecordDroppedSignal",
-            "reason": "SUPERSEDED_START_LIFETIME"
+            "kind": "ApplyRemoteOffer",
+            "voice_session_id": "0123456789abcdef0123456789abcdef",
+            "sdp": "v=0\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\na=mid:0\r\n"
+          },
+          {
+            "kind": "DrainQueuedCandidates"
+          },
+          {
+            "kind": "CreateAnswer",
+            "voice_session_id": "0123456789abcdef0123456789abcdef"
           }
         ],
         "state": {
           "role": "ANSWERER",
-          "status": "IDLE",
-          "voice_session_id": null,
+          "status": "NEGOTIATING",
+          "voice_session_id": "0123456789abcdef0123456789abcdef",
           "local_audio_open": true,
-          "remote_description_applied": false,
+          "remote_description_applied": true,
           "peer_voice_enabled": true,
           "peer_reported_state": "NEGOTIATING",
-          "held_remote_offer": {
+          "held_remote_offer": null,
+          "mic_muted": false,
+          "mode": "CONTINUOUS",
+          "negotiation_control_generation": 2
+        }
+      }
+    },
+    {
+      "name": "a-stale-start-with-capture-already-open-still-answers-the-newer-held-offer",
+      "state": {
+        "role": "ANSWERER",
+        "status": "IDLE",
+        "voice_session_id": null,
+        "local_audio_open": true,
+        "remote_description_applied": false,
+        "peer_voice_enabled": true,
+        "peer_reported_state": "NEGOTIATING",
+        "held_remote_offer": {
+          "voice_session_id": "0123456789abcdef0123456789abcdef",
+          "sdp": "v=0\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\na=mid:0\r\n"
+        },
+        "mic_muted": false,
+        "mode": "CONTINUOUS",
+        "negotiation_control_generation": 2
+      },
+      "input": {
+        "kind": "StartRequested",
+        "fresh_voice_session_id": "ffeeddccbbaa99887766554433221100",
+        "control_generation": 1
+      },
+      "expect": {
+        "actions": [
+          {
+            "kind": "ApplyRemoteOffer",
             "voice_session_id": "0123456789abcdef0123456789abcdef",
             "sdp": "v=0\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\na=mid:0\r\n"
           },
+          {
+            "kind": "DrainQueuedCandidates"
+          },
+          {
+            "kind": "CreateAnswer",
+            "voice_session_id": "0123456789abcdef0123456789abcdef"
+          }
+        ],
+        "state": {
+          "role": "ANSWERER",
+          "status": "NEGOTIATING",
+          "voice_session_id": "0123456789abcdef0123456789abcdef",
+          "local_audio_open": true,
+          "remote_description_applied": true,
+          "peer_voice_enabled": true,
+          "peer_reported_state": "NEGOTIATING",
+          "held_remote_offer": null,
           "mic_muted": false,
           "mode": "CONTINUOUS",
           "negotiation_control_generation": 2
