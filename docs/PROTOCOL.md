@@ -1075,10 +1075,25 @@ link died with the lifetime that carried the offer, so it has already torn its s
 holds that `voice_session_id`, and answering it would name a generation the peer would refuse while
 moving the negotiation's owner to a lifetime whose boundary is not the one that should retire it. This
 is the same "rebuild as a fresh negotiation" the reconnect row above requires, reached through the
-mechanism that already exists rather than a second one. If the consenting lifetime is **older**, the
-press is the stale thing: consent is recorded and capture opened (ARCHITECTURE §6.4 may give no second
-foreground-visible chance) but no negotiation is started, and the held offer — the only copy the peer
-will ever send — is left for its own lifetime's consent.
+mechanism that already exists rather than a second one.
+
+If the consenting lifetime is **older**, the *press* is the stale thing — but only half of it is
+(ADR-020 Amendment A10, STATUS §4 problem 66). A press carries two separable things: its **control
+authority**, which expires with its link and contributes nothing, and its **user consent**, which is
+ride-segment state and outlives a control reconnect by design — that is why the capture device stays
+open across a link loss at all, and why the reconnect row above rebuilds voice without asking again.
+So the held offer is **answered**, and the negotiation it establishes belongs to the **held offer's**
+lifetime throughout: that offer's `voice_session_id`, that lifetime's generation on every outbound
+frame, that lifetime's boundary as the one that retires it. The stale press authorises no write; the
+offer the live lifetime delivered does. Refusing instead was safe and **not live**: the offerer sends
+one `VOICE_OFFER` per `voice_session_id`, the reconnect rebuild has already run and found no consent
+recorded, and the user has already consented — so nothing would ever have answered it.
+
+The two orderings look symmetric and are not. A held offer **older** than the press has a stale remote
+SDP, which nothing local can repair. A held offer **newer** than the press has a live peer still
+holding that `voice_session_id` and waiting; only local consent was missing, and that is exactly what
+the press still legitimately carries. All of this is receiver-local — no new field, nothing on the
+wire — and the peer's view is simply that its one offer was answered.
 
 **Which link a `VOICE_*` frame may be written on.** Every outbound `VOICE_*` frame belongs to a
 negotiation, and therefore to that negotiation's control lifetime; it may be written **only** to the

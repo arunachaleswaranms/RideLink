@@ -1218,3 +1218,145 @@ and its overflow degrade still retires and discards nothing. A6's `NegotiationSe
 Capture lifetime: no path here opens or closes the capture device, and `localAudioOpen` still survives
 every control-lifetime boundary. `StopRequested` is still undisplaceable. Problems 50, 56, 57, 59, 60
 and 61 keep their regressions and all still pass.
+
+---
+
+## Amendment A10 — 14 September 2026 — local consent outlives a control lifetime; local control authority does not
+
+**Status:** accepted. Amends §7.3's held-offer rule and Amendment A9's `SUPERSEDED_START_LIFETIME`
+branch. Supersedes nothing: A9's other direction, A8's ownership table and A7's mailbox are all
+unchanged. **No wire change.** The shared vectors change, for A8's reason — the control lifetime is
+part of what the pure table decides.
+
+### The defect (STATUS §4 problem 66)
+
+A9 asked "may this press answer that held offer?" and got the **safety** answer right in both
+directions. It got the **liveness** answer wrong in one of them.
+
+The ordering is: a held `VOICE_OFFER` owned by lifetime **B**, met by a `StartRequested` authorised by
+lifetime **A**, with `A < B`. A9 recorded `SUPERSEDED_START_LIFETIME`, honoured the consent (capture
+opens — ARCHITECTURE §6.4 may give no second foreground-visible chance), started no negotiation, and
+left B's offer held "for its own lifetime's consent".
+
+**There is no such consent coming.** Every producer of one has already fired or cannot fire:
+
+- The offerer sends exactly one `VOICE_OFFER` per `voice_session_id` (§7.4). B's offer is the only copy.
+- §7.8's reconnect rebuild — `attachVoice`'s `start(authGeneration:)` — is gated on the *published*
+  `localAudioOpen` projection, and it already ran when `.connected(B)` was delivered, at which point
+  the press that would have set `localAudioOpen` had not been reduced yet. It issued nothing, and
+  there is no second `.connected(B)`.
+- The user has now consented; `localAudioOpen` is true and the UI shows the intercom as on. Nothing
+  presses Start again.
+
+So the held offer stayed held for the rest of the ride segment with capture open and the user
+expecting voice. A9's own regression hid this by supplying a second `start(controlGeneration: B)` by
+hand — an event production never sends.
+
+The ordering is reachable on unmodified iOS production and is reproduced by
+`VoiceConsentAcrossLifetimesTests` against the coordinator's real decisions:
+`SessionCoordinator.startIntercom` reads `liveAuthenticatedGeneration()` and then hands
+`VoiceController.start` to a deferred task, because `start` is actor-isolated (it stamps
+`VoiceSetupTimeline`). A dies and B authenticates inside that gap; `attachVoice(B)` sees no open
+capture; B's offer is admitted, reduced and held; and only then does the press — still naming A —
+reach the mailbox. Android's `startIntercom` offers synchronously, so a press is always ahead of a
+frame admitted after it in the same `CRITICAL` lane, and the ordering is not reachable there today —
+`SessionCoordinatorIntercomConsentTest` pins that difference rather than leaving it to luck.
+
+### The decision
+
+**A press carries two separable things, and only one of them expires with its link.**
+
+- Its **control authority** — "generation A may write on A's connection" — is stale the instant A
+  ends, and contributes nothing. It authorises no write, names no negotiation and owns nothing.
+- Its **user consent** — "this user wants the intercom for this ride segment" — is ride-segment state.
+  `localAudioOpen` has survived a control-lifetime boundary since Phase 2a *by design*, and §7.8's
+  reconnect rebuild exists precisely because consent outlives the link it was given under.
+
+When a stale press meets a newer held offer, the negotiation does not need the press's control
+authority, because the held offer already carries an authenticated one. So:
+
+| held offer's owner vs. press's owner | outcome |
+|---|---|
+| **equal** | answer it — A8's behaviour, unchanged |
+| **older** (`held < press`) | `RETIRED_HELD_OFFER`: discard the offer, state §7.3's intent-to-talk afresh under the press's lifetime — A9's behaviour, unchanged |
+| **newer** (`held > press`) | **answer it, under the held offer's own lifetime** — this amendment |
+
+In the third row the resulting negotiation is **B's from creation**: `voice_session_id` is B's offer's,
+`negotiationControlGeneration` stays B (deliberately *not* the press's A), every outbound frame it
+produces names B, A's delayed boundary is inert against it (A8's `SUPERSEDED_CONTROL_LIFETIME`), and
+B's own boundary retires it normally.
+
+**The correct phrasing is not "stale A may act on B".** It is: *the stale press contributes consent
+only; the held offer supplies the authenticated control lifetime and the voice-session identity.* The
+stale press does not authorise a write on B's socket — A9's transport rule still decides that, and it
+sees only B.
+
+### Why the two orderings are not symmetric
+
+They look like mirror images and are not:
+
+- `held < press` has a **stale remote SDP**. The offerer's link died with the lifetime that carried
+  the offer, so the offerer has already torn its side down and no longer holds that
+  `voice_session_id`. Nothing local can repair that, and answering it would name a generation the peer
+  would refuse while moving ownership to a lifetime whose boundary is not the one that should retire
+  it. §7.8 wants a fresh negotiation, and an answerer reaches one by stating its intent again.
+- `held > press` has a **stale local control authority** beside a **current** remote offer. The peer
+  is alive on B, still holds that `voice_session_id`, and is waiting for an answer. The only thing
+  missing was consent, and consent is exactly what the press still legitimately carries.
+
+Encoding these as one generic early return is how the liveness defect got in. The three comparisons
+are three branches, deliberately.
+
+### What `SUPERSEDED_START_LIFETIME` still covers, and why it has no vector
+
+The residue: newer-owned negotiation state that is **not** a held remote offer. That is unreachable by
+construction — an owner is set only by a transition that also sets a live status or a held offer, a
+live status returns through `start`'s idempotence before the comparison, and only an answerer can hold
+an offer — and `testNegotiationStateAndItsOwningControlLifetimeArePresentTogetherOrNotAtAll` is what
+says so: a vector row for the residue *fails that assertion*, which is how this was confirmed rather
+than assumed. The branch is kept as a fail-closed refusal, for the reason `controlLinkLost` keeps its
+null-owner branch — the alternative is a negotiation owned by a lifetime that has ended.
+
+### The unstructured-task finding (STATUS §4 problem 67)
+
+Auditing the iOS deferral found a second, separate defect in the same lines and it is recorded on its
+own rather than folded in. `startIntercom`, `endIntercom` and `setMicrophoneMuted` each wrapped their
+controller call in a bare `Task`. That is a continuation the session starts which nothing cancels and
+nothing **joins**, so `retireSession` could emit `.teardownComplete` — ADR-026 rule 21's claim that
+the session is terminal — with a press still in flight against a controller it is about to shut down.
+All three now go through `launchInSession`, the existing session-owned registry. **The deferral
+itself is unchanged and was deliberately not removed**: `VoiceController.start` is actor-isolated, the
+hop is what the actor requires, and removing it to make the reproduction impossible would have
+replaced a proof with an assumption. Android is structurally unaffected — `VoiceController.start` is
+an ordinary synchronous method there — and is not mirrored.
+
+### A correction to A8's justification, recorded rather than rewritten (STATUS §4 problem 69)
+
+A8 answers the **null-generation** press — Start pressed in the gap between two links — by recording
+consent and creating no negotiation, which is right and is unchanged. Its justification then adds:
+"`attachVoice` then rebuilds it under the successor the moment one authenticates, because it already
+starts voice for any segment whose capture is open. Deterministic, no wedge."
+
+**That last claim is false under exactly the ordering this amendment is about**, and it was measured
+against the fixed sources rather than argued: with the press deferred past `.connected(B)`,
+`attachVoice(B)` issues no rebuild (the published `localAudioOpen` is still false), the press lands
+with `controlGeneration == nil`, and the result is `status == idle`, `localAudioOpen == true`, nothing
+sent, and no further event coming. Voice is dead for the ride segment with capture open — this
+amendment's consequence, reached without a held offer.
+
+It is **not fixed by this amendment.** There is no held offer to answer and no lifetime for the pure
+table to name, and A8's own rule forbids the table inventing one. The obvious coordinator fix — making
+the §7.8 rebuild a reaction to consent becoming true — is unsafe as stated: it would also fire after
+`NegotiationSendFailed` degrades to idle with consent still recorded, which is a voice-layer retry
+loop, and §7.8 says §10's control ladder is the only reconnect loop in the app. STATUS §4 problem 69
+records it open with the measurement and the design constraint. A8's text stands as accepted; this is
+the correction.
+
+### Unchanged
+
+A9's outbound generation binding, in full. A9's other held-offer direction and `RETIRED_HELD_OFFER`.
+A8's ownership table and both its directions. A7's mailbox, including that it never suppresses a
+boundary. A6's `NegotiationSendFailed` semantics, and that a send refusal never speaks as
+`ControlLinkLost`. Capture lifetime: nothing here opens or closes the capture device, and
+`localAudioOpen` still survives every control-lifetime boundary. Problems 50, 56, 57, 59, 60, 61, 63
+and 64 keep their regressions and all still pass.
