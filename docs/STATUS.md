@@ -5214,6 +5214,13 @@ Bluetooth hop or audible alignment:
 | Repeated scheduled-start wake errors (200 samples) | **79 – 4 702 µs**, never negative |
 | Varispeed play-out of the 0.509 s fixture at 1.0 / 2.0 / 0.5 | **0.580–0.591 / 0.280–0.312 / 1.068–1.084 s** |
 
+**CI's own numbers on the same head, which separate the two claims again** (run `34750220856`, both
+jobs green): the in-range seek's play-out measured **0.430 s** on the shared `macos-26` runner —
+*inside* the laptop's 0.414–0.440 s spread — while the wake error in that same run measured
+**3.1–127.8 ms** against the laptop's 0.079–4.702 ms, roughly 27× worse. Play-out time is a property
+of the decode/render path; scheduling stall is a property of the host. That is why the new seek test
+bounds its timing relative to the fixture's own duration and never by an absolute figure.
+
 **Regressions re-run explicitly, since this pass must not weaken §2al's work** — all green: the
 problem-50 reproductions on both platforms, §2al's own problem-56 regression, the fifty-cycle
 Android second-session lifecycle sweep and the iOS manager-cycle sweep, and the 20 intercom

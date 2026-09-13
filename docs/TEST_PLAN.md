@@ -1049,7 +1049,15 @@ outlasts the player's own 250 ms position tick — and proves frames actually mo
 position advances **past** the seek point while still playing, the segment reaches its real
 `.dataPlayedBack` completion, and the wall-clock time to that completion matches the audio that was
 left. Measured over 20 consecutive runs: **0.414–0.440 s** for the 359 ms remaining, against
-**0.580–0.591 s** for the whole track. Claims 9 and 10 pin the contracts at both ends; the negative
+**0.580–0.591 s** for the whole track.
+
+**And that figure is portable, which is the point.** The same run on the shared GitHub `macos-26`
+runner measured **0.430 s** — inside the laptop's own spread — while the *wake error* in the very same
+run measured **3.1–127.8 ms** against the laptop's 0.079–4.702 ms, roughly 27× worse. Play-out time is
+a property of the decode/render path, i.e. of this code; scheduling stall is a property of the host.
+That is the same split claim 5 already relies on, now measured for claim 7 as well, and it is why
+claim 7's timing assertions are bounded relative to the fixture's own duration rather than by an
+absolute millisecond figure. Claims 9 and 10 pin the contracts at both ends; the negative
 one is not cosmetic, because a negative `startingFrame` reaching `AVAudioPlayerNode.scheduleSegment`
 **aborts the process** (observed, signal 6, against the pre-fix player).
 
