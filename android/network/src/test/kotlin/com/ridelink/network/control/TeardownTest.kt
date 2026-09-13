@@ -185,7 +185,10 @@ class TeardownTest {
                 // The two per-session families, attached exactly as SessionCoordinator attaches them.
                 sut.voice.sink =
                     object : VoiceSignalSink {
-                        override fun submit(signal: VoiceSignal) = Unit
+                        override fun submit(
+                            signal: VoiceSignal,
+                            controlGeneration: Long,
+                        ) = Unit
                     }
                 sut.audioState.sink = AudioStateSink { }
 

@@ -276,9 +276,15 @@ public actor VoiceController: VoiceSignalSink {
     /// (ARCHITECTURE §6.3/§6.4). Nothing is retried here — PROTOCOL §10's ladder is the only reconnect
     /// loop in the app, and a second one competing with it is the bug the §2e hardening pass fixed for
     /// the control plane.
-    public func onControlLinkLost() {
+    /// - Parameter retiredControlGeneration: **which** authentication generation ended, from
+    ///   `.linkLost` (STATUS §4 problem 60). Nil when the connection never authenticated, and
+    ///   therefore never admitted any semantic voice work to own. This controller is deliberately
+    ///   retained across a control reconnect, so "the link is gone" and "*whose* link is gone" are
+    ///   different questions and only the second one can safely decide what queued peer work is
+    ///   discarded — see `VoiceInputMailbox.offer`.
+    public func onControlLinkLost(retiredControlGeneration: Int64?) {
         lastFailure = .controlLinkLost
-        mailbox.offer(.controlLinkLost, doorbell: doorbell)
+        mailbox.offer(.controlLinkLost(retiredControlGeneration: retiredControlGeneration), doorbell: doorbell)
     }
 
     /// A `VOICE_*` frame that has **already** passed the ADR-019 trust gate. There is no other entry
@@ -288,8 +294,19 @@ public actor VoiceController: VoiceSignalSink {
     /// `nonisolated` and non-async so the control read loop is never blocked by it, even under a flood
     /// of frames from an authenticated peer -- `mailbox.offer` only ever touches an in-memory,
     /// lock-guarded deque/dictionary, never suspends, and never grows without bound.
-    public nonisolated func submit(_ signal: VoiceSignal) {
-        mailbox.offer(.signalReceived(signal: signal, freshVoiceSessionId: newVoiceSessionId()), doorbell: doorbell)
+    /// `controlGeneration` is carried into the input unchanged and is **never** re-derived here:
+    /// reading a live generation to label a frame that has already been read is exactly ADR-024
+    /// Amendment A7's defect, and a `VoiceController` that outlives a reconnect has no live generation
+    /// of its own to read in any case.
+    public nonisolated func submit(_ signal: VoiceSignal, controlGeneration: Int64) {
+        mailbox.offer(
+            .signalReceived(
+                signal: signal,
+                controlGeneration: controlGeneration,
+                freshVoiceSessionId: newVoiceSessionId()
+            ),
+            doorbell: doorbell
+        )
     }
 
     /// Releases every task this controller owns. After this, no callback can mutate anything.
@@ -335,6 +352,14 @@ public actor VoiceController: VoiceSignalSink {
             } else if let next = mailbox.poll() {
                 await apply(next)
             } else {
+                // A wake that applied nothing is still a wake that may have something to report: an
+                // input the mailbox **refused** rings this doorbell and then leaves the queues empty,
+                // so without this the retired-lifetime refusal count could only ever surface on the
+                // back of some *later* applied input (STATUS §4 problem 60). A counter that is only
+                // observable by accident is not surfaced. Safe here and nowhere else: this is the
+                // single consumer, so the state `publishDiagnostics` reads is not being mutated
+                // underneath it.
+                publishDiagnostics()
                 return
             }
         }
@@ -425,6 +450,48 @@ public actor VoiceController: VoiceSignalSink {
     }
 
     // swiftlint:disable:next cyclomatic_complexity
+    /// STATUS §4 problems 56, 57 and 59. The `Bool` from `VoiceSignalTransport.send` used to be
+    /// discarded for every action in `perform` -- and for an offer or an answer that silently loses a
+    /// **negotiation**, not just a frame.
+    ///
+    /// `VoiceSignalRelay.send` returns false whenever there is no authenticated writer -- which is
+    /// exactly the window between a link loss and the §10 ladder reconnecting. A Start pressed in that
+    /// window created an offer nothing could carry, and the table still advanced to `.negotiating`.
+    /// `VoiceNegotiation.start` is idempotent against a live negotiation on purpose (two Start presses
+    /// must make one offer), so `SessionCoordinator.attachVoice`'s reconnect rebuild then did nothing
+    /// at all, the peer's own `negotiating` intent hit the same idempotence coming back, and voice
+    /// stayed wedged for the rest of the ride segment with no error anywhere.
+    ///
+    /// The response resets the table to `.idle` and drops the media transport while **keeping this
+    /// user's capture device open** (ARCHITECTURE §6.3/§6.4), which is precisely the state a reconnect
+    /// rebuild needs to find.
+    ///
+    /// **It is `.negotiationSendFailed`, never `.controlLinkLost`** -- problem 57. The first
+    /// implementation of this fix reused the link-loss input because the table's *reaction* is the
+    /// same, but the two are not the same *event*, and `.controlLinkLost` carries two lifetime-boundary
+    /// powers a send failure has no right to. It owns every `.signalReceived` queued below it
+    /// (problem 50), and it occupies the single `.teardown` slot. Because `VoiceSignalRelay.send` is
+    /// three `await`s deep before a byte moves -- `authenticatedWriter()`, `activeSessionId()`, then the
+    /// writer -- and every one of them releases this actor, this `Bool` can arrive long after
+    /// PROTOCOL §10's ladder has authenticated a **successor** generation whose own `VOICE_OFFER` is
+    /// already queued (`submit` is `nonisolated` and needs none of this actor's time to enqueue one).
+    /// Injecting a lifetime boundary there discarded the successor's offer and wedged voice for the
+    /// ride segment, and injecting it over a pending `.stopRequested` erased a capture release
+    /// `SessionCoordinator.retireSession` waits on with no timeout.
+    ///
+    /// `voiceSessionId` is the generation the lost frame belonged to, so the reducer can refuse to act
+    /// on any other. Nil is not "unknown" -- it is an answerer's intent-to-talk, which names none.
+    ///
+    /// Deliberately **not** applied to `.sendCandidate`, nor to any `.sendVoiceState` other than that
+    /// intent (problem 59): trickle ICE is designed to lose candidates, and every other state update
+    /// either names a generation or is genuinely superseded by the next one. Neither strands a
+    /// negotiation, and tearing media down for one would turn a recoverable blip into a rebuild.
+    private func degradeIfUnsent(_ sent: Bool, voiceSessionId: VoiceSessionId?) {
+        guard !sent else { return }
+        lastFailure = .controlLinkLost
+        mailbox.offer(.negotiationSendFailed(voiceSessionId: voiceSessionId), doorbell: doorbell)
+    }
+
     private func perform(_ action: VoiceAction) async {
         switch action {
         case .startLocalAudio:
@@ -441,12 +508,20 @@ public actor VoiceController: VoiceSignalSink {
             _ = await engine.applyRemoteDescription(kind: .answer, sdp: sdp)
         case .sendOffer(let id, let sdp):
             mark(.localDescription)
-            _ = await transport.send(.offer(voiceSessionId: id, sdp: sdp))
+            degradeIfUnsent(await transport.send(.offer(voiceSessionId: id, sdp: sdp)), voiceSessionId: id)
         case .sendAnswer(let id, let sdp):
             mark(.localDescription)
-            _ = await transport.send(.answer(voiceSessionId: id, sdp: sdp))
+            degradeIfUnsent(await transport.send(.answer(voiceSessionId: id, sdp: sdp)), voiceSessionId: id)
         case .sendVoiceState(let id, let wire, let micMuted, let mode):
-            _ = await transport.send(.state(voiceSessionId: id, state: wire, micMuted: micMuted, mode: mode))
+            let sent = await transport.send(.state(voiceSessionId: id, state: wire, micMuted: micMuted, mode: mode))
+            // STATUS §4 problem 59. One `VOICE_STATE` is not "carried by the next one": an answerer's
+            // intent-to-talk. It names no generation because the offerer has not made one yet (§7.3),
+            // it is the **only** wire effect an answerer's `start()` produces, and the table is already
+            // `.negotiating` by the time it is attempted -- so losing it wedges exactly as a lost offer
+            // does, and `attachVoice`'s rebuild finds a live negotiation and does nothing. Every other
+            // `VOICE_STATE` (a mute, a mode, a connectivity transition, a `closed`) either names a
+            // generation or is genuinely superseded by the next one, and is deliberately left alone.
+            if id == nil, wire == .negotiating { degradeIfUnsent(sent, voiceSessionId: nil) }
         case .sendCandidate(let id, let candidate, let mid, let index):
             // PROTOCOL §7.6 inspects the `typ` of every candidate this side **gathers** as well as
             // every one it receives. The gathering direction is the one that would reveal a STUN
@@ -653,8 +728,15 @@ public actor VoiceController: VoiceSignalSink {
         diagnostics.queuedCandidates = pending.count
         diagnostics.droppedQueuedCandidates = pending.droppedCount
         let mailboxOverflows = mailbox.overflowCount
+        // Discarded **and** refused: the mailbox keeps the two apart because they are the same fact
+        // caught at its two different instants, and the diagnostics screen has one reason for "a peer
+        // signal its own control lifetime had already outlived" (STATUS §4 problem 60).
+        let retiredSignalDiscards = mailbox.discardedRetiredSignalCount + mailbox.refusedRetiredSignalCount
+        // Both of these are counted by the mailbox, one layer earlier than every reason the table
+        // itself produces -- so they are merged in here rather than living in `dropCounts`.
         var droppedSignals = dropCounts
         if mailboxOverflows > 0 { droppedSignals[.inputMailboxOverflow] = mailboxOverflows }
+        if retiredSignalDiscards > 0 { droppedSignals[.retiredControlLifetime] = retiredSignalDiscards }
         diagnostics.droppedSignals = droppedSignals
         diagnostics.rebuildCount = rebuildCount
         diagnostics.unexpectedCandidateTypeSeen = unexpectedCandidateSeen
@@ -714,7 +796,10 @@ private final class VoiceInputMailboxBox: @unchecked Sendable {
             // degrade -- media stops, local capture and the TLS control session both survive -- is
             // the same safe response an actual control-link blip already produces, applied one layer
             // earlier. The teardown lane always accepts.
-            _ = mailbox.offer(.controlLinkLost)
+            // `retiredControlGeneration: nil` -- an overflow is a local fact about *this* device's
+            // bounded queue, not a control-lifetime boundary, so it retires nothing and owns nobody's
+            // queued work (STATUS §4 problem 60). The degrade the reducer performs is identical.
+            _ = mailbox.offer(.controlLinkLost(retiredControlGeneration: nil))
         }
         lock.unlock()
         doorbell.signal()
@@ -730,6 +815,19 @@ private final class VoiceInputMailboxBox: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         return mailbox.overflowCount
+    }
+
+    var discardedRetiredSignalCount: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return mailbox.discardedRetiredSignalCount
+    }
+
+    /// See `VoiceInputMailbox.refusedRetiredSignalCount` (STATUS §4 problem 60).
+    var refusedRetiredSignalCount: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return mailbox.refusedRetiredSignalCount
     }
 
     func clear() {

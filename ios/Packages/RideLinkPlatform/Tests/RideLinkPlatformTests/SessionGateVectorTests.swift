@@ -56,7 +56,12 @@ final class SessionGateVectorTests: XCTestCase {
         case "HandshakeRefused":
             return .handshakeRefused(code: errorCodePinMismatch)
         case "LinkLost":
-            return .linkLost(reason: try platformLinkLossReason(try XCTUnwrap(spec["reason"] as? String)))
+            // The gate reads only `reason`; the retired generation is receiver-local provenance the
+            // session FSM has no use for (STATUS §4 problem 60), so the vectors carry none.
+            return .linkLost(
+                reason: try platformLinkLossReason(try XCTUnwrap(spec["reason"] as? String)),
+                retiredAuthGeneration: nil
+            )
         case "DuplicateConnectionClosed":
             return .duplicateConnectionClosed
         case "ReconnectBudgetExhausted":

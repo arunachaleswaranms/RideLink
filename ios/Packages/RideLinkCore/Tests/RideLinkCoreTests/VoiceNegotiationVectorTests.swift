@@ -9,6 +9,12 @@ import XCTest
 /// two simultaneous Start Voice presses produce one negotiation, that a stale callback cannot touch the
 /// next session, and that a link blip does not close a microphone Android would not let us reopen.
 final class VoiceNegotiationVectorTests: XCTestCase {
+    /// The vectors pin the **reducer**, which reads neither of the two provenance fields the mailbox
+    /// added in ADR-020 Amendment A7 (STATUS §4 problem 60). A constant is therefore the honest
+    /// encoding: the vector files are unchanged, and that is itself the assertion that control-lifetime
+    /// identity is a receiver-local concern and not a wire one.
+    private let vectorControlGeneration: Int64 = 1
+
     private let expectedMinimumRows = 59
     private let vsidA = "5e2a9c40b7f13d86e0a4c95b28f7d613"
     private let vsidFresh = "ffeeddccbbaa99887766554433221100"
@@ -86,7 +92,7 @@ final class VoiceNegotiationVectorTests: XCTestCase {
                     localAudioOpen: true,
                     remoteDescriptionApplied: status == .active
                 )
-                let outcome = VoiceNegotiation.reduce(state: before, input: .controlLinkLost)
+                let outcome = VoiceNegotiation.reduce(state: before, input: .controlLinkLost(retiredControlGeneration: vectorControlGeneration))
                 XCTAssertFalse(
                     outcome.actions.contains(.releaseLocalAudio),
                     "\(role)/\(status) released capture on a link loss"
@@ -113,13 +119,13 @@ final class VoiceNegotiationVectorTests: XCTestCase {
                 .startRequested(freshVoiceSessionId: VoiceSessionId(vsidFresh)),
                 .signalReceived(
                     signal: .state(voiceSessionId: nil, state: .negotiating, micMuted: false, mode: .continuous),
-                    freshVoiceSessionId: VoiceSessionId(vsidFresh)
+                    controlGeneration: vectorControlGeneration, freshVoiceSessionId: VoiceSessionId(vsidFresh)
                 ),
                 .signalReceived(
                     signal: .state(
                         voiceSessionId: VoiceSessionId(vsidA), state: .negotiating, micMuted: false, mode: .continuous
                     ),
-                    freshVoiceSessionId: VoiceSessionId(vsidFresh)
+                    controlGeneration: vectorControlGeneration, freshVoiceSessionId: VoiceSessionId(vsidFresh)
                 ),
             ]
             for input in inputs {
@@ -140,7 +146,7 @@ final class VoiceNegotiationVectorTests: XCTestCase {
         let fresh = VoiceSessionId(vsidFresh)
         let peerIntent = VoiceInput.signalReceived(
             signal: .state(voiceSessionId: nil, state: .negotiating, micMuted: false, mode: .continuous),
-            freshVoiceSessionId: fresh
+            controlGeneration: vectorControlGeneration, freshVoiceSessionId: fresh
         )
         let orders: [[VoiceInput]] = [
             [.startRequested(freshVoiceSessionId: fresh), peerIntent],
@@ -199,7 +205,11 @@ final class VoiceNegotiationVectorTests: XCTestCase {
         case "StopRequested":
             return .stopRequested
         case "ControlLinkLost":
-            return .controlLinkLost
+            // See `vectorControlGeneration`: the vectors carry no control generation because the
+            // reducer reads none.
+            return .controlLinkLost(retiredControlGeneration: vectorControlGeneration)
+        case "NegotiationSendFailed":
+            return .negotiationSendFailed(voiceSessionId: spec.strOpt("voice_session_id").map(VoiceSessionId.init))
         case "MuteRequested":
             return .muteRequested(muted: spec.boolVal("muted"))
         case "ModeSelected":
@@ -207,7 +217,7 @@ final class VoiceNegotiationVectorTests: XCTestCase {
         case "SignalReceived":
             return .signalReceived(
                 signal: signal(spec.dict("signal")),
-                freshVoiceSessionId: VoiceSessionId(spec.str("fresh_voice_session_id"))
+                controlGeneration: vectorControlGeneration, freshVoiceSessionId: VoiceSessionId(spec.str("fresh_voice_session_id"))
             )
         case "LocalOfferCreated":
             return .localOfferCreated(

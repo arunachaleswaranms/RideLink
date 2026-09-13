@@ -940,6 +940,57 @@ def build() -> list[dict]:
             state(ANSWERER, IDLE),
         )
     )
+    # --- NegotiationSendFailed (STATUS §4 problems 56/57/59) ---------------------------------
+    #
+    # An outbound frame the negotiation depended on could not be put on the wire. The table's
+    # *reaction* is ControlLinkLost's, but the *event* is not: this one is a local, in-lifetime fact
+    # about one frame, it carries the generation that frame belonged to, and it is deliberately inert
+    # against any other. That guard is the whole reason it is a separate input rather than a reuse of
+    # ControlLinkLost, which owns a control lifetime's queued remote work and may not be forged by a
+    # send whose Boolean arrived after that lifetime ended.
+    rows.append(
+        row(
+            "negotiation-send-failed-drops-media-but-keeps-capture",
+            state(OFFERER, NEGOTIATING, VSID_A, local_audio_open=True),
+            {"kind": "NegotiationSendFailed", "voice_session_id": VSID_A},
+            # Exactly ControlLinkLost's actions: no SendVoiceState (nothing could be sent — that is
+            # what just failed) and no ReleaseLocalAudio (ARCHITECTURE §6.3/§6.4).
+            [{"kind": "StopMediaTransport"}],
+            state(OFFERER, IDLE, None, local_audio_open=True),
+        )
+    )
+    rows.append(
+        row(
+            "negotiation-send-failed-for-an-answerers-intent-names-no-generation",
+            # §7.3: an answerer's intent-to-talk has no voice_session_id because the offerer has not
+            # created one yet, so null is the generation it legitimately names — not "unknown".
+            state(ANSWERER, NEGOTIATING, None, local_audio_open=True),
+            {"kind": "NegotiationSendFailed", "voice_session_id": None},
+            [{"kind": "StopMediaTransport"}],
+            state(ANSWERER, IDLE, None, local_audio_open=True),
+        )
+    )
+    rows.append(
+        row(
+            "negotiation-send-failed-from-a-retired-generation-is-inert",
+            # The send that failed belonged to a negotiation the table has already moved past. This is
+            # the case that stops a late Boolean retiring whatever came next.
+            state(OFFERER, NEGOTIATING, VSID_B, local_audio_open=True),
+            {"kind": "NegotiationSendFailed", "voice_session_id": VSID_A},
+            [drop("GENERATION_MISMATCH")],
+            state(OFFERER, NEGOTIATING, VSID_B, local_audio_open=True),
+        )
+    )
+    rows.append(
+        row(
+            "negotiation-send-failed-against-an-idle-table-is-inert",
+            # A teardown already reset the table. A null-named intent failure must not match this.
+            state(ANSWERER, IDLE, None, local_audio_open=True),
+            {"kind": "NegotiationSendFailed", "voice_session_id": None},
+            [drop("UNEXPECTED_FOR_STATUS")],
+            state(ANSWERER, IDLE, None, local_audio_open=True),
+        )
+    )
     rows.append(
         row(
             "peer-closed-drops-media-and-keeps-consent",
@@ -1059,6 +1110,7 @@ def main() -> None:
             "No row where the input's voice_session_id differs from the state's may produce any action other than RecordDroppedSignal. That is the §7.2 generation guard.",
             "ControlLinkLost must never emit ReleaseLocalAudio: the capture device survives a link blip (ARCHITECTURE §6.3/§6.4).",
             "ControlLinkLost must never emit SendVoiceState: there is no link to send it on.",
+            "NegotiationSendFailed must never emit ReleaseLocalAudio or SendVoiceState, for ControlLinkLost's two reasons, and must never act on a generation other than the one the state holds — that guard is why it is a separate input rather than a second use of ControlLinkLost (STATUS §4 problem 57).",
             "No ModeSelected row may emit any action other than SendVoiceState, and none may change the status: choosing a gate is a local policy change, not a state transition of the voice session (PROTOCOL §7.4, ADR-021).",
             "No ModeSelected row may emit StartLocalAudio or ReleaseLocalAudio. PTT and VOX gate transmission, never the capture device (ARCHITECTURE §6.3).",
             "No row whose input is a received signal may start a negotiation (CreateOffer/CreateAnswer) when local_audio_open is false. The microphone is never opened because a *peer* asked — only a local StartRequested, which is how consent arrives, may open it (ARCHITECTURE §6.4).",

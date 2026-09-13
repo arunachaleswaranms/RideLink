@@ -932,19 +932,47 @@ memory just by sending frames faster than they are consumed:
 
 | Lane | Holds | Policy |
 |---|---|---|
-| teardown | a deliberate stop, or a control-link loss | one slot, always accepted, drained with top priority |
+| teardown | a deliberate stop, or a control-link loss | one slot, always accepted, drained with top priority. Latest wins with **one exception**: a pending stop is never displaced by a control-link loss (the loss's ownership of queued peer signals still takes effect; only its slot is yielded), because a stop is a strict superset — it also releases the capture device — and it is the only input a caller awaiting release can complete on. A stop offered over a pending link loss still replaces it. **A control-link loss names the control authentication generation that ended** and owns only *that* generation's queued peer signals — see the note below |
+| send_failure | an outbound `VOICE_OFFER`/`VOICE_ANSWER`, or an answerer's intent-to-talk `VOICE_STATE`, that could not be put on the wire | one slot, always accepted. Ranked **below teardown and above critical**: the table must be back at `idle` before a queued `VOICE_OFFER` is reduced against a negotiation that is already dead, and it must not be able to displace a teardown. It is deliberately **not** a control-link loss — see the note below the priority sentence |
 | terminal_peer_state | a peer's own `VOICE_STATE { state: closed \| failed }` | bounded FIFO, capacity **8** (`VoiceInputMailbox.TERMINAL_PEER_STATE_CAPACITY`/`terminalPeerStateCapacity`). A single negotiation produces at most one of these naturally — `closed` xor `failed`, once — so 8 absorbs several rapid teardown/rebuild cycles within one control session while staying far below anything an ordinary ride would approach. **Never coalesced**: the reducer gives `closed`/`failed` teardown semantics (`teardownFromPeer`), so a later ordinary `VOICE_STATE` must never be allowed to replace one still queued here. A new terminal signal arriving at capacity is refused outright — rather than evicting the oldest, which risks discarding the one signal this lane exists to protect — and forces the same link-loss-style degrade a critical-lane refusal does |
 | critical | local start, engine offer/answer/connectivity callbacks, a peer's `VOICE_OFFER`/`VOICE_ANSWER` | bounded FIFO, capacity **32** (`VoiceInputMailbox.CRITICAL_CAPACITY`/`criticalCapacity`); a new input arriving at capacity is refused and forces a link-loss-style degrade (media stops; local capture and the TLS control session both survive) |
 | ice | `VOICE_ICE`, and a locally gathered candidate | bounded ring, capacity `MAX_QUEUED_VOICE_CANDIDATES` (the same constant `PendingCandidates` enforces one layer later); at capacity the oldest is evicted and counted, exactly as `PendingCandidates` already does |
 | coalesced | `VOICE_STATE { state: negotiating \| connecting \| active \| idle \| unknown }`, mute, remote-track-present | one slot per kind; a newer update replaces an undelivered older one rather than queuing behind it |
 
-Draining priority is teardown > terminal_peer_state > critical > ice > coalesced: a peer's own
-teardown signal is never delayed behind a flood of offers/answers or trickle ICE, and it is
+Draining priority is teardown > send_failure > terminal_peer_state > critical > ice > coalesced: a
+peer's own teardown signal is never delayed behind a flood of offers/answers or trickle ICE, and it is
 classified in a lane strictly above `coalesced` so it can never be silently overwritten by an
-ordinary peer-state update that arrives after it but before it is drained. A refusal at the
+ordinary peer-state update that arrives after it but before it is drained.
+
+**A failed send and a control-link loss are different events, and `send_failure` exists because they
+were briefly conflated** (ADR-020 Amendment A6). They ask the negotiation table for the same thing —
+drop the media transport, keep this user's capture device, retry nothing — but `teardown`'s
+control-link loss additionally *owns* every queued peer signal below it (it is the lifetime that
+admitted them) and occupies the single teardown slot. An outbound send **suspends**, so its result can
+arrive after the control lifetime that authorised it has been replaced by a reconnect; a send failure
+allowed to speak as a link loss therefore discarded a **successor** lifetime's freshly admitted
+`VOICE_OFFER`, and could erase a pending stop. A `send_failure` input carries the `voice_session_id`
+the lost frame named and is inert against any other, so it can only ever retire the negotiation that
+actually authorised it; it discards nothing and displaces nothing. A refusal at the
 critical or terminal_peer_state lane is counted as `INPUT_MAILBOX_OVERFLOW` in the FR-023
 diagnostics — a distinct reason from every other entry in the drop-reason vocabulary, because the
 reducer never even saw the input in this case.
+
+**A control-link loss owns queued peer signals by *lifetime identity*, not by arrival order**
+(ADR-020 Amendment A7). Every queued peer signal carries the **control authentication generation that
+admitted it** — the generation `ReadFrameBinding` captured when the frame was read, passed unchanged
+through `VoiceSignalRelay.deliver` and `VoiceSignalSink.submit` — and a `teardown` names the
+generation that ended. The mailbox then **discards** the retired generation's queued signals and
+**refuses** any that arrive afterwards, so neither the order in which they turned up nor when the
+boundary is delivered changes the answer. This is receiver-local metadata: **it is not on the wire**,
+it is not negotiated, and no peer can influence it. `VoiceNegotiation` never reads it — a control
+generation owns an authenticated control lifetime, while `voice_session_id` owns one WebRTC
+negotiation, and the two are deliberately different identities. Two consequences worth stating:
+a *mailbox-overflow* degrade names **no** generation, so it stops the media transport and discards
+nothing; and a signal from a generation strictly older than one the mailbox has already admitted is
+refused even with no boundary delivered at all, because `ControlSessionManager` holds one
+authenticated connection at a time and allocates a strictly greater generation for each — so a newer
+generation's frame is itself proof the older one ended.
 
 **The wake-up between the mailbox and its single consumer is itself conflated on both platforms.**
 `VoiceController` rings a doorbell on every `offer` rather than passing the input across the

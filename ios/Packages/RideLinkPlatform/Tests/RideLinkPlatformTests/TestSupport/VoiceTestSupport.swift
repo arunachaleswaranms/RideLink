@@ -2,7 +2,6 @@ import Foundation
 import RideLinkCore
 @testable import RideLinkPlatform
 
-/// Records what an authenticated peer's `VOICE_*` frames actually deliver.
 /// Records what the receiver's `AUDIO_STATE` sink actually got (PROTOCOL §4.4).
 final class AudioStateSpy: AudioStateSink, @unchecked Sendable {
     private let lock = NSLock()
@@ -21,9 +20,16 @@ final class AudioStateSpy: AudioStateSink, @unchecked Sendable {
     }
 }
 
+/// Records what an authenticated peer's `VOICE_*` frames actually deliver, **and which control
+/// authentication generation admitted each one** (STATUS §4 problem 60).
+///
+/// The generation is recorded rather than ignored for the same reason `ManifestSpy` records it: the
+/// claim under test is that the relay passes on the frame's *own* provenance and never substitutes a
+/// live read, and a spy that dropped the parameter could not tell the two apart.
 final class VoiceSignalSpy: VoiceSignalSink, @unchecked Sendable {
     private let lock = NSLock()
     private var log: [VoiceSignal] = []
+    private var generationLog: [Int64] = []
 
     var received: [VoiceSignal] {
         lock.lock()
@@ -31,10 +37,38 @@ final class VoiceSignalSpy: VoiceSignalSink, @unchecked Sendable {
         return log
     }
 
-    func submit(_ signal: VoiceSignal) {
+    /// One entry per `received` entry, in the same order.
+    var generations: [Int64] {
+        lock.lock()
+        defer { lock.unlock() }
+        return generationLog
+    }
+
+    func submit(_ signal: VoiceSignal, controlGeneration: Int64) {
         lock.lock()
         defer { lock.unlock() }
         log.append(signal)
+        generationLog.append(controlGeneration)
+    }
+}
+
+/// The one control authentication generation every suite written before STATUS §4 problem 60 is about.
+///
+/// Those suites all describe a **single** control lifetime — a signal admitted by it, and its own link
+/// loss — so naming one generation for both is exactly faithful to what they assert, and it is what
+/// keeps them honest regressions rather than tests that happen to pass because everything is
+/// indistinguishable. A suite that needs two lifetimes says so explicitly instead of using these.
+let testControlGenerationA: Int64 = 1
+
+extension VoiceController {
+    /// `testControlGenerationA` admitted this signal.
+    nonisolated func submit(_ signal: VoiceSignal) {
+        submit(signal, controlGeneration: testControlGenerationA)
+    }
+
+    /// `testControlGenerationA` is the lifetime that ended.
+    func onControlLinkLost() {
+        onControlLinkLost(retiredControlGeneration: testControlGenerationA)
     }
 }
 
@@ -143,6 +177,8 @@ actor FakeVoiceAudioSession: VoiceAudioSession {
     /// How many times the capture path was **actually** opened (a no-op re-open does not count).
     private(set) var openCaptureCount = 0
     private(set) var closeCaptureCount = 0
+    private var openGateArmed = false
+    private var openGate: CheckedContinuation<Void, Never>?
 
     init() {}
 
@@ -163,7 +199,33 @@ actor FakeVoiceAudioSession: VoiceAudioSession {
         sink?(next)
     }
 
+    /// Suspends the next `open()` until `releaseOpenGate()` is called.
+    ///
+    /// The mailbox consumer runs `startLocalAudio` inside `apply`, so gating `open` parks the consumer
+    /// mid-input at a known point. That is what makes an interleaving deterministic on this platform:
+    /// `VoiceController` is an actor with a doorbell-driven consumer task and no injectable dispatcher,
+    /// so there is no `ManualDispatcher` equivalent of Android's -- but a Swift actor is reentrant, so
+    /// `submit` (nonisolated) and `onControlLinkLost` (isolated) both still run while the consumer is
+    /// suspended here. Used by `VoiceControllerLinkLossOrderingTests`.
+    func armOpenGate() {
+        openGateArmed = true
+    }
+
+    func releaseOpenGate() {
+        openGateArmed = false
+        openGate?.resume()
+        openGate = nil
+    }
+
+    /// True once the consumer is actually parked inside `open()`, as opposed to merely armed. Tests
+    /// wait on this so the interleaving is a fact rather than a hope.
+    func isGateHolding() -> Bool { openGate != nil }
+
     func open() async -> Result<Void, VoiceAudioSessionError> {
+        if openGateArmed {
+            openGateArmed = false
+            await withCheckedContinuation { continuation in self.openGate = continuation }
+        }
         calls.append("open")
         // The real sessions are idempotent — `IosVoiceAudioSession.open` returns early when already
         // open, and `AndroidVoiceAudioSession` likewise — so an already-open session does not count as a
@@ -186,17 +248,66 @@ actor FakeVoiceAudioSession: VoiceAudioSession {
 
 /// Records the `VOICE_*` frames the controller decided to send.
 actor RecordingVoiceTransport: VoiceSignalTransport {
+    /// Which signal kinds park in `send` until `releaseSendGate` says what the write reported.
+    enum SendGate: Sendable, Equatable {
+        case offerOrAnswer
+        case voiceState
+    }
+
     private var log: [VoiceSignal] = []
     var accept = true
+    private var armedGate: SendGate?
+    private var parked: CheckedContinuation<Bool, Never>?
 
     init() {}
 
     func sentSignals() -> [VoiceSignal] { log }
 
+    /// Models a control link with no authenticated writer: `VoiceSignalRelay.send` returns false for
+    /// the whole window between a link loss and the §10 ladder reconnecting (STATUS §4 problem 56).
+    func setAccept(_ value: Bool) { accept = value }
+
+    /// Parks the next matching `send`, **suspending `VoiceController`'s consumer inside `perform`**,
+    /// until `releaseSendGate` supplies the result (STATUS §4 problem 57).
+    ///
+    /// This is the production shape, not a contrivance. `VoiceSignalRelay.send` is three `await`s deep
+    /// before a byte moves -- `authenticatedWriter()` and `activeSessionId()` both hop to the
+    /// `ControlSessionManager` actor, then the writer itself performs real I/O -- and it reports
+    /// `false` for a write that failed. So the `Bool` a `.sendOffer`/`.sendAnswer` finally produces can
+    /// arrive arbitrarily late, after the control lifetime that authorised it has been replaced.
+    /// Parking is how a test names that instant instead of racing for it.
+    func armSendGate(_ gate: SendGate) { armedGate = gate }
+
+    /// True once a `send` is actually parked, as opposed to merely armed.
+    func isSendGateHolding() -> Bool { parked != nil }
+
+    /// Reports `result` to whichever `send` is parked, and stops parking.
+    func releaseSendGate(result: Bool) {
+        armedGate = nil
+        parked?.resume(returning: result)
+        parked = nil
+    }
+
     func send(_ signal: VoiceSignal) async -> Bool {
+        if let gate = armedGate, Self.matches(gate, signal) {
+            armedGate = nil
+            let result = await withCheckedContinuation { continuation in self.parked = continuation }
+            guard result else { return false }
+            log.append(signal)
+            return true
+        }
         guard accept else { return false }
         log.append(signal)
         return true
+    }
+
+    private static func matches(_ gate: SendGate, _ signal: VoiceSignal) -> Bool {
+        switch (gate, signal) {
+        case (.offerOrAnswer, .offer), (.offerOrAnswer, .answer), (.voiceState, .state):
+            return true
+        default:
+            return false
+        }
     }
 }
 

@@ -518,11 +518,17 @@ private final class TransferGenerationSpy: TransferSink, @unchecked Sendable {
 private final class VoiceSpy: VoiceSignalSink, @unchecked Sendable {
     private let lock = NSLock()
     private var log: [VoiceSignal] = []
+    private var generationLog: [Int64] = []
 
     var received: [VoiceSignal] { lock.withLock { log } }
+    /// Which control generation admitted each delivery — the fact STATUS §4 problem 60 is about.
+    var generations: [Int64] { lock.withLock { generationLog } }
 
-    func submit(_ signal: VoiceSignal) {
-        lock.withLock { log.append(signal) }
+    func submit(_ signal: VoiceSignal, controlGeneration: Int64) {
+        lock.withLock {
+            log.append(signal)
+            generationLog.append(controlGeneration)
+        }
     }
 }
 

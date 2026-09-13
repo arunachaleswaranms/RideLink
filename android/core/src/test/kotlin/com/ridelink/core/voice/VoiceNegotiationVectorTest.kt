@@ -96,7 +96,7 @@ class VoiceNegotiationVectorTest {
                         localAudioOpen = true,
                         remoteDescriptionApplied = status == VoiceStatus.ACTIVE,
                     )
-                val outcome = VoiceNegotiation.reduce(before, VoiceInput.ControlLinkLost)
+                val outcome = VoiceNegotiation.reduce(before, VoiceInput.ControlLinkLost(VECTOR_CONTROL_GENERATION))
                 assertTrue(
                     outcome.actions.none { it is VoiceAction.ReleaseLocalAudio },
                     "$role/$status released capture on a link loss",
@@ -126,10 +126,12 @@ class VoiceNegotiationVectorTest {
                     VoiceInput.StartRequested(VoiceSessionId(VSID_FRESH)),
                     VoiceInput.SignalReceived(
                         VoiceSignal.State(null, VoiceWireState.NEGOTIATING, false, VoiceMode.CONTINUOUS),
+                        VECTOR_CONTROL_GENERATION,
                         VoiceSessionId(VSID_FRESH),
                     ),
                     VoiceInput.SignalReceived(
                         VoiceSignal.State(VoiceSessionId(VSID_A), VoiceWireState.NEGOTIATING, false, VoiceMode.CONTINUOUS),
+                        VECTOR_CONTROL_GENERATION,
                         VoiceSessionId(VSID_FRESH),
                     ),
                 )
@@ -153,6 +155,7 @@ class VoiceNegotiationVectorTest {
         val peerIntent =
             VoiceInput.SignalReceived(
                 VoiceSignal.State(null, VoiceWireState.NEGOTIATING, false, VoiceMode.CONTINUOUS),
+                VECTOR_CONTROL_GENERATION,
                 fresh,
             )
         val orders =
@@ -197,12 +200,19 @@ class VoiceNegotiationVectorTest {
         when (val kind = spec.string("kind")) {
             "StartRequested" -> VoiceInput.StartRequested(VoiceSessionId(spec.string("fresh_voice_session_id")))
             "StopRequested" -> VoiceInput.StopRequested
-            "ControlLinkLost" -> VoiceInput.ControlLinkLost
+            // The vectors pin the **reducer**, which reads neither of the two provenance fields the
+            // mailbox added in ADR-020 Amendment A7 (STATUS §4 problem 60). A constant is therefore
+            // the honest encoding: the vector files are unchanged, and that is itself the assertion
+            // that control-lifetime identity is a receiver-local concern and not a wire one.
+            "ControlLinkLost" -> VoiceInput.ControlLinkLost(VECTOR_CONTROL_GENERATION)
+            "NegotiationSendFailed" ->
+                VoiceInput.NegotiationSendFailed(spec.nullableString("voice_session_id")?.let { VoiceSessionId(it) })
             "MuteRequested" -> VoiceInput.MuteRequested(spec.bool("muted"))
             "ModeSelected" -> VoiceInput.ModeSelected(VoiceMode.valueOf(spec.string("mode")))
             "SignalReceived" ->
                 VoiceInput.SignalReceived(
                     signal(spec["signal"]!!.jsonObject),
+                    VECTOR_CONTROL_GENERATION,
                     VoiceSessionId(spec.string("fresh_voice_session_id")),
                 )
             "LocalOfferCreated" ->
@@ -310,6 +320,12 @@ class VoiceNegotiationVectorTest {
     private fun JsonObject.int(key: String): Int = this[key]!!.jsonPrimitive.intOrNull!!
 
     private companion object {
+        /**
+         * A control authentication generation is receiver-local provenance the reducer never reads,
+         * so the vectors do not carry one and this stands in (STATUS §4 problem 60).
+         */
+        const val VECTOR_CONTROL_GENERATION = 1L
+
         /**
          * Both are the PROTOCOL §7.2 generation guard, and the distinction between them is
          * deliberate rather than incidental: a foreign generation arriving on the **wire** is a peer

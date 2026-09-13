@@ -15,7 +15,8 @@ import XCTest
 ///
 /// **What this file can and cannot prove, stated plainly.** `ios/RideLink/SessionCoordinator.swift`
 /// is in the app target, and `ios/RideLink.xcodeproj` has no XCTest target over the app's own Swift
-/// sources (`docs/STATUS.md` §4 problem 22), so the *wiring* — which effects `retireSession` awaits,
+/// sources (`docs/STATUS.md` §4 problem 48 — problem 22 is the unrelated Android WebRTC media
+/// path), so the *wiring* — which effects `retireSession` awaits,
 /// in which order, and that `.teardownComplete` is its last statement — has **no direct iOS test**.
 /// Android's `SessionLifecycleRestartTest` is the mirrored proof of that wiring, and this file covers
 /// the two pieces that do live in a tested package:
@@ -130,6 +131,47 @@ final class SessionTeardownOwnershipTests: XCTestCase {
         state = await sut.diagnostics.controlState
         XCTAssertEqual(state, .idle, "a new session starts from `idle`, not from the last one's `ended`")
         await sut.shutdown()
+    }
+
+    /// The thirty-fifth session's §S2-2 sweep, at the strongest seam this platform exposes.
+    ///
+    /// `SessionCoordinator` lives in the **app target**, which has no test bundle (STATUS §4 problem
+    /// 48), so the fifty-cycle coordinator sweep Android runs in `SessionLifecycleRestartTest` has no
+    /// iOS counterpart and this is deliberately not a manufactured stand-in for one. What *is*
+    /// reachable — and is where problem 54 actually lived — is the manager: the process-lifetime
+    /// sinks, the shutdown latch and the per-session control state, across fifty real
+    /// `startListening`/`shutdown` cycles on one manager.
+    ///
+    /// The residual app-layer gap is stated rather than papered over: the voice controller's
+    /// per-session lifetime, the `AUDIO_STATE` sender epoch and the capture device are proven at this
+    /// level on Android only.
+    func testFiftyShutdownAndRestartCyclesLeakNothingAndDisableNothing() async throws {
+        let peer = try TestSessions.unpairedPeer("7272727272727272", name: "SUT")
+        let sut = peer.manager(monotonicNowUs: { 0 })
+
+        // Installed once per process, exactly as SharedLibraryCoordinator and SyncPlaybackCoordinator
+        // install theirs, and never re-installed.
+        await sut.manifestRelay().setSink(RecordingManifestSink(id: 11))
+        await sut.transferRelay().setSink(RecordingTransferSink(id: 22))
+        await sut.playbackRelay().setPlaybackSink(RecordingPlaybackSink(id: 33))
+        await sut.playbackRelay().setQueueSink(RecordingQueueSink(id: 44))
+
+        for cycle in 1...50 {
+            // A successful bind is itself the proof the shutdown latch released: `startListening`
+            // is the only thing that un-latches it, and a still-latched manager refuses to promote.
+            _ = try await sut.startListening(local: peer.local)
+            let started = await sut.diagnostics.controlState
+            XCTAssertEqual(started, .idle, "cycle \(cycle) inherited the previous session's control state")
+
+            await assertSinkIds(sut, manifest: 11, transfer: 22, playback: 33, queue: 44,
+                                "cycle \(cycle), mid-session")
+
+            await sut.shutdown()
+            await assertSinkIds(sut, manifest: 11, transfer: 22, playback: 33, queue: 44,
+                                "cycle \(cycle), after teardown")
+            let ended = await sut.diagnostics.controlState
+            XCTAssertEqual(ended, .ended, "cycle \(cycle) did not end")
+        }
     }
 
     // MARK: - harness

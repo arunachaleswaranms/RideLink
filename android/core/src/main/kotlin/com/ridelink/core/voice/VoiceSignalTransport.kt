@@ -47,5 +47,24 @@ interface VoiceSignalTransport {
  * its lanes; only the coalesced lane deliberately collapses everything but the newest value.
  */
 interface VoiceSignalSink {
-    fun submit(signal: VoiceSignal)
+    /**
+     * @param controlGeneration **the authentication generation that owned the connection this frame
+     *   was read from, at the moment of the read** — `ReadFrameBinding.generation`, handed down
+     *   unchanged (ADR-025, ADR-020 Amendment A7).
+     *
+     * It is a parameter and not a lookup for the reason ADR-024 Amendment A7 exists: an
+     * implementation that reached for whatever session is live when *its* work runs would label this
+     * frame with the successor's authority. The relay compares the two — a frame whose generation is
+     * no longer live is refused there — but it passes **this** value on, never the live one, because
+     * downstream the question stops being "is a session live" and becomes "whose semantic work is
+     * this", and only immutable provenance can answer that (STATUS §4 problem 60).
+     *
+     * This is receiver-local metadata. It is not on the wire, not negotiated and not peer-
+     * influenceable, and it is a different identity from `voice_session_id`, which owns one WebRTC
+     * negotiation rather than one authenticated control lifetime.
+     */
+    fun submit(
+        signal: VoiceSignal,
+        controlGeneration: Long,
+    )
 }

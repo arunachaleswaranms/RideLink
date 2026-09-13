@@ -32,6 +32,10 @@ import com.ridelink.network.control.LocalHandshakeIdentity
 import com.ridelink.network.discovery.AdvertiseState
 import com.ridelink.network.discovery.DiscoveryController
 import com.ridelink.network.discovery.DiscoveryEvent
+import com.ridelink.network.manifest.ManifestSink
+import com.ridelink.network.playback.PlaybackSink
+import com.ridelink.network.playback.QueueSink
+import com.ridelink.network.transfer.TransferSink
 import com.ridelink.network.voice.VoiceController
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
@@ -419,6 +423,106 @@ class SessionLifecycleRestartTest {
     // harness
     // ==========================================================================================
 
+    // ----------------------------------------------------------------------------------------
+    // H. the same boundary, fifty times (the thirty-fifth session's §S2-2 sweep)
+    // ----------------------------------------------------------------------------------------
+
+    /**
+     * Everything above proves **a** restart is correct, which is what ADR-026 needed. This proves
+     * fifty are, and it exists because the class of defect problem 54 belonged to is not visible in
+     * one: a sink detached once and never re-installed, a latch that fails to un-latch, a counter
+     * that accumulates, a listener bound twice, a controller retained into a session it does not
+     * belong to. Each is invisible at N = 1 and obvious at N = 50.
+     *
+     * The rule asserted once per cycle: **what belongs to the process survives every boundary
+     * unchanged, and what belongs to a session exists during exactly its own.**
+     */
+    @Test
+    fun `fifty end-to-restart cycles leak nothing and disable nothing`() =
+        withSession { sut ->
+            // Installed **once**, exactly as `SharedLibraryCoordinator` and `SyncPlaybackCoordinator`
+            // install theirs in their constructors: once per process, and never re-installed.
+            val manifestSink = ManifestSink { _, _ -> }
+            val transferSink = TransferSink { _, _ -> }
+            val playbackSink = PlaybackSink { _, _ -> }
+            val queueSink = QueueSink { _, _ -> }
+            sut.manager.manifest.sink = manifestSink
+            sut.manager.transfer.sink = transferSink
+            sut.manager.playback.playbackSink = playbackSink
+            sut.manager.playback.queueSink = queueSink
+
+            val epochs = mutableSetOf<com.ridelink.core.protocol.AudioStateEpoch>()
+
+            repeat(CYCLES) { i ->
+                val cycle = i + 1
+                sut.coordinator.startDiscovery()
+                assertEquals(SessionStatus.DISCOVERING, sut.coordinator.state.value.status, "cycle $cycle could not start")
+                // `startListening` is what un-latches `isShutDown`, so one bind per cycle is also the
+                // proof the latch released — and exactly one is the proof no listener was bound twice.
+                sut.awaitTrue("cycle $cycle bound the control plane") { sut.channel.bindCalls.get() == cycle }
+
+                epochs += sut.coordinator.audioStateSenderEpoch
+                sut.connectFromDiscovering()
+
+                assertNotNull(sut.manager.voice.sink, "cycle $cycle installed no voice sink")
+                assertNotNull(sut.manager.audioState.sink, "cycle $cycle installed no AUDIO_STATE sink")
+                assertEquals(cycle, sut.controllersBuilt.get(), "cycle $cycle must build its own controller, never reuse a retired one")
+                assertSame(manifestSink, sut.manager.manifest.sink, "cycle $cycle lost the manifest sink mid-session")
+                assertSame(playbackSink, sut.manager.playback.playbackSink, "cycle $cycle lost the playback sink mid-session")
+
+                sut.coordinator.handleControlEvent(ControlEvent.LinkLost(LinkLossReason.BYE))
+                sut.awaitTrue("cycle $cycle reached IDLE") { sut.coordinator.state.value.status == SessionStatus.IDLE }
+
+                // Still the very same objects after the teardown has fully completed. This is what
+                // problem 54 failed on the *first* cycle, and what any future re-introduction of a
+                // blanket `reset()` would fail on again.
+                assertSame(manifestSink, sut.manager.manifest.sink, "cycle $cycle's teardown took the manifest sink")
+                assertSame(transferSink, sut.manager.transfer.sink, "cycle $cycle's teardown took the transfer sink")
+                assertSame(playbackSink, sut.manager.playback.playbackSink, "cycle $cycle's teardown took the playback sink")
+                assertSame(queueSink, sut.manager.playback.queueSink, "cycle $cycle's teardown took the queue sink")
+
+                // …and the per-session ones went with the session that owned them.
+                assertNull(sut.manager.voice.sink, "cycle $cycle's voice sink outlived its session")
+                assertNull(sut.manager.audioState.sink, "cycle $cycle's AUDIO_STATE sink outlived its session")
+                assertNull(sut.coordinator.peerAudioState.value, "cycle $cycle inherited a dead session's peer state")
+            }
+
+            assertEquals(
+                CYCLES,
+                epochs.size,
+                "ADR-021 Amendment A7: every session is its own sender lifetime, so no revision_epoch may repeat",
+            )
+            assertEquals(CYCLES, sut.channel.bindCalls.get(), "exactly one listener bind per session, never two")
+            assertEquals(CYCLES, sut.controllersBuilt.get(), "exactly one voice controller per session")
+        }
+
+    /**
+     * The same sweep with the intercom actually started, because capture is the resource whose
+     * mishandling is least recoverable — ARCHITECTURE §6.4 forbids reopening a microphone from the
+     * background, so a cycle that leaked one would strand it for the rest of the process.
+     */
+    @Test
+    fun `twenty intercom cycles open and release capture exactly once each`() =
+        withSession { sut ->
+            repeat(INTERCOM_CYCLES) { i ->
+                val cycle = i + 1
+                sut.coordinator.startDiscovery()
+                sut.awaitTrue("cycle $cycle bound") { sut.channel.bindCalls.get() == cycle }
+                sut.connectFromDiscovering()
+
+                sut.coordinator.startIntercom()
+                sut.awaitTrue("cycle $cycle opened capture") { sut.audio.isOpen }
+                assertEquals(cycle, sut.audio.openCaptureCount, "cycle $cycle must open capture exactly once")
+
+                sut.coordinator.handleControlEvent(ControlEvent.LinkLost(LinkLossReason.BYE))
+                sut.awaitTrue("cycle $cycle reached IDLE") { sut.coordinator.state.value.status == SessionStatus.IDLE }
+
+                assertFalse(sut.audio.isOpen, "cycle $cycle left the capture device open past its session")
+                assertEquals(cycle, sut.audio.closeCaptureCount, "cycle $cycle must release capture exactly once")
+                assertEquals(cycle, sut.fgs.stopCalls, "the foreground service is stopped once per deliberate end")
+            }
+        }
+
     private class Sut(
         val coordinator: SessionCoordinator,
         val manager: ControlSessionManager,
@@ -510,6 +614,9 @@ class SessionLifecycleRestartTest {
         @Volatile var closeCaptureCount = 0
             private set
 
+        @Volatile var openCaptureCount = 0
+            private set
+
         @Volatile var closeCalls = 0
             private set
 
@@ -529,6 +636,7 @@ class SessionLifecycleRestartTest {
         override suspend fun open(): Result<Unit> {
             if (isOpen) return Result.success(Unit)
             isOpen = true
+            openCaptureCount += 1
             sink?.invoke(route)
             return Result.success(Unit)
         }
@@ -655,5 +763,7 @@ class SessionLifecycleRestartTest {
         const val AWAIT_TIMEOUT_MS = 5_000L
         const val POLL_MS = 2L
         const val SETTLE_MS = 60L
+        const val CYCLES = 50
+        const val INTERCOM_CYCLES = 20
     }
 }

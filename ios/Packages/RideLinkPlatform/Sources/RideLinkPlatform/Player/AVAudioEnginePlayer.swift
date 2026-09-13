@@ -146,7 +146,17 @@ public actor AVAudioEnginePlayer: Player {
             updateState { $0.copy(error: .storageIo) }
             return
         }
-        scheduleFromCurrentOffset(file: file, generationAtSchedule: generation)
+        // STATUS §4 problem 58. `playing: true` used to be published unconditionally, including when
+        // `scheduleFromCurrentOffset` had scheduled **nothing** because the offset was already at or
+        // past the end of the file. The node then "played" silence forever: no segment, so no
+        // completion callback, so `PlayerState.ended` (which requires `!playing`) could never become
+        // true and a queue owner could never advance. Android reaches `STATE_ENDED` here and reports
+        // `playing = false, positionMs = durationMs`; this is the same observable outcome, and it is
+        // exactly the state `handleSegmentFinished` publishes when a segment does play out.
+        guard scheduleFromCurrentOffset(file: file, generationAtSchedule: generation) else {
+            reportEndOfMedia()
+            return
+        }
         playerNode.play()
         updateState { $0.copy(playing: true, error: nil) }
         startPositionTicking()
@@ -165,13 +175,28 @@ public actor AVAudioEnginePlayer: Player {
         let wasPlaying = playerNode.isPlaying
         playerNode.stop()
         generation += 1
-        seekOffsetFrames = frames(forMs: positionMs)
+        // STATUS §4 problem 58: clamped into the loaded file, because `scheduleSegment` is given
+        // `seekOffsetFrames` directly and `durationMs(forFrames:)` reports it back to the app.
+        // Unclamped, a target past the end reported a `positionMs` **larger than `durationMs`** for a
+        // track that had not moved at all, and a negative one would hand `scheduleSegment` a negative
+        // `startingFrame`. `ExoPlayer.seekTo` clamps to the period on Android and this side reports
+        // whatever it clamped to, so clamping here is what makes the two platforms answer the same
+        // question the same way. PROTOCOL §5's `target_position_ms` is already rejected below zero
+        // (`PlaybackCodec.isValidPosition`), so the lower bound is defence in depth; the upper bound
+        // is not — a peer's `SEEK` names a position in *its* copy and nothing guarantees this side's
+        // decoded length is identical.
+        seekOffsetFrames = clampedToFile(frames(forMs: positionMs))
         // A seek while paused has no position-tick loop running to observe it, matching the real
         // bug found in ExoPlayerMusicPlayer on Android — updated immediately rather than left stale
         // until the next Play.
         updateState { $0.copy(positionMs: durationMs(forFrames: seekOffsetFrames)) }
         if wasPlaying, let file = audioFile {
-            scheduleFromCurrentOffset(file: file, generationAtSchedule: generation)
+            guard scheduleFromCurrentOffset(file: file, generationAtSchedule: generation) else {
+                // Seeked to the end while playing: the same end-of-media state a played-out segment
+                // reaches, rather than a node left "playing" with nothing scheduled (problem 58).
+                reportEndOfMedia()
+                return
+            }
             playerNode.play()
         }
     }
@@ -195,15 +220,33 @@ public actor AVAudioEnginePlayer: Player {
 
     // MARK: - Scheduling and position
 
-    private func scheduleFromCurrentOffset(file: AVAudioFile, generationAtSchedule: Int) {
+    /// @return false when there is nothing left to schedule — the offset is at the end of the file.
+    /// Callers must treat that as end-of-media rather than starting the node anyway (problem 58).
+    @discardableResult
+    private func scheduleFromCurrentOffset(file: AVAudioFile, generationAtSchedule: Int) -> Bool {
         let remaining = AVAudioFrameCount(max(0, totalFrames - seekOffsetFrames))
-        guard remaining > 0 else { return }
+        guard remaining > 0 else { return false }
         playerNode.scheduleSegment(
             file, startingFrame: seekOffsetFrames, frameCount: remaining, at: nil, completionCallbackType: .dataPlayedBack
         ) { [weak self] _ in
             guard let self else { return }
             Task { await self.handleSegmentFinished(generationAtSchedule: generationAtSchedule) }
         }
+        return true
+    }
+
+    /// The one end-of-media state, published from the two places that can reach it without a segment
+    /// ever playing out: a `play` or a `seek`-while-playing whose offset is already at the end. It is
+    /// deliberately identical to what `handleSegmentFinished` publishes, so `PlayerState.ended` means
+    /// one thing however the end was reached.
+    private func reportEndOfMedia() {
+        stopPositionTicking()
+        updateState { $0.copy(positionMs: $0.durationMs, playing: false, error: nil) }
+    }
+
+    /// Clamps an absolute frame position into the loaded file. See `seekCommand`.
+    private func clampedToFile(_ frame: AVAudioFramePosition) -> AVAudioFramePosition {
+        min(max(0, frame), totalFrames)
     }
 
     private func handleSegmentFinished(generationAtSchedule: Int) {

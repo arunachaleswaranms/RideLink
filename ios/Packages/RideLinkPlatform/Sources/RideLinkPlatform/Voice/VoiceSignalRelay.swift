@@ -114,6 +114,13 @@ public actor VoiceSignalRelay: VoiceSignalTransport {
     ///
     /// This is a refusal rather than a relabelling on purpose: there is no ledger here that a
     /// retired generation's frame has to reach, unlike Phase 5's (ADR-024 Amendment A6).
+    ///
+    /// **This check is liveness, not provenance, and it is not on its own sufficient** (STATUS §4
+    /// problem 60). Nothing spans the read of `liveGeneration` and the `sink.submit` below --
+    /// `endConnection` clears the authenticated record from another actor -- so a frame can pass here
+    /// and be overtaken by the entire teardown before it is queued. What makes that harmless is that
+    /// `generation` travels with it: `VoiceInputMailbox` refuses a signal whose admitting generation
+    /// has been retired, whenever it arrives.
     public func deliver(type: String, payload: [String: JSONValue], generation: Int64) {
         guard generation == liveGeneration() else {
             retiredGenerationDrops += 1
@@ -121,7 +128,12 @@ public actor VoiceSignalRelay: VoiceSignalTransport {
         }
         switch VoiceSignalCodec.parse(type: type, payload: payload) {
         case .parsed(let signal):
-            sink?.submit(signal)
+            // `generation` -- this frame's own, from its `ReadFrameBinding` -- and never
+            // `liveGeneration()`. They were just proved equal, so substituting the live read would be
+            // indistinguishable *here* and wrong everywhere downstream: the sink's consumer decides
+            // against the generation it is given long after this returns, and a value read from live
+            // state is exactly ADR-024 Amendment A7's defect (STATUS §4 problem 60).
+            sink?.submit(signal, controlGeneration: generation)
         case .rejected(let reason):
             rejections[reason, default: 0] += 1
         }
