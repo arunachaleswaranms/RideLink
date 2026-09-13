@@ -271,14 +271,28 @@ class VoiceController(
 
     // --- the four things the app asks for ------------------------------------------------------
 
-    /** The user pressed Start Voice, or a control reconnect is rebuilding voice (PROTOCOL §7.8). */
-    fun start() {
+    /**
+     * The user pressed Start Voice, or a control reconnect is rebuilding voice (PROTOCOL §7.8).
+     *
+     * @param controlGeneration **the authenticated control lifetime this start is authorised by**,
+     *   which becomes the owner of any negotiation it establishes (STATUS §4 problem 61). The caller
+     *   supplies it — `SessionCoordinator` passes `ControlEvent.Connected.authGeneration` for the
+     *   reconnect rebuild and `ControlSessionManager.liveAuthenticatedGeneration` for a user's tap —
+     *   because this controller is deliberately retained across a reconnect and has no live
+     *   generation of its own to read.
+     *
+     *   Null when no lifetime is authenticated, which a user reaches by pressing Start in the gap
+     *   between one link dying and the ladder restoring the next: the press then records consent and
+     *   opens capture but starts no negotiation, and `attachVoice` rebuilds it under the successor.
+     *   See [VoiceInput.StartRequested.controlGeneration].
+     */
+    fun start(controlGeneration: Long?) {
         // A fresh negotiation is a fresh measurement (V-01's setup figure is per generation, not a
         // lifetime average), and the mark is taken here rather than in the consumer so it times the
         // user's tap rather than when the queue got round to it.
         val at = monotonicNowUs()
         synchronized(mailboxLock) { setup = VoiceSetupTimer.restart(at) }
-        offer(VoiceInput.StartRequested(newVoiceSessionId()))
+        offer(VoiceInput.StartRequested(newVoiceSessionId(), controlGeneration))
     }
 
     /** The user pressed End Voice, or the session is entering `ENDING`. */

@@ -1032,7 +1032,7 @@ one voice session per control session, and exactly one owner of it.
 | Control-plane event | Voice-plane consequence |
 |---|---|
 | trust gate passes (`CONNECTED`) | voice becomes *permitted*. Nothing is opened; the microphone is opened only by an explicit user action (ARCHITECTURE §6.4) |
-| `LinkLost` (network) | the **media transport** is torn down — peer connection, both tracks, ICE state — and `voice_session_id` is cleared. The **capture device and audio session stay open**: ARCHITECTURE §6.3/§6.4 opens them once while the app is foreground-visible and keeps them for the whole ride segment, because on Android there is no second legal opportunity to open the microphone once the screen is locked, so a link blip must not close it. Nothing is retried by the voice layer — §10's control ladder is the only reconnect loop in the app |
+| `LinkLost` (network) | the **media transport** is torn down — peer connection, both tracks, ICE state — and `voice_session_id` is cleared, **provided the lost link is the one that owns the negotiation** (see below). The **capture device and audio session stay open**: ARCHITECTURE §6.3/§6.4 opens them once while the app is foreground-visible and keeps them for the whole ride segment, because on Android there is no second legal opportunity to open the microphone once the screen is locked, so a link blip must not close it. Nothing is retried by the voice layer — §10's control ladder is the only reconnect loop in the app |
 | control reconnect succeeds, returning to `RIDE_ACTIVE` | voice is rebuilt as a **fresh negotiation** with a new `voice_session_id`. A stale ICE candidate or answer from before the loss cannot apply (§7.2) |
 | `BYE` | media torn down as above, and not rebuilt. `BYE` leads to `ENDING`, which is the state that releases the audio session (ARCHITECTURE §3 rule 3) |
 | pairing or security failure | voice can never have been alive: the trust gate never opened, so no `VOICE_*` frame was ever accepted (§7.1) |
@@ -1051,6 +1051,20 @@ happens to still remember (ADR-020 Amendment A2) — the extracted, independentl
 `com.ridelink.core.voice.VoiceEngineGeneration` / `RideLinkCore.VoiceEngineGeneration`. A media
 engine reporting that `start()` itself failed is not a callback in this sense and is reported
 unconditionally, since the generation it would have named was never installed.
+
+**Which link loss.** A live negotiation belongs to the authenticated **control lifetime** that
+established it, and a `LinkLost` retires it only when the lifetime that ended is not older than that
+owner (ADR-020 Amendment A8, STATUS §4 problem 61). This is **receiver-local and not on the wire**:
+nothing here is negotiated, nothing is sent, and no peer can influence it — a control authentication
+generation is a number one device allocates for its own connections, and it is a third identity that
+must never be conflated with `voice_session_id` (which owns one WebRTC negotiation) or with
+`AUDIO_STATE.revision_epoch` (§4.4, which owns one sender lifetime). The rule exists because a
+`LinkLost` is delivered asynchronously while an inbound promotion can authenticate a successor and
+admit its frames without passing through that delivery at all, so a predecessor's boundary can arrive
+after the successor's `VOICE_OFFER` has already been applied. Note the direction: a boundary naming a
+**newer** lifetime than the owner still retires it, because one authenticated connection exists at a
+time and generations strictly increase, so a newer lifetime having existed proves the owner's has
+ended. A negotiation that no boundary could retire would be a worse failure than the one this fixes.
 
 ### 7.9 Test vectors
 
@@ -1351,7 +1365,7 @@ incompatibility a laptop-side test failure instead of a roadside mystery
 | `audio-state/*.json` | `AUDIO_STATE` encode against §4.4's representable-states table, every field missing and every field wrong-typed, both bounds at and past their edges, explicit-null versus absent nullable fields, derived `media_quality` for every profile value, unknown enum tolerated as `unknown`, the publisher's monotonic `revision` (including the states that must **not** move it), the `revision_epoch` that scopes it (§4.4.2) — minted only by the same step that restarts the counter, and on the receiving side: a new epoch accepted over a higher floor, a superseded one refused and counted, and the 8-epoch bound's evicted lifetime read as new again — and the receiver dropping anything not strictly greater **within one epoch**. Also scanned by both platforms for platform audio vocabulary, which must appear nowhere in it (§4.4.1, ADR-016). 98 rows |
 | `intercom/*.json` | ARCHITECTURE §6.3's transmission gate: `(policy, state, input) -> (state, actions)` across all five modes, the five presets field for field, both wire-mode mappings, and the invariant that **no action can open or close capture** (ADR-021 §4) |
 | `voice-signal/*.json` | `VOICE_*` parse/reject: every required field, wrong types, `voice_session_id` format, oversize SDP and candidate, mline-index range, nullable `sdp_mid`, unknown `state`/`mode` tolerated (§7.4, §7.5) |
-| `voice-fsm/*.json` | the complete `(role, status, input) -> (actions, new status)` negotiation table: offerer rule, glare, duplicate offer/answer, ICE before and after the remote description, teardown, generation mismatch (§7.3, §7.8) |
+| `voice-fsm/*.json` | the complete `(role, status, input) -> (actions, new status)` negotiation table: offerer rule, glare, duplicate offer/answer, ICE before and after the remote description, teardown, generation mismatch, and the control-lifetime ownership of a negotiation (§7.3, §7.8) |
 
 Each is `{ "name", "input", "expected" }`, so a single table-driven runner per platform covers
 the file. A vector is added for every protocol bug found on a device — that is the regression

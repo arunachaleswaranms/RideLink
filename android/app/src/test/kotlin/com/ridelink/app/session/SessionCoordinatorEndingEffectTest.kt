@@ -402,7 +402,7 @@ class SessionCoordinatorEndingEffectTest {
             coordinator.handleControlEvent(ControlEvent.PeerTrusted(remotePeerId))
             assertEquals(SessionStatus.CONNECTING, coordinator.state.value.status)
             coordinator.handleControlEvent(
-                ControlEvent.Connected(remotePeerId, SessionId("test-session"), isLocalLeader = true),
+                ControlEvent.Connected(remotePeerId, SessionId("test-session"), isLocalLeader = true, authGeneration = 1L),
             )
             assertEquals(SessionStatus.CONNECTED, coordinator.state.value.status)
 

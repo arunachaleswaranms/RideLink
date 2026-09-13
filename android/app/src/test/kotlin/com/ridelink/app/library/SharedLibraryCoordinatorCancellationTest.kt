@@ -174,7 +174,7 @@ class SharedLibraryCoordinatorCancellationTest {
             runCurrent()
             session.currentAuthGeneration = 2L
             session.currentPeerSpki = peerB
-            session.emitEvent(ControlEvent.Connected(peerIdB, sessionIdB, isLocalLeader = false))
+            session.emitEvent(ControlEvent.Connected(peerIdB, sessionIdB, isLocalLeader = false, authGeneration = 2L))
             runCurrent()
             assertTrue(bulkTransport.closeCallCount > 0, "onSessionBoundary() really ran and really closed the transport")
 

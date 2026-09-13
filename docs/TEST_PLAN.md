@@ -808,7 +808,7 @@ which is the point: if any answer depended on when something ran, the file could
 | P60-7 | `StopRequested` | Retires nothing, discards nothing, and is never displaced by a link loss (problem 57 / ADR-026 rule 21) |
 | P60-8 | `NegotiationSendFailed` | Retires no control generation and discards no successor work — a send failure stays negotiation-scoped (problem 57) |
 | P60-9 | A link loss naming **no** generation (the mailbox-overflow degrade) | Tears down, retires nothing, discards nothing |
-| P60-10 | A link loss offered when a newer generation has already admitted work | **Still delivered to the reducer.** The teardown is never suppressed — see §4 problem 61 for why suppressing it is worse |
+| P60-10 | A link loss offered when a newer generation has already admitted work | **Still delivered to the reducer.** The teardown is never suppressed. Unchanged by ADR-020 Amendment A8, and now right for a sharper reason: the mailbox delivers every boundary and the *table* decides what one means (P61-* below) |
 
 `VoiceLifetimeProvenanceTest` (Android) / `VoiceLifetimeProvenanceTests` (iOS) — the production half,
 against real `ControlSessionManager` code:
@@ -836,6 +836,52 @@ controller rows fail. The two characteristic outputs are the defects themselves 
 
 **Stress:** 50 consecutive clean runs per suite per platform, 0 failures, after the iOS controller
 rows were made deterministic.
+
+#### Control-lifetime ownership of a live negotiation (ADR-020 Amendment A8, §4 problem 61)
+
+`VoiceControlLifetimeOwnershipTest` (Android) / `VoiceControlLifetimeOwnershipTests` (iOS) — the
+*state* half, where P60's rows are the *queue* half. A reduced input is no longer an input, so none of
+the rows above reach this.
+
+Determinism has a different source on each platform and no sleep in any assertion: Android uses the
+`ManualDispatcher`; iOS sequences on an observable that proves the previous step was reduced —
+`awaitEngineCall` for work, and the `SUPERSEDED_CONTROL_LIFETIME` counter for a boundary that was
+correctly ignored. That counter exists partly for this: preserving a successor produces no other
+observable at all.
+
+| ID | Case | Pass condition |
+|---|---|---|
+| P61-A | B's offer admitted **and fully reduced**, then A's boundary arrives | B's negotiation survives untouched — status still `NEGOTIATING`, **not one** further engine call, and the boundary counted as `SUPERSEDED_CONTROL_LIFETIME` |
+| P61-B | B's offer admitted and reduced but **refused** by `GENERATION_MISMATCH` against A's live negotiation, then A's boundary | A's negotiation **is** retired, media stops, capture stays. Nothing is counted as superseded. **This is the row the rejected suppression fails**, and the reason the fix is about ownership and not about which generation was seen last |
+| P61-C | C owns the negotiation; A's and B's boundaries arrive, **drained one at a time** | Neither retires C; C's own boundary does. Both older boundaries are counted, which is what proves each was genuinely applied rather than coalescing in the single-slot `TEARDOWN` lane |
+| P61-D | The owning lifetime's own boundary | PROTOCOL §7.8 in full: media stops, capture is **not** released, nothing is sent on the dead link, and `VoiceNegotiation` authors no retry. The fix must not make link losses inert |
+| P61-E | A negotiation started by a **local press** under B, then A's boundary, then B's | A cannot retire it; B can; capture survives both |
+| P61-F | Start pressed with **no** authenticated lifetime, then a successor authenticates | Capture opens and consent is recorded, **no** negotiation and nothing on the wire; a boundary in the gap does not close capture; the successor's rebuild starts the negotiation and it is genuinely owned by the successor |
+| P61-G | A held remote offer delivered by B, then A's boundary, then consent under B | The held offer survives and is answered. It is the only copy — a peer never re-sends one |
+| P61-H | A boundary naming **no** lifetime against a negotiation owned by C | Retires unconditionally. The mailbox-overflow degrade is a local safety valve and must work whoever owns what |
+| P61-I | A peer's `closed`, then a boundary | Ownership cleared with the negotiation, so the boundary is the pre-existing empty-table no-op and **not** a supersession |
+| P61-J | A mode change under a live negotiation (Android) | Does not move the owner: a later predecessor boundary is still inert and the owner's still works |
+
+The pure table's own half is in `VoiceNegotiationVectorTest[s]` over `protocol/vectors/voice-fsm/`:
+seven ownership rows (the rule's four corners, a held offer, the establishment cases), the two
+`StartRequested`-with-no-lifetime rows and their rebuild, plus two property tests — *every resulting
+state names an owner iff it holds negotiation state*, and *only a boundary older than the owner is
+inert*, the second exhausting role × status × {older, equal, newer, null}.
+
+**Pre-fix proof.** Run against the focused reducer change reverted: on Android, 6 of the 10 controller
+rows and 3 of the vector suite's tests fail; on iOS, 5 of 9 fail. The rows that pass in both
+directions are the guards (P61-B, P61-D, P61-H, P61-I and the mailbox row) — they exist to prove the
+fix does not make link losses inert, which is the obvious wrong way to close this.
+
+**Stress:** 50 consecutive runs of the Android voice suites (`core.voice.*`, `network.voice.*` and
+`SessionLifecycleRestartTest`) and 50 of the iOS equivalents. **Figures, and one honest caveat:** every
+P61 row passed every run on both platforms, and the Android loop recorded one failure in 50 that is
+**not** a P61 row and **not** a product defect — `VoiceControllerIntercomTest > a link loss keeps
+capture and the rebuild does not reopen it` asserts on a *published diagnostics field* immediately
+after awaiting an *engine call* that `stopMediaTransport` records **before** `publishEngineDiagnostics`
+runs, so the snapshot it reads can still be the pre-boundary one. It is a pre-existing test-side race,
+measured at 0/60 in isolation and reproduced on the pre-change baseline; it is recorded as
+`docs/STATUS.md` §4 problem 62 rather than fixed here, because it is not this change's.
 
 `VoiceInputMailboxTest[s]` pins the lane and capacity rules within one control lifetime: a
 `ControlLinkLost` discards that lifetime's queued peer signals and **no** local input; `StopRequested` — which shares the teardown lane but is not

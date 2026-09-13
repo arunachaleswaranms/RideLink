@@ -109,7 +109,7 @@ final class VoiceMailboxLifetimeIdentityTests: XCTestCase {
         ]
         for peerSignal in peerSignals { mailbox.offer(signal(peerSignal, controlA)) }
         let localInputs: [VoiceInput] = [
-            .startRequested(freshVoiceSessionId: vsidFresh),
+            .startRequested(freshVoiceSessionId: vsidFresh, controlGeneration: controlA),
             .localOfferCreated(voiceSessionId: vsidA, sdp: sdp),
             .localCandidateGathered(voiceSessionId: vsidA, candidate: candidate, sdpMid: nil, sdpMlineIndex: 0),
             .muteRequested(muted: true),

@@ -15,7 +15,7 @@ final class VoiceNegotiationVectorTests: XCTestCase {
     /// identity is a receiver-local concern and not a wire one.
     private let vectorControlGeneration: Int64 = 1
 
-    private let expectedMinimumRows = 59
+    private let expectedMinimumRows = 73
     private let vsidA = "5e2a9c40b7f13d86e0a4c95b28f7d613"
     private let vsidFresh = "ffeeddccbbaa99887766554433221100"
 
@@ -106,6 +106,80 @@ final class VoiceNegotiationVectorTests: XCTestCase {
         }
     }
 
+    /// **Every value that holds negotiation state names the lifetime that owns it, and every value
+    /// that holds none names nobody** (STATUS §4 problem 61, ADR-020 Amendment A8).
+    ///
+    /// Run over the resulting state of every row, this is what turns the generator's "a row that does
+    /// not say otherwise is about one control lifetime" from a convenience into a checked invariant.
+    /// A negotiation with no owner would be un-retirable by any boundary that names one; an owner
+    /// left behind on a state that holds nothing would let a later boundary be judged against a
+    /// negotiation that no longer exists.
+    ///
+    /// "Holds negotiation state" is spelled out rather than read off `isNegotiationLive`, because the
+    /// two come apart in both directions: an answerer's intent-to-talk is live with no
+    /// `voice_session_id` (§7.3), and a peer's `failed` leaves a `.failed` status owning nothing.
+    func testNegotiationStateAndItsOwningControlLifetimeArePresentTogetherOrNotAtAll() throws {
+        for element in try rows() {
+            guard let row = element as? [String: Any] else { return XCTFail("row is not an object") }
+            let outcome = VoiceNegotiation.reduce(state: state(row.dict("state")), input: input(row.dict("input")))
+            let after = outcome.state
+            let holdsNegotiation =
+                after.status.isNegotiationLive || after.voiceSessionId != nil || after.heldRemoteOffer != nil
+            XCTAssertEqual(
+                holdsNegotiation,
+                after.negotiationControlGeneration != nil,
+                """
+                row \(row.str("name")) holds negotiation state = \(holdsNegotiation) but names owner \
+                \(String(describing: after.negotiationControlGeneration))
+                """
+            )
+        }
+    }
+
+    /// The ownership rule as a property over every role and status rather than the seven rows that
+    /// name it: **a boundary older than the owner is inert, and every other boundary tears down.**
+    ///
+    /// The `owner < retired` half is the one worth stating twice. A boundary naming a *newer* lifetime
+    /// than the owner must still tear down, because `ControlSessionManager` authenticates one
+    /// connection at a time and allocates strictly increasing generations — so a newer lifetime having
+    /// existed proves the owner's already ended. Making that case inert instead is exactly the
+    /// "suppress a superseded boundary" fix that was implemented and rejected: it leaves a dead
+    /// lifetime's negotiation standing, which then refuses every offer the successor sends.
+    func testOnlyABoundaryOlderThanTheOwnerIsInert() {
+        let owner: Int64 = 5
+        for role in VoiceRole.allCases {
+            for status in VoiceStatus.allCases where status != .idle {
+                let before = VoiceNegotiationState(
+                    role: role,
+                    status: status,
+                    voiceSessionId: VoiceSessionId(vsidA),
+                    localAudioOpen: true,
+                    negotiationControlGeneration: owner
+                )
+
+                let superseded = VoiceNegotiation.reduce(
+                    state: before, input: .controlLinkLost(retiredControlGeneration: owner - 1)
+                )
+                XCTAssertEqual(superseded.state, before, "\(role)/\(status): a predecessor's boundary changed state")
+                XCTAssertFalse(
+                    superseded.actions.contains(.stopMediaTransport),
+                    "\(role)/\(status): a predecessor's boundary stopped the successor's media"
+                )
+
+                for retired: Int64? in [owner, owner + 1, nil] {
+                    let outcome = VoiceNegotiation.reduce(
+                        state: before, input: .controlLinkLost(retiredControlGeneration: retired)
+                    )
+                    XCTAssertTrue(
+                        outcome.actions.contains(.stopMediaTransport),
+                        "\(role)/\(status): a boundary naming \(String(describing: retired)) failed to retire \(owner)"
+                    )
+                    XCTAssertNil(outcome.state.negotiationControlGeneration, "\(role)/\(status): owner survived")
+                }
+            }
+        }
+    }
+
     /// PROTOCOL §7.3, exhaustively: an answerer never authors an offer, from any status.
     func testAnAnswererNeverOffersFromAnyStatus() {
         for status in VoiceStatus.allCases {
@@ -116,7 +190,7 @@ final class VoiceNegotiationVectorTests: XCTestCase {
                 localAudioOpen: true
             )
             let inputs: [VoiceInput] = [
-                .startRequested(freshVoiceSessionId: VoiceSessionId(vsidFresh)),
+                .startRequested(freshVoiceSessionId: VoiceSessionId(vsidFresh), controlGeneration: vectorControlGeneration),
                 .signalReceived(
                     signal: .state(voiceSessionId: nil, state: .negotiating, micMuted: false, mode: .continuous),
                     controlGeneration: vectorControlGeneration, freshVoiceSessionId: VoiceSessionId(vsidFresh)
@@ -149,9 +223,9 @@ final class VoiceNegotiationVectorTests: XCTestCase {
             controlGeneration: vectorControlGeneration, freshVoiceSessionId: fresh
         )
         let orders: [[VoiceInput]] = [
-            [.startRequested(freshVoiceSessionId: fresh), peerIntent],
-            [peerIntent, .startRequested(freshVoiceSessionId: fresh)],
-            [peerIntent, peerIntent, .startRequested(freshVoiceSessionId: fresh), peerIntent],
+            [.startRequested(freshVoiceSessionId: fresh, controlGeneration: vectorControlGeneration), peerIntent],
+            [peerIntent, .startRequested(freshVoiceSessionId: fresh, controlGeneration: vectorControlGeneration)],
+            [peerIntent, peerIntent, .startRequested(freshVoiceSessionId: fresh, controlGeneration: vectorControlGeneration), peerIntent],
         ]
         for order in orders {
             var current = VoiceNegotiationState(role: .offerer, localAudioOpen: true)
@@ -183,7 +257,8 @@ final class VoiceNegotiationVectorTests: XCTestCase {
                 HeldRemoteOffer(voiceSessionId: VoiceSessionId($0.str("voice_session_id")), sdp: $0.str("sdp"))
             },
             micMuted: spec.boolVal("mic_muted"),
-            mode: mode(spec.str("mode"))
+            mode: mode(spec.str("mode")),
+            negotiationControlGeneration: spec.requiredInt64Opt("negotiation_control_generation")
         )
     }
 
@@ -201,13 +276,19 @@ final class VoiceNegotiationVectorTests: XCTestCase {
     private func input(_ spec: [String: Any]) -> VoiceInput {
         switch spec.str("kind") {
         case "StartRequested":
-            return .startRequested(freshVoiceSessionId: VoiceSessionId(spec.str("fresh_voice_session_id")))
+            return .startRequested(
+                freshVoiceSessionId: VoiceSessionId(spec.str("fresh_voice_session_id")),
+                controlGeneration: spec.requiredInt64Opt("control_generation")
+            )
         case "StopRequested":
             return .stopRequested
         case "ControlLinkLost":
-            // See `vectorControlGeneration`: the vectors carry no control generation because the
-            // reducer reads none.
-            return .controlLinkLost(retiredControlGeneration: vectorControlGeneration)
+            // Read from the file, never defaulted here. ADR-020 Amendment A7 could encode these as a
+            // constant because the reducer ignored them; Amendment A8 made the control lifetime part
+            // of what the table decides, so the vectors now carry it and a row that omits it fails
+            // rather than quietly meaning "the only lifetime there is". Still **not** a wire field:
+            // this is receiver-local provenance in a receiver-local table.
+            return .controlLinkLost(retiredControlGeneration: spec.requiredInt64Opt("retired_control_generation"))
         case "NegotiationSendFailed":
             return .negotiationSendFailed(voiceSessionId: spec.strOpt("voice_session_id").map(VoiceSessionId.init))
         case "MuteRequested":
@@ -217,7 +298,8 @@ final class VoiceNegotiationVectorTests: XCTestCase {
         case "SignalReceived":
             return .signalReceived(
                 signal: signal(spec.dict("signal")),
-                controlGeneration: vectorControlGeneration, freshVoiceSessionId: VoiceSessionId(spec.str("fresh_voice_session_id"))
+                controlGeneration: spec.requiredInt64("control_generation"),
+                freshVoiceSessionId: VoiceSessionId(spec.str("fresh_voice_session_id"))
             )
         case "LocalOfferCreated":
             return .localOfferCreated(

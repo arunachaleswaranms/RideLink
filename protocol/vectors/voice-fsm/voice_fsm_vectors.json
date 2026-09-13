@@ -25,11 +25,13 @@
         "peer_reported_state": "IDLE",
         "held_remote_offer": null,
         "mic_muted": false,
-        "mode": "CONTINUOUS"
+        "mode": "CONTINUOUS",
+        "negotiation_control_generation": null
       },
       "input": {
         "kind": "StartRequested",
-        "fresh_voice_session_id": "ffeeddccbbaa99887766554433221100"
+        "fresh_voice_session_id": "ffeeddccbbaa99887766554433221100",
+        "control_generation": 1
       },
       "expect": {
         "actions": [
@@ -58,7 +60,8 @@
           "peer_reported_state": "IDLE",
           "held_remote_offer": null,
           "mic_muted": false,
-          "mode": "CONTINUOUS"
+          "mode": "CONTINUOUS",
+          "negotiation_control_generation": 1
         }
       }
     },
@@ -74,11 +77,13 @@
         "peer_reported_state": "IDLE",
         "held_remote_offer": null,
         "mic_muted": false,
-        "mode": "CONTINUOUS"
+        "mode": "CONTINUOUS",
+        "negotiation_control_generation": null
       },
       "input": {
         "kind": "StartRequested",
-        "fresh_voice_session_id": "ffeeddccbbaa99887766554433221100"
+        "fresh_voice_session_id": "ffeeddccbbaa99887766554433221100",
+        "control_generation": 1
       },
       "expect": {
         "actions": [
@@ -103,7 +108,8 @@
           "peer_reported_state": "IDLE",
           "held_remote_offer": null,
           "mic_muted": false,
-          "mode": "CONTINUOUS"
+          "mode": "CONTINUOUS",
+          "negotiation_control_generation": 1
         }
       }
     },
@@ -119,11 +125,13 @@
         "peer_reported_state": "IDLE",
         "held_remote_offer": null,
         "mic_muted": false,
-        "mode": "CONTINUOUS"
+        "mode": "CONTINUOUS",
+        "negotiation_control_generation": 1
       },
       "input": {
         "kind": "StartRequested",
-        "fresh_voice_session_id": "ffeeddccbbaa99887766554433221100"
+        "fresh_voice_session_id": "ffeeddccbbaa99887766554433221100",
+        "control_generation": 1
       },
       "expect": {
         "actions": [],
@@ -137,7 +145,8 @@
           "peer_reported_state": "IDLE",
           "held_remote_offer": null,
           "mic_muted": false,
-          "mode": "CONTINUOUS"
+          "mode": "CONTINUOUS",
+          "negotiation_control_generation": 1
         }
       }
     },
@@ -153,11 +162,13 @@
         "peer_reported_state": "IDLE",
         "held_remote_offer": null,
         "mic_muted": false,
-        "mode": "CONTINUOUS"
+        "mode": "CONTINUOUS",
+        "negotiation_control_generation": 1
       },
       "input": {
         "kind": "StartRequested",
-        "fresh_voice_session_id": "ffeeddccbbaa99887766554433221100"
+        "fresh_voice_session_id": "ffeeddccbbaa99887766554433221100",
+        "control_generation": 1
       },
       "expect": {
         "actions": [],
@@ -171,7 +182,8 @@
           "peer_reported_state": "IDLE",
           "held_remote_offer": null,
           "mic_muted": false,
-          "mode": "CONTINUOUS"
+          "mode": "CONTINUOUS",
+          "negotiation_control_generation": 1
         }
       }
     },
@@ -187,11 +199,13 @@
         "peer_reported_state": "IDLE",
         "held_remote_offer": null,
         "mic_muted": false,
-        "mode": "CONTINUOUS"
+        "mode": "CONTINUOUS",
+        "negotiation_control_generation": null
       },
       "input": {
         "kind": "StartRequested",
-        "fresh_voice_session_id": "ffeeddccbbaa99887766554433221100"
+        "fresh_voice_session_id": "ffeeddccbbaa99887766554433221100",
+        "control_generation": 1
       },
       "expect": {
         "actions": [
@@ -217,7 +231,8 @@
           "peer_reported_state": "IDLE",
           "held_remote_offer": null,
           "mic_muted": false,
-          "mode": "CONTINUOUS"
+          "mode": "CONTINUOUS",
+          "negotiation_control_generation": 1
         }
       }
     },
@@ -236,11 +251,13 @@
           "sdp": "v=0\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\na=mid:0\r\n"
         },
         "mic_muted": false,
-        "mode": "CONTINUOUS"
+        "mode": "CONTINUOUS",
+        "negotiation_control_generation": 1
       },
       "input": {
         "kind": "StartRequested",
-        "fresh_voice_session_id": "ffeeddccbbaa99887766554433221100"
+        "fresh_voice_session_id": "ffeeddccbbaa99887766554433221100",
+        "control_generation": 1
       },
       "expect": {
         "actions": [
@@ -270,7 +287,8 @@
           "peer_reported_state": "NEGOTIATING",
           "held_remote_offer": null,
           "mic_muted": false,
-          "mode": "CONTINUOUS"
+          "mode": "CONTINUOUS",
+          "negotiation_control_generation": 1
         }
       }
     },
@@ -286,7 +304,8 @@
         "peer_reported_state": "IDLE",
         "held_remote_offer": null,
         "mic_muted": false,
-        "mode": "CONTINUOUS"
+        "mode": "CONTINUOUS",
+        "negotiation_control_generation": null
       },
       "input": {
         "kind": "SignalReceived",
@@ -297,7 +316,8 @@
           "state": "NEGOTIATING",
           "mic_muted": false,
           "mode": "CONTINUOUS"
-        }
+        },
+        "control_generation": 1
       },
       "expect": {
         "actions": [
@@ -323,7 +343,8 @@
           "peer_reported_state": "NEGOTIATING",
           "held_remote_offer": null,
           "mic_muted": false,
-          "mode": "CONTINUOUS"
+          "mode": "CONTINUOUS",
+          "negotiation_control_generation": 1
         }
       }
     },
@@ -339,7 +360,8 @@
         "peer_reported_state": "IDLE",
         "held_remote_offer": null,
         "mic_muted": false,
-        "mode": "CONTINUOUS"
+        "mode": "CONTINUOUS",
+        "negotiation_control_generation": 1
       },
       "input": {
         "kind": "SignalReceived",
@@ -350,7 +372,8 @@
           "state": "NEGOTIATING",
           "mic_muted": false,
           "mode": "CONTINUOUS"
-        }
+        },
+        "control_generation": 1
       },
       "expect": {
         "actions": [],
@@ -364,7 +387,8 @@
           "peer_reported_state": "NEGOTIATING",
           "held_remote_offer": null,
           "mic_muted": false,
-          "mode": "CONTINUOUS"
+          "mode": "CONTINUOUS",
+          "negotiation_control_generation": 1
         }
       }
     },
@@ -380,7 +404,8 @@
         "peer_reported_state": "IDLE",
         "held_remote_offer": null,
         "mic_muted": false,
-        "mode": "CONTINUOUS"
+        "mode": "CONTINUOUS",
+        "negotiation_control_generation": null
       },
       "input": {
         "kind": "SignalReceived",
@@ -391,7 +416,8 @@
           "state": "NEGOTIATING",
           "mic_muted": false,
           "mode": "CONTINUOUS"
-        }
+        },
+        "control_generation": 1
       },
       "expect": {
         "actions": [
@@ -409,7 +435,8 @@
           "peer_reported_state": "NEGOTIATING",
           "held_remote_offer": null,
           "mic_muted": false,
-          "mode": "CONTINUOUS"
+          "mode": "CONTINUOUS",
+          "negotiation_control_generation": null
         }
       }
     },
@@ -425,7 +452,8 @@
         "peer_reported_state": "IDLE",
         "held_remote_offer": null,
         "mic_muted": false,
-        "mode": "CONTINUOUS"
+        "mode": "CONTINUOUS",
+        "negotiation_control_generation": null
       },
       "input": {
         "kind": "SignalReceived",
@@ -436,7 +464,8 @@
           "state": "NEGOTIATING",
           "mic_muted": false,
           "mode": "CONTINUOUS"
-        }
+        },
+        "control_generation": 1
       },
       "expect": {
         "actions": [],
@@ -450,7 +479,8 @@
           "peer_reported_state": "NEGOTIATING",
           "held_remote_offer": null,
           "mic_muted": false,
-          "mode": "CONTINUOUS"
+          "mode": "CONTINUOUS",
+          "negotiation_control_generation": null
         }
       }
     },
@@ -466,7 +496,8 @@
         "peer_reported_state": "IDLE",
         "held_remote_offer": null,
         "mic_muted": false,
-        "mode": "CONTINUOUS"
+        "mode": "CONTINUOUS",
+        "negotiation_control_generation": 1
       },
       "input": {
         "kind": "SignalReceived",
@@ -475,7 +506,8 @@
           "kind": "Offer",
           "voice_session_id": "5e2a9c40b7f13d86e0a4c95b28f7d613",
           "sdp": "v=0\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\na=mid:0\r\n"
-        }
+        },
+        "control_generation": 1
       },
       "expect": {
         "actions": [
@@ -502,7 +534,8 @@
           "peer_reported_state": "NEGOTIATING",
           "held_remote_offer": null,
           "mic_muted": false,
-          "mode": "CONTINUOUS"
+          "mode": "CONTINUOUS",
+          "negotiation_control_generation": 1
         }
       }
     },
@@ -518,7 +551,8 @@
         "peer_reported_state": "IDLE",
         "held_remote_offer": null,
         "mic_muted": false,
-        "mode": "CONTINUOUS"
+        "mode": "CONTINUOUS",
+        "negotiation_control_generation": null
       },
       "input": {
         "kind": "SignalReceived",
@@ -527,7 +561,8 @@
           "kind": "Offer",
           "voice_session_id": "5e2a9c40b7f13d86e0a4c95b28f7d613",
           "sdp": "v=0\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\na=mid:0\r\n"
-        }
+        },
+        "control_generation": 1
       },
       "expect": {
         "actions": [
@@ -548,7 +583,8 @@
             "sdp": "v=0\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\na=mid:0\r\n"
           },
           "mic_muted": false,
-          "mode": "CONTINUOUS"
+          "mode": "CONTINUOUS",
+          "negotiation_control_generation": 1
         }
       }
     },
@@ -564,7 +600,8 @@
         "peer_reported_state": "IDLE",
         "held_remote_offer": null,
         "mic_muted": false,
-        "mode": "CONTINUOUS"
+        "mode": "CONTINUOUS",
+        "negotiation_control_generation": 1
       },
       "input": {
         "kind": "SignalReceived",
@@ -573,7 +610,8 @@
           "kind": "Offer",
           "voice_session_id": "5e2a9c40b7f13d86e0a4c95b28f7d613",
           "sdp": "v=0\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\na=mid:0\r\n"
-        }
+        },
+        "control_generation": 1
       },
       "expect": {
         "actions": [
@@ -592,7 +630,8 @@
           "peer_reported_state": "IDLE",
           "held_remote_offer": null,
           "mic_muted": false,
-          "mode": "CONTINUOUS"
+          "mode": "CONTINUOUS",
+          "negotiation_control_generation": 1
         }
       }
     },
@@ -608,7 +647,8 @@
         "peer_reported_state": "IDLE",
         "held_remote_offer": null,
         "mic_muted": false,
-        "mode": "CONTINUOUS"
+        "mode": "CONTINUOUS",
+        "negotiation_control_generation": 1
       },
       "input": {
         "kind": "SignalReceived",
@@ -617,7 +657,8 @@
           "kind": "Offer",
           "voice_session_id": "5e2a9c40b7f13d86e0a4c95b28f7d613",
           "sdp": "v=0\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\na=mid:0\r\n"
-        }
+        },
+        "control_generation": 1
       },
       "expect": {
         "actions": [
@@ -636,7 +677,8 @@
           "peer_reported_state": "IDLE",
           "held_remote_offer": null,
           "mic_muted": false,
-          "mode": "CONTINUOUS"
+          "mode": "CONTINUOUS",
+          "negotiation_control_generation": 1
         }
       }
     },
@@ -652,7 +694,8 @@
         "peer_reported_state": "IDLE",
         "held_remote_offer": null,
         "mic_muted": false,
-        "mode": "CONTINUOUS"
+        "mode": "CONTINUOUS",
+        "negotiation_control_generation": 1
       },
       "input": {
         "kind": "SignalReceived",
@@ -661,7 +704,8 @@
           "kind": "Offer",
           "voice_session_id": "0123456789abcdef0123456789abcdef",
           "sdp": "v=0\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\na=mid:0\r\n"
-        }
+        },
+        "control_generation": 1
       },
       "expect": {
         "actions": [
@@ -680,7 +724,8 @@
           "peer_reported_state": "IDLE",
           "held_remote_offer": null,
           "mic_muted": false,
-          "mode": "CONTINUOUS"
+          "mode": "CONTINUOUS",
+          "negotiation_control_generation": 1
         }
       }
     },
@@ -696,7 +741,8 @@
         "peer_reported_state": "IDLE",
         "held_remote_offer": null,
         "mic_muted": false,
-        "mode": "CONTINUOUS"
+        "mode": "CONTINUOUS",
+        "negotiation_control_generation": 1
       },
       "input": {
         "kind": "SignalReceived",
@@ -705,7 +751,8 @@
           "kind": "Answer",
           "voice_session_id": "5e2a9c40b7f13d86e0a4c95b28f7d613",
           "sdp": "v=0\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\na=mid:0\r\n"
-        }
+        },
+        "control_generation": 1
       },
       "expect": {
         "actions": [
@@ -735,7 +782,8 @@
           "peer_reported_state": "IDLE",
           "held_remote_offer": null,
           "mic_muted": false,
-          "mode": "CONTINUOUS"
+          "mode": "CONTINUOUS",
+          "negotiation_control_generation": 1
         }
       }
     },
@@ -751,7 +799,8 @@
         "peer_reported_state": "IDLE",
         "held_remote_offer": null,
         "mic_muted": false,
-        "mode": "CONTINUOUS"
+        "mode": "CONTINUOUS",
+        "negotiation_control_generation": 1
       },
       "input": {
         "kind": "SignalReceived",
@@ -760,7 +809,8 @@
           "kind": "Answer",
           "voice_session_id": "5e2a9c40b7f13d86e0a4c95b28f7d613",
           "sdp": "v=0\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\na=mid:0\r\n"
-        }
+        },
+        "control_generation": 1
       },
       "expect": {
         "actions": [
@@ -779,7 +829,8 @@
           "peer_reported_state": "IDLE",
           "held_remote_offer": null,
           "mic_muted": false,
-          "mode": "CONTINUOUS"
+          "mode": "CONTINUOUS",
+          "negotiation_control_generation": 1
         }
       }
     },
@@ -795,7 +846,8 @@
         "peer_reported_state": "IDLE",
         "held_remote_offer": null,
         "mic_muted": false,
-        "mode": "CONTINUOUS"
+        "mode": "CONTINUOUS",
+        "negotiation_control_generation": 1
       },
       "input": {
         "kind": "SignalReceived",
@@ -804,7 +856,8 @@
           "kind": "Answer",
           "voice_session_id": "5e2a9c40b7f13d86e0a4c95b28f7d613",
           "sdp": "v=0\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\na=mid:0\r\n"
-        }
+        },
+        "control_generation": 1
       },
       "expect": {
         "actions": [
@@ -823,7 +876,8 @@
           "peer_reported_state": "IDLE",
           "held_remote_offer": null,
           "mic_muted": false,
-          "mode": "CONTINUOUS"
+          "mode": "CONTINUOUS",
+          "negotiation_control_generation": 1
         }
       }
     },
@@ -839,7 +893,8 @@
         "peer_reported_state": "IDLE",
         "held_remote_offer": null,
         "mic_muted": false,
-        "mode": "CONTINUOUS"
+        "mode": "CONTINUOUS",
+        "negotiation_control_generation": 1
       },
       "input": {
         "kind": "SignalReceived",
@@ -848,7 +903,8 @@
           "kind": "Answer",
           "voice_session_id": "0123456789abcdef0123456789abcdef",
           "sdp": "v=0\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\na=mid:0\r\n"
-        }
+        },
+        "control_generation": 1
       },
       "expect": {
         "actions": [
@@ -867,7 +923,8 @@
           "peer_reported_state": "IDLE",
           "held_remote_offer": null,
           "mic_muted": false,
-          "mode": "CONTINUOUS"
+          "mode": "CONTINUOUS",
+          "negotiation_control_generation": 1
         }
       }
     },
@@ -883,7 +940,8 @@
         "peer_reported_state": "IDLE",
         "held_remote_offer": null,
         "mic_muted": false,
-        "mode": "CONTINUOUS"
+        "mode": "CONTINUOUS",
+        "negotiation_control_generation": null
       },
       "input": {
         "kind": "SignalReceived",
@@ -892,7 +950,8 @@
           "kind": "Answer",
           "voice_session_id": "5e2a9c40b7f13d86e0a4c95b28f7d613",
           "sdp": "v=0\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\na=mid:0\r\n"
-        }
+        },
+        "control_generation": 1
       },
       "expect": {
         "actions": [
@@ -911,7 +970,8 @@
           "peer_reported_state": "IDLE",
           "held_remote_offer": null,
           "mic_muted": false,
-          "mode": "CONTINUOUS"
+          "mode": "CONTINUOUS",
+          "negotiation_control_generation": null
         }
       }
     },
@@ -927,7 +987,8 @@
         "peer_reported_state": "IDLE",
         "held_remote_offer": null,
         "mic_muted": false,
-        "mode": "CONTINUOUS"
+        "mode": "CONTINUOUS",
+        "negotiation_control_generation": 1
       },
       "input": {
         "kind": "SignalReceived",
@@ -938,7 +999,8 @@
           "candidate": "candidate:1 1 udp 1 192.0.2.11 51234 typ host",
           "sdp_mid": "0",
           "sdp_mline_index": 0
-        }
+        },
+        "control_generation": 1
       },
       "expect": {
         "actions": [
@@ -960,7 +1022,8 @@
           "peer_reported_state": "IDLE",
           "held_remote_offer": null,
           "mic_muted": false,
-          "mode": "CONTINUOUS"
+          "mode": "CONTINUOUS",
+          "negotiation_control_generation": 1
         }
       }
     },
@@ -976,7 +1039,8 @@
         "peer_reported_state": "IDLE",
         "held_remote_offer": null,
         "mic_muted": false,
-        "mode": "CONTINUOUS"
+        "mode": "CONTINUOUS",
+        "negotiation_control_generation": 1
       },
       "input": {
         "kind": "SignalReceived",
@@ -987,7 +1051,8 @@
           "candidate": "candidate:1 1 udp 1 192.0.2.11 51234 typ host",
           "sdp_mid": null,
           "sdp_mline_index": 0
-        }
+        },
+        "control_generation": 1
       },
       "expect": {
         "actions": [
@@ -1009,7 +1074,8 @@
           "peer_reported_state": "IDLE",
           "held_remote_offer": null,
           "mic_muted": false,
-          "mode": "CONTINUOUS"
+          "mode": "CONTINUOUS",
+          "negotiation_control_generation": 1
         }
       }
     },
@@ -1025,7 +1091,8 @@
         "peer_reported_state": "IDLE",
         "held_remote_offer": null,
         "mic_muted": false,
-        "mode": "CONTINUOUS"
+        "mode": "CONTINUOUS",
+        "negotiation_control_generation": null
       },
       "input": {
         "kind": "SignalReceived",
@@ -1036,7 +1103,8 @@
           "candidate": "candidate:1 1 udp 1 192.0.2.11 51234 typ host",
           "sdp_mid": "0",
           "sdp_mline_index": 0
-        }
+        },
+        "control_generation": 1
       },
       "expect": {
         "actions": [
@@ -1055,7 +1123,8 @@
           "peer_reported_state": "IDLE",
           "held_remote_offer": null,
           "mic_muted": false,
-          "mode": "CONTINUOUS"
+          "mode": "CONTINUOUS",
+          "negotiation_control_generation": null
         }
       }
     },
@@ -1071,7 +1140,8 @@
         "peer_reported_state": "IDLE",
         "held_remote_offer": null,
         "mic_muted": false,
-        "mode": "CONTINUOUS"
+        "mode": "CONTINUOUS",
+        "negotiation_control_generation": 1
       },
       "input": {
         "kind": "SignalReceived",
@@ -1082,7 +1152,8 @@
           "candidate": "candidate:1 1 udp 1 192.0.2.11 51234 typ host",
           "sdp_mid": "0",
           "sdp_mline_index": 0
-        }
+        },
+        "control_generation": 1
       },
       "expect": {
         "actions": [
@@ -1101,7 +1172,8 @@
           "peer_reported_state": "IDLE",
           "held_remote_offer": null,
           "mic_muted": false,
-          "mode": "CONTINUOUS"
+          "mode": "CONTINUOUS",
+          "negotiation_control_generation": 1
         }
       }
     },
@@ -1117,7 +1189,8 @@
         "peer_reported_state": "IDLE",
         "held_remote_offer": null,
         "mic_muted": false,
-        "mode": "CONTINUOUS"
+        "mode": "CONTINUOUS",
+        "negotiation_control_generation": 1
       },
       "input": {
         "kind": "LocalOfferCreated",
@@ -1142,7 +1215,8 @@
           "peer_reported_state": "IDLE",
           "held_remote_offer": null,
           "mic_muted": false,
-          "mode": "CONTINUOUS"
+          "mode": "CONTINUOUS",
+          "negotiation_control_generation": 1
         }
       }
     },
@@ -1158,7 +1232,8 @@
         "peer_reported_state": "IDLE",
         "held_remote_offer": null,
         "mic_muted": false,
-        "mode": "CONTINUOUS"
+        "mode": "CONTINUOUS",
+        "negotiation_control_generation": 1
       },
       "input": {
         "kind": "LocalOfferCreated",
@@ -1182,7 +1257,8 @@
           "peer_reported_state": "IDLE",
           "held_remote_offer": null,
           "mic_muted": false,
-          "mode": "CONTINUOUS"
+          "mode": "CONTINUOUS",
+          "negotiation_control_generation": 1
         }
       }
     },
@@ -1198,7 +1274,8 @@
         "peer_reported_state": "IDLE",
         "held_remote_offer": null,
         "mic_muted": false,
-        "mode": "CONTINUOUS"
+        "mode": "CONTINUOUS",
+        "negotiation_control_generation": 1
       },
       "input": {
         "kind": "LocalAnswerCreated",
@@ -1230,7 +1307,8 @@
           "peer_reported_state": "IDLE",
           "held_remote_offer": null,
           "mic_muted": false,
-          "mode": "CONTINUOUS"
+          "mode": "CONTINUOUS",
+          "negotiation_control_generation": 1
         }
       }
     },
@@ -1246,7 +1324,8 @@
         "peer_reported_state": "IDLE",
         "held_remote_offer": null,
         "mic_muted": false,
-        "mode": "CONTINUOUS"
+        "mode": "CONTINUOUS",
+        "negotiation_control_generation": null
       },
       "input": {
         "kind": "LocalAnswerCreated",
@@ -1270,7 +1349,8 @@
           "peer_reported_state": "IDLE",
           "held_remote_offer": null,
           "mic_muted": false,
-          "mode": "CONTINUOUS"
+          "mode": "CONTINUOUS",
+          "negotiation_control_generation": null
         }
       }
     },
@@ -1286,7 +1366,8 @@
         "peer_reported_state": "IDLE",
         "held_remote_offer": null,
         "mic_muted": false,
-        "mode": "CONTINUOUS"
+        "mode": "CONTINUOUS",
+        "negotiation_control_generation": 1
       },
       "input": {
         "kind": "LocalCandidateGathered",
@@ -1315,7 +1396,8 @@
           "peer_reported_state": "IDLE",
           "held_remote_offer": null,
           "mic_muted": false,
-          "mode": "CONTINUOUS"
+          "mode": "CONTINUOUS",
+          "negotiation_control_generation": 1
         }
       }
     },
@@ -1331,7 +1413,8 @@
         "peer_reported_state": "IDLE",
         "held_remote_offer": null,
         "mic_muted": false,
-        "mode": "CONTINUOUS"
+        "mode": "CONTINUOUS",
+        "negotiation_control_generation": null
       },
       "input": {
         "kind": "LocalCandidateGathered",
@@ -1357,7 +1440,8 @@
           "peer_reported_state": "IDLE",
           "held_remote_offer": null,
           "mic_muted": false,
-          "mode": "CONTINUOUS"
+          "mode": "CONTINUOUS",
+          "negotiation_control_generation": null
         }
       }
     },
@@ -1373,7 +1457,8 @@
         "peer_reported_state": "IDLE",
         "held_remote_offer": null,
         "mic_muted": false,
-        "mode": "CONTINUOUS"
+        "mode": "CONTINUOUS",
+        "negotiation_control_generation": 1
       },
       "input": {
         "kind": "MediaConnectivityChanged",
@@ -1401,7 +1486,8 @@
           "peer_reported_state": "IDLE",
           "held_remote_offer": null,
           "mic_muted": false,
-          "mode": "CONTINUOUS"
+          "mode": "CONTINUOUS",
+          "negotiation_control_generation": 1
         }
       }
     },
@@ -1417,7 +1503,8 @@
         "peer_reported_state": "IDLE",
         "held_remote_offer": null,
         "mic_muted": false,
-        "mode": "CONTINUOUS"
+        "mode": "CONTINUOUS",
+        "negotiation_control_generation": 1
       },
       "input": {
         "kind": "MediaConnectivityChanged",
@@ -1437,7 +1524,8 @@
           "peer_reported_state": "IDLE",
           "held_remote_offer": null,
           "mic_muted": false,
-          "mode": "CONTINUOUS"
+          "mode": "CONTINUOUS",
+          "negotiation_control_generation": 1
         }
       }
     },
@@ -1453,7 +1541,8 @@
         "peer_reported_state": "IDLE",
         "held_remote_offer": null,
         "mic_muted": false,
-        "mode": "CONTINUOUS"
+        "mode": "CONTINUOUS",
+        "negotiation_control_generation": 1
       },
       "input": {
         "kind": "MediaConnectivityChanged",
@@ -1481,7 +1570,8 @@
           "peer_reported_state": "IDLE",
           "held_remote_offer": null,
           "mic_muted": false,
-          "mode": "CONTINUOUS"
+          "mode": "CONTINUOUS",
+          "negotiation_control_generation": 1
         }
       }
     },
@@ -1497,7 +1587,8 @@
         "peer_reported_state": "IDLE",
         "held_remote_offer": null,
         "mic_muted": false,
-        "mode": "CONTINUOUS"
+        "mode": "CONTINUOUS",
+        "negotiation_control_generation": 1
       },
       "input": {
         "kind": "MediaConnectivityChanged",
@@ -1528,7 +1619,8 @@
           "peer_reported_state": "IDLE",
           "held_remote_offer": null,
           "mic_muted": false,
-          "mode": "CONTINUOUS"
+          "mode": "CONTINUOUS",
+          "negotiation_control_generation": 1
         }
       }
     },
@@ -1544,7 +1636,8 @@
         "peer_reported_state": "IDLE",
         "held_remote_offer": null,
         "mic_muted": false,
-        "mode": "CONTINUOUS"
+        "mode": "CONTINUOUS",
+        "negotiation_control_generation": 1
       },
       "input": {
         "kind": "MediaConnectivityChanged",
@@ -1569,7 +1662,8 @@
           "peer_reported_state": "IDLE",
           "held_remote_offer": null,
           "mic_muted": false,
-          "mode": "CONTINUOUS"
+          "mode": "CONTINUOUS",
+          "negotiation_control_generation": 1
         }
       }
     },
@@ -1585,7 +1679,8 @@
         "peer_reported_state": "IDLE",
         "held_remote_offer": null,
         "mic_muted": false,
-        "mode": "CONTINUOUS"
+        "mode": "CONTINUOUS",
+        "negotiation_control_generation": 1
       },
       "input": {
         "kind": "RemoteTrackChanged",
@@ -1604,7 +1699,8 @@
           "peer_reported_state": "IDLE",
           "held_remote_offer": null,
           "mic_muted": false,
-          "mode": "CONTINUOUS"
+          "mode": "CONTINUOUS",
+          "negotiation_control_generation": 1
         }
       }
     },
@@ -1620,7 +1716,8 @@
         "peer_reported_state": "IDLE",
         "held_remote_offer": null,
         "mic_muted": false,
-        "mode": "CONTINUOUS"
+        "mode": "CONTINUOUS",
+        "negotiation_control_generation": 1
       },
       "input": {
         "kind": "RemoteTrackChanged",
@@ -1644,7 +1741,8 @@
           "peer_reported_state": "IDLE",
           "held_remote_offer": null,
           "mic_muted": false,
-          "mode": "CONTINUOUS"
+          "mode": "CONTINUOUS",
+          "negotiation_control_generation": 1
         }
       }
     },
@@ -1660,7 +1758,8 @@
         "peer_reported_state": "IDLE",
         "held_remote_offer": null,
         "mic_muted": false,
-        "mode": "CONTINUOUS"
+        "mode": "CONTINUOUS",
+        "negotiation_control_generation": 1
       },
       "input": {
         "kind": "MuteRequested",
@@ -1690,7 +1789,8 @@
           "peer_reported_state": "IDLE",
           "held_remote_offer": null,
           "mic_muted": true,
-          "mode": "CONTINUOUS"
+          "mode": "CONTINUOUS",
+          "negotiation_control_generation": 1
         }
       }
     },
@@ -1706,7 +1806,8 @@
         "peer_reported_state": "IDLE",
         "held_remote_offer": null,
         "mic_muted": true,
-        "mode": "CONTINUOUS"
+        "mode": "CONTINUOUS",
+        "negotiation_control_generation": 1
       },
       "input": {
         "kind": "MuteRequested",
@@ -1736,7 +1837,8 @@
           "peer_reported_state": "IDLE",
           "held_remote_offer": null,
           "mic_muted": false,
-          "mode": "CONTINUOUS"
+          "mode": "CONTINUOUS",
+          "negotiation_control_generation": 1
         }
       }
     },
@@ -1752,7 +1854,8 @@
         "peer_reported_state": "IDLE",
         "held_remote_offer": null,
         "mic_muted": false,
-        "mode": "CONTINUOUS"
+        "mode": "CONTINUOUS",
+        "negotiation_control_generation": 1
       },
       "input": {
         "kind": "MuteRequested",
@@ -1770,7 +1873,8 @@
           "peer_reported_state": "IDLE",
           "held_remote_offer": null,
           "mic_muted": false,
-          "mode": "CONTINUOUS"
+          "mode": "CONTINUOUS",
+          "negotiation_control_generation": 1
         }
       }
     },
@@ -1786,7 +1890,8 @@
         "peer_reported_state": "IDLE",
         "held_remote_offer": null,
         "mic_muted": false,
-        "mode": "CONTINUOUS"
+        "mode": "CONTINUOUS",
+        "negotiation_control_generation": null
       },
       "input": {
         "kind": "MuteRequested",
@@ -1804,7 +1909,8 @@
           "peer_reported_state": "IDLE",
           "held_remote_offer": null,
           "mic_muted": true,
-          "mode": "CONTINUOUS"
+          "mode": "CONTINUOUS",
+          "negotiation_control_generation": null
         }
       }
     },
@@ -1820,7 +1926,8 @@
         "peer_reported_state": "IDLE",
         "held_remote_offer": null,
         "mic_muted": false,
-        "mode": "CONTINUOUS"
+        "mode": "CONTINUOUS",
+        "negotiation_control_generation": 1
       },
       "input": {
         "kind": "ModeSelected",
@@ -1846,7 +1953,8 @@
           "peer_reported_state": "IDLE",
           "held_remote_offer": null,
           "mic_muted": false,
-          "mode": "PTT"
+          "mode": "PTT",
+          "negotiation_control_generation": 1
         }
       }
     },
@@ -1862,7 +1970,8 @@
         "peer_reported_state": "IDLE",
         "held_remote_offer": null,
         "mic_muted": false,
-        "mode": "CONTINUOUS"
+        "mode": "CONTINUOUS",
+        "negotiation_control_generation": 1
       },
       "input": {
         "kind": "ModeSelected",
@@ -1888,7 +1997,8 @@
           "peer_reported_state": "IDLE",
           "held_remote_offer": null,
           "mic_muted": false,
-          "mode": "VOX"
+          "mode": "VOX",
+          "negotiation_control_generation": 1
         }
       }
     },
@@ -1904,7 +2014,8 @@
         "peer_reported_state": "IDLE",
         "held_remote_offer": null,
         "mic_muted": true,
-        "mode": "CONTINUOUS"
+        "mode": "CONTINUOUS",
+        "negotiation_control_generation": 1
       },
       "input": {
         "kind": "ModeSelected",
@@ -1930,7 +2041,8 @@
           "peer_reported_state": "IDLE",
           "held_remote_offer": null,
           "mic_muted": true,
-          "mode": "PTT"
+          "mode": "PTT",
+          "negotiation_control_generation": 1
         }
       }
     },
@@ -1946,7 +2058,8 @@
         "peer_reported_state": "IDLE",
         "held_remote_offer": null,
         "mic_muted": false,
-        "mode": "CONTINUOUS"
+        "mode": "CONTINUOUS",
+        "negotiation_control_generation": 1
       },
       "input": {
         "kind": "ModeSelected",
@@ -1964,7 +2077,8 @@
           "peer_reported_state": "IDLE",
           "held_remote_offer": null,
           "mic_muted": false,
-          "mode": "CONTINUOUS"
+          "mode": "CONTINUOUS",
+          "negotiation_control_generation": 1
         }
       }
     },
@@ -1980,7 +2094,8 @@
         "peer_reported_state": "IDLE",
         "held_remote_offer": null,
         "mic_muted": false,
-        "mode": "CONTINUOUS"
+        "mode": "CONTINUOUS",
+        "negotiation_control_generation": null
       },
       "input": {
         "kind": "ModeSelected",
@@ -1998,7 +2113,8 @@
           "peer_reported_state": "IDLE",
           "held_remote_offer": null,
           "mic_muted": false,
-          "mode": "PTT"
+          "mode": "PTT",
+          "negotiation_control_generation": null
         }
       }
     },
@@ -2014,7 +2130,8 @@
         "peer_reported_state": "IDLE",
         "held_remote_offer": null,
         "mic_muted": false,
-        "mode": "CONTINUOUS"
+        "mode": "CONTINUOUS",
+        "negotiation_control_generation": 1
       },
       "input": {
         "kind": "ModeSelected",
@@ -2032,7 +2149,8 @@
           "peer_reported_state": "IDLE",
           "held_remote_offer": null,
           "mic_muted": false,
-          "mode": "PTT"
+          "mode": "PTT",
+          "negotiation_control_generation": 1
         }
       }
     },
@@ -2048,7 +2166,8 @@
         "peer_reported_state": "IDLE",
         "held_remote_offer": null,
         "mic_muted": false,
-        "mode": "CONTINUOUS"
+        "mode": "CONTINUOUS",
+        "negotiation_control_generation": 1
       },
       "input": {
         "kind": "ModeSelected",
@@ -2074,7 +2193,8 @@
           "peer_reported_state": "IDLE",
           "held_remote_offer": null,
           "mic_muted": false,
-          "mode": "PTT"
+          "mode": "PTT",
+          "negotiation_control_generation": 1
         }
       }
     },
@@ -2090,7 +2210,8 @@
         "peer_reported_state": "IDLE",
         "held_remote_offer": null,
         "mic_muted": false,
-        "mode": "CONTINUOUS"
+        "mode": "CONTINUOUS",
+        "negotiation_control_generation": 1
       },
       "input": {
         "kind": "StopRequested"
@@ -2121,7 +2242,8 @@
           "peer_reported_state": "IDLE",
           "held_remote_offer": null,
           "mic_muted": false,
-          "mode": "CONTINUOUS"
+          "mode": "CONTINUOUS",
+          "negotiation_control_generation": null
         }
       }
     },
@@ -2137,7 +2259,8 @@
         "peer_reported_state": "IDLE",
         "held_remote_offer": null,
         "mic_muted": true,
-        "mode": "CONTINUOUS"
+        "mode": "CONTINUOUS",
+        "negotiation_control_generation": 1
       },
       "input": {
         "kind": "StopRequested"
@@ -2168,7 +2291,8 @@
           "peer_reported_state": "IDLE",
           "held_remote_offer": null,
           "mic_muted": true,
-          "mode": "CONTINUOUS"
+          "mode": "CONTINUOUS",
+          "negotiation_control_generation": null
         }
       }
     },
@@ -2184,7 +2308,8 @@
         "peer_reported_state": "IDLE",
         "held_remote_offer": null,
         "mic_muted": false,
-        "mode": "CONTINUOUS"
+        "mode": "CONTINUOUS",
+        "negotiation_control_generation": null
       },
       "input": {
         "kind": "StopRequested"
@@ -2201,7 +2326,8 @@
           "peer_reported_state": "IDLE",
           "held_remote_offer": null,
           "mic_muted": false,
-          "mode": "CONTINUOUS"
+          "mode": "CONTINUOUS",
+          "negotiation_control_generation": null
         }
       }
     },
@@ -2217,10 +2343,12 @@
         "peer_reported_state": "IDLE",
         "held_remote_offer": null,
         "mic_muted": false,
-        "mode": "CONTINUOUS"
+        "mode": "CONTINUOUS",
+        "negotiation_control_generation": 1
       },
       "input": {
-        "kind": "ControlLinkLost"
+        "kind": "ControlLinkLost",
+        "retired_control_generation": 1
       },
       "expect": {
         "actions": [
@@ -2238,7 +2366,8 @@
           "peer_reported_state": "IDLE",
           "held_remote_offer": null,
           "mic_muted": false,
-          "mode": "CONTINUOUS"
+          "mode": "CONTINUOUS",
+          "negotiation_control_generation": null
         }
       }
     },
@@ -2254,10 +2383,12 @@
         "peer_reported_state": "IDLE",
         "held_remote_offer": null,
         "mic_muted": false,
-        "mode": "CONTINUOUS"
+        "mode": "CONTINUOUS",
+        "negotiation_control_generation": null
       },
       "input": {
-        "kind": "ControlLinkLost"
+        "kind": "ControlLinkLost",
+        "retired_control_generation": 1
       },
       "expect": {
         "actions": [],
@@ -2271,7 +2402,634 @@
           "peer_reported_state": "IDLE",
           "held_remote_offer": null,
           "mic_muted": false,
+          "mode": "CONTINUOUS",
+          "negotiation_control_generation": null
+        }
+      }
+    },
+    {
+      "name": "control-link-lost-for-a-predecessor-cannot-retire-the-successors-negotiation",
+      "state": {
+        "role": "ANSWERER",
+        "status": "NEGOTIATING",
+        "voice_session_id": "5e2a9c40b7f13d86e0a4c95b28f7d613",
+        "local_audio_open": true,
+        "remote_description_applied": true,
+        "peer_voice_enabled": false,
+        "peer_reported_state": "IDLE",
+        "held_remote_offer": null,
+        "mic_muted": false,
+        "mode": "CONTINUOUS",
+        "negotiation_control_generation": 2
+      },
+      "input": {
+        "kind": "ControlLinkLost",
+        "retired_control_generation": 1
+      },
+      "expect": {
+        "actions": [
+          {
+            "kind": "RecordDroppedSignal",
+            "reason": "SUPERSEDED_CONTROL_LIFETIME"
+          }
+        ],
+        "state": {
+          "role": "ANSWERER",
+          "status": "NEGOTIATING",
+          "voice_session_id": "5e2a9c40b7f13d86e0a4c95b28f7d613",
+          "local_audio_open": true,
+          "remote_description_applied": true,
+          "peer_voice_enabled": false,
+          "peer_reported_state": "IDLE",
+          "held_remote_offer": null,
+          "mic_muted": false,
+          "mode": "CONTINUOUS",
+          "negotiation_control_generation": 2
+        }
+      }
+    },
+    {
+      "name": "control-link-lost-for-a-long-dead-lifetime-cannot-retire-a-third-generations-negotiation",
+      "state": {
+        "role": "OFFERER",
+        "status": "ACTIVE",
+        "voice_session_id": "5e2a9c40b7f13d86e0a4c95b28f7d613",
+        "local_audio_open": true,
+        "remote_description_applied": false,
+        "peer_voice_enabled": false,
+        "peer_reported_state": "IDLE",
+        "held_remote_offer": null,
+        "mic_muted": false,
+        "mode": "CONTINUOUS",
+        "negotiation_control_generation": 3
+      },
+      "input": {
+        "kind": "ControlLinkLost",
+        "retired_control_generation": 1
+      },
+      "expect": {
+        "actions": [
+          {
+            "kind": "RecordDroppedSignal",
+            "reason": "SUPERSEDED_CONTROL_LIFETIME"
+          }
+        ],
+        "state": {
+          "role": "OFFERER",
+          "status": "ACTIVE",
+          "voice_session_id": "5e2a9c40b7f13d86e0a4c95b28f7d613",
+          "local_audio_open": true,
+          "remote_description_applied": false,
+          "peer_voice_enabled": false,
+          "peer_reported_state": "IDLE",
+          "held_remote_offer": null,
+          "mic_muted": false,
+          "mode": "CONTINUOUS",
+          "negotiation_control_generation": 3
+        }
+      }
+    },
+    {
+      "name": "control-link-lost-for-the-owning-lifetime-still-drops-media-and-keeps-capture",
+      "state": {
+        "role": "ANSWERER",
+        "status": "ACTIVE",
+        "voice_session_id": "5e2a9c40b7f13d86e0a4c95b28f7d613",
+        "local_audio_open": true,
+        "remote_description_applied": false,
+        "peer_voice_enabled": false,
+        "peer_reported_state": "IDLE",
+        "held_remote_offer": null,
+        "mic_muted": false,
+        "mode": "CONTINUOUS",
+        "negotiation_control_generation": 2
+      },
+      "input": {
+        "kind": "ControlLinkLost",
+        "retired_control_generation": 2
+      },
+      "expect": {
+        "actions": [
+          {
+            "kind": "StopMediaTransport"
+          }
+        ],
+        "state": {
+          "role": "ANSWERER",
+          "status": "IDLE",
+          "voice_session_id": null,
+          "local_audio_open": true,
+          "remote_description_applied": false,
+          "peer_voice_enabled": false,
+          "peer_reported_state": "IDLE",
+          "held_remote_offer": null,
+          "mic_muted": false,
+          "mode": "CONTINUOUS",
+          "negotiation_control_generation": null
+        }
+      }
+    },
+    {
+      "name": "control-link-lost-still-retires-a-predecessor-a-successor-never-took-over-from",
+      "state": {
+        "role": "OFFERER",
+        "status": "ACTIVE",
+        "voice_session_id": "5e2a9c40b7f13d86e0a4c95b28f7d613",
+        "local_audio_open": true,
+        "remote_description_applied": false,
+        "peer_voice_enabled": false,
+        "peer_reported_state": "IDLE",
+        "held_remote_offer": null,
+        "mic_muted": false,
+        "mode": "CONTINUOUS",
+        "negotiation_control_generation": 1
+      },
+      "input": {
+        "kind": "ControlLinkLost",
+        "retired_control_generation": 1
+      },
+      "expect": {
+        "actions": [
+          {
+            "kind": "StopMediaTransport"
+          }
+        ],
+        "state": {
+          "role": "OFFERER",
+          "status": "IDLE",
+          "voice_session_id": null,
+          "local_audio_open": true,
+          "remote_description_applied": false,
+          "peer_voice_enabled": false,
+          "peer_reported_state": "IDLE",
+          "held_remote_offer": null,
+          "mic_muted": false,
+          "mode": "CONTINUOUS",
+          "negotiation_control_generation": null
+        }
+      }
+    },
+    {
+      "name": "control-link-lost-for-a-newer-lifetime-still-retires-an-older-owners-negotiation",
+      "state": {
+        "role": "OFFERER",
+        "status": "ACTIVE",
+        "voice_session_id": "5e2a9c40b7f13d86e0a4c95b28f7d613",
+        "local_audio_open": true,
+        "remote_description_applied": false,
+        "peer_voice_enabled": false,
+        "peer_reported_state": "IDLE",
+        "held_remote_offer": null,
+        "mic_muted": false,
+        "mode": "CONTINUOUS",
+        "negotiation_control_generation": 1
+      },
+      "input": {
+        "kind": "ControlLinkLost",
+        "retired_control_generation": 2
+      },
+      "expect": {
+        "actions": [
+          {
+            "kind": "StopMediaTransport"
+          }
+        ],
+        "state": {
+          "role": "OFFERER",
+          "status": "IDLE",
+          "voice_session_id": null,
+          "local_audio_open": true,
+          "remote_description_applied": false,
+          "peer_voice_enabled": false,
+          "peer_reported_state": "IDLE",
+          "held_remote_offer": null,
+          "mic_muted": false,
+          "mode": "CONTINUOUS",
+          "negotiation_control_generation": null
+        }
+      }
+    },
+    {
+      "name": "control-link-lost-naming-no-lifetime-retires-whatever-is-live",
+      "state": {
+        "role": "ANSWERER",
+        "status": "ACTIVE",
+        "voice_session_id": "5e2a9c40b7f13d86e0a4c95b28f7d613",
+        "local_audio_open": true,
+        "remote_description_applied": false,
+        "peer_voice_enabled": false,
+        "peer_reported_state": "IDLE",
+        "held_remote_offer": null,
+        "mic_muted": false,
+        "mode": "CONTINUOUS",
+        "negotiation_control_generation": 3
+      },
+      "input": {
+        "kind": "ControlLinkLost",
+        "retired_control_generation": null
+      },
+      "expect": {
+        "actions": [
+          {
+            "kind": "StopMediaTransport"
+          }
+        ],
+        "state": {
+          "role": "ANSWERER",
+          "status": "IDLE",
+          "voice_session_id": null,
+          "local_audio_open": true,
+          "remote_description_applied": false,
+          "peer_voice_enabled": false,
+          "peer_reported_state": "IDLE",
+          "held_remote_offer": null,
+          "mic_muted": false,
+          "mode": "CONTINUOUS",
+          "negotiation_control_generation": null
+        }
+      }
+    },
+    {
+      "name": "control-link-lost-for-a-predecessor-cannot-discard-the-successors-held-offer",
+      "state": {
+        "role": "ANSWERER",
+        "status": "IDLE",
+        "voice_session_id": null,
+        "local_audio_open": false,
+        "remote_description_applied": false,
+        "peer_voice_enabled": true,
+        "peer_reported_state": "NEGOTIATING",
+        "held_remote_offer": {
+          "voice_session_id": "5e2a9c40b7f13d86e0a4c95b28f7d613",
+          "sdp": "v=0\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\na=mid:0\r\n"
+        },
+        "mic_muted": false,
+        "mode": "CONTINUOUS",
+        "negotiation_control_generation": 2
+      },
+      "input": {
+        "kind": "ControlLinkLost",
+        "retired_control_generation": 1
+      },
+      "expect": {
+        "actions": [
+          {
+            "kind": "RecordDroppedSignal",
+            "reason": "SUPERSEDED_CONTROL_LIFETIME"
+          }
+        ],
+        "state": {
+          "role": "ANSWERER",
+          "status": "IDLE",
+          "voice_session_id": null,
+          "local_audio_open": false,
+          "remote_description_applied": false,
+          "peer_voice_enabled": true,
+          "peer_reported_state": "NEGOTIATING",
+          "held_remote_offer": {
+            "voice_session_id": "5e2a9c40b7f13d86e0a4c95b28f7d613",
+            "sdp": "v=0\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\na=mid:0\r\n"
+          },
+          "mic_muted": false,
+          "mode": "CONTINUOUS",
+          "negotiation_control_generation": 2
+        }
+      }
+    },
+    {
+      "name": "a-successors-offer-taken-up-from-idle-is-owned-by-the-successor",
+      "state": {
+        "role": "ANSWERER",
+        "status": "IDLE",
+        "voice_session_id": null,
+        "local_audio_open": true,
+        "remote_description_applied": false,
+        "peer_voice_enabled": false,
+        "peer_reported_state": "IDLE",
+        "held_remote_offer": null,
+        "mic_muted": false,
+        "mode": "CONTINUOUS",
+        "negotiation_control_generation": null
+      },
+      "input": {
+        "kind": "SignalReceived",
+        "signal": {
+          "kind": "Offer",
+          "voice_session_id": "5e2a9c40b7f13d86e0a4c95b28f7d613",
+          "sdp": "v=0\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\na=mid:0\r\n"
+        },
+        "fresh_voice_session_id": "ffeeddccbbaa99887766554433221100",
+        "control_generation": 2
+      },
+      "expect": {
+        "actions": [
+          {
+            "kind": "ApplyRemoteOffer",
+            "voice_session_id": "5e2a9c40b7f13d86e0a4c95b28f7d613",
+            "sdp": "v=0\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\na=mid:0\r\n"
+          },
+          {
+            "kind": "DrainQueuedCandidates"
+          },
+          {
+            "kind": "CreateAnswer",
+            "voice_session_id": "5e2a9c40b7f13d86e0a4c95b28f7d613"
+          }
+        ],
+        "state": {
+          "role": "ANSWERER",
+          "status": "NEGOTIATING",
+          "voice_session_id": "5e2a9c40b7f13d86e0a4c95b28f7d613",
+          "local_audio_open": true,
+          "remote_description_applied": true,
+          "peer_voice_enabled": true,
+          "peer_reported_state": "NEGOTIATING",
+          "held_remote_offer": null,
+          "mic_muted": false,
+          "mode": "CONTINUOUS",
+          "negotiation_control_generation": 2
+        }
+      }
+    },
+    {
+      "name": "an-answer-arriving-over-a-successors-link-does-not-move-ownership",
+      "state": {
+        "role": "OFFERER",
+        "status": "NEGOTIATING",
+        "voice_session_id": "5e2a9c40b7f13d86e0a4c95b28f7d613",
+        "local_audio_open": true,
+        "remote_description_applied": false,
+        "peer_voice_enabled": false,
+        "peer_reported_state": "IDLE",
+        "held_remote_offer": null,
+        "mic_muted": false,
+        "mode": "CONTINUOUS",
+        "negotiation_control_generation": 1
+      },
+      "input": {
+        "kind": "SignalReceived",
+        "signal": {
+          "kind": "Answer",
+          "voice_session_id": "5e2a9c40b7f13d86e0a4c95b28f7d613",
+          "sdp": "v=0\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\na=mid:0\r\n"
+        },
+        "fresh_voice_session_id": "ffeeddccbbaa99887766554433221100",
+        "control_generation": 2
+      },
+      "expect": {
+        "actions": [
+          {
+            "kind": "ApplyRemoteAnswer",
+            "voice_session_id": "5e2a9c40b7f13d86e0a4c95b28f7d613",
+            "sdp": "v=0\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\na=mid:0\r\n"
+          },
+          {
+            "kind": "DrainQueuedCandidates"
+          },
+          {
+            "kind": "SendVoiceState",
+            "voice_session_id": "5e2a9c40b7f13d86e0a4c95b28f7d613",
+            "state": "connecting",
+            "mic_muted": false,
+            "mode": "CONTINUOUS"
+          }
+        ],
+        "state": {
+          "role": "OFFERER",
+          "status": "CONNECTING",
+          "voice_session_id": "5e2a9c40b7f13d86e0a4c95b28f7d613",
+          "local_audio_open": true,
+          "remote_description_applied": true,
+          "peer_voice_enabled": true,
+          "peer_reported_state": "IDLE",
+          "held_remote_offer": null,
+          "mic_muted": false,
+          "mode": "CONTINUOUS",
+          "negotiation_control_generation": 1
+        }
+      }
+    },
+    {
+      "name": "a-peer-intent-that-begins-a-negotiation-is-owned-by-the-lifetime-that-delivered-it",
+      "state": {
+        "role": "OFFERER",
+        "status": "IDLE",
+        "voice_session_id": null,
+        "local_audio_open": true,
+        "remote_description_applied": false,
+        "peer_voice_enabled": false,
+        "peer_reported_state": "IDLE",
+        "held_remote_offer": null,
+        "mic_muted": false,
+        "mode": "CONTINUOUS",
+        "negotiation_control_generation": null
+      },
+      "input": {
+        "kind": "SignalReceived",
+        "signal": {
+          "kind": "State",
+          "voice_session_id": null,
+          "state": "NEGOTIATING",
+          "mic_muted": false,
           "mode": "CONTINUOUS"
+        },
+        "fresh_voice_session_id": "ffeeddccbbaa99887766554433221100",
+        "control_generation": 2
+      },
+      "expect": {
+        "actions": [
+          {
+            "kind": "SendVoiceState",
+            "voice_session_id": "ffeeddccbbaa99887766554433221100",
+            "state": "negotiating",
+            "mic_muted": false,
+            "mode": "CONTINUOUS"
+          },
+          {
+            "kind": "CreateOffer",
+            "voice_session_id": "ffeeddccbbaa99887766554433221100"
+          }
+        ],
+        "state": {
+          "role": "OFFERER",
+          "status": "NEGOTIATING",
+          "voice_session_id": "ffeeddccbbaa99887766554433221100",
+          "local_audio_open": true,
+          "remote_description_applied": false,
+          "peer_voice_enabled": true,
+          "peer_reported_state": "NEGOTIATING",
+          "held_remote_offer": null,
+          "mic_muted": false,
+          "mode": "CONTINUOUS",
+          "negotiation_control_generation": 2
+        }
+      }
+    },
+    {
+      "name": "start-with-no-authenticated-lifetime-opens-capture-and-starts-no-negotiation",
+      "state": {
+        "role": "OFFERER",
+        "status": "IDLE",
+        "voice_session_id": null,
+        "local_audio_open": false,
+        "remote_description_applied": false,
+        "peer_voice_enabled": false,
+        "peer_reported_state": "IDLE",
+        "held_remote_offer": null,
+        "mic_muted": false,
+        "mode": "CONTINUOUS",
+        "negotiation_control_generation": null
+      },
+      "input": {
+        "kind": "StartRequested",
+        "fresh_voice_session_id": "ffeeddccbbaa99887766554433221100",
+        "control_generation": null
+      },
+      "expect": {
+        "actions": [
+          {
+            "kind": "StartLocalAudio"
+          }
+        ],
+        "state": {
+          "role": "OFFERER",
+          "status": "IDLE",
+          "voice_session_id": null,
+          "local_audio_open": true,
+          "remote_description_applied": false,
+          "peer_voice_enabled": false,
+          "peer_reported_state": "IDLE",
+          "held_remote_offer": null,
+          "mic_muted": false,
+          "mode": "CONTINUOUS",
+          "negotiation_control_generation": null
+        }
+      }
+    },
+    {
+      "name": "an-answerers-start-with-no-authenticated-lifetime-states-no-intent",
+      "state": {
+        "role": "ANSWERER",
+        "status": "IDLE",
+        "voice_session_id": null,
+        "local_audio_open": false,
+        "remote_description_applied": false,
+        "peer_voice_enabled": false,
+        "peer_reported_state": "IDLE",
+        "held_remote_offer": null,
+        "mic_muted": false,
+        "mode": "CONTINUOUS",
+        "negotiation_control_generation": null
+      },
+      "input": {
+        "kind": "StartRequested",
+        "fresh_voice_session_id": "ffeeddccbbaa99887766554433221100",
+        "control_generation": null
+      },
+      "expect": {
+        "actions": [
+          {
+            "kind": "StartLocalAudio"
+          }
+        ],
+        "state": {
+          "role": "ANSWERER",
+          "status": "IDLE",
+          "voice_session_id": null,
+          "local_audio_open": true,
+          "remote_description_applied": false,
+          "peer_voice_enabled": false,
+          "peer_reported_state": "IDLE",
+          "held_remote_offer": null,
+          "mic_muted": false,
+          "mode": "CONTINUOUS",
+          "negotiation_control_generation": null
+        }
+      }
+    },
+    {
+      "name": "the-reconnect-rebuild-starts-the-negotiation-the-gap-press-could-not",
+      "state": {
+        "role": "OFFERER",
+        "status": "IDLE",
+        "voice_session_id": null,
+        "local_audio_open": true,
+        "remote_description_applied": false,
+        "peer_voice_enabled": false,
+        "peer_reported_state": "IDLE",
+        "held_remote_offer": null,
+        "mic_muted": false,
+        "mode": "CONTINUOUS",
+        "negotiation_control_generation": null
+      },
+      "input": {
+        "kind": "StartRequested",
+        "fresh_voice_session_id": "ffeeddccbbaa99887766554433221100",
+        "control_generation": 2
+      },
+      "expect": {
+        "actions": [
+          {
+            "kind": "SendVoiceState",
+            "voice_session_id": "ffeeddccbbaa99887766554433221100",
+            "state": "negotiating",
+            "mic_muted": false,
+            "mode": "CONTINUOUS"
+          },
+          {
+            "kind": "CreateOffer",
+            "voice_session_id": "ffeeddccbbaa99887766554433221100"
+          }
+        ],
+        "state": {
+          "role": "OFFERER",
+          "status": "NEGOTIATING",
+          "voice_session_id": "ffeeddccbbaa99887766554433221100",
+          "local_audio_open": true,
+          "remote_description_applied": false,
+          "peer_voice_enabled": false,
+          "peer_reported_state": "IDLE",
+          "held_remote_offer": null,
+          "mic_muted": false,
+          "mode": "CONTINUOUS",
+          "negotiation_control_generation": 2
+        }
+      }
+    },
+    {
+      "name": "a-start-under-a-newer-lifetime-does-not-re-own-a-live-negotiation",
+      "state": {
+        "role": "OFFERER",
+        "status": "NEGOTIATING",
+        "voice_session_id": "5e2a9c40b7f13d86e0a4c95b28f7d613",
+        "local_audio_open": true,
+        "remote_description_applied": false,
+        "peer_voice_enabled": false,
+        "peer_reported_state": "IDLE",
+        "held_remote_offer": null,
+        "mic_muted": false,
+        "mode": "CONTINUOUS",
+        "negotiation_control_generation": 1
+      },
+      "input": {
+        "kind": "StartRequested",
+        "fresh_voice_session_id": "ffeeddccbbaa99887766554433221100",
+        "control_generation": 2
+      },
+      "expect": {
+        "actions": [],
+        "state": {
+          "role": "OFFERER",
+          "status": "NEGOTIATING",
+          "voice_session_id": "5e2a9c40b7f13d86e0a4c95b28f7d613",
+          "local_audio_open": true,
+          "remote_description_applied": false,
+          "peer_voice_enabled": false,
+          "peer_reported_state": "IDLE",
+          "held_remote_offer": null,
+          "mic_muted": false,
+          "mode": "CONTINUOUS",
+          "negotiation_control_generation": 1
         }
       }
     },
@@ -2287,7 +3045,8 @@
         "peer_reported_state": "IDLE",
         "held_remote_offer": null,
         "mic_muted": false,
-        "mode": "CONTINUOUS"
+        "mode": "CONTINUOUS",
+        "negotiation_control_generation": 1
       },
       "input": {
         "kind": "NegotiationSendFailed",
@@ -2309,7 +3068,8 @@
           "peer_reported_state": "IDLE",
           "held_remote_offer": null,
           "mic_muted": false,
-          "mode": "CONTINUOUS"
+          "mode": "CONTINUOUS",
+          "negotiation_control_generation": null
         }
       }
     },
@@ -2325,7 +3085,8 @@
         "peer_reported_state": "IDLE",
         "held_remote_offer": null,
         "mic_muted": false,
-        "mode": "CONTINUOUS"
+        "mode": "CONTINUOUS",
+        "negotiation_control_generation": 1
       },
       "input": {
         "kind": "NegotiationSendFailed",
@@ -2347,7 +3108,8 @@
           "peer_reported_state": "IDLE",
           "held_remote_offer": null,
           "mic_muted": false,
-          "mode": "CONTINUOUS"
+          "mode": "CONTINUOUS",
+          "negotiation_control_generation": null
         }
       }
     },
@@ -2363,7 +3125,8 @@
         "peer_reported_state": "IDLE",
         "held_remote_offer": null,
         "mic_muted": false,
-        "mode": "CONTINUOUS"
+        "mode": "CONTINUOUS",
+        "negotiation_control_generation": 1
       },
       "input": {
         "kind": "NegotiationSendFailed",
@@ -2386,7 +3149,8 @@
           "peer_reported_state": "IDLE",
           "held_remote_offer": null,
           "mic_muted": false,
-          "mode": "CONTINUOUS"
+          "mode": "CONTINUOUS",
+          "negotiation_control_generation": 1
         }
       }
     },
@@ -2402,7 +3166,8 @@
         "peer_reported_state": "IDLE",
         "held_remote_offer": null,
         "mic_muted": false,
-        "mode": "CONTINUOUS"
+        "mode": "CONTINUOUS",
+        "negotiation_control_generation": null
       },
       "input": {
         "kind": "NegotiationSendFailed",
@@ -2425,7 +3190,8 @@
           "peer_reported_state": "IDLE",
           "held_remote_offer": null,
           "mic_muted": false,
-          "mode": "CONTINUOUS"
+          "mode": "CONTINUOUS",
+          "negotiation_control_generation": null
         }
       }
     },
@@ -2441,7 +3207,8 @@
         "peer_reported_state": "IDLE",
         "held_remote_offer": null,
         "mic_muted": false,
-        "mode": "CONTINUOUS"
+        "mode": "CONTINUOUS",
+        "negotiation_control_generation": 1
       },
       "input": {
         "kind": "SignalReceived",
@@ -2452,7 +3219,8 @@
           "state": "CLOSED",
           "mic_muted": false,
           "mode": "CONTINUOUS"
-        }
+        },
+        "control_generation": 1
       },
       "expect": {
         "actions": [
@@ -2470,7 +3238,8 @@
           "peer_reported_state": "CLOSED",
           "held_remote_offer": null,
           "mic_muted": false,
-          "mode": "CONTINUOUS"
+          "mode": "CONTINUOUS",
+          "negotiation_control_generation": null
         }
       }
     },
@@ -2486,7 +3255,8 @@
         "peer_reported_state": "IDLE",
         "held_remote_offer": null,
         "mic_muted": false,
-        "mode": "CONTINUOUS"
+        "mode": "CONTINUOUS",
+        "negotiation_control_generation": 1
       },
       "input": {
         "kind": "SignalReceived",
@@ -2497,7 +3267,8 @@
           "state": "FAILED",
           "mic_muted": false,
           "mode": "CONTINUOUS"
-        }
+        },
+        "control_generation": 1
       },
       "expect": {
         "actions": [
@@ -2515,7 +3286,8 @@
           "peer_reported_state": "FAILED",
           "held_remote_offer": null,
           "mic_muted": false,
-          "mode": "CONTINUOUS"
+          "mode": "CONTINUOUS",
+          "negotiation_control_generation": null
         }
       }
     },
@@ -2531,7 +3303,8 @@
         "peer_reported_state": "IDLE",
         "held_remote_offer": null,
         "mic_muted": false,
-        "mode": "CONTINUOUS"
+        "mode": "CONTINUOUS",
+        "negotiation_control_generation": 1
       },
       "input": {
         "kind": "SignalReceived",
@@ -2542,7 +3315,8 @@
           "state": "CLOSED",
           "mic_muted": false,
           "mode": "CONTINUOUS"
-        }
+        },
+        "control_generation": 1
       },
       "expect": {
         "actions": [
@@ -2561,7 +3335,8 @@
           "peer_reported_state": "IDLE",
           "held_remote_offer": null,
           "mic_muted": false,
-          "mode": "CONTINUOUS"
+          "mode": "CONTINUOUS",
+          "negotiation_control_generation": 1
         }
       }
     },
@@ -2577,7 +3352,8 @@
         "peer_reported_state": "IDLE",
         "held_remote_offer": null,
         "mic_muted": false,
-        "mode": "CONTINUOUS"
+        "mode": "CONTINUOUS",
+        "negotiation_control_generation": null
       },
       "input": {
         "kind": "SignalReceived",
@@ -2588,7 +3364,8 @@
           "state": "IDLE",
           "mic_muted": false,
           "mode": "CONTINUOUS"
-        }
+        },
+        "control_generation": 1
       },
       "expect": {
         "actions": [],
@@ -2602,7 +3379,8 @@
           "peer_reported_state": "IDLE",
           "held_remote_offer": null,
           "mic_muted": false,
-          "mode": "CONTINUOUS"
+          "mode": "CONTINUOUS",
+          "negotiation_control_generation": null
         }
       }
     },
@@ -2618,7 +3396,8 @@
         "peer_reported_state": "IDLE",
         "held_remote_offer": null,
         "mic_muted": false,
-        "mode": "CONTINUOUS"
+        "mode": "CONTINUOUS",
+        "negotiation_control_generation": 1
       },
       "input": {
         "kind": "SignalReceived",
@@ -2629,7 +3408,8 @@
           "state": "ACTIVE",
           "mic_muted": false,
           "mode": "CONTINUOUS"
-        }
+        },
+        "control_generation": 1
       },
       "expect": {
         "actions": [],
@@ -2643,7 +3423,8 @@
           "peer_reported_state": "ACTIVE",
           "held_remote_offer": null,
           "mic_muted": false,
-          "mode": "CONTINUOUS"
+          "mode": "CONTINUOUS",
+          "negotiation_control_generation": 1
         }
       }
     },
@@ -2659,7 +3440,8 @@
         "peer_reported_state": "IDLE",
         "held_remote_offer": null,
         "mic_muted": false,
-        "mode": "CONTINUOUS"
+        "mode": "CONTINUOUS",
+        "negotiation_control_generation": 1
       },
       "input": {
         "kind": "SignalReceived",
@@ -2670,7 +3452,8 @@
           "state": "UNKNOWN",
           "mic_muted": false,
           "mode": "UNKNOWN"
-        }
+        },
+        "control_generation": 1
       },
       "expect": {
         "actions": [],
@@ -2684,7 +3467,8 @@
           "peer_reported_state": "UNKNOWN",
           "held_remote_offer": null,
           "mic_muted": false,
-          "mode": "CONTINUOUS"
+          "mode": "CONTINUOUS",
+          "negotiation_control_generation": 1
         }
       }
     }

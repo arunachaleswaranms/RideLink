@@ -71,6 +71,18 @@ sealed class ControlEvent {
         val remotePeerId: PeerId,
         val sessionId: SessionId,
         val isLocalLeader: Boolean,
+        /**
+         * **The authentication generation this activation allocated** — the same number
+         * [ControlSessionManager.activateAuthenticatedSession] binds to the connection, emitted from
+         * the one statement that mints it (STATUS §4 problem 61, ADR-020 Amendment A8).
+         *
+         * The counterpart of [LinkLost.retiredAuthGeneration], and it exists for the same reason:
+         * this event is consumed asynchronously, so a handler that wants to say "the lifetime that
+         * has just authenticated" must be *told* which one rather than re-reading whatever is live
+         * by the time it runs. `SessionCoordinator.attachVoice` carries it into PROTOCOL §7.8's
+         * reconnect rebuild, where it becomes the owning lifetime of the rebuilt negotiation.
+         */
+        val authGeneration: Long,
     ) : ControlEvent()
 
     /**
@@ -663,7 +675,14 @@ class ControlSessionManager(
         // frame read off it is authorised by this record for as long as that frame exists.
         authenticatedConnection = AuthenticatedConnection(pending.socket, authenticationGeneration)
         _diagnostics.update { it.copy(controlState = ControlState.CONNECTED) }
-        _events.tryEmit(ControlEvent.Connected(pending.remotePeerId, pending.sessionId, pending.isLocalLeader))
+        _events.tryEmit(
+            ControlEvent.Connected(
+                pending.remotePeerId,
+                pending.sessionId,
+                pending.isLocalLeader,
+                authenticationGeneration,
+            ),
+        )
         clockSyncJob = scope.launch { clockSyncLoop(pending.socket) }
     }
 

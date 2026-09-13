@@ -594,7 +594,13 @@ public final class SessionCoordinator {
     /// the point: "is voice allowed?" is answered by whether the object exists.
     public func startIntercom() {
         guard case .allowed = evaluateIntercomStart(), let voice else { return }
-        Task { await voice.start() }
+        // The live generation, read **now**, for an input that happens now: a local press carries no
+        // frame whose provenance could be preserved instead, and "which lifetime is authenticated at
+        // the moment the user taps" is exactly the lifetime that will carry its offer. Nil in the gap
+        // between two links, which records consent and starts no negotiation — see
+        // `VoiceInput.startRequested`'s `controlGeneration` (STATUS §4 problem 61).
+        let generation = controlSessionManager.liveAuthenticatedGeneration()
+        Task { await voice.start(controlGeneration: generation) }
     }
 
     public func endIntercom() {
@@ -642,12 +648,16 @@ public final class SessionCoordinator {
     /// Idempotent across a reconnect: `.connected` fires again after `.reconnectSucceeded`, and the
     /// existing controller is the right one to keep — it still holds the open capture device for this
     /// ride segment, which a fresh one would have to reopen.
-    private func attachVoice(isLocalLeader: Bool) {
+    private func attachVoice(isLocalLeader: Bool, authGeneration: Int64) {
         if let voice {
             // A reconnect. If the user had consented to voice, rebuild the media transport as a fresh
             // negotiation (PROTOCOL §7.8); `start()` is idempotent when voice is already live.
+            //
+            // `authGeneration` is the one **this event** named, never a live re-read: the successor it
+            // rebuilds under is the lifetime that emitted this `.connected`, and it becomes the owner
+            // of the rebuilt negotiation (STATUS §4 problem 61).
             if voiceDiagnostics.localAudioOpen {
-                Task { await voice.start() }
+                Task { await voice.start(controlGeneration: authGeneration) }
             }
             return
         }
@@ -811,8 +821,8 @@ public final class SessionCoordinator {
             // only the user can tell those apart.
             securityAlert = code
             logger.warn("SessionCoordinator", "handshake refused: \(code)")
-        case .connected(_, _, let isLocalLeader):
-            attachVoice(isLocalLeader: isLocalLeader)
+        case .connected(_, _, let isLocalLeader, let authGeneration):
+            attachVoice(isLocalLeader: isLocalLeader, authGeneration: authGeneration)
             // PROTOCOL §4.4 names `CONNECTED` as one of the two moments an `AUDIO_STATE` is sent
             // regardless of whether anything changed: a peer that has just connected has never seen any
             // of our state, so "nothing changed" is not a reason to stay silent.

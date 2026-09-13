@@ -719,11 +719,11 @@ class SyncPlaybackTwoPeerTest {
             follower.session.setClock(SessionClockEstimate(offsetToLeaderUs = OFFSET_US, rttP95Us = 8_000, ready = true))
             leader.session.emit(
                 com.ridelink.network.control.ControlEvent
-                    .Connected(follower.localPeerId, SESSION_ID, true),
+                    .Connected(follower.localPeerId, SESSION_ID, true, 1L),
             )
             follower.session.emit(
                 com.ridelink.network.control.ControlEvent
-                    .Connected(leader.localPeerId, SESSION_ID, false),
+                    .Connected(leader.localPeerId, SESSION_ID, false, 1L),
             )
             scope.runCurrent()
             clearPlayers()
@@ -783,11 +783,11 @@ class SyncPlaybackTwoPeerTest {
             follower.session.currentAuthGeneration = generation
             leader.session.emit(
                 com.ridelink.network.control.ControlEvent
-                    .Connected(follower.localPeerId, SESSION_ID, true),
+                    .Connected(follower.localPeerId, SESSION_ID, true, generation),
             )
             follower.session.emit(
                 com.ridelink.network.control.ControlEvent
-                    .Connected(leader.localPeerId, SESSION_ID, false),
+                    .Connected(leader.localPeerId, SESSION_ID, false, generation),
             )
             scope.runCurrent()
         }

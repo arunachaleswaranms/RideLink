@@ -79,7 +79,9 @@ final class PairingSessionOrderingTests: XCTestCase {
             // has moved on: with the consumer cancelled and the channel finished, this must be
             // silently dropped, exactly as `OrderedEventChannelTests
             // .testSendAfterFinishIsADroppedNoOp` proves for the channel alone.
-            a.sendDirectly(.connected(remotePeerId: PeerId("0000000000000099"), sessionId: SessionId("stale"), isLocalLeader: true))
+            a.sendDirectly(.connected(
+                remotePeerId: PeerId("0000000000000099"), sessionId: SessionId("stale"), isLocalLeader: true,
+                authGeneration: 1))
             try await Task.sleep(nanoseconds: 200_000_000)
 
             XCTAssertEqual(a.status, statusBefore, "a stale post-teardown event must not move the FSM")

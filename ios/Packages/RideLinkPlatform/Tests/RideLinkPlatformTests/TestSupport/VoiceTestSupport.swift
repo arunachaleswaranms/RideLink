@@ -70,6 +70,11 @@ extension VoiceController {
     func onControlLinkLost() {
         onControlLinkLost(retiredControlGeneration: testControlGenerationA)
     }
+
+    /// `testControlGenerationA` is the lifetime this start is authorised by (STATUS §4 problem 61).
+    func start() {
+        start(controlGeneration: testControlGenerationA)
+    }
 }
 
 /// A `VoiceEngine` with no WebRTC in it: it records what it was asked to do and emits whatever a test

@@ -93,6 +93,32 @@ data class VoiceNegotiationState(
     val heldRemoteOffer: HeldRemoteOffer? = null,
     val micMuted: Boolean = false,
     val mode: VoiceMode = VoiceMode.CONTINUOUS,
+    /**
+     * **The authenticated control generation that owns the negotiation state this value holds**, or
+     * null when it holds none (STATUS §4 problem 61, ADR-020 Amendment A8).
+     *
+     * "Negotiation state" is precisely a live [status] or a [heldRemoteOffer]; those two are mutually
+     * exclusive by construction, because every branch that goes live requires [localAudioOpen] and
+     * every branch that holds an offer requires it to be false, so one field names the owner of
+     * whichever exists.
+     *
+     * It exists because [VoiceInput.ControlLinkLost] is delivered **asynchronously**, and
+     * [VoiceInputMailbox]'s identity rule reaches only as far as *queued* work. Once a successor
+     * lifetime's offer has been reduced, the negotiation it created is ordinary state with nothing on
+     * it to say whose it is — so a predecessor's boundary, arriving later, returned it to [IDLE] and
+     * wedged voice for the ride segment.
+     *
+     * Ownership is **established**, never inferred: it is set only by the transitions that actually
+     * create negotiation state, always to the generation carried by the very input that created it.
+     * That a newer generation *admitted* something transfers nothing — admission is not application,
+     * and a successor's offer refused by [VoiceSignalDropReason.GENERATION_MISMATCH] leaves the
+     * predecessor the owner, exactly so its own boundary can still retire it.
+     *
+     * A third identity, and never to be conflated with the other two: `voice_session_id` owns one
+     * WebRTC negotiation, [VoiceInput.SignalReceived.controlGeneration] owns the frame that admitted
+     * a signal, and this owns the control lifetime a negotiation belongs to.
+     */
+    val negotiationControlGeneration: Long? = null,
 )
 
 /** What the driver is asked to do. Every payload is a plain primitive (see [VoiceSignal]'s note). */
@@ -226,6 +252,17 @@ enum class VoiceSignalDropReason {
      * instants it can be caught at, and only the mailbox needs to tell them apart.
      */
     RETIRED_CONTROL_LIFETIME,
+
+    /**
+     * A [VoiceInput.ControlLinkLost] naming a control lifetime **older** than the one that owns the
+     * negotiation this side is holding (STATUS §4 problem 61, ADR-020 Amendment A8).
+     *
+     * Not a signal, like [INPUT_MAILBOX_OVERFLOW] is not — but recorded through the same counter for
+     * the same reason: a preserved successor is a fact about the ride ("a predecessor's boundary
+     * arrived late and was correctly ignored"), and a silent no-op would make the one case this
+     * amendment exists for the only one with no evidence that it happened.
+     */
+    SUPERSEDED_CONTROL_LIFETIME,
 }
 
 /** What drives the table. [VoiceInput.freshVoiceSessionId] exists because the table is pure. */
@@ -240,6 +277,28 @@ sealed class VoiceInput {
      */
     data class StartRequested(
         val freshVoiceSessionId: VoiceSessionId,
+        /**
+         * **The authenticated control generation this press is authorised by**, supplied by the
+         * caller from `ControlSessionManager` — `ControlEvent.Connected.authGeneration` for
+         * PROTOCOL §7.8's reconnect rebuild, and the live generation for a user's tap (STATUS §4
+         * problem 61).
+         *
+         * Reading the live generation for a *local* press is correct and is not ADR-025's defect:
+         * there is no frame here whose provenance could be discarded, and "which lifetime is
+         * authenticated right now" is exactly the question a press asks. The defect is re-reading a
+         * live generation to label a frame that was already read, which this is not.
+         *
+         * **Null means no control lifetime is authenticated**, which a user can reach by pressing
+         * Start in the gap between one link dying and the ladder restoring the next. A negotiation
+         * needs a link to negotiate over and an owner to be retired by, and there is neither — so
+         * this records the user's consent (opening capture, which ARCHITECTURE §6.4 requires be done
+         * while foreground-visible and is the whole reason the press must not simply be refused) and
+         * starts **no** negotiation. `SessionCoordinator.attachVoice` then rebuilds it under the
+         * successor's generation the moment one authenticates, because it starts voice for any
+         * segment whose capture is already open. The alternative — a negotiation owned by a lifetime
+         * that does not exist — is the one thing no boundary could ever retire.
+         */
+        val controlGeneration: Long?,
     ) : VoiceInput()
 
     /** This user pressed End Voice, or the session is entering `ENDING` (ARCHITECTURE §3 rule 3). */
@@ -404,34 +463,45 @@ object VoiceNegotiation {
         input: VoiceInput,
     ): VoiceOutcome =
         when (input) {
-            is VoiceInput.StartRequested -> start(state, input.freshVoiceSessionId)
+            is VoiceInput.StartRequested -> start(state, input.freshVoiceSessionId, input.controlGeneration)
             VoiceInput.StopRequested -> stop(state)
             is VoiceInput.MuteRequested -> mute(state, input.muted)
             is VoiceInput.ModeSelected -> modeSelected(state, input.mode)
-            // `controlGeneration` is deliberately not read: it is a control-lifetime identity, and
-            // this table decides negotiations. `VoiceInputMailbox` is where it is used.
-            is VoiceInput.SignalReceived -> signal(state, input.signal, input.freshVoiceSessionId)
+            // `controlGeneration` decides **ownership** and nothing else: which control lifetime a
+            // negotiation this signal *establishes* belongs to (STATUS §4 problem 61). It still
+            // decides no negotiation — `VoiceInputMailbox` remains the only place it gates admission.
+            is VoiceInput.SignalReceived ->
+                signal(state, input.signal, input.freshVoiceSessionId, input.controlGeneration)
             is VoiceInput.LocalOfferCreated -> localOfferCreated(state, input.voiceSessionId, input.sdp)
             is VoiceInput.LocalAnswerCreated -> localAnswerCreated(state, input.voiceSessionId, input.sdp)
             is VoiceInput.LocalCandidateGathered -> localCandidateGathered(state, input)
             is VoiceInput.RemoteTrackChanged -> remoteTrackChanged(state, input)
             is VoiceInput.MediaConnectivityChanged -> connectivity(state, input)
-            is VoiceInput.ControlLinkLost -> controlLinkLost(state)
+            is VoiceInput.ControlLinkLost -> controlLinkLost(state, input.retiredControlGeneration)
             is VoiceInput.NegotiationSendFailed -> negotiationSendFailed(state, input.voiceSessionId)
         }
 
     // --- local user actions -------------------------------------------------------------------
 
+    @Suppress("ReturnCount") // one early-out per guard, in the order they have to be asked
     private fun start(
         state: VoiceNegotiationState,
         fresh: VoiceSessionId,
+        owner: Long?,
     ): VoiceOutcome {
         // Idempotent: pressing Start Voice twice, or a reconnect rebuild racing a manual start,
-        // must not produce a second negotiation.
+        // must not produce a second negotiation. The owner is deliberately **not** refreshed here:
+        // the negotiation that is already live was established by whichever lifetime established it,
+        // and a later press observing a newer one does not move it (STATUS §4 problem 61).
         if (state.status.isNegotiationLive) return VoiceOutcome(state, emptyList())
 
         val actions = mutableListOf<VoiceAction>()
         if (!state.localAudioOpen) actions += VoiceAction.StartLocalAudio
+
+        // No authenticated control lifetime: consent, and only consent. See
+        // [VoiceInput.StartRequested.controlGeneration] for why this is not a refusal and not a
+        // negotiation owned by nobody.
+        if (owner == null) return VoiceOutcome(state.copy(localAudioOpen = true), actions)
 
         return when (state.role) {
             VoiceRole.OFFERER -> {
@@ -444,6 +514,7 @@ object VoiceNegotiation {
                         localAudioOpen = true,
                         remoteDescriptionApplied = false,
                         heldRemoteOffer = null,
+                        negotiationControlGeneration = owner,
                     ),
                     actions,
                 )
@@ -464,6 +535,10 @@ object VoiceNegotiation {
                             localAudioOpen = true,
                             remoteDescriptionApplied = true,
                             heldRemoteOffer = null,
+                            // The **press's** lifetime, not the held offer's: the answer this
+                            // produces goes out on the link that is authenticated now, and it is
+                            // that link's loss which must be able to retire it.
+                            negotiationControlGeneration = owner,
                         ),
                         actions,
                     )
@@ -477,6 +552,7 @@ object VoiceNegotiation {
                             voiceSessionId = null,
                             localAudioOpen = true,
                             remoteDescriptionApplied = false,
+                            negotiationControlGeneration = owner,
                         ),
                         actions,
                     )
@@ -542,9 +618,52 @@ object VoiceNegotiation {
 
     // --- control-plane lifecycle --------------------------------------------------------------
 
-    private fun controlLinkLost(state: VoiceNegotiationState): VoiceOutcome {
+    /**
+     * PROTOCOL §7.8, scoped to the lifetime that actually ended (STATUS §4 problem 61, ADR-020
+     * Amendment A8).
+     *
+     * > A control-lifetime boundary may retire only negotiation state **owned by that lifetime**. It
+     * > may never retire state that has already transferred to a successor.
+     *
+     * The whole rule is one comparison, and it is deliberately expressed as "is the lifetime that
+     * ended **older** than the owner" rather than "is it a different one":
+     *
+     * - `owner > retired` — a *predecessor's* boundary, delivered after the successor's work was
+     *   already reduced. This is problem 61 itself. Preserved, and recorded rather than silent.
+     * - `owner == retired` — the ordinary case, and PROTOCOL §7.8 unchanged. Torn down.
+     * - `owner < retired` — a *newer* lifetime ended while an older one still owns the negotiation.
+     *   The owner's lifetime must therefore already be over:
+     *   `ControlSessionManager` holds one authenticated connection at a time and allocates a strictly
+     *   greater generation for each, so the existence of a newer lifetime **proves** the older one
+     *   ended (the same fact `VoiceInputMailbox.newestAdmittedControlGeneration` rests on). Torn
+     *   down — which is what stops a lost or never-emitted predecessor boundary stranding a dead
+     *   negotiation forever, the exact wedge that made the naïve "suppress a superseded boundary"
+     *   fix strictly worse than the defect.
+     * - `owner == null` — there is negotiation state but nothing owns it. Unreachable by
+     *   construction (every establishing transition sets an owner, and `start` with no lifetime
+     *   establishes nothing), and torn down rather than trusted: an un-retirable negotiation is the
+     *   one outcome with no way out of it.
+     * - `retired == null` — **no lifetime ended at all.** Its two producers are a connection that
+     *   died before it authenticated and the mailbox-overflow degrade, and the second is why this
+     *   must tear down unconditionally: the degrade is a local safety valve that has to work
+     *   whoever owns what.
+     *
+     * Note what is *not* consulted: nothing live, nothing about arrival order, and nothing about
+     * what the mailbox has admitted. Admission is not application — a successor's offer refused by
+     * `offerReceived`'s `GENERATION_MISMATCH` leaves the predecessor the owner, and the predecessor's
+     * own boundary then correctly retires it.
+     */
+    @Suppress("ReturnCount") // nothing-to-retire, not-ours, retire -- in that order and no other
+    private fun controlLinkLost(
+        state: VoiceNegotiationState,
+        retired: Long?,
+    ): VoiceOutcome {
         if (state.status == VoiceStatus.IDLE && state.voiceSessionId == null && state.heldRemoteOffer == null) {
             return VoiceOutcome(state, emptyList())
+        }
+        val owner = state.negotiationControlGeneration
+        if (owner != null && retired != null && owner > retired) {
+            return dropped(state, VoiceSignalDropReason.SUPERSEDED_CONTROL_LIFETIME)
         }
         // Media goes; the capture device does not (ARCHITECTURE §6.3/§6.4 — see localAudioOpen).
         // No VOICE_STATE is sent: there is no link to send it on. And nothing is retried here —
@@ -701,18 +820,24 @@ private fun signal(
     state: VoiceNegotiationState,
     signal: VoiceSignal,
     fresh: VoiceSessionId,
+    owner: Long,
 ): VoiceOutcome =
     when (signal) {
-        is VoiceSignal.Offer -> offerReceived(state, signal)
+        // Only the two branches that can *establish* negotiation state are given the owner.
+        // `answerReceived` and `candidateReceived` advance a negotiation that already exists and
+        // therefore already has one, and moving it because a successor's link carried a later frame
+        // would be inferring ownership rather than establishing it (STATUS §4 problem 61).
+        is VoiceSignal.Offer -> offerReceived(state, signal, owner)
         is VoiceSignal.Answer -> answerReceived(state, signal)
         is VoiceSignal.IceCandidate -> candidateReceived(state, signal)
-        is VoiceSignal.State -> peerStateReceived(state, signal, fresh)
+        is VoiceSignal.State -> peerStateReceived(state, signal, fresh, owner)
     }
 
 @Suppress("ReturnCount") // one early-out per PROTOCOL §7.4 receiver rule, in spec order
 private fun offerReceived(
     state: VoiceNegotiationState,
     offer: VoiceSignal.Offer,
+    owner: Long,
 ): VoiceOutcome {
     // §7.3: only the answerer may receive an offer. An offerer receiving one has met a peer
     // that disagrees about leadership — the same condition §4.1 calls leader_mismatch.
@@ -734,7 +859,12 @@ private fun offerReceived(
     // held and the UI offers to start; consent then answers it from `start()`.
     if (!state.localAudioOpen) {
         return VoiceOutcome(
-            withPeer.copy(heldRemoteOffer = HeldRemoteOffer(id, offer.sdp)),
+            withPeer.copy(
+                heldRemoteOffer = HeldRemoteOffer(id, offer.sdp),
+                // A held offer is negotiation state too — it is what a later consent answers — so it
+                // is owned by the lifetime that delivered it and retired with that lifetime.
+                negotiationControlGeneration = owner,
+            ),
             listOf(VoiceAction.SurfacePeerVoiceRequest),
         )
     }
@@ -745,6 +875,7 @@ private fun offerReceived(
             voiceSessionId = id,
             remoteDescriptionApplied = true,
             heldRemoteOffer = null,
+            negotiationControlGeneration = owner,
         ),
         listOf(
             VoiceAction.ApplyRemoteOffer(id, offer.sdp),
@@ -807,6 +938,7 @@ private fun peerStateReceived(
     state: VoiceNegotiationState,
     peer: VoiceSignal.State,
     fresh: VoiceSessionId,
+    owner: Long,
 ): VoiceOutcome {
     // A peer state naming a generation that is not ours is not about our session. `null` is
     // legal and carries no generation claim, so it is never a mismatch (§7.4).
@@ -817,7 +949,7 @@ private fun peerStateReceived(
     return when (peer.state) {
         VoiceWireState.CLOSED -> teardownFromPeer(observed, VoiceStatus.IDLE)
         VoiceWireState.FAILED -> teardownFromPeer(observed, VoiceStatus.FAILED)
-        VoiceWireState.NEGOTIATING -> peerWantsVoice(observed, fresh)
+        VoiceWireState.NEGOTIATING -> peerWantsVoice(observed, fresh, owner)
         VoiceWireState.IDLE -> VoiceOutcome(observed.copy(peerVoiceEnabled = false), emptyList())
         // Informational. §7.4 requires an unrecognised value to be tolerated as `unknown`
         // rather than treated as malformed, so it lands here alongside the known ones.
@@ -863,6 +995,7 @@ private fun teardownFromPeer(
 private fun peerWantsVoice(
     state: VoiceNegotiationState,
     fresh: VoiceSessionId,
+    owner: Long,
 ): VoiceOutcome {
     val withPeer = state.copy(peerVoiceEnabled = true)
     if (state.status.isNegotiationLive) return VoiceOutcome(withPeer, emptyList())
@@ -876,6 +1009,7 @@ private fun peerWantsVoice(
             voiceSessionId = fresh,
             remoteDescriptionApplied = false,
             heldRemoteOffer = null,
+            negotiationControlGeneration = owner,
         ),
         listOf(
             VoiceAction.SendVoiceState(fresh, VoiceWireState.NEGOTIATING, state.micMuted, state.mode),

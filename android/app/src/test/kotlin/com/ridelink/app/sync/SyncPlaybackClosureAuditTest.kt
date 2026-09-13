@@ -85,6 +85,7 @@ class SyncPlaybackClosureAuditTest {
                 if (asLeader) SyncTestValues.followerPeerId else SyncTestValues.leaderPeerId,
                 SessionId("S"),
                 asLeader,
+                1L,
             ),
         )
         scope.runCurrent()

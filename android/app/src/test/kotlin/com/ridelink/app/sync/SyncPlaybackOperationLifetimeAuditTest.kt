@@ -436,7 +436,7 @@ class SyncPlaybackOperationLifetimeAuditTest {
         session.setClock(SessionClockEstimate(offsetToLeaderUs = 0, rttP95Us = 8_000, ready = true))
         session.rttP95Us = LONG_LEAD_RTT_US
         session.currentAuthGeneration = generation
-        session.emit(ControlEvent.Connected(SyncTestValues.leaderPeerId, SessionId("S$generation"), true))
+        session.emit(ControlEvent.Connected(SyncTestValues.leaderPeerId, SessionId("S$generation"), true, generation))
         scope.runCurrent()
         for (hash in listOf(HASH_A, HASH_X, HASH_Y, HASH_Z)) {
             content.localHashes.add(hash.value)
@@ -492,7 +492,7 @@ class SyncPlaybackOperationLifetimeAuditTest {
         scope.runCurrent()
         session.currentAuthGeneration = generation
         session.rttP95Us = 8_000
-        session.emit(ControlEvent.Connected(SyncTestValues.leaderPeerId, SessionId("S$generation"), true))
+        session.emit(ControlEvent.Connected(SyncTestValues.leaderPeerId, SessionId("S$generation"), true, generation))
         scope.runCurrent()
     }
 

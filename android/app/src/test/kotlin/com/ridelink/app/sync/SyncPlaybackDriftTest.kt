@@ -61,7 +61,7 @@ class SyncPlaybackDriftTest {
     private suspend fun startPlaying(scope: TestScope) {
         scope.runCurrent()
         session.setClock(SessionClockEstimate(offsetToLeaderUs = 0, rttP95Us = 8_000, ready = true))
-        session.emit(ControlEvent.Connected(SyncTestValues.leaderPeerId, SessionId("S"), false))
+        session.emit(ControlEvent.Connected(SyncTestValues.leaderPeerId, SessionId("S"), false, 1L))
         scope.runCurrent()
         content.localHashes.add(SyncTestValues.hash(1).value)
         session.deliver(

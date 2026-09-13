@@ -67,6 +67,9 @@ fun VoiceController.submit(signal: VoiceSignal) = submit(signal, TEST_CONTROL_GE
 /** [TEST_CONTROL_GENERATION_A] is the lifetime that ended. */
 fun VoiceController.onControlLinkLost() = onControlLinkLost(TEST_CONTROL_GENERATION_A)
 
+/** [TEST_CONTROL_GENERATION_A] is the lifetime this start is authorised by (STATUS §4 problem 61). */
+fun VoiceController.start() = start(TEST_CONTROL_GENERATION_A)
+
 fun VoiceSignal.kindName(): String =
     when (this) {
         is VoiceSignal.Offer -> "Offer"

@@ -382,7 +382,7 @@ class SessionCoordinatorAudioStateLifetimeTest {
         sink.submit(message)
     }
 
-    private fun connected() = ControlEvent.Connected(REMOTE_PEER_ID, SessionId("test-session"), isLocalLeader = true)
+    private fun connected() = ControlEvent.Connected(REMOTE_PEER_ID, SessionId("test-session"), isLocalLeader = true, authGeneration = 1L)
 
     private fun peerMessage(
         revision: Long,

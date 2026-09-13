@@ -260,7 +260,12 @@ class SessionCoordinator(
      * ARCHITECTURE §6.4 requires the service to be up **before** the capture path opens.
      */
     fun startIntercom() {
-        voice?.start()
+        // The live generation, read **now**, for an input that happens now: a local press carries no
+        // frame whose provenance could be preserved instead, and "which lifetime is authenticated at
+        // the moment the user taps" is exactly the lifetime that will carry its offer. Null in the
+        // gap between two links, which records consent and starts no negotiation — see
+        // `VoiceInput.StartRequested.controlGeneration` (STATUS §4 problem 61).
+        voice?.start(controlSessionManager.liveAuthenticatedGeneration)
     }
 
     fun endIntercom() {
@@ -643,7 +648,7 @@ class SessionCoordinator(
                 logger.warn("SessionCoordinator", "handshake refused: ${event.code}")
             }
             is ControlEvent.Connected -> {
-                attachVoice(event.isLocalLeader)
+                attachVoice(event.isLocalLeader, event.authGeneration)
                 // PROTOCOL §4.4 names `CONNECTED` as one of the two moments an `AUDIO_STATE` is sent
                 // regardless of whether anything changed: a peer that has just connected has never
                 // seen any of our state, so "nothing changed" is not a reason to stay silent.
@@ -680,11 +685,18 @@ class SessionCoordinator(
      * `ReconnectSucceeded`, and the existing controller is the right one to keep — it still holds the
      * open capture device for this ride segment, which a fresh one would have to reopen.
      */
-    private fun attachVoice(isLocalLeader: Boolean) {
+    private fun attachVoice(
+        isLocalLeader: Boolean,
+        authGeneration: Long,
+    ) {
         if (voice != null) {
             // A reconnect. If the user had consented to voice, rebuild the media transport as a fresh
             // negotiation (PROTOCOL §7.8); `start()` is idempotent when voice is already live.
-            if (_voiceDiagnostics.value.localAudioOpen) voice?.start()
+            //
+            // [authGeneration] is the one **this event** named, never a live re-read: the successor
+            // it rebuilds under is the lifetime that emitted this `Connected`, and it becomes the
+            // owner of the rebuilt negotiation (STATUS §4 problem 61).
+            if (_voiceDiagnostics.value.localAudioOpen) voice?.start(authGeneration)
             return
         }
         val controller = buildVoiceController(isLocalLeader)

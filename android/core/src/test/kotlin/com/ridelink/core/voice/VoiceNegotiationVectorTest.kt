@@ -12,6 +12,7 @@ import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.long
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
@@ -110,6 +111,83 @@ class VoiceNegotiationVectorTest {
         }
     }
 
+    /**
+     * **Every value that holds negotiation state names the lifetime that owns it, and every value
+     * that holds none names nobody** (STATUS §4 problem 61, ADR-020 Amendment A8).
+     *
+     * Run over the resulting state of every row, this is what turns the generator's "a row that does
+     * not say otherwise is about one control lifetime" from a convenience into a checked invariant.
+     * A negotiation with no owner would be un-retirable by any boundary that names one; an owner
+     * left behind on a state that holds nothing would let a later boundary be judged against a
+     * negotiation that no longer exists.
+     *
+     * "Holds negotiation state" is spelled out rather than read off [VoiceStatus.isNegotiationLive],
+     * because the two come apart in both directions: an answerer's intent-to-talk is live with no
+     * `voice_session_id` (§7.3), and a peer's `failed` leaves a [VoiceStatus.FAILED] owning nothing.
+     */
+    @Test
+    fun `negotiation state and its owning control lifetime are present together or not at all`() {
+        for (element in doc["rows"]!!.jsonArray) {
+            val row = element.jsonObject
+            val outcome = VoiceNegotiation.reduce(state(row["state"]!!.jsonObject), input(row["input"]!!.jsonObject))
+            val after = outcome.state
+            val holdsNegotiation =
+                after.status.isNegotiationLive || after.voiceSessionId != null || after.heldRemoteOffer != null
+            assertEquals(
+                holdsNegotiation,
+                after.negotiationControlGeneration != null,
+                "row ${row.string("name")} holds negotiation state = $holdsNegotiation but names owner " +
+                    "${after.negotiationControlGeneration}; resulting state = $after",
+            )
+        }
+    }
+
+    /**
+     * The ownership rule as a property over every role and status rather than the seven rows that
+     * name it: **a boundary older than the owner is inert, and every other boundary tears down.**
+     *
+     * The `owner < retired` half is the one worth stating twice. A boundary naming a *newer*
+     * lifetime than the owner must still tear down, because `ControlSessionManager` authenticates
+     * one connection at a time and allocates strictly increasing generations — so a newer lifetime
+     * having existed proves the owner's already ended. Making that case inert instead is exactly the
+     * "suppress a superseded boundary" fix that was implemented and rejected: it leaves a dead
+     * lifetime's negotiation standing, which then refuses every offer the successor sends.
+     */
+    @Test
+    fun `only a boundary older than the owner is inert`() {
+        val owner = 5L
+        for (role in VoiceRole.entries) {
+            for (status in VoiceStatus.entries) {
+                val before =
+                    VoiceNegotiationState(
+                        role = role,
+                        status = status,
+                        voiceSessionId = if (status == VoiceStatus.IDLE) null else VoiceSessionId(VSID_A),
+                        localAudioOpen = true,
+                        negotiationControlGeneration = if (status == VoiceStatus.IDLE) null else owner,
+                    )
+                // Nothing to tear down at all: the pre-existing no-op, whoever the boundary names.
+                if (status == VoiceStatus.IDLE) continue
+
+                val superseded = VoiceNegotiation.reduce(before, VoiceInput.ControlLinkLost(owner - 1))
+                assertEquals(before, superseded.state, "$role/$status: a predecessor's boundary changed state")
+                assertTrue(
+                    superseded.actions.none { it is VoiceAction.StopMediaTransport },
+                    "$role/$status: a predecessor's boundary stopped the successor's media",
+                )
+
+                for (retired in listOf(owner, owner + 1, null)) {
+                    val outcome = VoiceNegotiation.reduce(before, VoiceInput.ControlLinkLost(retired))
+                    assertTrue(
+                        outcome.actions.any { it is VoiceAction.StopMediaTransport },
+                        "$role/$status: a boundary naming $retired failed to retire an owner of $owner",
+                    )
+                    assertEquals(null, outcome.state.negotiationControlGeneration, "$role/$status: owner survived")
+                }
+            }
+        }
+    }
+
     /** PROTOCOL §7.3, exhaustively: an answerer never authors an offer, from any status. */
     @Test
     fun `an answerer never offers, from any status`() {
@@ -123,7 +201,7 @@ class VoiceNegotiationVectorTest {
                 )
             val inputs =
                 listOf(
-                    VoiceInput.StartRequested(VoiceSessionId(VSID_FRESH)),
+                    VoiceInput.StartRequested(VoiceSessionId(VSID_FRESH), VECTOR_CONTROL_GENERATION),
                     VoiceInput.SignalReceived(
                         VoiceSignal.State(null, VoiceWireState.NEGOTIATING, false, VoiceMode.CONTINUOUS),
                         VECTOR_CONTROL_GENERATION,
@@ -160,9 +238,9 @@ class VoiceNegotiationVectorTest {
             )
         val orders =
             listOf(
-                listOf(VoiceInput.StartRequested(fresh), peerIntent),
-                listOf(peerIntent, VoiceInput.StartRequested(fresh)),
-                listOf(peerIntent, peerIntent, VoiceInput.StartRequested(fresh), peerIntent),
+                listOf(VoiceInput.StartRequested(fresh, VECTOR_CONTROL_GENERATION), peerIntent),
+                listOf(peerIntent, VoiceInput.StartRequested(fresh, VECTOR_CONTROL_GENERATION)),
+                listOf(peerIntent, peerIntent, VoiceInput.StartRequested(fresh, VECTOR_CONTROL_GENERATION), peerIntent),
             )
         for (order in orders) {
             var state = VoiceNegotiationState(role = VoiceRole.OFFERER, localAudioOpen = true)
@@ -194,17 +272,25 @@ class VoiceNegotiationVectorTest {
                 },
             micMuted = spec.bool("mic_muted"),
             mode = VoiceMode.valueOf(spec.string("mode")),
+            negotiationControlGeneration = spec.requiredNullableLong("negotiation_control_generation"),
         )
 
     private fun input(spec: JsonObject): VoiceInput =
         when (val kind = spec.string("kind")) {
-            "StartRequested" -> VoiceInput.StartRequested(VoiceSessionId(spec.string("fresh_voice_session_id")))
+            "StartRequested" ->
+                VoiceInput.StartRequested(
+                    VoiceSessionId(spec.string("fresh_voice_session_id")),
+                    spec.requiredNullableLong("control_generation"),
+                )
             "StopRequested" -> VoiceInput.StopRequested
-            // The vectors pin the **reducer**, which reads neither of the two provenance fields the
-            // mailbox added in ADR-020 Amendment A7 (STATUS §4 problem 60). A constant is therefore
-            // the honest encoding: the vector files are unchanged, and that is itself the assertion
-            // that control-lifetime identity is a receiver-local concern and not a wire one.
-            "ControlLinkLost" -> VoiceInput.ControlLinkLost(VECTOR_CONTROL_GENERATION)
+            // Read from the file, never defaulted here. ADR-020 Amendment A7 could encode these as a
+            // constant because the reducer ignored them; Amendment A8 made the control lifetime part
+            // of what the table decides, so the vectors now carry it and a row that omits it fails
+            // rather than quietly meaning "the only lifetime there is".
+            //
+            // This is still **not** a wire field: `requiredNullableLong` reads receiver-local
+            // provenance out of a receiver-local table. Nothing here is serialised to a peer.
+            "ControlLinkLost" -> VoiceInput.ControlLinkLost(spec.requiredNullableLong("retired_control_generation"))
             "NegotiationSendFailed" ->
                 VoiceInput.NegotiationSendFailed(spec.nullableString("voice_session_id")?.let { VoiceSessionId(it) })
             "MuteRequested" -> VoiceInput.MuteRequested(spec.bool("muted"))
@@ -212,7 +298,7 @@ class VoiceNegotiationVectorTest {
             "SignalReceived" ->
                 VoiceInput.SignalReceived(
                     signal(spec["signal"]!!.jsonObject),
-                    VECTOR_CONTROL_GENERATION,
+                    spec.requiredLong("control_generation"),
                     VoiceSessionId(spec.string("fresh_voice_session_id")),
                 )
             "LocalOfferCreated" ->
@@ -319,6 +405,21 @@ class VoiceNegotiationVectorTest {
 
     private fun JsonObject.int(key: String): Int = this[key]!!.jsonPrimitive.intOrNull!!
 
+    /**
+     * A control generation that must be **present** and may be null — the distinction the ownership
+     * rows turn on, since null is a meaning ("no lifetime") rather than an omission.
+     *
+     * A missing key is an error rather than a null, so a future row that forgets to say which
+     * lifetime it is about fails the build instead of silently asserting the wrong thing.
+     */
+    private fun JsonObject.requiredNullableLong(key: String): Long? {
+        val element = this[key] ?: error("vector row is missing the required key '$key'")
+        return if (element is JsonNull) null else element.jsonPrimitive.long
+    }
+
+    private fun JsonObject.requiredLong(key: String): Long =
+        requireNotNull(requiredNullableLong(key)) { "vector row's '$key' may not be null" }
+
     private companion object {
         /**
          * A control authentication generation is receiver-local provenance the reducer never reads,
@@ -336,7 +437,7 @@ class VoiceNegotiationVectorTest {
         val GENERATION_GUARD_REASONS =
             setOf(VoiceSignalDropReason.GENERATION_MISMATCH, VoiceSignalDropReason.STALE_ENGINE_CALLBACK)
 
-        const val EXPECTED_MINIMUM_ROWS = 59
+        const val EXPECTED_MINIMUM_ROWS = 73
         const val VSID_A = "5e2a9c40b7f13d86e0a4c95b28f7d613"
         const val VSID_FRESH = "ffeeddccbbaa99887766554433221100"
     }

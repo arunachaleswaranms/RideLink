@@ -54,7 +54,16 @@ public enum ControlEvent: Sendable {
     /// (PROTOCOL §4.5), and for a peer whose stored pin matched, only after `.peerTrusted`. It is
     /// emitted from exactly one place — `activateAuthenticatedSession` — and never from the
     /// handshake or from candidate promotion.
-    case connected(remotePeerId: PeerId, sessionId: SessionId, isLocalLeader: Bool)
+    ///
+    /// `authGeneration` is **the authentication generation this activation allocated** — the same
+    /// number `activateAuthenticatedSession` binds to the connection, emitted from the one statement
+    /// that mints it (STATUS §4 problem 61, ADR-020 Amendment A8). The counterpart of
+    /// `.linkLost`'s `retiredAuthGeneration`, and it exists for the same reason: this event is
+    /// consumed asynchronously, so a handler that wants to say "the lifetime that has just
+    /// authenticated" must be *told* which one rather than re-reading whatever is live by the time it
+    /// runs. `SessionCoordinator.attachVoice` carries it into PROTOCOL §7.8's reconnect rebuild,
+    /// where it becomes the owning lifetime of the rebuilt negotiation.
+    case connected(remotePeerId: PeerId, sessionId: SessionId, isLocalLeader: Bool, authGeneration: Int64)
     /// The peer's presented SPKI matched the stored pin, so the trust gate passed with no user
     /// action at all (PROTOCOL §4.1 "silent connect"). Raised only on the **surviving** connection
     /// and always immediately before `.connected` — it is what carries `PAIRING -> CONNECTING` for
@@ -663,7 +672,10 @@ public actor ControlSessionManager {
             connection: pending.socket, generation: authenticationGeneration)
         updateDiagnostics { $0.controlState = .connected }
         emit(.connected(
-            remotePeerId: pending.remotePeerId, sessionId: pending.sessionId, isLocalLeader: pending.isLocalLeader))
+            remotePeerId: pending.remotePeerId,
+            sessionId: pending.sessionId,
+            isLocalLeader: pending.isLocalLeader,
+            authGeneration: authenticationGeneration))
         clockSyncTask = Task { await self.clockSyncLoop(socket: pending.socket) }
     }
 

@@ -61,7 +61,9 @@ class SessionGateVectorTest {
 
     private fun controlEvent(spec: JsonObject): ControlEvent =
         when (val kind = spec.string("kind")) {
-            "Connected" -> ControlEvent.Connected(REMOTE, SessionId("s"), isLocalLeader = true)
+            // `SessionGate` decides on the event's *kind*, never on which lifetime raised it, so any
+            // generation is faithful here — the trust gate is not a lifetime-ownership question.
+            "Connected" -> ControlEvent.Connected(REMOTE, SessionId("s"), isLocalLeader = true, authGeneration = 1L)
             "PeerTrusted" -> ControlEvent.PeerTrusted(REMOTE)
             "PairingRequired" -> ControlEvent.PairingRequired(REMOTE)
             "PairingSucceeded" -> ControlEvent.PairingSucceeded(PEER)

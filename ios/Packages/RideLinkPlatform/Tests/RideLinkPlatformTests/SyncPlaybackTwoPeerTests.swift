@@ -401,7 +401,7 @@ final class SyncPlaybackTwoPeerTests: XCTestCase {
 
     private static func isLocalLeader(_ session: FsmSession) -> Bool? {
         for event in session.events {
-            if case .connected(_, _, let isLocalLeader) = event { return isLocalLeader }
+            if case .connected(_, _, let isLocalLeader, _) = event { return isLocalLeader }
         }
         return nil
     }
