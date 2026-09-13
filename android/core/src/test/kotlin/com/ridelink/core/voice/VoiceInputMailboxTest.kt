@@ -119,11 +119,76 @@ class VoiceInputMailboxTest {
         mailbox.offer(VoiceInput.ControlLinkLost)
 
         assertEquals(VoiceInput.ControlLinkLost, mailbox.poll(), "local teardown outranks even a terminal peer state")
-        assertEquals(closed, mailbox.poll())
+        // `closed` is **not** polled next any more: it is a peer signal, and the control lifetime
+        // that admitted it ended when `ControlLinkLost` was offered (STATUS §4 problem 50). The
+        // local inputs behind it are untouched and still come back in lane order.
+        assertEquals(1, mailbox.discardedRetiredSignalCount)
         assertEquals(VoiceInput.StartRequested(GEN_1), mailbox.poll())
         assertEquals(VoiceInput.LocalCandidateGathered(GEN_1, CANDIDATE, null, 0), mailbox.poll())
         assertEquals(VoiceInput.MuteRequested(true), mailbox.poll())
         assertEquals(null, mailbox.poll())
+        assertTrue(closed is VoiceInput.SignalReceived)
+    }
+
+    /**
+     * STATUS §4 problem 50, at the layer that owns it. A `ControlLinkLost` ends the lifetime that
+     * admitted every queued peer signal, and it outranks all of them — so it discards them rather
+     * than letting the reducer see them after it has reset itself to `IDLE`.
+     */
+    @Test
+    fun `ControlLinkLost discards every queued peer signal and no local input`() {
+        val mailbox = VoiceInputMailbox()
+        val offer = VoiceInput.SignalReceived(VoiceSignal.Offer(GEN_1, "sdp"), GEN_1)
+        val answer = VoiceInput.SignalReceived(VoiceSignal.Answer(GEN_1, "sdp"), GEN_1)
+        val remoteIce = VoiceInput.SignalReceived(VoiceSignal.IceCandidate(GEN_1, CANDIDATE, null, 0), GEN_1)
+        val peerState =
+            VoiceInput.SignalReceived(VoiceSignal.State(GEN_1, VoiceWireState.NEGOTIATING, false, VoiceMode.CONTINUOUS), GEN_1)
+        val terminal =
+            VoiceInput.SignalReceived(VoiceSignal.State(GEN_1, VoiceWireState.CLOSED, false, VoiceMode.CONTINUOUS), GEN_1)
+        listOf(offer, answer, remoteIce, peerState, terminal).forEach { mailbox.offer(it) }
+        // ...alongside local work in every lane a peer signal can also occupy.
+        mailbox.offer(VoiceInput.StartRequested(GEN_1))
+        mailbox.offer(VoiceInput.LocalCandidateGathered(GEN_1, CANDIDATE, null, 0))
+        mailbox.offer(VoiceInput.MuteRequested(true))
+        mailbox.offer(VoiceInput.ModeSelected(VoiceMode.PTT))
+
+        mailbox.offer(VoiceInput.ControlLinkLost)
+
+        assertEquals(5, mailbox.discardedRetiredSignalCount, "every queued peer signal is discarded, and counted")
+        val drained = generateSequence { mailbox.poll() }.toList()
+        assertTrue(
+            drained.none { it is VoiceInput.SignalReceived },
+            "no peer signal may survive the lifetime that admitted it; drained=$drained",
+        )
+        assertEquals(
+            listOf(
+                VoiceInput.ControlLinkLost,
+                VoiceInput.StartRequested(GEN_1),
+                VoiceInput.LocalCandidateGathered(GEN_1, CANDIDATE, null, 0),
+                VoiceInput.MuteRequested(true),
+                VoiceInput.ModeSelected(VoiceMode.PTT),
+            ),
+            drained,
+            "local intent and engine callbacks are not the retired peer's to withdraw",
+        )
+    }
+
+    /**
+     * The deliberate asymmetry. `StopRequested` shares the teardown lane but is **not** a control
+     * lifetime boundary — the link is still up when a user presses End Voice — so it discards
+     * nothing, and a peer signal that arrived before the press is still delivered.
+     */
+    @Test
+    fun `StopRequested shares the teardown lane but discards nothing`() {
+        val mailbox = VoiceInputMailbox()
+        val offer = VoiceInput.SignalReceived(VoiceSignal.Offer(GEN_1, "sdp"), GEN_1)
+        mailbox.offer(offer)
+
+        mailbox.offer(VoiceInput.StopRequested)
+
+        assertEquals(0, mailbox.discardedRetiredSignalCount)
+        assertEquals(VoiceInput.StopRequested, mailbox.poll())
+        assertEquals(offer, mailbox.poll(), "a local stop does not end the control lifetime")
     }
 
     @Test

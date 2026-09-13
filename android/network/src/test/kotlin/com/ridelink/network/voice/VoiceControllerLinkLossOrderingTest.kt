@@ -1,0 +1,372 @@
+package com.ridelink.network.voice
+
+import com.ridelink.core.protocol.VoiceMode
+import com.ridelink.core.protocol.VoiceSessionId
+import com.ridelink.core.protocol.VoiceSignal
+import com.ridelink.core.protocol.VoiceWireState
+import com.ridelink.core.voice.VoiceEngineEvent
+import com.ridelink.core.voice.VoiceStatus
+import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlin.coroutines.CoroutineContext
+import kotlin.test.Test
+import kotlin.test.assertEquals
+import kotlin.test.assertFalse
+import kotlin.test.assertTrue
+
+/**
+ * STATUS §4 problem 50 — semantic `VOICE_*` work that was admitted by one control lifetime, and is
+ * still queued when that lifetime ends.
+ *
+ * This is **not** ADR-025 frame provenance. Every frame here was read while its control generation
+ * was genuinely live, and `VoiceSignalRelay` was right to admit it. The question this file settles
+ * is the one that comes *after* admission: once `ControlLinkLost` has been applied, may semantic
+ * work that the retired lifetime queued still **begin or advance** a voice negotiation?
+ *
+ * The interleaving is reachable because [VoiceController.offer] is non-blocking and its consumer is
+ * a suspending coroutine: a `VOICE_*` frame can be queued while the consumer is mid-effect, the
+ * control link can drop immediately after, and [com.ridelink.core.voice.VoiceInputMailbox] then
+ * quite deliberately drains `TEARDOWN` **first**. [ManualDispatcher] makes that ordering exact
+ * rather than a race a fast machine wins either way.
+ */
+class VoiceControllerLinkLossOrderingTest {
+    /**
+     * P50-A — a remote `VOICE_OFFER` queued before the link is lost.
+     *
+     * The answerer is the side that may legally receive an offer, so it is the side where this
+     * matters. After `ControlLinkLost` has stopped the media transport, the stale offer must not
+     * rebuild the peer connection or answer a peer that is no longer reachable.
+     */
+    @Test
+    fun `a VOICE_OFFER queued before ControlLinkLost cannot begin a negotiation after it`() =
+        withControllerManual(isLocalLeader = false) { answerer, fakes, dispatcher ->
+            answerer.start()
+            dispatcher.runAll()
+            assertTrue(answerer.diagnostics.value.localAudioOpen, "the answerer's capture must be open for this to be the real case")
+
+            // Admitted while the control lifetime was genuinely live (ADR-025 is satisfied), but
+            // not yet drained by the consumer.
+            answerer.submit(VoiceSignal.Offer(genAt(OFFER_ID), SDP))
+            // ...and now that lifetime ends. TEARDOWN outranks CRITICAL, so this applies first.
+            answerer.onControlLinkLost()
+            dispatcher.runAll()
+
+            val calls = fakes.engine.calls.toList()
+            val stopAt = calls.indexOf("stop")
+            assertTrue(stopAt >= 0, "ControlLinkLost must have stopped the media transport; calls=$calls")
+            val afterTeardown = calls.drop(stopAt + 1)
+
+            assertFalse(
+                afterTeardown.any { it.startsWith("start(") },
+                "a retired lifetime's offer must not rebuild the peer connection; after stop=$afterTeardown",
+            )
+            assertFalse(
+                afterTeardown.contains("applyRemote(OFFER)"),
+                "a retired lifetime's offer must not be applied; after stop=$afterTeardown",
+            )
+            assertFalse(
+                afterTeardown.contains("createAnswer"),
+                "a retired lifetime's offer must not be answered; after stop=$afterTeardown",
+            )
+            assertEquals(
+                VoiceStatus.IDLE,
+                answerer.diagnostics.value.status,
+                "the controller must not believe it is negotiating with a peer it has no link to",
+            )
+            assertTrue(
+                fakes.transport.sent.none { it is VoiceSignal.Answer },
+                "no answer may be produced for a retired lifetime's offer",
+            )
+        }
+
+    /**
+     * P50-E — the same question for the coalesced lane. A peer `VOICE_STATE { negotiating }` is
+     * §7.3's intent-to-talk, and on the **offerer** it starts a whole negotiation of its own. It
+     * drains below `TEARDOWN` exactly as the offer does.
+     */
+    @Test
+    fun `a peer negotiating intent queued before ControlLinkLost cannot start a negotiation after it`() =
+        withControllerManual(isLocalLeader = true) { offerer, fakes, dispatcher ->
+            offerer.start()
+            dispatcher.runAll()
+            assertTrue(offerer.diagnostics.value.localAudioOpen)
+            val beforeStarts = fakes.engine.calls.count { it.startsWith("start(") }
+
+            offerer.submit(VoiceSignal.State(null, VoiceWireState.NEGOTIATING, false, VoiceMode.CONTINUOUS))
+            offerer.onControlLinkLost()
+            dispatcher.runAll()
+
+            val calls = fakes.engine.calls.toList()
+            val stopAt = calls.indexOf("stop")
+            assertTrue(stopAt >= 0, "ControlLinkLost must have stopped the media transport; calls=$calls")
+            val afterTeardown = calls.drop(stopAt + 1)
+
+            assertFalse(
+                afterTeardown.any { it.startsWith("start(") },
+                "a retired lifetime's peer intent must not rebuild the peer connection; after stop=$afterTeardown",
+            )
+            assertFalse(
+                afterTeardown.contains("createOffer"),
+                "a retired lifetime's peer intent must not create an offer; after stop=$afterTeardown",
+            )
+            assertEquals(
+                VoiceStatus.IDLE,
+                offerer.diagnostics.value.status,
+                "the controller must not believe it is negotiating with a peer it has no link to",
+            )
+            assertTrue(beforeStarts >= 0)
+        }
+
+    /**
+     * P50-B — the answer lane, which the existing generation guard already covers. Kept as a
+     * regression so a future change to the offer rule cannot quietly weaken this one: an answer
+     * names a generation, and after teardown there is no generation for it to name.
+     */
+    @Test
+    fun `a VOICE_ANSWER queued before ControlLinkLost cannot advance a retired negotiation`() =
+        withControllerManual(isLocalLeader = true) { offerer, fakes, dispatcher ->
+            offerer.start()
+            dispatcher.runAll()
+            assertEquals(VoiceStatus.NEGOTIATING, offerer.diagnostics.value.status)
+            // The harness's first fresh id is the one `start()` installed as the live generation.
+            val liveId = genAt(1)
+
+            offerer.submit(VoiceSignal.Answer(liveId, SDP))
+            offerer.onControlLinkLost()
+            dispatcher.runAll()
+
+            val calls = fakes.engine.calls.toList()
+            val afterTeardown = calls.drop(calls.indexOf("stop") + 1)
+            assertFalse(
+                afterTeardown.contains("applyRemote(ANSWER)"),
+                "a retired lifetime's answer must not be applied; after stop=$afterTeardown",
+            )
+            assertEquals(VoiceStatus.IDLE, offerer.diagnostics.value.status)
+        }
+
+    /** P50-C — the ICE lane. The existing `voiceSessionId` guard is claimed to make this inert. */
+    @Test
+    fun `a VOICE_ICE queued before ControlLinkLost cannot reach the engine after it`() =
+        withControllerManual(isLocalLeader = true) { offerer, fakes, dispatcher ->
+            offerer.start()
+            dispatcher.runAll()
+            val liveId = genAt(1)
+
+            offerer.submit(VoiceSignal.IceCandidate(liveId, "candidate:1 typ host", null, 0))
+            offerer.onControlLinkLost()
+            dispatcher.runAll()
+
+            val calls = fakes.engine.calls.toList()
+            val afterTeardown = calls.drop(calls.indexOf("stop") + 1)
+            assertFalse(
+                afterTeardown.any { it.startsWith("addRemoteCandidate") },
+                "a retired lifetime's candidate must not reach the engine; after stop=$afterTeardown",
+            )
+        }
+
+    /** P50-D — a terminal peer state around the boundary must not resurrect or mis-tear anything. */
+    @Test
+    fun `a terminal VOICE_STATE queued before ControlLinkLost leaves the controller idle`() =
+        withControllerManual(isLocalLeader = true) { offerer, fakes, dispatcher ->
+            offerer.start()
+            dispatcher.runAll()
+            val liveId = genAt(1)
+
+            offerer.submit(VoiceSignal.State(liveId, VoiceWireState.CLOSED, false, VoiceMode.CONTINUOUS))
+            offerer.onControlLinkLost()
+            dispatcher.runAll()
+
+            assertEquals(VoiceStatus.IDLE, offerer.diagnostics.value.status)
+            val calls = fakes.engine.calls.toList()
+            val afterTeardown = calls.drop(calls.indexOf("stop") + 1)
+            assertFalse(
+                afterTeardown.any { it.startsWith("start(") },
+                "nothing may rebuild the peer connection after teardown; after stop=$afterTeardown",
+            )
+        }
+
+    /**
+     * The other half of the invariant, and the one that stops the fix from being "refuse everything":
+     * a genuinely fresh offer, arriving after the control link is back, is still answered normally.
+     */
+    @Test
+    fun `a fresh VOICE_OFFER after the link is restored is still answered`() =
+        withControllerManual(isLocalLeader = false) { answerer, fakes, dispatcher ->
+            answerer.start()
+            dispatcher.runAll()
+            answerer.submit(VoiceSignal.Offer(genAt(OFFER_ID), SDP))
+            answerer.onControlLinkLost()
+            dispatcher.runAll()
+            val openedBefore = fakes.audio.openCaptureCount
+            val closedBefore = fakes.audio.closeCaptureCount
+
+            // PROTOCOL §7.8: the control ladder reconnected and voice is rebuilt.
+            answerer.start()
+            dispatcher.runAll()
+            answerer.submit(VoiceSignal.Offer(genAt(OFFER_ID + 1), SDP))
+            dispatcher.runAll()
+
+            assertTrue(
+                fakes.engine.calls.contains("applyRemote(OFFER)"),
+                "a fresh offer after reconnect must still be applied; calls=${fakes.engine.calls}",
+            )
+            assertTrue(fakes.engine.calls.contains("createAnswer"), "a fresh offer after reconnect must still be answered")
+            assertEquals(
+                openedBefore,
+                fakes.audio.openCaptureCount,
+                "an ordinary control-link blip must not reopen the capture device (ARCHITECTURE §6.3/§6.4)",
+            )
+            assertEquals(
+                closedBefore,
+                fakes.audio.closeCaptureCount,
+                "an ordinary control-link blip must not close the capture device (ARCHITECTURE §6.3/§6.4)",
+            )
+        }
+
+    /**
+     * A second, distinct defect found while tracing problem 50, and it needs **no scheduling race
+     * at all** — see STATUS §4 problem 56.
+     *
+     * `VoiceController.perform` discards the `Boolean` that `VoiceSignalTransport.send` returns. So
+     * an offer created while the control link is down is "sent" into a `null` writer, the send
+     * silently fails, and the table still advances to `NEGOTIATING`. `VoiceNegotiation.start` is
+     * idempotent against a live negotiation — deliberately, so two Start presses make one offer —
+     * so when `SessionCoordinator.attachVoice` rebuilds voice on the reconnect, its `start()` is a
+     * **no-op**. The peer never sees an offer, its own `negotiating` intent hits the same
+     * idempotence on the way back, and voice is wedged for the rest of the ride segment.
+     */
+    @Test
+    fun `an offer that could not be sent does not wedge voice for the rest of the segment`() =
+        withControllerManual(isLocalLeader = true) { offerer, fakes, dispatcher ->
+            offerer.start()
+            dispatcher.runAll()
+            fakes.engine.emit(VoiceEngineEvent.OfferCreated(genAt(1), SDP))
+            dispatcher.runAll()
+            assertTrue(fakes.transport.sent.any { it is VoiceSignal.Offer }, "the healthy case must really send an offer")
+
+            offerer.onControlLinkLost()
+            dispatcher.runAll()
+
+            // The link is down: `VoiceSignalRelay.send` finds no authenticated writer and returns
+            // false. The user presses Start Voice again while the ladder is still reconnecting.
+            fakes.transport.accept = false
+            offerer.start()
+            dispatcher.runAll()
+            fakes.engine.emit(VoiceEngineEvent.OfferCreated(genAt(2), SDP))
+            dispatcher.runAll()
+
+            // The ladder reconnects. `attachVoice` rebuilds voice as a fresh negotiation (§7.8).
+            fakes.transport.accept = true
+            val offersBefore = fakes.transport.sent.count { it is VoiceSignal.Offer }
+            offerer.start()
+            dispatcher.runAll()
+            fakes.engine.emit(VoiceEngineEvent.OfferCreated(genAt(3), SDP))
+            dispatcher.runAll()
+
+            assertTrue(
+                fakes.transport.sent.count { it is VoiceSignal.Offer } > offersBefore,
+                "after a reconnect the rebuild must put a new offer on the wire; sent=${fakes.transport.sent.map { it.kindName() }}",
+            )
+        }
+
+    /**
+     * Problem 55 reached the other way — the interleaving that first exposed it. A user presses
+     * Start Voice at the moment the link drops, so `StartRequested` and `ControlLinkLost` are queued
+     * together and the teardown lane applies the link loss first. `controlLinkLost` is a no-op from
+     * `IDLE`, so the Start then builds a negotiation belonging to a lifetime that has already gone,
+     * with a transport that can no longer carry its offer.
+     */
+    @Test
+    fun `a Start pressed as the link drops still leaves voice rebuildable after reconnect`() =
+        withControllerManual(isLocalLeader = true) { offerer, fakes, dispatcher ->
+            // The link is already gone by the time either of these is applied.
+            fakes.transport.accept = false
+            offerer.start()
+            offerer.onControlLinkLost()
+            dispatcher.runAll()
+            fakes.engine.emit(VoiceEngineEvent.OfferCreated(genAt(1), SDP))
+            dispatcher.runAll()
+
+            fakes.transport.accept = true
+            val offersBefore = fakes.transport.sent.count { it is VoiceSignal.Offer }
+            offerer.start()
+            dispatcher.runAll()
+            fakes.engine.emit(VoiceEngineEvent.OfferCreated(genAt(2), SDP))
+            dispatcher.runAll()
+
+            assertTrue(
+                fakes.transport.sent.count { it is VoiceSignal.Offer } > offersBefore,
+                "after a reconnect the rebuild must put a new offer on the wire; sent=${fakes.transport.sent.map { it.kindName() }}",
+            )
+            assertTrue(
+                fakes.audio.closeCaptureCount == 0,
+                "no part of this degrade may close the capture device (ARCHITECTURE §6.3/§6.4)",
+            )
+        }
+
+    // --- harness ---------------------------------------------------------------------------------
+
+    private class ManualDispatcher : CoroutineDispatcher() {
+        private val tasks = ArrayDeque<Runnable>()
+
+        override fun dispatch(
+            context: CoroutineContext,
+            block: Runnable,
+        ) {
+            synchronized(tasks) { tasks.addLast(block) }
+        }
+
+        fun runAll() {
+            while (true) {
+                val next = synchronized(tasks) { if (tasks.isEmpty()) null else tasks.removeFirst() }
+                next?.run() ?: break
+            }
+        }
+    }
+
+    private class Fakes(
+        val engine: FakeVoiceEngine,
+        val audio: FakeVoiceAudioSession,
+        val transport: RecordingVoiceTransport,
+    )
+
+    private fun withControllerManual(
+        isLocalLeader: Boolean,
+        body: (VoiceController, Fakes, ManualDispatcher) -> Unit,
+    ) {
+        val dispatcher = ManualDispatcher()
+        val scope = CoroutineScope(SupervisorJob() + dispatcher)
+        val engine = FakeVoiceEngine()
+        val audio = FakeVoiceAudioSession()
+        val transport = RecordingVoiceTransport()
+        val freshIds =
+            java.util.concurrent.atomic
+                .AtomicInteger(0)
+        val controller =
+            VoiceController(
+                scope = scope,
+                engine = engine,
+                audioSession = audio,
+                transport = transport,
+                isLocalLeader = isLocalLeader,
+                localTrackId = "ridelink-voice",
+                newVoiceSessionId = { genAt(freshIds.incrementAndGet()) },
+            )
+        try {
+            body(controller, Fakes(engine, audio, transport), dispatcher)
+        } finally {
+            scope.cancel()
+        }
+    }
+
+    private companion object {
+        const val SDP = "v=0\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\na=mid:0\r\n"
+
+        /** Far clear of the harness's own fresh-id counter, so a collision cannot mask a result. */
+        const val OFFER_ID = 900
+
+        fun genAt(n: Int): VoiceSessionId = VoiceSessionId(n.toString().padStart(32, '0'))
+    }
+}

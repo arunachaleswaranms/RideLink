@@ -209,6 +209,18 @@ enum class VoiceSignalDropReason {
      * so `VoiceController` counts it directly, one layer earlier than every other reason here.
      */
     INPUT_MAILBOX_OVERFLOW,
+
+    /**
+     * A peer signal that [VoiceInputMailbox] was still holding when the control lifetime that
+     * admitted it ended (STATUS §4 problem 50). Never produced by this table, for the same reason
+     * [INPUT_MAILBOX_OVERFLOW] is not: the input is discarded before `VoiceNegotiation` ever sees
+     * it, so `VoiceController` counts it directly.
+     *
+     * Distinct from `VoiceSignalRelay.droppedRetiredGeneration`, which counts a frame that had
+     * *already* lost its lifetime when it arrived (ADR-025). This one counts a frame that was
+     * admitted perfectly legitimately and then outlived the link that admitted it.
+     */
+    RETIRED_CONTROL_LIFETIME,
 }
 
 /** What drives the table. [VoiceInput.freshVoiceSessionId] exists because the table is pure. */

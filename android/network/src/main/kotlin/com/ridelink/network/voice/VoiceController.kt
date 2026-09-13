@@ -594,11 +594,11 @@ class VoiceController(
             }
             is VoiceAction.SendOffer -> {
                 mark(VoiceSetupMark.LOCAL_DESCRIPTION)
-                transport.send(VoiceSignal.Offer(action.voiceSessionId, action.sdp))
+                degradeIfUnsent(transport.send(VoiceSignal.Offer(action.voiceSessionId, action.sdp)))
             }
             is VoiceAction.SendAnswer -> {
                 mark(VoiceSetupMark.LOCAL_DESCRIPTION)
-                transport.send(VoiceSignal.Answer(action.voiceSessionId, action.sdp))
+                degradeIfUnsent(transport.send(VoiceSignal.Answer(action.voiceSessionId, action.sdp)))
             }
             is VoiceAction.SendVoiceState ->
                 transport.send(
@@ -704,6 +704,36 @@ class VoiceController(
             if (rebuildCount == 0 && diagnosticsPollJob == null) startDiagnosticsPolling()
         }
         block()
+    }
+
+    /**
+     * STATUS §4 problem 56. The `Boolean` from [VoiceSignalTransport.send] used to be discarded for
+     * every action here, and for an offer or an answer that silently loses a **negotiation**, not
+     * just a frame.
+     *
+     * `VoiceSignalRelay.send` returns false whenever there is no authenticated writer — which is
+     * exactly the window between a link loss and the §10 ladder reconnecting. A Start pressed in
+     * that window created an offer nothing could carry, and the table still advanced to
+     * `NEGOTIATING`. `VoiceNegotiation.start` is idempotent against a live negotiation on purpose
+     * (two Start presses must make one offer), so `SessionCoordinator.attachVoice`'s reconnect
+     * rebuild then did nothing at all, the peer's own `negotiating` intent hit the same idempotence
+     * coming back, and voice stayed wedged for the rest of the ride segment with no error anywhere.
+     *
+     * The response is the degrade `offer` already uses for a critical-lane overflow, and for the
+     * same reason: a critical thing could not happen, so mirror a real control-link blip rather than
+     * invent a new failure path. It resets the table to `IDLE` and drops the media transport while
+     * **keeping this user's capture device open** (ARCHITECTURE §6.3/§6.4), which is precisely the
+     * state a reconnect rebuild needs to find.
+     *
+     * Deliberately **not** applied to `SendVoiceState` or `SendCandidate`: a lost state update is
+     * carried by the next one, and trickle ICE is designed to lose candidates. Neither strands a
+     * negotiation, and tearing media down for one would turn a recoverable blip into a rebuild.
+     */
+    private fun degradeIfUnsent(sent: Boolean) {
+        if (sent) return
+        lastFailure = VoiceFailure.CONTROL_LINK_LOST
+        synchronized(mailboxLock) { mailbox.offer(VoiceInput.ControlLinkLost) }
+        doorbell.trySend(Unit)
     }
 
     private suspend fun stopMediaTransport() {
@@ -824,16 +854,21 @@ class VoiceController(
             synchronized(mailboxLock) {
                 DiagnosticsSnapshot(
                     mailboxOverflows = mailbox.overflowCount,
+                    retiredSignalDiscards = mailbox.discardedRetiredSignalCount,
                     transmission = transmission,
                     setup = setup,
                 )
             }
-        val droppedSignals =
-            if (snapshot.mailboxOverflows > 0) {
-                dropCounts + (VoiceSignalDropReason.INPUT_MAILBOX_OVERFLOW to snapshot.mailboxOverflows)
-            } else {
-                dropCounts.toMap()
-            }
+        // Both of these are counted by the mailbox, one layer earlier than every reason the table
+        // itself produces -- so they are merged in here rather than living in `dropCounts`.
+        var droppedSignals = dropCounts.toMap()
+        if (snapshot.mailboxOverflows > 0) {
+            droppedSignals = droppedSignals + (VoiceSignalDropReason.INPUT_MAILBOX_OVERFLOW to snapshot.mailboxOverflows)
+        }
+        if (snapshot.retiredSignalDiscards > 0) {
+            droppedSignals =
+                droppedSignals + (VoiceSignalDropReason.RETIRED_CONTROL_LIFETIME to snapshot.retiredSignalDiscards)
+        }
         // `update`, not a plain read-copy-write (Issue H): this runs on the mailbox consumer, but
         // `publishEngineDiagnostics` (the diagnostics-poll coroutine) and `publishRoute` (a platform
         // audio-session callback thread) can both write `_diagnostics` concurrently with this call, and
@@ -878,6 +913,7 @@ class VoiceController(
     /** The three lock-guarded values [publishDiagnostics] needs, read in one critical section. */
     private data class DiagnosticsSnapshot(
         val mailboxOverflows: Int,
+        val retiredSignalDiscards: Int,
         val transmission: TransmissionState,
         val setup: VoiceSetupTimeline,
     )
