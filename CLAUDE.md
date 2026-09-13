@@ -55,6 +55,8 @@ Read these before changing anything. They are authoritative; this file is a summ
 | 21 | **A session may enter `IDLE` only when it is terminal, and `TeardownComplete` is the claim that it is** (ADR-026). The event that opens `ENDING -> IDLE` is the door a successor walks through, so it may be emitted only after every effect owned by the ending session has **completed**: capture released and awaited; every continuation the session started cancelled **and joined**; `ControlSessionManager.shutdown()` awaited, not launched. There is **one** teardown owner per platform — `SessionCoordinator.retireSession` over `SessionTeardownOwner` — it captures everything the ending session owns **synchronously**, before its first suspension, and each captured reference *is* the ownership token. A successor joins that job before touching anything shared. **Cancellation is a request; joining is the proof** — `NsdDiscoveryController`'s `awaitClose` handlers and iOS's actor `await`s all run after a cancel. Two corollaries: ARCHITECTURE §3 rule 3 has **two** deliberate ends, not one (`ENDING`, and the user's retry out of `DISCONNECTED`), and `SessionFsm` — never a coordinator — is what says which; and **a relay sink belongs to whoever installed it**, so `shutdown()` resets counters and detaches nothing | Never emit `TeardownComplete` from wherever the teardown happens to finish; never let a fire-and-forget tail outlive the transition to `IDLE`; never let two components emit it; never clear a mutable "current" sink after `IDLE`; never read live coordinator state from retired teardown work; never use a sleep as lifecycle synchronisation; never invent a generation counter where a captured reference already answers "whose?" |
 | 20 | **An inbound frame's authority is the `ReadFrameBinding` its read produced, for *every* message family** (ADR-025). No subsystem downstream of `handleFrame` may discard that provenance and rebuild authority from live session state: `MANIFEST_*`/`TRANSFER_*` carry the generation to their sink, `VOICE_*` and `AUDIO_STATE` are refused at their relay when it is no longer live, and the pre-authentication family (`PING`/`PONG`/`PAIR_*`/`BYE`/`ERROR`) — which is exempt from the generation gate by design and therefore bound to nothing — is answered **only for the connection it was read from**. `ReadFrameBinding.generation` says which session authorised *this frame* and never changes; `liveAuthenticatedGeneration` says which session is authenticated *right now* and is null between sessions. **Comparing them is correct; reading the second to label a frame is the defect.** A frame that is live by this rule may still belong to a *dead sender lifetime*, which is a different question again and is rule 17's `revision_epoch` (ADR-021 Amendment A7) — provenance and state lifetime are not the same guard and both are required. Phase 5 is the one deliberate exception to the relay-level refusal, because ADR-024 A6's ledger must *see* a retired frame to attribute it | Never read a live generation, epoch or session id to decide what a frame you already have belongs to; never conflate `authenticationGeneration` with `voice_session_id`; never use `currentAuthGeneration` where "is there a live session at all" is the question; never assume a family that is exempt from one gate is covered by another |
 
+| 22 | **Admission is not permission to act later, and a send that failed is not a send** (ADR-020 Amendment A5). A `VOICE_*` frame a live control lifetime admitted can still be queued when that lifetime ends, and `VoiceInputMailbox` drains `TEARDOWN` ahead of everything — so `ControlLinkLost` resets `VoiceNegotiation` to `IDLE`/`voiceSessionId = null` **first**, and the queued frame is then reduced against that reset. The `voice_session_id` guard does not save it: `offerReceived` and `peerWantsVoice` are guarded only *when there is a generation to compare*, so a teardown removes exactly the thing that would have refused them. **The teardown that jumps the queue owns the remote work it jumped** — `offer` discards queued `SignalReceived` at **offer** time, which is exact because `endConnection` clears `authenticatedConnection` *before* it emits `LinkLost`. And `SendOffer`/`SendAnswer` **consume** `send`'s `Boolean`: `VoiceNegotiation.start` is idempotent against a live negotiation by design, so a negotiation advanced with nothing on the wire can never be rebuilt, and voice wedges for the ride segment | Never decide at *apply* time what a teardown outranked — the queue is only exact at offer time; never discard local intent, engine callbacks or capture on a control-lifetime boundary; never let `StopRequested` discard peer work (a local End is not a lifetime boundary); never discard `send`'s result for a frame whose loss strands a negotiation |
+
 Reasoning: `docs/DECISIONS/ADR-001…026`.
 
 ## Platform stack and baselines
@@ -205,9 +207,24 @@ resume are deferred, but the chunk and page framing keep both possible.
 
 ## Current phase
 
-**Phase 5 — synchronized playback. Closure-audited seven times. A7's findings and the Phase 4 defect
+**Phase 5 — synchronized playback. Software closure is CLAIMED as of the thirty-fifth session
+(`docs/STATUS.md` §2al); real-device validation is a separate claim and is NOT made.** The final audit
+confirmed problem 50 (reachable, and worse than STATUS recorded), found and fixed problem 56 (an offer
+that could not be sent still advanced the table, and `start`'s idempotence then made the reconnect
+rebuild a no-op — voice wedged for the ride segment, no race required), closed problem 41 by executing
+iOS's production scheduled start and varispeed (which never needed a simulator — `AVAudioUnitVarispeed`
+is on macOS), and swept the new second-session lifecycle fifty times without finding anything.
+**TEST_PLAN §5.2's S-01…S-12 remain pending and no alignment figure exists.** Eleven passes have each
+found something already CI-green, this one included — assume a twelfth would too. Its sharper lesson:
+two of the three areas it investigated were **described inaccurately in STATUS**, in opposite
+directions, and a third defect lived entirely inside a row's stated mitigation. **A problem row is a
+hypothesis, not a finding.**
+
+The history below is kept because its lessons stand. Before that closure:
+
+**Closure-audited seven times. A7's findings and the Phase 4 defect
 it deliberately left open (`docs/STATUS.md` §4 problem 44) are both now fixed and green on both
-platforms — but software closure is *still not* claimed: closing problem 44 meant sweeping every other
+platforms — but software closure was withheld at the time: closing problem 44 meant sweeping every other
 inbound family, and that sweep found three more confirmed reachable instances of the same class
 (ADR-025, `docs/STATUS.md` §2ai), one of them in PROTOCOL §4.5's two-human pairing gate. Ten passes
 have each found something in code that was already CI-green. The real-device synchronized-playback
