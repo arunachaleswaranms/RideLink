@@ -14,7 +14,7 @@ final class SessionGateTests: XCTestCase {
     ]
 
     private var connected: ControlEvent {
-        .connected(remotePeerId: remote, sessionId: SessionId("s"), isLocalLeader: true)
+        .connected(remotePeerId: remote, sessionId: SessionId("s"), isLocalLeader: true, authGeneration: 1)
     }
 
     private var peerTrusted: ControlEvent { .peerTrusted(remotePeerId: remote) }

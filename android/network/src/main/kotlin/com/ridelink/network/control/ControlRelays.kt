@@ -47,6 +47,20 @@ class ControlRelays internal constructor(
     activeSessionId: () -> SessionId,
     /** Yields a writer only while the trust gate has passed; `null` at every other moment. */
     authenticatedWriter: () -> AuthenticatedFrameWriter?,
+    /**
+     * The same, **bound to one control lifetime**: a writer for the surviving connection only while
+     * the generation asked for is the one that owns it (STATUS §4 problem 64, ADR-020 Amendment A9).
+     *
+     * Only [voice] takes it, and deliberately so. A `VOICE_*` frame is one step of a negotiation
+     * owned by a named control lifetime, and every step between that lifetime's authorisation and
+     * the write suspends — so "the authenticated writer, now" is not the connection the frame was
+     * authorised for. The other four families' outbound work is either re-derived per session
+     * (`AUDIO_STATE` — PROTOCOL §4.4 sends one on every `CONNECTED` regardless of change) or already
+     * carries its own generation to a check of its own (Phase 4's transfers, Phase 5's
+     * `PlaybackRelay.send`, ADR-024 Amendment A2), so widening this would duplicate a guard rather
+     * than add one.
+     */
+    authenticatedWriterFor: (Long) -> AuthenticatedFrameWriter?,
     /** ADR-023 §3's live authentication generation. Only [playback] needs it — see its doc. */
     currentAuthGeneration: () -> Long,
     /**
@@ -57,7 +71,7 @@ class ControlRelays internal constructor(
     liveGeneration: () -> Long?,
 ) {
     val voice: VoiceSignalRelay =
-        VoiceSignalRelay(localPeerId, monotonicNowUs, nextSeq, activeSessionId, authenticatedWriter, liveGeneration)
+        VoiceSignalRelay(localPeerId, monotonicNowUs, nextSeq, activeSessionId, authenticatedWriterFor, liveGeneration)
 
     val audioState: AudioStateRelay =
         AudioStateRelay(localPeerId, monotonicNowUs, nextSeq, activeSessionId, authenticatedWriter, liveGeneration)

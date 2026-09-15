@@ -106,7 +106,7 @@ class VoiceMailboxLifetimeIdentityTest {
         peerSignals.forEach { mailbox.offer(signal(it, CONTROL_A)) }
         val localInputs =
             listOf(
-                VoiceInput.StartRequested(VSID_FRESH),
+                VoiceInput.StartRequested(VSID_FRESH, CONTROL_A),
                 VoiceInput.LocalOfferCreated(VSID_A, SDP),
                 VoiceInput.LocalCandidateGathered(VSID_A, CANDIDATE, null, 0),
                 VoiceInput.MuteRequested(true),

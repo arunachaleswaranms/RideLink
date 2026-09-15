@@ -382,7 +382,7 @@ class SessionCoordinatorAudioStateLifetimeTest {
         sink.submit(message)
     }
 
-    private fun connected() = ControlEvent.Connected(REMOTE_PEER_ID, SessionId("test-session"), isLocalLeader = true)
+    private fun connected() = ControlEvent.Connected(REMOTE_PEER_ID, SessionId("test-session"), isLocalLeader = true, authGeneration = 1L)
 
     private fun peerMessage(
         revision: Long,
@@ -434,7 +434,10 @@ class SessionCoordinatorAudioStateLifetimeTest {
     }
 
     private class FixtureVoiceTransport : VoiceSignalTransport {
-        override suspend fun send(signal: VoiceSignal): Boolean = false
+        override suspend fun send(
+            signal: VoiceSignal,
+            controlGeneration: Long?,
+        ): Boolean = false
     }
 
     private class FixtureVoiceAudioSession : VoiceAudioSession {

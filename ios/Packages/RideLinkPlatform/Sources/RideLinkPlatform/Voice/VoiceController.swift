@@ -216,12 +216,25 @@ public actor VoiceController: VoiceSignalSink {
     // MARK: - the four things the app asks for
 
     /// The user pressed Start Voice, or a control reconnect is rebuilding voice (PROTOCOL §7.8).
-    public func start() {
+    ///
+    /// - Parameter controlGeneration: **the authenticated control lifetime this start is authorised
+    ///   by**, which becomes the owner of any negotiation it establishes (STATUS §4 problem 61). The
+    ///   caller supplies it — `SessionCoordinator` passes `.connected`'s `authGeneration` for the
+    ///   reconnect rebuild and `liveAuthenticatedGeneration()` for a user's tap — because this
+    ///   controller is deliberately retained across a reconnect and has no live generation of its own
+    ///   to read.
+    ///
+    ///   Nil when no lifetime is authenticated, which a user reaches by pressing Start in the gap
+    ///   between one link dying and the ladder restoring the next: the press then records consent and
+    ///   opens capture but starts no negotiation, and `attachVoice` rebuilds it under the successor.
+    public func start(controlGeneration: Int64?) {
         // A fresh negotiation is a fresh measurement (V-01's setup figure is per generation, not a
         // lifetime average), and the mark is taken here rather than in the consumer so it times the
         // user's tap rather than when the queue got round to it.
         setupTimeline = VoiceSetupTimer.restart(atMonoUs: monotonicNowUs())
-        mailbox.offer(.startRequested(freshVoiceSessionId: newVoiceSessionId()), doorbell: doorbell)
+        mailbox.offer(
+            .startRequested(freshVoiceSessionId: newVoiceSessionId(), controlGeneration: controlGeneration),
+            doorbell: doorbell)
     }
 
     /// The user pressed End Voice, or the session is entering `ENDING`.
@@ -285,6 +298,17 @@ public actor VoiceController: VoiceSignalSink {
     public func onControlLinkLost(retiredControlGeneration: Int64?) {
         lastFailure = .controlLinkLost
         mailbox.offer(.controlLinkLost(retiredControlGeneration: retiredControlGeneration), doorbell: doorbell)
+    }
+
+    /// Explicit successor authority from Connected, consumed by the reducer (ADR-020 A11).
+    public func controlAuthenticated(controlGeneration: Int64) {
+        mailbox.offer(
+            .controlAuthenticated(
+                controlGeneration: controlGeneration,
+                freshVoiceSessionId: newVoiceSessionId()
+            ),
+            doorbell: doorbell
+        )
     }
 
     /// A `VOICE_*` frame that has **already** passed the ADR-019 trust gate. There is no other entry
@@ -506,14 +530,25 @@ public actor VoiceController: VoiceSignalSink {
         case .applyRemoteAnswer(_, let sdp):
             mark(.remoteDescription)
             _ = await engine.applyRemoteDescription(kind: .answer, sdp: sdp)
-        case .sendOffer(let id, let sdp):
+        case .sendOffer(let id, let sdp, let owner):
             mark(.localDescription)
-            degradeIfUnsent(await transport.send(.offer(voiceSessionId: id, sdp: sdp)), voiceSessionId: id)
-        case .sendAnswer(let id, let sdp):
+            // `owner` -- the lifetime the reducing transition captured -- and never a live read here
+            // or in the transport (ADR-020 Amendment A9).
+            degradeIfUnsent(
+                await transport.send(.offer(voiceSessionId: id, sdp: sdp), controlGeneration: owner),
+                voiceSessionId: id
+            )
+        case .sendAnswer(let id, let sdp, let owner):
             mark(.localDescription)
-            degradeIfUnsent(await transport.send(.answer(voiceSessionId: id, sdp: sdp)), voiceSessionId: id)
-        case .sendVoiceState(let id, let wire, let micMuted, let mode):
-            let sent = await transport.send(.state(voiceSessionId: id, state: wire, micMuted: micMuted, mode: mode))
+            degradeIfUnsent(
+                await transport.send(.answer(voiceSessionId: id, sdp: sdp), controlGeneration: owner),
+                voiceSessionId: id
+            )
+        case .sendVoiceState(let id, let wire, let micMuted, let mode, let owner):
+            let sent = await transport.send(
+                .state(voiceSessionId: id, state: wire, micMuted: micMuted, mode: mode),
+                controlGeneration: owner
+            )
             // STATUS §4 problem 59. One `VOICE_STATE` is not "carried by the next one": an answerer's
             // intent-to-talk. It names no generation because the offerer has not made one yet (§7.3),
             // it is the **only** wire effect an answerer's `start()` produces, and the table is already
@@ -522,13 +557,14 @@ public actor VoiceController: VoiceSignalSink {
             // `VOICE_STATE` (a mute, a mode, a connectivity transition, a `closed`) either names a
             // generation or is genuinely superseded by the next one, and is deliberately left alone.
             if id == nil, wire == .negotiating { degradeIfUnsent(sent, voiceSessionId: nil) }
-        case .sendCandidate(let id, let candidate, let mid, let index):
+        case .sendCandidate(let id, let candidate, let mid, let index, let owner):
             // PROTOCOL §7.6 inspects the `typ` of every candidate this side **gathers** as well as
             // every one it receives. The gathering direction is the one that would reveal a STUN
             // server had been contacted, so missing it would miss the case the check is for.
             noteCandidateType(candidate)
             _ = await transport.send(
-                .iceCandidate(voiceSessionId: id, candidate: candidate, sdpMid: mid, sdpMlineIndex: index)
+                .iceCandidate(voiceSessionId: id, candidate: candidate, sdpMid: mid, sdpMlineIndex: index),
+                controlGeneration: owner
             )
         case .applyRemoteCandidate(_, let candidate, let mid, let index):
             noteCandidateType(candidate)

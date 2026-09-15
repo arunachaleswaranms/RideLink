@@ -594,17 +594,32 @@ public final class SessionCoordinator {
     /// the point: "is voice allowed?" is answered by whether the object exists.
     public func startIntercom() {
         guard case .allowed = evaluateIntercomStart(), let voice else { return }
-        Task { await voice.start() }
+        // The live generation, read **now**, for an input that happens now: a local press carries no
+        // frame whose provenance could be preserved instead, and "which lifetime is authenticated at
+        // the moment the user taps" is exactly the lifetime that will carry its offer. Nil in the gap
+        // between two links, which records consent and starts no negotiation — see
+        // `VoiceInput.startRequested`'s `controlGeneration` (STATUS §4 problem 61).
+        let generation = controlSessionManager.liveAuthenticatedGeneration()
+        // **Session-owned, not unstructured** (ADR-026 rule 21, STATUS §4 problem 67). `start` is
+        // actor-isolated on the controller — unlike `setPushToTalkHeld`, it stamps `VoiceSetupTimeline`
+        // — so this press cannot reach the bounded mailbox without a hop, and a bare `Task` here is a
+        // continuation this session started that nothing cancels and nothing joins. `retireSession`
+        // could then emit `.teardownComplete` with a press still in flight against the controller it is
+        // about to shut down. `launchInSession` is the registry that makes cancellation *and* joining
+        // the session's, and it is the only thing that changes: the hop itself stays, because it is
+        // what the actor requires, and STATUS §4 problem 66 is about what the table does with a press
+        // that arrives late rather than about preventing one.
+        launchInSession { _ in await voice.start(controlGeneration: generation) }
     }
 
     public func endIntercom() {
         guard let voice else { return }
-        Task { await voice.stop() }
+        launchInSession { _ in await voice.stop() }
     }
 
     public func setMicrophoneMuted(_ muted: Bool) {
         guard let voice else { return }
-        Task { await voice.setMicrophoneMuted(muted) }
+        launchInSession { _ in await voice.setMicrophoneMuted(muted) }
     }
 
     /// The PTT control's current position. Gates the outbound WebRTC track and **nothing else** — no
@@ -642,13 +657,11 @@ public final class SessionCoordinator {
     /// Idempotent across a reconnect: `.connected` fires again after `.reconnectSucceeded`, and the
     /// existing controller is the right one to keep — it still holds the open capture device for this
     /// ride segment, which a fresh one would have to reopen.
-    private func attachVoice(isLocalLeader: Bool) {
+    private func attachVoice(isLocalLeader: Bool, authGeneration: Int64) {
         if let voice {
-            // A reconnect. If the user had consented to voice, rebuild the media transport as a fresh
-            // negotiation (PROTOCOL §7.8); `start()` is idempotent when voice is already live.
-            if voiceDiagnostics.localAudioOpen {
-                Task { await voice.start() }
-            }
+            // One authenticated event supplies successor authority and the §7.8 rebuild opportunity.
+            // The reducer also sees a gap press delivered after this task; diagnostics decide neither.
+            launchInSession { _ in await voice.controlAuthenticated(controlGeneration: authGeneration) }
             return
         }
         let manager = controlSessionManager
@@ -675,6 +688,13 @@ public final class SessionCoordinator {
             await controller.attach()
             guard self.ownsSessionWork(id) else { return }
             controller.selectPolicy(self.intercomPolicy)
+            // The lifetime this controller was born under, as an input like every other
+            // control-lifetime fact the table holds (ADR-020 Amendment A11). A first-ever press
+            // before this point reads the live generation itself; this is for the press that
+            // arrives after a boundary, whose own tap-time read can only ever be honest about the
+            // gap it was pressed in.
+            await controller.controlAuthenticated(controlGeneration: authGeneration)
+            guard self.ownsSessionWork(id) else { return }
 
             // Exactly one consumer, draining in a single `for await` loop — see `OrderedEventChannel`'s
             // doc comment for why a `Task` per event cannot make the ordering guarantee `AUDIO_STATE`'s
@@ -811,8 +831,8 @@ public final class SessionCoordinator {
             // only the user can tell those apart.
             securityAlert = code
             logger.warn("SessionCoordinator", "handshake refused: \(code)")
-        case .connected(_, _, let isLocalLeader):
-            attachVoice(isLocalLeader: isLocalLeader)
+        case .connected(_, _, let isLocalLeader, let authGeneration):
+            attachVoice(isLocalLeader: isLocalLeader, authGeneration: authGeneration)
             // PROTOCOL §4.4 names `CONNECTED` as one of the two moments an `AUDIO_STATE` is sent
             // regardless of whether anything changed: a peer that has just connected has never seen any
             // of our state, so "nothing changed" is not a reason to stay silent.

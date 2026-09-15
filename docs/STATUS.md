@@ -1,10 +1,26 @@
 # RideLink — Status
 
-**Updated:** 13 September 2026 (**a focused pass on one open problem**, thirty-seventh — see §2an. **§4 problem 60 is CONFIRMED and FIXED** by [ADR-020 Amendment A7](DECISIONS/ADR-020-webrtc-voice-foundation.md): semantic `VOICE_*` work now carries the control generation that admitted it all the way to `VoiceInputMailbox`, and a lifetime boundary names the generation that ended, so "whose work is this" stops being a question about when it arrived. Window 2 turned out **not to be a race at all** and is now pinned by a test over two real TLS sessions. **No wire change and no vector change** — the reducer reads neither new field. The 50-run stress pass then found the *state* half of the same window, and the suppression that would close it was implemented and **rejected** as strictly worse: that is **§4 problem 61**, open and classified)
-**Current milestone:** M1 (Private voice link) is **software-complete with one known, classified,
-non-blocking defect** (§4 problem 61 — see §2an.3 for why the obvious fix is worse than the defect);
-its hardware gate is the larger thing left open. It is deliberately no longer described as "no known
-defect": §2an closed problem 60 and opened 61 in the same pass, and a milestone cannot be both. **§4 problem 53 is fixed and §4 problem 54 with it**: for
+**Updated:** 15 September 2026 — **problem 69 implemented with one-shot pending Start intent**
+([ADR-020 Amendment A11](DECISIONS/ADR-020-webrtc-voice-foundation.md), §2ar). Both nil-Start
+orderings progress under explicit successor authority. No generic consent-driven retry, no wire
+change, no physical gate claim. **The final self-audit also confirmed open problem 70: iOS voice
+shutdown can return with a send suspended, then create media after shutdown. Overall readiness is
+NOT READY.** Verification is recorded in §2ar.
+
+**Previous update:** 14 September 2026 (**an independent review of the previous pass's own fix**, fortieth — see §2aq. **§4 problem 66 is CONFIRMED and FIXED** by [ADR-020 Amendment A10](DECISIONS/ADR-020-webrtc-voice-foundation.md). A9 answered "may this press answer that held offer?" safely in both directions and **not live** in one: a `StartRequested` from a lifetime older than the one owning a held `VOICE_OFFER` was refused, and nothing would ever have answered that offer — the peer sends one per `voice_session_id` (§7.4), §7.8's rebuild is gated on the published `localAudioOpen` and had already run, and a user who has consented does not press again. **A9's own regression hid it by supplying a second `start(B)` that production never sends**, which is why CI stayed green. Reproduced first on unmodified iOS production at the coordinator's real decisions. Fixed by separating a press's two halves: **control authority expires with its link; user consent is ride-segment state.** A newer held offer is now answered **under that offer's own lifetime** — its `voice_session_id`, its generation on every outbound frame, its boundary as the one that retires it — and the owner is deliberately **not** moved to the press's. **No wire change; the shared vectors change.** A separate rule-21 finding is recorded as **§4 problem 67** and fixed. A8 and A9 are otherwise unchanged and problems 61, 63 and 64 stay closed. The previous entry follows.)
+
+**Previously:** the thirty-ninth pass — see §2ap. **§4 problems 63 and 64 are CONFIRMED and FIXED** by [ADR-020 Amendment A9](DECISIONS/ADR-020-webrtc-voice-foundation.md): a held remote offer may be answered only by the lifetime that delivered it, and every outbound `VOICE_*` action names the control lifetime whose connection it may be written on. Both were reproduced from unmodified production on both platforms first. That fix is unchanged in substance; §2aq is the independent review **of** it, and it found one more — problem 66, a *liveness* defect in A9's own held-offer rule, plus the rule-21 finding recorded as problem 67. See the entry above.
+**Current milestone:** M1 (Private voice link) has its software implementation, including the
+problem 69 fix in §2ar, with open teardown defect 70; its hardware gate is the larger thing left open. §2an closed problem 60 and opened 61 in the same
+pass; §2ao closed 61 and claimed to open nothing, and **§2ap — an independent review of §2ao's own
+fix — found two reachable defects in it** (problems 63 and 64), one of which re-created the exact
+wedge an earlier amendment existed to remove. **§2aq — an independent review of §2ap's own fix —
+then found one more** (problem 66): A9's held-offer rule was safe in both directions and *not live* in
+one, and A9's own regression hid it by supplying an event production never sends. That is sixteen
+consecutive passes each finding something in code that was already CI-green, and the third consecutive
+pass whose finding was the *previous pass's fix*. §2aq's own fix is now the least-audited code in the
+repository, and §2am's standing instruction applies to it with one clause added: **audit the newest
+fix first — and audit what a regression *supplies* as carefully as what it asserts.** **§4 problem 53 is fixed and §4 problem 54 with it**: for
 the first time a ride can be ended and a new one started without relaunching the app, and a Stop
 Discovery no longer silently kills Phase 4 and Phase 5 for the rest of the process. M2 (local music) is implementation-complete and
 closure-audited (§2q/§2r). Phase 4 is closure-audited **six** times (§2v–§2z, §2ai) and **§4 problem
@@ -40,12 +56,32 @@ The thirty-seventh session (§2an) is a **focused pass on problem 60 alone**. Bo
 re-verified from production first, and the second turned out not to be a race: a successor lifetime
 authenticates and admits its own `VOICE_OFFER` without waiting on anything that consumes the
 predecessor's `LinkLost`. Both are closed by lifetime identity rather than by timing. The pass's own
-stress run then found the *state* half of the same window — **§4 problem 61**, open, with the
+stress run then found the *state* half of the same window — **§4 problem 61**, with the
 suppression that would close it implemented and rejected as strictly worse.
-**Phase 5 status: software closure is CLAIMED, re-affirmed after the thirty-sixth session's review
-(§2am) and after the thirty-seventh's fix (§2an). Problem 61 is open and classified: it is a voice
-lifetime residue, not a Phase 5 defect, and it is not a correctness blocker for the real-device gate.
-Real-device validation is a separate claim and is NOT made.**
+The thirty-eighth session (§2ao) is a focused pass on **problem 61 alone**. It reproduced the defect
+from unmodified production on both platforms, then closed it by giving the pure table an explicit
+owner — and kept the rejection: the fix distinguishes *which lifetime owns the live negotiation* from
+*which lifetime the mailbox last saw*, which is the distinction the suppression could not make.
+The thirty-ninth session (§2ap) is an independent review **of** §2ao's fix, and it found two more:
+**§4 problem 63** (a held remote offer could be adopted by a lifetime that did not deliver it) and
+**§4 problem 64** (an action authorised by one control lifetime was written on its successor's
+socket). Both are fixed by [ADR-020 Amendment A9](DECISIONS/ADR-020-webrtc-voice-foundation.md).
+Amendment A8's ownership rule is unchanged and problem 61 stays closed.
+The fortieth session (§2aq) is an independent review **of** §2ap's fix, and it found one more:
+**§4 problem 66** — A9 refused a stale press that met a newer lifetime's held offer, which was safe and
+**not live**, because nothing else would ever have answered that offer. Fixed by
+[ADR-020 Amendment A10](DECISIONS/ADR-020-webrtc-voice-foundation.md): a press's *control authority*
+expires with its link, its *user consent* does not, and the held offer supplies the authenticated
+lifetime and the `voice_session_id` for the negotiation that results. A separate rule-21 finding in the
+same lines is recorded as **§4 problem 67** and fixed. A8 and A9 are otherwise unchanged; problems 61,
+63 and 64 stay closed.
+
+**Phase 5 status: software closure is CLAIMED (Phase 5 itself; the Phase 2a voice
+lifetime defect §4 problem 69 is implemented in §2ar), re-affirmed after the thirty-sixth session's review
+(§2am), the thirty-seventh's fix (§2an), the thirty-eighth's (§2ao), the thirty-ninth's review of that
+(§2ap) and the fortieth's review of *that* (§2aq). Problems 61, 63, 64, 66 and 67 were voice lifetime
+residues rather than Phase 5 defects, and all five are now fixed. Real-device validation is a separate claim and is NOT made; no S-01…S-12 row has
+run.**
 
 Every row that previously withheld it is closed: **44** (ADR-025 §1), **47** (§2aj), **41** — closed by
 actually executing iOS's production scheduled start and varispeed, which never needed a simulator —
@@ -5281,6 +5317,566 @@ generation refuses that generation's) and **not on iOS**, because `ios/RideLink/
 bundle at all (§4 problem 48). The iOS wiring is one exhaustive pattern match, and both of its ends
 are tested; that is not the same as testing the middle, and it is recorded rather than glossed.
 
+## 2ao. The thirty-eighth session — problem 61 closed by negotiation ownership (ADR-020 Amendment A8)
+
+A focused pass with one objective: **fix problem 61 and nothing else.** It did not advance Phase 5, did
+not touch Phase 6 or Phase 7, did not close any physical gate, and opened no new problem row.
+
+It is also the first pass in fourteen that was *handed* its defect by the previous one rather than
+having to find it. That makes its finding cheap and its **fix** the thing to distrust — see §2ao.5.
+
+### 2ao.1 Reproduced from production before anything was changed
+
+§2an.3 recorded problem 61 from three failures in a 50-run iOS stress pass. This pass did not take
+that on trust. Against unmodified sources, on Android, with `ManualDispatcher` making the ordering
+exact rather than a race:
+
+1. an answerer consents under control generation A;
+2. generation B's `VOICE_OFFER` is admitted **and fully drained** — `applyRemote(OFFER)`,
+   `createAnswer`, status `NEGOTIATING`;
+3. only then is `ControlLinkLost(A)` delivered, as `SessionCoordinator`'s event consumer does.
+
+Engine trace: `setMicrophoneMuted(true), start(…901), setMicrophoneMuted(true), applyRemote(OFFER),
+createAnswer, stop` — and status `IDLE`. **Confirmed, exactly as the row described it.** The same
+reproduction holds on iOS, where five of the nine new regressions fail against the pre-fix reducer.
+
+The row's claim that PROTOCOL §7.8's rebuild cannot recover this was also checked rather than
+repeated: it is the *peer's* idempotence that wedges it. The local side does rebuild and re-states its
+intent; the offerer's `peerWantsVoice` is idempotent against its own still-live negotiation, so no new
+offer is ever authored and the answerer waits out the ride segment.
+
+### 2ao.2 The fix, and the two things it is not
+
+`VoiceNegotiationState` gains `negotiationControlGeneration` — the authenticated control lifetime that
+owns the negotiation state the value holds. `controlLinkLost` retires only when the lifetime that
+ended is **not older than** that owner. Everything else is a consequence. ADR-020 Amendment A8 has the
+full table; three points belong here.
+
+**It is not the suppression, and that is checkable rather than asserted.** The rejected fix keyed on
+"has a newer generation been admitted?"; this one keys on "which lifetime *established* the state we
+are holding?". P61-B is the ordering that separates them: B's offer is admitted and reduced and then
+**refused** by `offerReceived`'s `GENERATION_MISMATCH`, so A is still the owner and A's boundary must
+still retire it. The suppression cannot distinguish that state from P61-A's. *Admission is not
+application*, and there is now a regression per platform that says so.
+
+**It is not "different from", it is "older than".** A boundary naming a **newer** lifetime than the
+owner still retires it. `ControlSessionManager` holds one authenticated connection at a time and
+allocates a strictly greater generation for each, so a newer lifetime having existed proves the older
+one ended — the same fact `newestAdmittedControlGeneration` already rested on. Without that direction,
+a predecessor boundary that was lost or never emitted would strand a dead negotiation permanently,
+which is the rejected suppression's failure mode reintroduced through the front door. The exhaustive
+property test over role × status × {older, equal, newer, null} is what pins it.
+
+**It does not conflate the three lifetimes.** Capture lifetime is still the ride segment — no boundary
+here closes a microphone, and every regression asserts capture is still open afterwards. WebRTC
+negotiation lifetime is still `voice_session_id`. The control authentication lifetime is the new
+owner. ARCHITECTURE §6.3/§6.4 is untouched.
+
+### 2ao.3 `StartRequested`, which was the hard half
+
+A local press is admitted by no frame, so there is no provenance to carry and the table must not
+invent one. The owner comes from the caller: `ControlEvent.Connected` gains `authGeneration` (emitted
+from the one statement that mints it) for §7.8's reconnect rebuild, and `startIntercom` reads
+`liveAuthenticatedGeneration`.
+
+Reading a live generation *there* is correct and is not ADR-025's defect, which is re-reading live
+state to label a frame already read. A press carries no provenance to discard and happens now.
+
+The case with no good precedent is **Start pressed in the gap between two links** — reachable,
+because `voice` deliberately survives a reconnect. Refusing it is wrong (ARCHITECTURE §6.4: this may
+be the last foreground-visible moment to open capture). Creating a negotiation is worse: it would be
+owned by a lifetime that does not exist, and **an un-retirable negotiation is a strictly worse
+failure than the one this pass is fixing.** So the press records consent, opens capture, and starts no
+negotiation; `attachVoice` rebuilds it under the successor. That is also simpler than what happened
+before, which was to author an offer, fail to send it, and degrade back through
+`NegotiationSendFailed`.
+
+### 2ao.4 What was verified, and how
+
+- **Reproduction first, on both platforms, against unmodified sources.** Six of nine Android
+  regressions and five of nine iOS ones fail pre-fix; the vector suite fails pre-fix on both. The
+  remainder are guards that must pass *both* before and after — they exist to prove the fix does not
+  make link losses inert, which is the obvious way to "fix" this and be wrong.
+- **The vectors moved, deliberately.** Fourteen new rows, plus a control generation on every state and
+  on every lifetime-carrying input. Both readers **require** the new keys while allowing null, so a
+  future row that forgets which lifetime it is about fails a build rather than silently meaning
+  `CTL_A`. Two property tests carry what rows cannot: one asserts every row's resulting state names an
+  owner *iff* it holds negotiation state; the other exhausts the comparison.
+- **No wire change.** `vectors/voice-signal/` and `vectors/session-gate/` untouched. A control
+  authentication generation is a number one device allocates for its own connections.
+- **The A7 mailbox is untouched**, including its "a boundary is never suppressed" regression, which
+  still passes unchanged and is now the right assertion for a different reason: the mailbox still
+  delivers every boundary, and the *table* decides what one means.
+
+### 2ao.5 What this pass did not do, and the one thing it got wrong
+
+**Nothing ran on a phone.** No S-01…S-12 row moved, no alignment figure exists, and the M1 hardware
+gate is untouched. The iOS coordinator seam is still untested for the reason §2an.5 gives — `ios/RideLink/`
+has no test bundle (§4 problem 48) — so `attachVoice`'s new `authGeneration` argument is verified at both
+ends and not in the middle, on that platform.
+
+**And the pass's own test was wrong first.** P61-C's first draft delivered `ControlLinkLost(A)` and
+`ControlLinkLost(B)` back to back and asserted both had been applied. They had not: `VoiceMailboxLane.TEARDOWN`
+is a single latest-wins slot, so the second replaced the first and the test only ever exercised one lifetime.
+The iOS run caught it — and only because the fix's new `SUPERSEDED_CONTROL_LIFETIME` counter had made "was this
+boundary actually reduced?" observable. The Android draft of the same test passed, because its assertions were
+satisfied either way. Both are now drained one at a time and Android counts the supersessions. The lesson is
+small and worth keeping: **a test that cannot tell you how many times the thing under test ran is not yet a
+regression**, and surfacing a no-op is what turns one into evidence.
+
+
+## 2ap. The thirty-ninth session — a negotiation's authority reaches its wire (ADR-020 Amendment A9)
+
+An **independent review of §2ao's own fix**, which is what §2am said to do next: *the freshest fix is
+the least-audited code in the repository — audit the newest fix first.* It was handed two hypotheses
+and confirmed both. Problem 61 stays closed and its fix is unchanged; what A8 did not ask is whether
+negotiation state created by one lifetime may be **adopted** by another, and whether an action the
+table authorised is still **written on the connection that authorised it**. The answer to both was no,
+and production did both anyway. They are §4 problems **63** and **64**, and [ADR-020 Amendment
+A9](DECISIONS/ADR-020-webrtc-voice-foundation.md) closes them.
+
+### 2ap.1 Reproduced from unmodified production, before anything was changed
+
+Both were named as hypotheses and both were checked against the real sources first, on a `ManualDispatcher`
+so that "drained after the successor authenticated" is a fact rather than an ordering a fast machine
+happens to win. A throwaway Android test drove the real `VoiceController` with a transport that records
+which control generation was live at the instant of each write — production's own behaviour, since
+`VoiceSignalRelay.send` resolved `authenticatedWriter()` at write time. Its output *is* the finding:
+
+```
+FINDING-B writes = [State@gen2, State@gen2, Offer@gen2]
+FINDING-A engine calls = [start(aaaa…), setMicrophoneMuted(true), applyRemote(OFFER), createAnswer, …]
+FINDING-A writes = [State@gen2, Answer@gen2, State@gen2]
+FINDING-A status = CONNECTING
+FINDING-A status after LinkLost(A) = CONNECTING
+```
+
+- **Problem 64** — `start(controlGeneration = 1)` produced three frames and **all three went out on
+  generation 2**. Work authorised by A executed through B's writer.
+- **Problem 63** — a `VOICE_OFFER` held under generation 1 was applied, answered, and the `VOICE_ANSWER`
+  **naming generation 1's `voice_session_id`** went out on generation 2. Then generation 1's boundary
+  arrived and was **inert** — because A8's own rule had just been handed an owner of 2 — so the status
+  stayed `CONNECTING` with nothing left able to retire it. That is problem 56's wedge, re-created by a
+  different route, by the amendment written to prevent exactly that class.
+
+Each half was then re-proved in isolation: with **only** the held-offer rule reverted, the two
+problem-63 regressions fail and the four problem-64 ones pass; with **only** the transport binding
+reverted, the four problem-64 regressions fail and the two problem-63 ones pass. Neither fix is
+carrying the other.
+
+### 2ap.2 The fixes
+
+**63 — a held offer may not cross a control lifetime.** `start`'s answerer branch now compares the held
+offer's owner against the press's lifetime. Equal (or unowned): answer it, A8 unchanged. **Older**: the
+offerer's link died with it and the offerer has already torn its own side down, so the held offer is
+**discarded** (`RETIRED_HELD_OFFER`) and §7.3's intent-to-talk goes out under the press's lifetime —
+which is PROTOCOL §7.8's fresh rebuild, through the mechanism that already exists rather than a second
+one. **Newer**: the *press* is the stale thing, so consent is recorded and capture opened
+(ARCHITECTURE §6.4 may give no second foreground-visible chance) and **no** negotiation is started
+(`SUPERSEDED_START_LIFETIME`), leaving the held offer — the only copy a peer will ever send — for its
+own lifetime's consent. Both orderings are reachable and neither is a race.
+
+**64 — an outbound action names the lifetime it may be written on.** `SendOffer`, `SendAnswer`,
+`SendVoiceState` and `SendCandidate` implement `OutboundVoiceAction` and carry `controlGeneration`, set
+by the transition that produced them. `VoiceSignalTransport.send` takes it, and `VoiceSignalRelay`
+refuses on mismatch or null, counting `droppedRetiredGenerationOutbound`. The writer supplier is itself
+generation-bound and resolves the socket **and** the generation from the one immutable
+`AuthenticatedConnection` record — `ReadFrameBinding.of`'s reasoning, pointing outwards.
+
+Deriving the owner in the driver from the pre/post reduction state was considered and rejected. It is
+correct for every branch that existed before this pass and would have been **wrong for the first branch
+this pass adds** — problem 63's discard, where the pre-state owner is the dead lifetime and the send
+belongs to the live one. That is this codebase's recurring failure mode, so the value goes where it
+cannot drift: on the action, decided by the pure table, pinned by vectors.
+
+### 2ap.3 Engine callbacks: audited, and deliberately unchanged
+
+Every asynchronous continuation a `StartRequested` spawns was traced. `LocalOfferCreated`,
+`LocalAnswerCreated`, `LocalCandidateGathered`, `RemoteTrackChanged` and `MediaConnectivityChanged` are
+guarded by `voice_session_id` alone, and that **is** sufficient — 128 CSPRNG bits per negotiation mean a
+callback from a torn-down peer connection can never match a different one. The case it could not answer
+is a callback matching a negotiation that is still live but whose *lifetime* has ended, and that is now
+refused at the send, because the `SendOffer` it produces carries the negotiation's owner (P64-D pins
+exactly this). Adding control-lifetime provenance to the callbacks themselves was rejected: it would be a
+second answer to a question the negotiation's owner already answers, and two sources of one fact is how
+they come to disagree.
+
+### 2ap.4 What was verified, and how
+
+- **Pre-fix reproduction on both platforms**, then per-half isolation as above.
+- **Eight new deterministic regressions per platform** (`VoiceCrossLifetimeAuthorityTest[s]`): P63-A/B
+  plus the same-lifetime guard, and P64-A…E. No sleeps: Android sequences on a `ManualDispatcher`, iOS on
+  observables that prove the previous step was *reduced* — an engine call, or one of the two new drop
+  counters, which exist so a refusal leaves evidence.
+- **One new production regression per platform**, in `VoiceLifetimeProvenanceTest[s]`: two real TLS
+  sessions on one real `ControlSessionManager`, where a frame authorised by generation 1 fails closed,
+  is counted, and **never reaches the successor's peer**, while generation 2's own frame does.
+- **Shared vectors**: 81 rows (was 77). Four new rows for the held-offer/start-lifetime rules, a
+  `control_generation` on every outbound action, and a new property on both platforms — *every outbound
+  action names a control lifetime the table already held*, non-null and not invented.
+- **Android**: `:core:test`, the full `test`, `ktlintCheck`, `detekt`, `lint`, `assembleDebug` and
+  `assembleRelease` all green. **50/50** on the focused lifetime suite; **20/20** on the whole
+  `:network` suite; **10/10** on `test assembleDebug assembleRelease` together.
+- **iOS**: `RideLinkCore` and `RideLinkPlatform` green; unsigned Debug **and** Release simulator builds
+  succeed. **50/50** on the focused lifetime suite — after a defect in one of this pass's *own* new
+  tests was found by that stress run and fixed: the new two-session outbound test reconnected before
+  the manager had observed the first connection's loss, so the successor sometimes never
+  authenticated. It now gates on `liveAuthenticatedGeneration()` going nil and then reaching 2, on
+  both platforms. That is a test-setup race, not a production one, and it is exactly the failure mode
+  §2ao.5 warned about — **the pass's own test was wrong first, again.**
+- **One unattributed failure is recorded rather than explained away**: see §4 problem 65.
+- `swiftlint` and `swiftformat` are **not installed on this machine** and were not run. No claim is
+  made about them.
+
+### 2ap.5 What this pass did not do, and what it refused to claim
+
+**Nothing ran on a phone.** No S-01…S-12 row moved and no alignment figure exists.
+
+**One hypothesis was withdrawn on evidence rather than asserted.** A regression for "a stale
+`NegotiationSendFailed` applied after a successor's rebuild has been reduced" was written, and building
+it proved the ordering **unreachable**: `VoiceMailboxLane.SEND_FAILURE` outranks `CRITICAL` by design
+(A6), and the single consumer is parked inside `perform` for as long as the write is, so the failure is
+always reduced before any rebuild queued behind it. The iOS run is what exposed it — the Android draft
+had passed *vacuously*, asserting a status that had never changed. The reducer's guard against that
+ordering is real and stays pinned where it belongs, in `negotiation-send-failed-from-a-retired-generation-is-inert`.
+The test was reshaped to assert what is reachable and the ADR records the withdrawal.
+
+That is §2ao.5's lesson arriving again by a different road: **a test that cannot tell you whether the
+thing under test ran is not yet a regression** — and this time the vacuous one was an assertion about a
+state no ordering could produce. The standing instruction is unchanged and now has two passes behind it:
+**audit the newest fix first.** A8 was one session old, CI-green, and carried nine regressions; it still
+had two reachable defects in it, and one of them re-created the exact wedge an earlier amendment existed
+to remove.
+
+
+## 2aq. The fortieth session — consent outlives a lifetime, control authority does not (ADR-020 Amendment A10)
+
+A focused pass with one objective: **finish problem 63 and nothing else.** It did not advance Phase 5,
+did not start Phase 6, and moved no hardware gate. It also restacked PR #3 on the `main` that now
+contains PR #2 (merge commit `dcc3805`, main CI green), which removed nothing from PR #3's effective
+diff because the merge base was already PR #2's head.
+
+### 2aq.1 What the previous pass's fix left open, and how it was found
+
+An independent review of §2ap's A9 accepted every safety claim in it and asked one question of the
+regression rather than of the code: **where does the second `start(B)` come from?**
+
+`VoiceCrossLifetimeAuthorityTest[s]`'s P63-B ended with a hand-supplied
+`start(controlGeneration: CONTROL_B)`, and nothing in production sends that event:
+
+- the offerer sends exactly one `VOICE_OFFER` per `voice_session_id` (PROTOCOL §7.4), so B's held
+  offer is the only copy there will ever be;
+- §7.8's reconnect rebuild — `attachVoice`'s `start(authGeneration:)` — is gated on the **published**
+  `localAudioOpen` projection and already ran when `.connected(B)` was delivered, at which point the
+  press that would have set it had not been reduced. It issued nothing, and there is no second
+  `.connected(B)`;
+- the user has consented, `localAudioOpen` is true, and the intercom reads as on. Nobody presses again.
+
+So A9's refusal left B's offer held for the rest of the ride segment, capture open, voice dead. That is
+**§4 problem 66**: a liveness defect, which is why every safety assertion in A9 kept passing.
+
+### 2aq.2 Reproduced first, against production, with no event production cannot send
+
+The ordering is reachable on unmodified iOS production, and the reproduction is at the coordinator's
+real decisions rather than at the pure table:
+
+1. A is authenticated. The user presses Start Intercom.
+2. `SessionCoordinator.startIntercom` reads `liveAuthenticatedGeneration()` — A — and hands
+   `VoiceController.start` to a deferred task, because `start` is actor-isolated (it stamps
+   `VoiceSetupTimeline`; `setPushToTalkHeld` and `submit` are `nonisolated` and this is not).
+3. A dies, B authenticates, `.connected(B)` is delivered.
+4. `attachVoice(B)` sees `voiceDiagnostics.localAudioOpen == false` — the press is still in flight —
+   and issues no rebuild.
+5. B's `VOICE_OFFER` is admitted under B, reduced, and held for want of consent.
+6. The deferred press finally reaches the mailbox, still naming A.
+
+`VoiceConsentAcrossLifetimesTests` asserts progress from step 6 and from nothing after it. Against
+unmodified production it fails on every claim: `SUPERSEDED_START_LIFETIME` counted 1, status `idle`, no
+`applyRemote(OFFER)`, no `createAnswer`, nothing sent.
+
+**The coordinator is mirrored rather than executed, and the mirror is checked.** `ios/RideLink/` is the
+Xcode app target, which has no test bundle at all (§4 problem 48) and which CI only *builds*. Adding an
+XCTest bundle and a simulator `xcodebuild test` step is a much larger change than this defect warrants,
+so `CoordinatorShapedVoiceHost` reproduces the three decision points and a companion test **reads
+`SessionCoordinator.swift`** and fails if any of them stops being what is mirrored. If someone makes
+the press synchronous, that test fails and this one must be re-derived rather than quietly becoming a
+test of nothing.
+
+**Android cannot reach the ordering today**, and that is a property rather than luck:
+`SessionCoordinator.startIntercom` calls `VoiceController.start` synchronously, `start` never suspends,
+and `VoiceInputMailbox.offer` only touches a lock-guarded deque — so a press is in the mailbox, in the
+same `CRITICAL` lane, ahead of any frame admitted after it. `SessionCoordinatorIntercomConsentTest`
+pins that against the **real** `SessionCoordinator` with a manual dispatcher, so a future refactor that
+introduced a hop would fail it.
+
+### 2aq.3 The fix, and the sentence it must not be described by
+
+A press carries two separable things, and only one expires with its link:
+
+- **control authority** — "generation A may write on A's connection" — stale the instant A ends,
+  authorising no write and owning nothing;
+- **user consent** — ride-segment state, which is *already* why the capture device survives a link loss
+  (ARCHITECTURE §6.3/§6.4) and why §7.8's rebuild restarts voice without asking again.
+
+The held offer already carries an authenticated control lifetime, so the negotiation does not need the
+press's. The three comparisons are now three branches:
+
+| held offer's owner vs. press's owner | outcome |
+|---|---|
+| equal | answer it (A8, unchanged) |
+| older | `RETIRED_HELD_OFFER`, state §7.3's intent afresh (A9, unchanged) |
+| **newer** | **answer it under the held offer's own lifetime** (A10) |
+
+In the third row `negotiationControlGeneration` stays **B** — deliberately not the press's A — so B's
+`voice_session_id` is answered, every outbound frame names B, A's delayed boundary is inert against it
+(`SUPERSEDED_CONTROL_LIFETIME`), and B's own boundary retires it normally.
+
+**The wrong phrasing is "stale A may act on B".** The right one: *the stale press contributes consent
+only; the held offer supplies the authenticated control lifetime and the voice-session identity.* The
+press authorises no socket write — A9's transport rule still decides that and sees only B.
+
+**The two orderings are not symmetric and encoding them as one early return is how this got in.** An
+*older* held offer has a stale remote SDP: the offerer's link died with it and it no longer holds that
+`voice_session_id`, so nothing local can repair it. A *newer* one has a live peer still holding that id
+and waiting; only local consent was missing.
+
+`SUPERSEDED_START_LIFETIME` now covers a residue — newer-owned negotiation state that is not a held
+offer — which is **unreachable by construction**, and that was proved rather than assumed: a vector row
+for it *fails* the pre-existing
+`testNegotiationStateAndItsOwningControlLifetimeArePresentTogetherOrNotAtAll`, so the row was removed
+and the branch kept as a fail-closed refusal for `controlLinkLost`'s null-owner reason.
+
+### 2aq.4 A second, separate finding, recorded on its own (§4 problem 67)
+
+Auditing the iOS deferral found something that is not problem 66 and is not folded into it.
+`startIntercom`, `endIntercom` and `setMicrophoneMuted` each wrapped their controller call in a bare
+`Task` — a continuation the session starts which nothing cancels and nothing **joins**, so
+`retireSession` could emit `.teardownComplete` (ADR-026 rule 21's claim that the session is terminal)
+with a press still in flight against a controller it is about to shut down. All three now go through
+`launchInSession`, the registry that already exists for exactly this.
+
+**The deferral itself was deliberately not removed.** `VoiceController.start` is actor-isolated, the
+hop is what the actor requires, and removing it to make the reproduction impossible would replace a
+proof with an assumption — and would not close problem 66 anyway, which is a property of the table.
+Android is structurally unaffected and is not mirrored.
+
+### 2aq.5 Verification
+
+- **Pre-fix reproduction on both platforms.** Reverting only `VoiceNegotiation` and re-running:
+  iOS — the production regression and P63-B1/B2/B3/B4 all fail, every other cross-lifetime test passes;
+  Android — P63-B1/B2/B3 fail, every other one passes. P63-B4 passes pre-fix *vacuously* (pre-fix the
+  table is idle with the offer still held, so the boundary tears down either way) and is recorded as a
+  preservation test rather than a regression, because a test that cannot fail is not evidence.
+- **Shared vectors**: 82 rows (was 81). A9's superseded-start row is replaced by two A10 rows (with and
+  without capture already open), and a third row written for the `SUPERSEDED_START_LIFETIME` residue
+  was **removed because it failed an existing invariant assertion** — see §2aq.3.
+- **Android**: `:core:test`, the full `test`, `ktlintCheck`, `detekt`, `lint`, `assembleDebug` and
+  `assembleRelease` all green. **50/50** on the focused `:network` lifetime suite and **50/50** on the
+  focused `:app` coordinator suite.
+- **iOS**: `RideLinkCore` (308) and `RideLinkPlatform` (488) green; unsigned Debug **and** Release
+  simulator builds succeed. **50/50** on the focused lifetime suite (46 tests per run).
+- **This pass's own new test was wrong first, again — and its own stress run is what found it.** The
+  iOS production regression failed 2 of the first 25 runs on `XCTAssertTrue(diagnostics.localAudioOpen)`.
+  Not a production ordering: `diagnostics.localAudioOpen` is
+  `state.localAudioOpen && transmission.captureOpen`, and the second half arrives through the
+  **intercom** mailbox (`startLocalAudio` *offers* `.captureOpen` rather than writing it), so it is
+  published one drain after the engine call the test was waiting on. The assertion now waits on that
+  observable — still no sleep — and the same read in P63-B1 was corrected with it. 50/50 after.
+  §2ao.5's lesson arriving for the third consecutive pass.
+- `swiftlint` and `swiftformat` are **not installed on this machine** and were not run. No claim is
+  made about them.
+- **Two loopback-TLS suites failed once each under whole-suite contention, and both are recorded
+  rather than attributed** — see §4 problem 68. `VoiceAuthenticationGateTest` once under a deliberately
+  heavy recompile-every-iteration loop, and `PairingSessionIntegrationTest` once in 24 clean whole-`:network`
+  runs on this branch, against **0 in 24** on the pre-change baseline (`origin/main`, `dcc3805`). Both
+  figures are recorded; neither is enough to call it pre-existing and neither is enough to call it this
+  change's. Both are 15 s `withTimeout` settles over two real TLS sessions on loopback — the same shape
+  problems 62 and 65 already record — and this change touches nothing either exercises.
+- **Problem 65 stays recorded and unattributed.** It was not investigated by this pass and no claim
+  about it is made either way.
+
+### 2aq.6 One more finding, confirmed and deliberately left open (§4 problem 69)
+
+Auditing A9's inherited reasoning found a **third** thing, and it is recorded open rather than
+half-fixed. A8 answers the null-generation press — Start pressed in the gap between two links — by
+recording consent and creating no negotiation, which is right, and then justifies it with: "`attachVoice`
+then rebuilds it under the successor the moment one authenticates … Deterministic, no wedge."
+
+**That sentence is false under exactly problem 66's ordering**, and this pass measured it against the
+*fixed* sources rather than asserting it: with the press deferred past `.connected(B)`,
+`attachVoice(B)` issues no rebuild at all (`rebuildStartsIssued == 0` — the published `localAudioOpen`
+is still false), the press lands with `controlGeneration == nil`, and the final state is `status ==
+idle`, `localAudioOpen == true`, **nothing sent**, with no further event coming. Problem 66's
+consequence, reached without a held offer.
+
+It is **not fixed here**, for three stated reasons: it is not the held-offer question this pass was
+scoped to; A10 cannot reach it, because there is no held offer to answer and no lifetime for the pure
+table to name (rule 23 forbids the table inventing one); and the obvious coordinator fix — making the
+§7.8 rebuild a reaction to consent becoming true — would also fire after `NegotiationSendFailed`
+degrades to idle with consent still recorded, which is a voice-layer retry loop that §7.8 explicitly
+forbids. That needs a designed answer, and guessing at one is how a real defect gets hidden.
+
+A8's text is **not rewritten** — an accepted ADR never is. A10 records the correction, and this row is
+the finding.
+
+### 2aq.7 What this pass did not do
+
+**Nothing ran on a phone.** No S-01…S-12 row moved and no alignment figure exists. Phase 6 and Phase 7
+are not started. PR #3 is not merged.
+
+The standing instruction now has three passes behind it, with one clause added: **audit the newest fix
+first — and audit what a regression *supplies* as carefully as what it asserts.** A9 was one session
+old, CI-green, carried eleven regressions, and one of them reached its conclusion through an event the
+production state machine cannot produce. Nothing in CI could have caught that; only reading the
+regression could.
+
+## 2ar. Gap Start intent across an authenticated successor (15 September 2026, ADR-020 A11)
+
+### Audit and reproduction
+
+The branch began at `50a7291207706e5a246f2531cc0302ee61f7f770`, equal to its remote head after
+fetch, with thirteen modified voice/coordinator/vector files and no local-only commits. No reset,
+stash, checkout, history rewrite or Git identity change was used. The initial diff was preserved
+outside the repository before editing. An unrelated untracked local configuration was left untouched
+and excluded from the commit.
+
+The interrupted implementation introduced reducer-owned pending intent, explicit authentication
+availability, controller/coordinator wiring, shared vectors and an iOS host regression. Those concepts
+were retained. The audit corrected unconditional availability clearing on stale boundaries, missing
+Android mailbox parity, admission of superseded availability, and a separate projection-driven
+reconnect Start that could issue another attempt after the same event's first attempt failed. New
+sleep-based negative-test settling was removed; a counted stale callback now provides a drain barrier.
+No wire codec or message schema had been changed.
+
+P69-B was executed against an isolated archive of **unchanged reviewed production sources** at
+`50a7291`, with only the reproduction test added. A dies, the press captures nil, B's Connected runs
+with published capture false, and the delayed nil press finally arrives. The test failed its progress,
+negotiating-status, fresh-ID and B-outbound assertions: idle, capture open, no ID, no frames. It did
+not inject Start(B). The initial interrupted patch's five tests passed; the audit did not treat that
+as proof of cases they never exercised.
+
+### Decision and adversarial cases
+
+`pendingStartIntent` is pure reducer state, distinct from consent, explicit availability and live
+negotiation ownership. `ControlAuthenticated(B)` supplies the event's own generation; it consumes
+pending intent or records authority for a nil Start arriving later. Establishment consumes intent,
+Stop/ENDING clear it, and failed critical sends never create it. A new authenticated event also owns
+the existing §7.8 reconnect, once; the coordinator emits no second Start from diagnostics.
+
+One deliberately failing probe caught a necessary consequence of that change: B Connected may
+reduce before A's delayed loss while A still has live media. Merely recording B would lose the only
+reconnect opportunity. The new event therefore stops obsolete A media before creating a **fresh** B
+negotiation. It never re-owns A. Duplicate B leaves existing B untouched, and A's late boundary cannot
+retire it. A separate regression prevents delayed A loss clearing idle B availability.
+
+Both roles and both nil-Start orders are tested. A held B offer supplies its ID and authority to nil
+consent. Duplicate availability and an explicit B Start cannot create two live negotiations. If B's
+availability is retired before consumption, only C's explicit event can consume the surviving intent.
+A transport send parked under B and released after C authenticates cannot land on C. Every outbound
+action still carries its owner. Stop releases capture; a link boundary does not.
+
+Android mirrors the reducer and availability wiring. Its existing coordinator still admits Start
+synchronously and does not naturally have iOS's pre-mailbox reordering. iOS Start, Stop, mute and
+reconnect continuations remain session-owned and joined by teardown; the host checks the actual app
+source because there is still no app XCTest bundle. No wire change or retry timer was introduced.
+
+### Verification
+
+- Android full gate: `:core:test test ktlintCheck detekt lint assembleDebug assembleRelease` —
+  **passed**, using the repository's JDK 21 override. The full log reports **804 unit tests**:
+  core 287, network 277, app 176, audio 33, data 31. No failure in the final full run.
+- iOS `RideLinkCore`: **319/319**; `RideLinkPlatform`: **496/496**. Unsigned Debug and Release
+  simulator builds both passed. SwiftLint/SwiftFormat were not run and are not claimed.
+- Android lifetime stress: **50/50 clean iterations, 142 tests per iteration**, forcing execution
+  of the selected core, network and app test tasks each time. Includes P60/61/63/64/66, pending
+  intent, Stop, provenance and the real coordinator/session lifecycle suites. The final run adds
+  all seven `SessionCoordinatorAudioStateLifetimeTest` rows to the earlier 135-test selection.
+- iOS lifetime stress: **50/50 clean iterations**, each executing **52 Core and 60 Platform tests**
+  in fresh test processes. Includes the two production-shaped nil-Start roles/orderings, the source
+  mirror, existing lifetime regressions and session teardown ownership primitive tests.
+- Generated vectors: **103 rows**, exact match to the generator. After excluding the two new local
+  state fields, every surviving pre-A11 row retains its prior semantics; the nil-Start row is renamed
+  to describe pending intent. Both readers require the new keys.
+- No unexplained flakes occurred in either completed stress run. Problems 62/65/68 remain open and
+  unattributed as previously documented; none was used to excuse a failure in this work.
+- Git diff hygiene passed. The normal push and exact-PR-head CI results are reported in the handoff;
+  no physical gate, app-target XCTest execution, Phase 6 or Phase 7 claim is made.
+
+These passing gates do not cover problem 70's suspended-consumer teardown. Overall readiness is
+**NOT READY**, independently of CI's result.
+
+### A separate pre-existing teardown defect found by the final self-audit: problem 70
+
+The Problem 67 coordinator registry cancels and joins its Start/Stop/mute/reconnect continuations.
+That does **not** prove the controller's own mailbox consumer has finished. On iOS,
+`VoiceController.shutdown()` directly applies Stop, cancels `consumerTask`, sets it to nil and returns
+without awaiting its value. The consumer may already be suspended inside `perform`'s transport send.
+Neither the remaining action sequence nor `startEngine` checks cancellation before continuing.
+
+A deterministic probe against unchanged `50a7291` production sources parked the offerer's initial
+`SendVoiceState` (before `CreateOffer` in the same action sequence), awaited `shutdown`, and then
+released the send. Two assertions failed: shutdown had returned with the send still suspended, and
+retired work subsequently created media. The measured trace was:
+
+```text
+shutdown returned: send still holding=true; engine=[stop, release]
+after released old send: engine=[stop, release, start(aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa),
+                                setMicrophoneMuted(true), createOffer]
+```
+
+The session can therefore report `TeardownComplete` while an owned controller continuation remains
+in flight. A post-shutdown `startEngine` can also restart diagnostics polling. This code is unchanged
+by A11: the only iOS controller edit is the new authenticated-input method. The defect is recorded
+open, separately from the completed Problem 69 behavior; a controller-shutdown ownership repair
+needs its own cancellation/join regression and must not be silently folded into this task. Android's
+shutdown enqueues Stop and awaits its completion, and its controller jobs belong to the session
+runtime; identical Android reachability is **not** claimed by this iOS probe.
+
+**Final readiness is NOT READY while problem 70 remains open**, even if all existing suite and CI
+gates pass. P69's idle pending-intent shutdown test is a capture/intent proof, not an in-flight
+consumer-join proof. No physical validation is implied.
+
+### Failures encountered, kept separate from existing timing issues
+
+- The untouched-source P69-B reproduction failed as expected.
+- The reconnect-order probe above failed during implementation and prompted the fresh-media rule.
+- A new test barrier incorrectly used wire mute, which PTT can hold independently of user mute;
+  it timed out. It was replaced with a counted stale engine callback, not a longer timeout.
+- A new Android assertion counted all state announcements as negotiation attempts. Capture/gate
+  updates legitimately announce state, so the proof now compares the full frame list before and
+  after duplicate availability, alongside exact offer counts and shared reducer effects.
+- Initial Kotlin test compilation and formatting checks needed corrections. One Gradle invocation
+  failed to clean compiler outputs; the next diagnostic invocation completed compilation. No test
+  failure was attributed to that tooling failure.
+- The first exact-head CI run (`34925803186`, head `b38e8b83b6f6712d224906922b63977990fc1e15`)
+  failed in Android SDK setup before compilation: the action's default `sdkmanager tools` returned
+  `Failed to find package 'tools'`. The workflow now explicitly requests `platform-tools`; its next
+  step still installs API 36 and build tools 36.1.0. No dependency version or test gate was weakened.
+- The next CI run (`34925939190`, head `9188f84bd1902599c32c6b16c1cf9201827289d9`)
+  passed iOS but failed Android's `SessionCoordinatorAudioStateLifetimeTest` predecessor-loss row:
+  expected no retired peer-signal drops, observed one. This was an A11 diagnostics regression,
+  not attributed to problems 62/65/68. If initial `ControlAuthenticated(A)` was still queued when
+  A's loss arrived, the new sweep correctly retired it but incorrectly counted it as a dropped
+  peer signal. Both mailboxes now count discarded/refused local availability separately, preserving
+  the existing peer-signal counters. Deterministic pure tests assert both counts, and the unchanged
+  coordinator suite is included in the final stress run. No lifetime admission rule was relaxed.
+- Rechecking the counter correction hit Kotlin incremental compiler cache failures for missing
+  generated class files; the compiler's fallback rebuild completed. Detekt also rejected an added
+  branch at its complexity limit; extracting the counter update into a helper preserved that limit.
+- A later iOS stress attempt stopped at iteration 13: the existing P61 gap-Start row in
+  `VoiceControlLifetimeOwnershipTests` awaited the audio fixture's `open` call, then asserted the
+  controller's published capture projection before publication was guaranteed. The assertion saw
+  false. That row now awaits published consent itself and uses production's `ControlAuthenticated`
+  successor event. The suite's fixed settling sleeps were replaced with counted stale-callback
+  barriers and diagnostics-stream waits; timeouts remain failure watchdogs only. The failed attempt
+  is retained separately from the final 50-iteration run, and is not attributed to problems 62/65/68.
+- Problems 62, 65 and 68 remain recorded separately; none is a blanket explanation for a new failure.
+
+Phase 6 and Phase 7 have not started. No phone, Bluetooth, voice hardware or S-01…S-12 gate was run.
+PR #3 remains unmerged and this work requires independent review.
+
+---
+
 ## 3. Tests passed / pending
 
 
@@ -6030,7 +6626,16 @@ as of this write-up — see §7.
 | 58 | **FIXED on discovery (thirty-sixth session, §2am.4) — a false-positive test, and the production defect it was hiding.** `normal.m4a` is **509 ms**; §2al's `testLoadThenSeekThenStartPlaysFromTheSeekedPosition` seeked to **1 500 ms**, so `AVAudioEnginePlayer.scheduleFromCurrentOffset` computed `remaining == 0` and scheduled **nothing**, `playCommand` published `playing: true` regardless, and the assertion matched that state. It passed in 38 ms for audio that was never decoded. The production consequence is worse than the test being empty: `positionMs` (1 500) exceeds `durationMs` (509), there is no segment and therefore no completion callback, so `PlayerState.ended` — which requires `!playing` — is false forever and a queue owner waits for a track end that cannot come. Android does not behave this way (`ExoPlayer.seekTo` clamps and reaches `STATE_ENDED`). A **negative** local seek was worse still: a negative `startingFrame` reaching `scheduleSegment` **aborts the process**, observed as signal 6. Fixed by clamping a seek into the loaded file and reporting end-of-media — the identical state a played-out segment reaches — when there is nothing left to schedule. The replacement test seeks **inside** the fixture and proves frames moved three ways, including wall-clock play-out of the remaining audio | ~~**Medium**~~ Fixed | See §2am.4. Out-of-range is reachable from the wire: `target_position_ms` names a position in the *peer's* copy, and `PlaybackCodec` bounds it against `maxPositionMs`, never against the loaded track |
 | 59 | **FIXED on discovery (thirty-sixth session, §2am.3, ADR-020 Amendment A6) — problem 56's other half.** §2al exempted `SendVoiceState` from the degrade because "a lost state update is carried by the next one". True of a mute, a mode, a connectivity transition and a `closed`; **false of an answerer's intent-to-talk**. An answerer never offers (PROTOCOL §7.3) — its `start()` produces exactly one wire effect, a `VOICE_STATE { negotiating }` naming no `voice_session_id`, and the table advances to `NEGOTIATING` whether or not it reached anything. There is no next one, `start` is then idempotent, `attachVoice`'s rebuild is a no-op — and if the leader has not itself consented, `attachVoice` does not call `start()` there either, so **neither side ever asks again**. Voice wedged for the ride segment on exactly half the role pairings problem 56 was thought to have closed. Fixed by degrading that one frame (`voiceSessionId == null && state == negotiating`) and nothing else; `SendCandidate` and every other `VOICE_STATE` stay exempt | ~~**High**~~ Fixed | See §2am.3. Reproduced as a failing test on both platforms first |
 | 60 | **FIXED (thirty-seventh session, §2an, [ADR-020 Amendment A7](DECISIONS/ADR-020-webrtc-voice-foundation.md)).** Both windows independently re-verified from production before anything was changed, and this row under-described one of them. **Window 1** (a retired lifetime's signal admitted after its own boundary) is confirmed and narrow exactly as recorded: two unsynchronised reads of shared state inside `VoiceSignalRelay.deliver`, widened only by a thread or task being descheduled, and bounded to one in-flight frame because `endConnection` closes the socket. **Window 2** (a successor's signal deleted by a delayed boundary) is confirmed and is **not a race at all** — `ControlSessionManager.promote` waits on nothing `SessionCoordinator`'s event consumer does, and `VoiceLifetimeProvenanceTest[s]` now shows generation 2 authenticating and its own `VOICE_OFFER` reaching the voice sink with generation 1's `LinkLost` still unconsumed, over two real TLS sessions on one real manager. Fixed by provenance rather than timing: `VoiceSignalSink.submit` takes the frame's `ReadFrameBinding.generation`, `VoiceInput.SignalReceived` carries it, `ControlEvent.LinkLost` names the generation that ended (captured in `endConnection` before the record is cleared), and `VoiceInputMailbox` both **discards** what a retirement finds queued and **refuses** what arrives after it, against a monotonic floor plus `newestAdmittedControlGeneration`. The second of those is what closes Window 1 with no boundary in sight, and the `COALESCED` lane is why it is load-bearing: §7.3's `negotiating` intent-to-talk lives in a one-slot lane a retired lifetime's late peer state would otherwise overwrite. Pre-fix behaviour reproduced on both platforms by reverting the focused change. **No wire change and no vector change** — the reducer reads neither new field. Deliberate narrowing: the mailbox-overflow degrade now retires nothing and discards nothing | ~~Low~~ Fixed (residue: problem 61) | See §2an. The residue is the *state* half: a boundary applied after a successor's work was already **reduced** 
-| 61 | **OPEN — a control-lifetime boundary applied after a successor's work has already been *reduced* retires the successor's negotiation** (thirty-seventh session, §2an.3). Problem 60 closes the queue half: a retired lifetime can no longer discard or refuse a successor's **inputs**. This is the state half. `ControlLinkLost` reaches `VoiceController` through `SessionCoordinator`'s event consumer, so a successor's offer can be not merely queued but already applied when the predecessor's boundary arrives; `VoiceNegotiation.controlLinkLost` then returns that live negotiation to `IDLE`, and PROTOCOL §7.8's rebuild cannot recover it because `start` is idempotent against the peer's still-live negotiation. Observed as 3 failures in a 50-run iOS stress pass before the regressions were made deterministic | Low | **Suppressing a superseded boundary was implemented, mirrored, tested and rejected** — it is strictly worse. *Admission is not application*: a successor's admitted offer can be dropped by `offerReceived`'s `GENERATION_MISMATCH` against a still-live predecessor negotiation, so "a newer generation admitted something" does not imply its negotiation is live, and suppressing on that premise leaves a **dead** lifetime's negotiation standing, refusing every offer the successor sends. Both orderings wedge. Closing it properly means `VoiceNegotiationState` knowing which control lifetime owns the live negotiation — for which `StartRequested`, a local press admitted by no frame, has no answer — so it is an ADR-scale change to the pure table **and its vectors**, and deliberately not problem 60's. A regression on each platform pins that the teardown is never suppressed in the meantime |
+| 61 | **FIXED (thirty-eighth session, §2ao, [ADR-020 Amendment A8](DECISIONS/ADR-020-webrtc-voice-foundation.md)).** Confirmed exactly as this row described it, and reproduced from **unmodified production sources on both platforms before anything was changed** — the Android engine trace is the whole finding: `start(…)`, `applyRemote(OFFER)`, `createAnswer`, then `stop`, with status back at `IDLE`. Problem 60 closed the queue half; this was the state half, and a reduced input is no longer an input. Fixed by giving the pure table an owner: `VoiceNegotiationState.negotiationControlGeneration` names the authenticated control lifetime that established the negotiation state it holds (a live status, or a held offer — the two are mutually exclusive by construction), and `controlLinkLost` retires only when the lifetime that ended is **not older than** that owner. **Ownership is established, never inferred**: only the six transitions that actually create negotiation state set it, always to the generation carried by the input that created it; `answerReceived`/`candidateReceived` advance rather than establish and do not move it; `start`'s idempotent early-return does not re-own. **The rejection stands and the fix is not the suppression** — a successor's offer refused by `GENERATION_MISMATCH` leaves the predecessor the owner, so its own boundary still retires it, which is the ordering (P61-B) the suppression failed. The comparison is deliberately "older than" rather than "different from": a boundary naming a **newer** lifetime still retires an older owner, because one authenticated connection exists at a time and generations strictly increase, so a newer lifetime having existed proves the older one ended — that is what stops a lost predecessor boundary stranding a dead negotiation forever. A null owner (unreachable by construction) and a null retired generation (the mailbox-overflow degrade, and a connection that died before authenticating) both retire unconditionally, so the safe degrade is unchanged. `StartRequested` takes its owner from the caller — `ControlEvent.Connected.authGeneration` for §7.8's rebuild, `liveAuthenticatedGeneration` for a user's tap — and a **null** one (Start pressed in the gap between two links) records consent and opens capture but starts **no** negotiation, because a negotiation owned by a lifetime that does not exist is the one state no boundary could retire; `attachVoice` rebuilds it under the successor. A preserved boundary is counted as `SUPERSEDED_CONTROL_LIFETIME` rather than silently ignored. **No wire change. The shared vectors DO change** (14 new rows plus a control generation on every state and lifetime-carrying input) — the first of ADR-020's eight amendments where the control lifetime is part of what the pure table decides, and two property tests carry what rows cannot. Nine deterministic regressions per platform (P61-A…F plus held-offer, null-lifetime degrade and terminal-peer-state), of which six on Android and five on iOS fail against the pre-fix sources; the rest are guards proving the fix does not make link losses inert. The A7 mailbox is untouched, and its "a boundary is never suppressed" regression still passes unchanged | ~~Low~~ Fixed | See §2ao. The lesson is §2am's again: the residue A7 *recorded rather than half-fixed* was real, and naming it honestly is what made it fixable one pass later |
+| 62 | **`VoiceControllerIntercomTest` is intermittently flaky, and it is a *test-side* race that predates this work** (thirty-eighth session, §2ao). Two of its tests assert on a **published diagnostics field** immediately after awaiting an **engine call** — but `stopMediaTransport` records `engine.stop()` *before* `publishEngineDiagnostics()` runs, and `apply` publishes only after every action, so the awaited observable can be visible while `diagnostics.value` still holds the pre-boundary snapshot. Observed as `expected: <CONTROL_LINK_LOST> but was: <null>` in *a link loss keeps capture and the rebuild does not reopen it*, and as a failure of *switching from full duplex to PTT stops transmitting*. **Measured, not inferred:** 1 failure in 50 full-suite runs on this branch and **1 in 50 on the pre-change baseline at PR #2's head** (`eb26a84`) — plus 0 in 60 when the class is run alone, so it needs the fuller suite's contention to surface. It is therefore **not** ADR-020 Amendment A8's, and was deliberately **not** fixed in that change: the fix is to await the published field rather than the engine call (or to publish before recording), which touches a suite A8 does not otherwise modify. No product defect is implied — the production ordering is correct, and only the test's choice of observable is wrong | Low (test-only) | Found while stress-running A8. Fix by awaiting `diagnostics.value.lastFailure` / `transmitting` directly; do **not** fix it by adding a sleep |
+| 63 | **FIXED (thirty-ninth session, §2ap, [ADR-020 Amendment A9](DECISIONS/ADR-020-webrtc-voice-foundation.md)). A held remote offer could cross a control lifetime and be silently re-owned.** Found by an independent review *of* Amendment A8, and reproduced from unmodified production on both platforms before anything was changed. PROTOCOL §7.3 holds a `VOICE_OFFER` that arrives before this user has consented, and A8 correctly recorded the *delivering* lifetime as its owner — but `start`'s answerer branch answered whatever held offer it found and set the owner to the **press's** lifetime. So: A delivers an offer, A dies, B authenticates, and a tap before A's boundary is consumed applied A's SDP, sent a `VOICE_ANSWER` naming **A's** `voice_session_id` on **B's** wire, and moved the owner to B — after which A's boundary was *superseded* by A8's own rule and inert, so nothing could retire the wedge and `start`'s idempotence made `attachVoice`'s rebuild a no-op. That is problem 56's wedge re-created by a different route, by the amendment written to prevent that class. The offerer had already torn its side down with its own copy of that link, so the answer named a generation the peer no longer held. Fixed by comparing the held offer's owner against the press's lifetime: equal (or unowned) answers it, unchanged; **older** discards the held offer (`RETIRED_HELD_OFFER`) and states §7.3's intent-to-talk under the press's lifetime, which is §7.8's fresh rebuild through the mechanism that already exists; **newer** means the *press* is stale, so consent is recorded and capture opened but **no** negotiation started (`SUPERSEDED_START_LIFETIME`) and the held offer — the only copy a peer ever sends — is left for its own lifetime. **No wire change; four new vector rows.** Two deterministic regressions per platform, both of which fail with only this half reverted | ~~Medium~~ Fixed | See §2ap. Ownership is still *established, never inferred* — this discards and rebuilds rather than adopting, which is the opposite of re-owning |
+| 64 | **FIXED (thirty-ninth session, §2ap, [ADR-020 Amendment A9](DECISIONS/ADR-020-webrtc-voice-foundation.md)). An action authorised by one control lifetime was written on another's socket.** The second finding of the same review, and the more general one. `VoiceSignalRelay.send` resolved "the authenticated writer" at the moment of the **write**, which is never the moment the frame was authorised — the mailbox's single consumer, `createOffer`'s engine callback, the dispatcher/actor hop, the write lock and the flush all suspend between the two. Reproduced from production: `start(controlGeneration = 1)` produced three frames and all three went out on generation 2. The peer then accepted a `VOICE_OFFER` as current work on a connection that never authorised it, and generation 1's boundary, arriving afterwards, retired this side's media while the peer was still negotiating. This is ADR-024 Amendment A7's rule pointing outwards, and CLAUDE.md rule 20's distinction in the other direction: a live generation may be **compared** against an authorisation, never substituted for one. Fixed by putting the authorising lifetime on the action — `SendOffer`/`SendAnswer`/`SendVoiceState`/`SendCandidate` implement `OutboundVoiceAction` and carry `controlGeneration`, set by the transition that produced them (`stop`'s `closed` reads it **before** the reset) — and by making `VoiceSignalTransport.send` take it, with the relay refusing on mismatch **or null** and counting `droppedRetiredGenerationOutbound`. The writer supplier is itself generation-bound and resolves the socket **and** the generation from the one immutable `AuthenticatedConnection` record, so no interleaving can hand out a successor's socket under a predecessor's number. A refusal is a plain `false`, answered by `NegotiationSendFailed` and **never** `ControlLinkLost` (A6/problem 57); which sends degrade is unchanged from A6. Because generations strictly increase and one connection is authenticated at a time, a refusal is permanent rather than transient, so the degrade is deterministic and not a retry. Deriving the owner in the driver was considered and **rejected** — correct for every pre-existing branch, wrong for the first branch problem 63 adds. **No wire change; a `control_generation` on every outbound vector action, plus a new property on both platforms.** Four deterministic regressions per platform plus one over two real TLS sessions, all of which fail with only this half reverted | ~~Medium~~ Fixed | See §2ap. Engine callbacks were audited and deliberately left on `voice_session_id` alone — the case it could not answer is now refused at the send |
+| 65 | **`RetiredConnectionPairingTest > a PAIR_CONFIRM read from a retired connection cannot confirm the successor's pairing` failed once, and is recorded rather than attributed** (thirty-ninth session, §2ap). Observed **once**, in a single `test assembleDebug assembleRelease` invocation — the heaviest-contention shape run here. It did not reproduce: **0 failures in 10** further runs of that exact command on this branch, **0 in 20** clean runs of the `:network` suite on this branch, **0 in 20** on the pre-change baseline (PR #2's head, `eb26a84`), and it passes run alone. So 1 in 31 on this branch and 0 in 20 on the baseline — **which is not enough to call it pre-existing, and not enough to call it this change's either**, and both figures are recorded rather than one of them being asserted. What is certain is that the change touches nothing this test exercises: pairing, `handleFrame`, the pre-authentication family, `retiredConnectionFrames` and PROTOCOL §4.5's two-human gate are all untouched, and the only `ControlSessionManager` edit is an added lambda parameter used **solely** by the voice relay's outbound send. What is suspicious is the test's own shape — it settles with a fixed `delay(FsmSession.SETTLE_MS)` over two real TLS sessions on loopback, which is the same timing-sensitive construction problem 62 records for a different suite. Deliberately **not** fixed here: a plausible fix (await an observable instead of sleeping) would edit a suite this change does not otherwise touch, and guessing at a fix for a failure seen once is how a real defect gets hidden | Low (unattributed, test-side shape) | Investigate on its own: reproduce under load, then replace the fixed settle with an awaited observable. Do **not** lengthen the sleep |
+| 66 | **FIXED (fortieth session, §2aq, [ADR-020 Amendment A10](DECISIONS/ADR-020-webrtc-voice-foundation.md)). A9's held-offer rule was safe in both directions and *not live* in one.** A `StartRequested` authorised by a lifetime **older** than the one owning a held `VOICE_OFFER` recorded `SUPERSEDED_START_LIFETIME`, opened capture and started nothing — and nothing would ever have answered that offer: the offerer sends one `VOICE_OFFER` per `voice_session_id` (§7.4), §7.8's rebuild is gated on the **published** `localAudioOpen` and had already run before the press was reduced, and a user who has consented does not press Start again. So voice stayed dead for the ride segment with capture open. **A9's own regression hid it by supplying a second `start(B)` that production never sends** — found by reading the regression, not the code, and invisible to CI. Reachable on unmodified iOS production because `SessionCoordinator.startIntercom` reads the live generation and then defers `VoiceController.start` (actor-isolated, it stamps `VoiceSetupTimeline`), so the press lands behind a successor's admitted offer; reproduced at the coordinator's real decisions, with the mirror checked against `SessionCoordinator.swift`'s own source because the Xcode app target has no test bundle (problem 48). Fixed by separating a press's two halves: its **control authority** expires with its link and authorises no write; its **user consent** is ride-segment state, which is already why capture survives a link loss. `held > press` now **answers the offer under the held offer's own lifetime** — B's `voice_session_id`, B on every outbound frame, `negotiationControlGeneration` deliberately **not** moved to the press's, A's late boundary inert, B's own boundary retiring it. The three comparisons are three branches, never one early return, and the two orderings are **not** symmetric: an older held offer has a stale remote SDP nothing local can repair; a newer one has a live peer still holding that id. `SUPERSEDED_START_LIFETIME` now covers a residue that is unreachable by construction — proved by a vector row for it *failing* `testNegotiationStateAndItsOwningControlLifetimeArePresentTogetherOrNotAtAll` — and is kept fail-closed. **No wire change; the vectors moved.** Android cannot reach the ordering today (its press offers synchronously, ahead of any later-admitted frame in the same `CRITICAL` lane) and `SessionCoordinatorIntercomConsentTest` pins that against the real coordinator | ~~Medium~~ Fixed | See §2aq. Pre-fix reproduced on both platforms by reverting only `VoiceNegotiation`; P63-B4 passes pre-fix vacuously and is recorded as a preservation test, not a regression |
+| 67 | **FIXED (fortieth session, §2aq.4, ADR-020 Amendment A10). Three iOS voice actions were unstructured continuations nothing joined.** `SessionCoordinator.startIntercom`, `endIntercom` and `setMicrophoneMuted` each wrapped their `VoiceController` call in a bare `Task`, because `start`/`stop`/`setMicrophoneMuted` are actor-isolated there (unlike `submit`, `selectPolicy` and `setPushToTalkHeld`, which are `nonisolated` and reach the bounded mailbox directly). A bare `Task` is a continuation the session starts which `retireSession` neither cancels nor **joins**, so `.teardownComplete` — ADR-026 rule 21's claim that the session is terminal — could be emitted with a press still in flight against a controller it is about to shut down. All three now go through `launchInSession`. **The deferral itself is deliberately unchanged**: the hop is what the actor requires, and removing it to make problem 66's reproduction impossible would replace a proof with an assumption — and would not close 66 anyway, which is a property of the pure table. Found while auditing problem 66's seam and recorded separately rather than folded in. Android is structurally unaffected (`VoiceController.start` is an ordinary synchronous method) and is not mirrored | ~~Low~~ Fixed | See §2aq.4. No observed failure is attributed to it — it is a rule 21 shape violation, fixed on inspection |
+| 68 | **Two loopback-TLS suites each failed once under whole-suite contention, and both are recorded rather than attributed** (fortieth session, §2aq.5). `VoiceAuthenticationGateTest > the same peer's AUDIO_STATE is delivered once the trust gate has passed` failed once with `TimeoutCancellationException: Timed out waiting for 15000 ms` inside `FsmSession.awaitStatus`, under a deliberately heavy loop that recompiled and reran the whole `:network` **and** `:app` suites every iteration. `PairingSessionIntegrationTest > the peer confirming alone pairs nothing` failed once in **24** clean whole-`:network` runs on this branch. The pre-change baseline (`origin/main`, `dcc3805`) was **0 failures in 24** of the identical loop, and `VoiceAuthenticationGateTest` alone is 20/20 on this branch. So: 1 in 24 on the branch and 0 in 24 on the baseline for the comparable loop — **not enough to call it pre-existing, and not enough to call it this change's**, and both figures are recorded rather than one of them being asserted. What is certain is that this change touches nothing either suite exercises: within `:network` the only edits are the pure `VoiceNegotiation` table (reached solely through voice inputs) and `VoiceCrossLifetimeAuthorityTest` itself. What is plausible and unproven is load: this change **adds four tests** to a suite that runs alongside them, and both failures are 15 s `withTimeout` settles over two real TLS sessions on loopback — the same construction problems 62 and 65 already record for three other suites. Deliberately **not** fixed here: replacing those settles with awaited observables would edit suites this change does not otherwise touch, and it is the same call problem 65 made | Low (unattributed, test-side shape) | Investigate with problems 62 and 65 as one piece of work: replace every fixed settle in the loopback-TLS suites with an awaited observable. Do **not** lengthen the timeouts |
+| 69 | **FIXED (15 September 2026, §2ar, ADR-020 Amendment A11).** A gap Start captured nil, B Connected ran before that deferred Start reduced, and the published capture projection suppressed the only reconnect rebuild. The measured result was idle with capture open and nothing sent. The mirrored pure table now holds one unresolved `pendingStartIntent` and authority from an explicit `ControlAuthenticated` input. Both Start(nil)→B and B→delayed Start(nil) establish one B-owned negotiation; held B can supply its own authority. Connected owns the single reconnect opportunity, so duplicate events and critical send failure cannot retry through `IDLE + consent`. Stop/ENDING clear intent. Stale availability is discarded/refused by lifetime, outbound effects remain bound, and no wire field changed. Android mirrors semantics without claiming iOS pre-mailbox reachability. | ~~Medium~~ Fixed | See §2ar and TEST_PLAN §3.1e for reproduction, no-retry, ownership, stress and verification evidence. Physical voice gates remain pending. |
+| 70 | **OPEN, confirmed on unchanged `50a7291` production (15 September 2026, §2ar). iOS `VoiceController.shutdown()` cancels its mailbox consumer without joining it.** A suspended initial voice-state send survives shutdown; releasing it afterward continues the same action sequence and calls `startEngine`/`createOffer` after `stop` and `release` returned. The coordinator joins its own Problem 67 continuations, but that does not join this nested controller consumer. `TeardownComplete` can therefore precede completion of owned voice work. No A11 shutdown code changed, and identical Android reachability is not claimed. | Medium (terminal session ownership violation; media can restart after shutdown) | Repair controller cancellation and joining with a deterministic parked-send regression. Overall readiness remains NOT READY; do not treat passing P69 or existing CI tests as a consumer-join proof. |
 | 51 | **`session_id` is regenerated on every reconnect, which PROTOCOL §2 and §10 say it must not be.** §2's envelope table says "Regenerated on every fresh `CONNECTING`, **preserved across `RECONNECTING`**", and §10's ladder diagram shows `HELLO { session_id = <previous> }` as what distinguishes resuming from starting over. Both platforms' `ControlHandshake` call `freshSessionId()` unconditionally in the initiator role, and the acceptor mints a fresh one whenever it is leader, so a reconnect produces a **new** `session_id`. Found during §2aj's outbound `AUDIO_STATE` audit while checking whether `session_id` could name a sender lifetime — it cannot, and this is why | Low | **Not reachable as a bug today:** nothing in either codebase reads an inbound `session_id` to decide anything; session continuity is carried by the authentication generation (ADR-023 §3) and by `ControlSessionManager`'s own state, neither of which uses it. So this is a documentation-versus-implementation contradiction, which CLAUDE.md calls a bug in its own right. Resolve it deliberately — either implement §10's resume or correct §2/§10 — in a change that is *only* that, alongside problem 42's `STATE_REQUEST` work, which is the same reconnect story. **Re-audited in §2ak, now that a second session is genuinely reachable: still a documentation-versus-implementation mismatch only, and *not* made reachable by the lifecycle change.** Re-derived from production rather than from this row: `handleFrame` reads `binding.sessionId`, which is the locally-held `activeSessionId` recorded at read time and used only to stamp replies; `promote` takes the new id from the *handshake outcome*, never from an envelope. §2ak also notes one adjacent cosmetic point for whoever does resolve this: `shutdown()` does not reset `activeSessionId`, so between a shutdown and the next `promote` it still names the dead session. Nothing builds a frame in that window (the `BYE` that does is legitimately the dead session's), so it is inert — recorded so it is not rediscovered as a finding |
 | 52 | **`seq` never restarts at 1 per session**, which PROTOCOL §2 says it does ("Per-sender monotonic counter, starts at 1 per session"). `SeqCounter` is one `AtomicLong(1)` per `ControlSessionManager` — i.e. per process — and neither `promote` nor `shutdown` resets it, so the second session on a manager continues the first's numbering. Found alongside problem 51, in the same audit | Low | **Not reachable as a bug today:** `seq` is write-only across both codebases — no receiver reads it, and §2's stated uses (gap detection, duplicate dropping) are unimplemented. Fix it with problem 51, since both are the same question about what a "session" is on the wire, and both should move with §10's resume rather than piecemeal. **Re-audited in §2ak.** The lifecycle fix makes the contradicted behaviour *routine* rather than merely possible — a second session on one manager is now an ordinary thing to have — but not observable: `seq` is still write-only on both platforms. The sharper finding §2ak adds is that **the implementation is the safer of the two, and §2 is probably the side that should change**: a counter that restarts at 1 per session makes a straggler from the previous session indistinguishable from a valid low-`seq` frame of the new one, which is precisely the class ADR-025 closed everywhere else. The adversarial interleaving, written out so it is not re-derived: Session A ends at `seq` 400; Session B's first frame is `seq` 401; a receiver implementing §2's "starts at 1" gap detection sees a gap of 400 and, depending on how it reacts, either resyncs needlessly forever or discards B's traffic |
 | 53 | **FIXED (thirty-fourth session, §2ak, [ADR-026](DECISIONS/ADR-026-session-lifecycle-teardown-and-restart.md)).** Confirmed exactly as recorded: `TeardownComplete` (`ENDING -> IDLE`) and `RetryRequested` (`DISCONNECTED -> DISCOVERING`) were in `SessionFsm` on both platforms, mirrored, vector-covered, drawn in ARCHITECTURE §3.1 — and emitted by **nothing outside a test**, so an ended session or an exhausted reconnect budget required a force-quit. **Emitting them was the easy half.** `TeardownComplete` is the event a successor session walks through, and the pre-fix `ENDING` effect ended by *launching* `ControlSessionManager.shutdown()` and returning — so emitting it there would have let a successor bind a listener that the predecessor's pending `shutdown()` then closed, re-latched `isShutDown` behind, and (via `relays.reset()`) stripped the sinks from. Fixed with one teardown owner per platform (`SessionCoordinator.retireSession` over the new `SessionTeardownOwner`): everything the ending session owns is captured **synchronously** before the first suspension, then capture release is awaited, every continuation is cancelled **and joined**, `shutdown()` is awaited, and only then `TeardownComplete`. A successor joins that same job before touching anything shared. `retryDiscovery()`/`endSession()` are the new user entry points and the one session button now offers Start / Stop / End / Retry by FSM legality. ARCHITECTURE §3 rule 3 is amended to **two** deliberate ends (ADR-026 §5) and the FSM — not a coordinator — says which; the vector row and both platforms' effect assertions moved with it | ~~**Medium**~~ Fixed | See §2ak. `ErrorAcknowledged` remains un-emitted, tracked separately as problem 55 |
@@ -6101,7 +6706,21 @@ process on a negative local seek), and **59** (problem 56's `SendVoiceState` exe
 **answerer's** half of the same wedge open). The wire still did not move;
 `protocol/vectors/voice-fsm/` gains four rows for one new pure input.
 
-**One new row is open and is deliberately not closed here: 60.** §2al's justification for the
+**The thirty-seventh, thirty-eighth and thirty-ninth sessions then formed one chain, each auditing the
+one before it.** §2an closed **60** by lifetime identity and its own stress run opened **61**; §2ao
+closed 61 by giving the pure table a negotiation owner (rule 23); §2ap audited *that* and found **63**
+and **64** — a held remote offer that could be adopted by a lifetime that did not deliver it, and an
+outbound frame that could be written on a successor's socket (rule 24, ADR-020 Amendment A9). All five
+are fixed, all were reproduced from unmodified production on both platforms first, and every half was
+re-proved in isolation. **The next task is the same one this chain keeps demonstrating: audit §2ap's
+fix.** It is one session old, CI-green, carries nine new regressions, and is the least-audited code in
+the repository — which is exactly what was true of §2ao's fix when §2ap found two defects in it. In
+particular, re-derive for yourself whether `OutboundVoiceAction`'s generation is set correctly by
+*every* transition that sends (the vectors and a property test claim it is), and whether any outbound
+family other than `VOICE_*` has the same write-time-versus-authorisation-time gap that problem 64 was.
+
+**The historical note that follows is kept because its reasoning still explains how this codebase
+fails.** One row was open at §2am and is now closed: **60.** §2al's justification for the
 problem-50 discard — that offer time makes it "exact rather than a race" — is false as written, in
 both directions. The discard is scoped by arrival order, not by lifetime identity. Both windows are
 instruction-wide and neither is reproducible at any seam that layer exposes, so the claim is corrected
@@ -6156,15 +6775,26 @@ amount of further laptop auditing substitutes for it.
 Two software follow-ups are queued behind it, in this order, and each should be a change that is
 *only* itself:
 
-1. ~~**§4 problem 60**~~ — **done in §2an** (ADR-020 Amendment A7), exactly as this entry described it,
-   plus the `newestAdmittedControlGeneration` half that entry had not seen was needed. Its successor is
-   **§4 problem 61**, which is *not* the same shape: it needs the pure table to know which control
-   lifetime owns a negotiation, and `StartRequested` — a local press admitted by no frame — has no
-   answer for that. Do not start it as "more of problem 60".
+1. ~~**§4 problem 60**~~ — **done in §2an** (ADR-020 Amendment A7). ~~**§4 problem 61**~~ — **done in
+   §2ao** (ADR-020 Amendment A8), and the warning this entry gave was right: it was not "more of
+   problem 60", it took the change to the pure table and its vectors that this entry predicted, and
+   `StartRequested`'s missing answer turned out to be "consent without a negotiation" rather than an
+   invented generation. **Nothing in this queue replaces it** — the next voice-lifetime work is
+   whatever item 2 below turns up, and it should be *found* rather than assumed.
+   **Audit A8 itself first.** It is one pass old, it changed a pure table that seven previous audits
+   treated as settled, and by §2am's standing lesson that makes it the least-audited code here.
 2. **The question §2aj opened and nobody has finished**: *which long-lived objects in this codebase
    hold a verdict from an owner that is gone?* §2aj answered it for the `AUDIO_STATE` inbox and §2am
    answered a slice of it for `VoiceInputMailbox`. `SharedLibraryCoordinator`'s catalogue and the rest
    of `VoiceController`'s retained state have still never been asked.
+
+**§2ao's own small lesson, because it cost a test:** the first draft of P61-C delivered two boundaries
+back to back and asserted both had been applied. They had not — `VoiceMailboxLane.TEARDOWN` is a single
+latest-wins slot, so the second silently replaced the first and the test was only ever exercising one
+lifetime. The iOS run caught it because the fix's new `SUPERSEDED_CONTROL_LIFETIME` counter made
+"was this boundary actually reduced?" observable; on Android the same draft passed, because its
+assertions were satisfied either way. **A test that cannot tell you how many times the thing under test
+ran is not yet a regression** — and surfacing a no-op is what made the difference.
 
 **And carry §2am's lesson into whatever comes next: audit the newest fix first.** All three of that
 session's defects were in code one session old, green in CI, each already carrying a regression — and
@@ -6173,7 +6803,10 @@ one of them re-created, by a different route, the exact failure it had been writ
 **"ADR-025" is not "final", and the wording is deliberate.** **Ten** passes have now each found real
 defects in code that was already CI-green: A1 seven, A2 six, A3 three, A4 six, A5 four, A6 two, A7
 three (one left open), ADR-025 four, ADR-021 A7 one that ADR-025 had already filed as "Low" and
-under-described, and ADR-020 A7 one open problem that its *own stress run* found in its *own* fix. That is evidence *for* auditing again, not against it. Look hardest at where these
+under-described, ADR-020 A7 one open problem that its *own stress run* found in its *own* fix, and
+ADR-020 A8 that problem closed — the only one of the fourteen that was *handed* its defect by the
+previous pass rather than having to find it, which is exactly why it is the weakest evidence of
+thoroughness here and not the strongest. That is evidence *for* auditing again, not against it. Look hardest at where these
 stopped short:
 
 - **ADR-021 A7 changed a wire field and every peer must therefore be rebuilt.** `revision_epoch` is

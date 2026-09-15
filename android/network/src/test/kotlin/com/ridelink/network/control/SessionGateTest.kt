@@ -24,7 +24,7 @@ class SessionGateTest {
     private val remote = PeerId("bbbbbbbbbbbbbbbb")
     private val allStatuses = SessionStatus.entries
 
-    private val connected = ControlEvent.Connected(remote, SessionId("s"), isLocalLeader = true)
+    private val connected = ControlEvent.Connected(remote, SessionId("s"), isLocalLeader = true, authGeneration = 1L)
     private val peerTrusted = ControlEvent.PeerTrusted(remote)
     private val pairingRequired = ControlEvent.PairingRequired(remote)
     private val pairingSucceeded =

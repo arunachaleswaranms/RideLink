@@ -315,7 +315,10 @@ class SessionCoordinatorEndingEffectTest {
     }
 
     private class NoOpVoiceTransport : VoiceSignalTransport {
-        override suspend fun send(signal: VoiceSignal): Boolean = false
+        override suspend fun send(
+            signal: VoiceSignal,
+            controlGeneration: Long?,
+        ): Boolean = false
     }
 
     private class NoOpControlChannel : ControlChannel {
@@ -402,7 +405,7 @@ class SessionCoordinatorEndingEffectTest {
             coordinator.handleControlEvent(ControlEvent.PeerTrusted(remotePeerId))
             assertEquals(SessionStatus.CONNECTING, coordinator.state.value.status)
             coordinator.handleControlEvent(
-                ControlEvent.Connected(remotePeerId, SessionId("test-session"), isLocalLeader = true),
+                ControlEvent.Connected(remotePeerId, SessionId("test-session"), isLocalLeader = true, authGeneration = 1L),
             )
             assertEquals(SessionStatus.CONNECTED, coordinator.state.value.status)
 

@@ -83,7 +83,7 @@ class SyncPlaybackCoordinatorTest {
         // no subscriber drops what is emitted to it — so the subscription has to be let run first.
         scope.runCurrent()
         session.setClock(SessionClockEstimate(offsetToLeaderUs = 0, rttP95Us = 8_000, ready = clockReady))
-        session.emit(ControlEvent.Connected(SyncTestValues.followerPeerId, SessionId("S"), asLeader))
+        session.emit(ControlEvent.Connected(SyncTestValues.followerPeerId, SessionId("S"), asLeader, 1L))
         scope.runCurrent()
         // Establishing a session legitimately restores the rate to exactly 1.0 (brief §38) — real
         // behaviour, asserted on its own in the link-loss test below. Cleared here so the

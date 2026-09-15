@@ -225,7 +225,7 @@ class SyncPlaybackReadGenerationAuditTest {
         runCurrent()
         session.currentAuthGeneration = generation
         session.setClock(SessionClockEstimate(offsetToLeaderUs = 0, rttP95Us = 8_000, ready = true))
-        session.emit(ControlEvent.Connected(SyncTestValues.leaderPeerId, SessionId("S$generation"), false))
+        session.emit(ControlEvent.Connected(SyncTestValues.leaderPeerId, SessionId("S$generation"), false, generation))
         runCurrent()
     }
 

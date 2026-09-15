@@ -1032,7 +1032,7 @@ one voice session per control session, and exactly one owner of it.
 | Control-plane event | Voice-plane consequence |
 |---|---|
 | trust gate passes (`CONNECTED`) | voice becomes *permitted*. Nothing is opened; the microphone is opened only by an explicit user action (ARCHITECTURE §6.4) |
-| `LinkLost` (network) | the **media transport** is torn down — peer connection, both tracks, ICE state — and `voice_session_id` is cleared. The **capture device and audio session stay open**: ARCHITECTURE §6.3/§6.4 opens them once while the app is foreground-visible and keeps them for the whole ride segment, because on Android there is no second legal opportunity to open the microphone once the screen is locked, so a link blip must not close it. Nothing is retried by the voice layer — §10's control ladder is the only reconnect loop in the app |
+| `LinkLost` (network) | the **media transport** is torn down — peer connection, both tracks, ICE state — and `voice_session_id` is cleared, **provided the lost link is the one that owns the negotiation** (see below). The **capture device and audio session stay open**: ARCHITECTURE §6.3/§6.4 opens them once while the app is foreground-visible and keeps them for the whole ride segment, because on Android there is no second legal opportunity to open the microphone once the screen is locked, so a link blip must not close it. Nothing is retried by the voice layer — §10's control ladder is the only reconnect loop in the app |
 | control reconnect succeeds, returning to `RIDE_ACTIVE` | voice is rebuilt as a **fresh negotiation** with a new `voice_session_id`. A stale ICE candidate or answer from before the loss cannot apply (§7.2) |
 | `BYE` | media torn down as above, and not rebuilt. `BYE` leads to `ENDING`, which is the state that releases the audio session (ARCHITECTURE §3 rule 3) |
 | pairing or security failure | voice can never have been alive: the trust gate never opened, so no `VOICE_*` frame was ever accepted (§7.1) |
@@ -1051,6 +1051,78 @@ happens to still remember (ADR-020 Amendment A2) — the extracted, independentl
 `com.ridelink.core.voice.VoiceEngineGeneration` / `RideLinkCore.VoiceEngineGeneration`. A media
 engine reporting that `start()` itself failed is not a callback in this sense and is reported
 unconditionally, since the generation it would have named was never installed.
+
+**Which link loss.** A live negotiation belongs to the authenticated **control lifetime** that
+established it, and a `LinkLost` retires it only when the lifetime that ended is not older than that
+owner (ADR-020 Amendment A8, STATUS §4 problem 61). This is **receiver-local and not on the wire**:
+nothing here is negotiated, nothing is sent, and no peer can influence it — a control authentication
+generation is a number one device allocates for its own connections, and it is a third identity that
+must never be conflated with `voice_session_id` (which owns one WebRTC negotiation) or with
+`AUDIO_STATE.revision_epoch` (§4.4, which owns one sender lifetime). The rule exists because a
+`LinkLost` is delivered asynchronously while an inbound promotion can authenticate a successor and
+admit its frames without passing through that delivery at all, so a predecessor's boundary can arrive
+after the successor's `VOICE_OFFER` has already been applied. Note the direction: a boundary naming a
+**newer** lifetime than the owner still retires it, because one authenticated connection exists at a
+time and generations strictly increase, so a newer lifetime having existed proves the owner's has
+ended. A negotiation that no boundary could retire would be a worse failure than the one this fixes.
+
+**Which lifetime may answer a held offer.** §7.3's held `VOICE_OFFER` — the one an answerer keeps
+because its user has not consented yet — is negotiation state too, and it belongs to the control
+lifetime that **delivered** it. Local consent arriving under a *different* lifetime does not transfer
+it (ADR-020 Amendment A9, STATUS §4 problem 63). If the consenting lifetime is **newer**, the held
+offer is discarded and the answerer states §7.3's intent-to-talk afresh instead: the offerer's own
+link died with the lifetime that carried the offer, so it has already torn its side down and no longer
+holds that `voice_session_id`, and answering it would name a generation the peer would refuse while
+moving the negotiation's owner to a lifetime whose boundary is not the one that should retire it. This
+is the same "rebuild as a fresh negotiation" the reconnect row above requires, reached through the
+mechanism that already exists rather than a second one.
+
+If the consenting lifetime is **older**, the *press* is the stale thing — but only half of it is
+(ADR-020 Amendment A10, STATUS §4 problem 66). A press carries two separable things: its **control
+authority**, which expires with its link and contributes nothing, and its **user consent**, which is
+ride-segment state and outlives a control reconnect by design — that is why the capture device stays
+open across a link loss at all, and why the reconnect row above rebuilds voice without asking again.
+So the held offer is **answered**, and the negotiation it establishes belongs to the **held offer's**
+lifetime throughout: that offer's `voice_session_id`, that lifetime's generation on every outbound
+frame, that lifetime's boundary as the one that retires it. The stale press authorises no write; the
+offer the live lifetime delivered does. Refusing instead was safe and **not live**: the offerer sends
+one `VOICE_OFFER` per `voice_session_id`, the reconnect rebuild has already run and found no consent
+recorded, and the user has already consented — so nothing would ever have answered it.
+
+The two orderings look symmetric and are not. A held offer **older** than the press has a stale remote
+SDP, which nothing local can repair. A held offer **newer** than the press has a live peer still
+holding that `voice_session_id` and waiting; only local consent was missing, and that is exactly what
+the press still legitimately carries. All of this is receiver-local — no new field, nothing on the
+wire — and the peer's view is simply that its one offer was answered.
+
+**Which link a `VOICE_*` frame may be written on.** Every outbound `VOICE_*` frame belongs to a
+negotiation, and therefore to that negotiation's control lifetime; it may be written **only** to the
+connection that lifetime owns (ADR-020 Amendment A9, STATUS §4 problem 64). Everything between the
+decision to send and the write suspends — the input queue's single consumer, the media engine's
+offer/answer callback, the transport's own dispatch and write lock — so the connection that is
+authenticated when the write happens is not necessarily the one that authorised the frame. A frame
+whose lifetime no longer owns the surviving connection is **refused, not redirected**, and the
+negotiation degrades exactly as it does for any other unsendable offer or answer. This too is
+receiver-local: there is no new field and nothing about it appears on the wire; the peer's view is
+simply that the frame was never sent.
+
+**A Start pressed during the control gap** (ADR-020 Amendment A11, STATUS §4 problem 69) carries
+consent but no control authority. The local reducer records one `pendingStartIntent`, independently
+of capture consent. `Connected(B)` supplies an explicit `ControlAuthenticated(B)` input; it either
+consumes the pending intent or records B's authority for a delayed `Start(nil)` to meet. Thus both
+`Start(nil) → B` and `B → delayed Start(nil)` establish one B-owned negotiation without another tap.
+The offerer uses the establishing input's fresh `voice_session_id`; an answerer states §7.3 intent
+and waits, or answers an already-held B offer under that offer's own ID and owner.
+
+The authenticated event also owns the existing consented reconnect rebuild, once per new lifetime.
+There is no second Start from a published capture projection. If an older live negotiation remains,
+its media is stopped before a fresh successor negotiation is created; its owner is never relabelled.
+Duplicate availability cannot retry a failed send. `NegotiationSendFailed` preserves consent and
+creates no pending intent: **`IDLE + consent` alone is never permission to restart**. Stop and session
+ENDING clear pending intent. Availability obeys the same local lifetime retirement rules as admitted
+voice work, and every outbound effect keeps the generation that authorised it. These are local state
+and input fields, not changes to any wire schema. Android mirrors the table; its synchronous Start
+path does not currently have iOS's pre-mailbox Start deferral.
 
 ### 7.9 Test vectors
 
@@ -1351,7 +1423,7 @@ incompatibility a laptop-side test failure instead of a roadside mystery
 | `audio-state/*.json` | `AUDIO_STATE` encode against §4.4's representable-states table, every field missing and every field wrong-typed, both bounds at and past their edges, explicit-null versus absent nullable fields, derived `media_quality` for every profile value, unknown enum tolerated as `unknown`, the publisher's monotonic `revision` (including the states that must **not** move it), the `revision_epoch` that scopes it (§4.4.2) — minted only by the same step that restarts the counter, and on the receiving side: a new epoch accepted over a higher floor, a superseded one refused and counted, and the 8-epoch bound's evicted lifetime read as new again — and the receiver dropping anything not strictly greater **within one epoch**. Also scanned by both platforms for platform audio vocabulary, which must appear nowhere in it (§4.4.1, ADR-016). 98 rows |
 | `intercom/*.json` | ARCHITECTURE §6.3's transmission gate: `(policy, state, input) -> (state, actions)` across all five modes, the five presets field for field, both wire-mode mappings, and the invariant that **no action can open or close capture** (ADR-021 §4) |
 | `voice-signal/*.json` | `VOICE_*` parse/reject: every required field, wrong types, `voice_session_id` format, oversize SDP and candidate, mline-index range, nullable `sdp_mid`, unknown `state`/`mode` tolerated (§7.4, §7.5) |
-| `voice-fsm/*.json` | the complete `(role, status, input) -> (actions, new status)` negotiation table: offerer rule, glare, duplicate offer/answer, ICE before and after the remote description, teardown, generation mismatch (§7.3, §7.8) |
+| `voice-fsm/*.json` | the complete `(role, status, input) -> (actions, new status)` negotiation table: offerer rule, glare, duplicate offer/answer, ICE before and after the remote description, teardown, generation mismatch, and the control-lifetime ownership of a negotiation (§7.3, §7.8) |
 
 Each is `{ "name", "input", "expected" }`, so a single table-driven runner per platform covers
 the file. A vector is added for every protocol bug found on a device — that is the regression

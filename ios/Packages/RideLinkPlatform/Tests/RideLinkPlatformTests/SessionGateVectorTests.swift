@@ -41,7 +41,9 @@ final class SessionGateVectorTests: XCTestCase {
     private func controlEvent(_ spec: [String: Any]) throws -> ControlEvent {
         switch try XCTUnwrap(spec["kind"] as? String) {
         case "Connected":
-            return .connected(remotePeerId: remote, sessionId: SessionId("s"), isLocalLeader: true)
+            // `SessionGate` decides on the event's *kind*, never on which lifetime raised it, so any
+            // generation is faithful here — the trust gate is not a lifetime-ownership question.
+            return .connected(remotePeerId: remote, sessionId: SessionId("s"), isLocalLeader: true, authGeneration: 1)
         case "PeerTrusted":
             return .peerTrusted(remotePeerId: remote)
         case "PairingRequired":

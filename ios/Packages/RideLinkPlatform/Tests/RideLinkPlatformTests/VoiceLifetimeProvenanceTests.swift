@@ -159,6 +159,71 @@ final class VoiceLifetimeProvenanceTests: XCTestCase {
         await second.shutdown()
     }
 
+    /// **STATUS §4 problem 64 — the same rule pointing outwards, over two real TLS sessions on one real
+    /// manager** (ADR-020 Amendment A9).
+    ///
+    /// The three tests above prove a frame's *inbound* authority is the connection it was read from.
+    /// This one proves the outbound half, which had no guard at all: `send` resolved "the authenticated
+    /// writer" at the moment of the write, so a `VOICE_*` frame authorised by generation 1 was written
+    /// to generation 2's connection — and the peer on that connection received it as current work.
+    ///
+    /// Deliberately built on the same two-session machinery rather than on a fake: what is under test is
+    /// that `ControlSessionManager`'s writer supplier resolves the connection **and** the generation
+    /// from the one immutable `AuthenticatedConnection` record, which no fake could get wrong for it.
+    func testAVoiceFrameAuthorisedByARetiredGenerationIsNeverWrittenOnTheSuccessorsConnection() async throws {
+        let clock = ProvenanceStepClock(1_000_000)
+        let (a, b) = try TestSessions.pairedPeers("aaaaaaaaaaaaaaaa", "bbbbbbbbbbbbbbbb")
+        let manager = a.manager(monotonicNowUs: { clock.next() })
+        let session = FsmSession(peer: a, manager: manager)
+        await session.attach()
+
+        let first = try await Self.connect(manager: manager, session: session, peer: a, counterpart: b, clock: clock)
+        XCTAssertEqual(manager.liveAuthenticatedGeneration(), 1)
+        await first.shutdown()
+        // Wait for *this* manager to have observed the loss before dialling again. `promote` requires
+        // `activeSocket` to be nil, so reconnecting while the first connection is still being torn
+        // down can leave the successor unauthenticated — which is a fact about this test's setup, not
+        // about the rule under test. Gated on an observable, never on a sleep.
+        try await Self.poll { manager.liveAuthenticatedGeneration() == nil }
+
+        let second = try await Self.connect(manager: manager, session: session, peer: a, counterpart: b, clock: clock)
+        try await Self.poll { manager.liveAuthenticatedGeneration() == 2 }
+        XCTAssertEqual(manager.liveAuthenticatedGeneration(), 2, "generation 2 owns the surviving connection")
+        // The successor's own peer is the only observer that matters: it is the connection the pre-fix
+        // `send` would have written generation 1's frame to.
+        let peerSpy = VoiceSignalSpy()
+        await second.voiceRelay().setSink(peerSpy)
+
+        guard case .string(let sessionIdHex) = Self.offerPayload["voice_session_id"],
+              case .string(let sdp) = Self.offerPayload["sdp"] else {
+            return XCTFail("the shared offer payload must carry both fields")
+        }
+        let offer = VoiceSignal.offer(voiceSessionId: VoiceSessionId(sessionIdHex), sdp: sdp)
+        let relay = await manager.voiceRelay()
+
+        var placed = await relay.send(offer, controlGeneration: 1)
+        XCTAssertFalse(placed, "a retired lifetime's frame must fail closed")
+        var refusals = await relay.droppedRetiredGenerationOutbound()
+        XCTAssertEqual(refusals, 1, "and be counted, never silent")
+
+        placed = await relay.send(offer, controlGeneration: nil)
+        XCTAssertFalse(placed, "and so must a frame authorised by nobody")
+        refusals = await relay.droppedRetiredGenerationOutbound()
+        XCTAssertEqual(refusals, 2)
+
+        placed = await relay.send(offer, controlGeneration: 2)
+        XCTAssertTrue(placed, "the live lifetime's own frame still goes")
+        try await Self.poll { !peerSpy.received.isEmpty }
+        XCTAssertEqual(
+            peerSpy.received.count, 1,
+            "exactly one frame reached the successor's peer -- generation 1's never did"
+        )
+        XCTAssertEqual(peerSpy.generations, [1], "and the peer read it under its own first generation")
+
+        await manager.shutdown()
+        await second.shutdown()
+    }
+
     /// The other half of the same event: a connection that never passed the trust gate retires no
     /// generation, because it never admitted a `VOICE_*` frame for one to own. `connectTo` to a port
     /// nothing is listening on is the production path that emits exactly that.
@@ -188,7 +253,10 @@ final class VoiceLifetimeProvenanceTests: XCTestCase {
             monotonicNowUs: { 1 },
             nextSeq: { 1 },
             activeSessionId: { SessionId("00000000000000000000000000000000") },
-            authenticatedWriter: { { _ in true } },
+            authenticatedWriterFor: { expected in
+                let writer: AuthenticatedFrameWriter = { _ in true }
+                return expected == liveGeneration() ? writer : nil
+            },
             liveGeneration: liveGeneration
         )
     }

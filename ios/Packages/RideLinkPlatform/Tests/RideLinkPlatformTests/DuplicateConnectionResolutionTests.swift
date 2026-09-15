@@ -107,7 +107,7 @@ private actor EventCollector {
         let deadline = Date().addingTimeInterval(timeoutSeconds)
         while Date() < deadline {
             for event in events {
-                if case .connected(let remotePeerId, let sessionId, let isLocalLeader) = event {
+                if case .connected(let remotePeerId, let sessionId, let isLocalLeader, _) = event {
                     return (remotePeerId, sessionId, isLocalLeader)
                 }
             }

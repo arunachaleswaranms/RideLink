@@ -88,7 +88,7 @@ class SharedLibraryReadProvenanceTest {
             // `onSessionBoundary` is dispatched afterwards.
             session.currentAuthGeneration = 11L
             session.currentPeerSpki = peerB
-            session.emitEvent(ControlEvent.Connected(peerIdB, sessionIdB, isLocalLeader = false))
+            session.emitEvent(ControlEvent.Connected(peerIdB, sessionIdB, isLocalLeader = false, authGeneration = 2L))
             advanceUntilIdle()
 
             // The parked read-loop dispatch finally runs. Its frame was read under generation 10.
@@ -115,7 +115,7 @@ class SharedLibraryReadProvenanceTest {
 
             session.currentAuthGeneration = 11L
             session.currentPeerSpki = peerB
-            session.emitEvent(ControlEvent.Connected(peerIdB, sessionIdB, isLocalLeader = false))
+            session.emitEvent(ControlEvent.Connected(peerIdB, sessionIdB, isLocalLeader = false, authGeneration = 2L))
             advanceUntilIdle()
 
             submitManifestSync(session, generation = LIVE_GENERATION)
@@ -150,7 +150,7 @@ class SharedLibraryReadProvenanceTest {
 
             session.currentAuthGeneration = 11L
             session.currentPeerSpki = peerB
-            session.emitEvent(ControlEvent.Connected(peerIdB, sessionIdB, isLocalLeader = false))
+            session.emitEvent(ControlEvent.Connected(peerIdB, sessionIdB, isLocalLeader = false, authGeneration = 2L))
             advanceUntilIdle()
 
             session.transfer.sink!!.submit(TransferMessage.Request(hashX, transferX), STALE_GENERATION)
@@ -178,7 +178,7 @@ class SharedLibraryReadProvenanceTest {
 
             session.currentAuthGeneration = 11L
             session.currentPeerSpki = peerB
-            session.emitEvent(ControlEvent.Connected(peerIdB, sessionIdB, isLocalLeader = false))
+            session.emitEvent(ControlEvent.Connected(peerIdB, sessionIdB, isLocalLeader = false, authGeneration = 2L))
             advanceUntilIdle()
 
             session.transfer.sink!!.submit(TransferMessage.Request(hashX, transferX), LIVE_GENERATION)

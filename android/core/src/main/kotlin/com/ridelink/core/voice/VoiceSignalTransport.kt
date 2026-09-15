@@ -17,13 +17,28 @@ import com.ridelink.core.protocol.VoiceSignal
  */
 interface VoiceSignalTransport {
     /**
-     * @return true if the signal was handed to a live authenticated control connection.
+     * @param controlGeneration **the authenticated control lifetime this frame is authorised to be
+     *   written on**, taken from the [OutboundVoiceAction] the pure table produced (STATUS §4
+     *   problem 64, ADR-020 Amendment A9). The implementation **compares** it against the lifetime
+     *   that owns the surviving connection and refuses on any mismatch; it must never substitute the
+     *   live value, which is ADR-024 Amendment A7's defect pointing outwards.
+     *
+     *   Null means the action named no authorising lifetime, and is likewise a refusal: there is no
+     *   connection a frame authorised by nobody may be written to. No transition produces one.
+     *
+     * @return true if the signal was handed to a live authenticated control connection **owned by
+     *   [controlGeneration]**.
      *
      * False is a normal outcome, not an exception: the link may have gone between the negotiation
-     * table deciding to send and the write happening. The controller records it and lets
-     * PROTOCOL §10's control ladder — the app's only reconnect loop — deal with the link.
+     * table deciding to send and the write happening, or — since Amendment A9 — it may have gone and
+     * been *replaced*, which is the case that used to put a retired lifetime's SDP on its
+     * successor's socket. The controller records it and lets PROTOCOL §10's control ladder — the
+     * app's only reconnect loop — deal with the link.
      */
-    suspend fun send(signal: VoiceSignal): Boolean
+    suspend fun send(
+        signal: VoiceSignal,
+        controlGeneration: Long?,
+    ): Boolean
 }
 
 /**
