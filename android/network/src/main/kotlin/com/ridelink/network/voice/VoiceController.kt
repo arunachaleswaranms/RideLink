@@ -409,6 +409,11 @@ class VoiceController(
         offer(VoiceInput.ControlLinkLost(retiredControlGeneration))
     }
 
+    /** Explicit successor authority from Connected, consumed by the reducer (ADR-020 A11). */
+    fun controlAuthenticated(controlGeneration: Long) {
+        offer(VoiceInput.ControlAuthenticated(controlGeneration, newVoiceSessionId()))
+    }
+
     /**
      * A `VOICE_*` frame that has **already** passed the ADR-019 trust gate. There is no other entry
      * point: an unauthenticated peer's frame is dropped by `ControlSessionManager` before it can

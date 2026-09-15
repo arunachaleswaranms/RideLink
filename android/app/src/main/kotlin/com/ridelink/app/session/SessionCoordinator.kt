@@ -690,13 +690,9 @@ class SessionCoordinator(
         authGeneration: Long,
     ) {
         if (voice != null) {
-            // A reconnect. If the user had consented to voice, rebuild the media transport as a fresh
-            // negotiation (PROTOCOL §7.8); `start()` is idempotent when voice is already live.
-            //
-            // [authGeneration] is the one **this event** named, never a live re-read: the successor
-            // it rebuilds under is the lifetime that emitted this `Connected`, and it becomes the
-            // owner of the rebuilt negotiation (STATUS §4 problem 61).
-            if (_voiceDiagnostics.value.localAudioOpen) voice?.start(authGeneration)
+            // One Connected event supplies authority and the §7.8 rebuild opportunity. The reducer
+            // handles pending Start intent and consent without consulting a diagnostics projection.
+            voice?.controlAuthenticated(authGeneration)
             return
         }
         val controller = buildVoiceController(isLocalLeader)
@@ -710,6 +706,11 @@ class SessionCoordinator(
                 if (peerAudioStateInbox.accept(message)) _peerAudioState.value = message
             }
         controller.selectPolicy(_intercomPolicy.value)
+        // The lifetime this controller was born under, as an input like every other
+        // control-lifetime fact the table holds (ADR-020 Amendment A11). A first-ever press before
+        // this point reads the live generation itself; this is for the press that arrives after a
+        // boundary, whose own tap-time read can only ever be honest about the gap it was pressed in.
+        controller.controlAuthenticated(authGeneration)
         // On the session's own runtime, not the app scope: this collector publishes `AUDIO_STATE`,
         // so a teardown has to be able to prove it has *stopped*, not merely that it was asked to.
         voiceDiagnosticsJob =

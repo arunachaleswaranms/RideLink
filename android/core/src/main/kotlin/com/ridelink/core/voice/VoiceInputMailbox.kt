@@ -262,12 +262,18 @@ class VoiceInputMailbox(
     fun offer(input: VoiceInput): VoiceMailboxOutcome {
         // The "admitted after retirement" half. Checked before the lane is even chosen: a refused
         // signal occupies nothing, so it cannot overflow a lane and cannot force a degrade.
-        if (input is VoiceInput.SignalReceived) {
-            if (isStale(input.controlGeneration)) {
+        val inputGeneration =
+            when (input) {
+                is VoiceInput.SignalReceived -> input.controlGeneration
+                is VoiceInput.ControlAuthenticated -> input.controlGeneration
+                else -> null
+            }
+        if (inputGeneration != null) {
+            if (isStale(inputGeneration)) {
                 refusedRetiredSignalCount += 1
                 return VoiceMailboxOutcome.RetiredGeneration
             }
-            admitGeneration(input.controlGeneration)
+            admitGeneration(inputGeneration)
         }
         return when (val lane = laneFor(input)) {
             VoiceMailboxLane.TEARDOWN -> {
@@ -389,7 +395,12 @@ class VoiceInputMailbox(
     fun poll(): VoiceInput? {
         teardown?.let {
             teardown = null
-            return it
+            // Coalesced losses must still name the newest lifetime known to have ended.
+            return if (it is VoiceInput.ControlLinkLost && it.retiredControlGeneration != null) {
+                VoiceInput.ControlLinkLost(retiredControlGenerationFloor)
+            } else {
+                it
+            }
         }
         sendFailure?.let {
             sendFailure = null
@@ -441,7 +452,13 @@ class VoiceInputMailbox(
      * 60). Local inputs match no branch of it and never could.
      */
     private fun discardRetiredRemoteSignals() {
-        val retired: (VoiceInput) -> Boolean = { it is VoiceInput.SignalReceived && isStale(it.controlGeneration) }
+        val retired: (VoiceInput) -> Boolean = {
+            when (it) {
+                is VoiceInput.SignalReceived -> isStale(it.controlGeneration)
+                is VoiceInput.ControlAuthenticated -> isStale(it.controlGeneration)
+                else -> false
+            }
+        }
         discardedRetiredSignalCount +=
             terminalPeerState.count(retired) +
             critical.count(retired) +
@@ -495,6 +512,13 @@ class VoiceInputMailbox(
                 is VoiceInput.LocalAnswerCreated,
                 is VoiceInput.MediaConnectivityChanged,
                 -> VoiceMailboxLane.CRITICAL
+                // The successor-lifetime availability event (ADR-020 Amendment A11). Critical rather
+                // than coalesced: it must keep FIFO order against a `.startRequested` in the same
+                // lane, which is exactly the ordering problem 69 is — the press and the
+                // authentication have to reduce in the order they actually happened, and a coalesced
+                // slot would let a second authentication overwrite a first before the press between
+                // them was ever seen.
+                is VoiceInput.ControlAuthenticated -> VoiceMailboxLane.CRITICAL
                 is VoiceInput.SignalReceived ->
                     when (val signal = input.signal) {
                         is VoiceSignal.Offer, is VoiceSignal.Answer -> VoiceMailboxLane.CRITICAL

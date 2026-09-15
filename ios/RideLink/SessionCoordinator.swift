@@ -659,15 +659,9 @@ public final class SessionCoordinator {
     /// ride segment, which a fresh one would have to reopen.
     private func attachVoice(isLocalLeader: Bool, authGeneration: Int64) {
         if let voice {
-            // A reconnect. If the user had consented to voice, rebuild the media transport as a fresh
-            // negotiation (PROTOCOL §7.8); `start()` is idempotent when voice is already live.
-            //
-            // `authGeneration` is the one **this event** named, never a live re-read: the successor it
-            // rebuilds under is the lifetime that emitted this `.connected`, and it becomes the owner
-            // of the rebuilt negotiation (STATUS §4 problem 61).
-            if voiceDiagnostics.localAudioOpen {
-                launchInSession { _ in await voice.start(controlGeneration: authGeneration) }
-            }
+            // One authenticated event supplies successor authority and the §7.8 rebuild opportunity.
+            // The reducer also sees a gap press delivered after this task; diagnostics decide neither.
+            launchInSession { _ in await voice.controlAuthenticated(controlGeneration: authGeneration) }
             return
         }
         let manager = controlSessionManager
@@ -694,6 +688,13 @@ public final class SessionCoordinator {
             await controller.attach()
             guard self.ownsSessionWork(id) else { return }
             controller.selectPolicy(self.intercomPolicy)
+            // The lifetime this controller was born under, as an input like every other
+            // control-lifetime fact the table holds (ADR-020 Amendment A11). A first-ever press
+            // before this point reads the live generation itself; this is for the press that
+            // arrives after a boundary, whose own tap-time read can only ever be honest about the
+            // gap it was pressed in.
+            await controller.controlAuthenticated(controlGeneration: authGeneration)
+            guard self.ownsSessionWork(id) else { return }
 
             // Exactly one consumer, draining in a single `for await` loop — see `OrderedEventChannel`'s
             // doc comment for why a `Task` per event cannot make the ordering guarantee `AUDIO_STATE`'s

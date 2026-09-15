@@ -1360,3 +1360,98 @@ boundary. A6's `NegotiationSendFailed` semantics, and that a send refusal never 
 `ControlLinkLost`. Capture lifetime: nothing here opens or closes the capture device, and
 `localAudioOpen` still survives every control-lifetime boundary. Problems 50, 56, 57, 59, 60, 61, 63
 and 64 keep their regressions and all still pass.
+
+---
+
+## Amendment A11 — 15 September 2026 — a gap Start is one unresolved intent, not a retry policy
+
+**Status:** implemented; closes STATUS §4 problem 69 subject to the verification record in §2ar.
+No wire-format change. Amendments A7–A10's provenance, held-offer asymmetry, outbound binding and
+session-owned continuations remain required. The shared negotiation vectors change.
+
+### Reproduction and rejected shortcut
+
+On iOS, A dies and a user Start captures `liveAuthenticatedGeneration == nil`. Its session-owned
+controller call can run after `Connected(B)`. The old `attachVoice(B)` sees the asynchronously
+published `localAudioOpen == false` and emits no rebuild. The delayed `Start(nil)` then opens capture
+but creates no negotiation. Against unchanged `50a7291` production sources the production-shaped
+host reproduces `idle`, no `voice_session_id`, and no outbound frames without another user action.
+
+Reacting to `IDLE && localAudioOpen` would also restart after `NegotiationSendFailed`. That failure
+intentionally preserves capture and consent. It does not request another attempt. Such a reaction
+would create a voice retry loop outside PROTOCOL §10's control reconnect ladder.
+
+### State and authority
+
+The pure mirrored `VoiceNegotiationState` now separates four facts:
+
+- `localAudioOpen`: ride-segment consent and capture intent.
+- `pendingStartIntent`: one unresolved local Start, with no control owner of its own.
+- `authenticatedControlGeneration`: authority delivered by an explicit `ControlAuthenticated`
+  input, retained to meet a delayed nil Start. This is not a live coordinator lookup.
+- `negotiationControlGeneration`: the owner established when a negotiation is actually created.
+
+Both coordinators emit `ControlAuthenticated(generation, freshVoiceSessionId)` through their voice
+controller on initial authentication and reconnect. The generation comes from that `Connected`
+event. iOS reconnect delivery remains inside `launchInSession`; Start, Stop and mute retain their
+existing session-owned calls. Teardown still cancels and joins those continuations before shutdown.
+
+`Start(nil)` opens capture and records pending intent when no explicit availability or held offer
+supplies authority. `ControlAuthenticated(B)` consumes that intent under B. If B's event reduces
+first, its recorded authority lets the later nil Start establish the same fresh B semantics. The
+original nil input is never mutated into a B-authorised press. A held B offer can itself supply the
+owner and voice-session ID when nil supplies consent, preserving Amendment A10.
+
+### One opportunity per authenticated event
+
+The same new-lifetime event also performs the existing §7.8 reconnect of consented voice. The
+coordinator no longer emits a second Start based on published diagnostics. This avoids two kicks
+from one Connected: an initial resume could fail its send before a separately deferred rebuild Start
+arrived. A duplicate or older availability does nothing, including after a send failure.
+
+A new successor finding an older live negotiation stops the obsolete media before establishing a
+fresh negotiation. It does not re-own the old one. This handles `Connected(B)` before delayed
+`LinkLost(A)` without relying on their task ordering. A negotiation already owned by B or a newer
+lifetime is preserved. A's later boundary cannot retire B; B's own boundary still can.
+
+An offerer's establishment uses the fresh ID supplied with the input that actually establishes it.
+An unused provisional ID from a gap press never enters state or the wire and is discarded. An
+answerer without a held offer emits §7.3 intent-to-talk under B and waits; it does not create an
+offer or invent the offerer's ID. A held offer retains its own ID and owner.
+
+Establishment clears pending intent. Stop clears it and capture consent; session ENDING uses that
+same Stop reduction. A failed critical send clears negotiation state, preserves capture and
+availability, and creates no pending intent. Only another legitimate user action or a new
+control-lifetime event can initiate further work.
+
+### Lifetime ordering at the mailbox
+
+Availability occupies the bounded critical lane alongside Start and SDP inputs. It carries immutable
+control provenance and uses A7's admission and retirement checks on both platforms. A newer
+availability proves older queued frames and availability stale; it never discards local Start or Stop.
+A retired B event cannot restore B authority after its boundary. If B is retired before its queued
+availability consumes pending intent, C's explicit event consumes it under C instead.
+
+The availability record has its own boundary comparison: delayed A loss preserves idle B
+availability even when no negotiation exists. Coalesced named losses deliver the greatest retired
+floor, so a later-arriving older boundary cannot forget that B ended. A nil safety degrade names no
+ended control lifetime. No boundary is suppressed based on which negotiation appears newest.
+
+Every resulting outbound action retains its explicit owner through the controller and transport.
+A B send suspended across C authentication is refused rather than written on C, preserving A9.
+
+### Evidence and limits
+
+`VoicePendingStartIntentTest[s]` pins sequential reducer and mailbox cases on both platforms;
+`VoiceConsentAcrossLifetimesTests` reproduces both iOS scheduling orders and checks the production
+coordinator source. Android controller tests mirror shared semantics, while its existing real
+coordinator test continues to prove synchronous Start admission. Android does not naturally have
+iOS's pre-mailbox deferred Start ordering. Failure watchdogs bound tests; no new sequencing sleeps.
+See TEST_PLAN's P69 matrix and STATUS §2ar for actual verification, including failed probes.
+No app XCTest bundle, wire field, reconnect timer, Phase 6/7 feature or physical gate is added.
+
+**Final self-audit qualification:** STATUS §4 problem 70 is a separate, confirmed pre-existing iOS
+controller-shutdown defect. The coordinator's own continuations are joined, but the controller's
+mailbox consumer is merely cancelled and can resume a suspended send's remaining effects after
+shutdown returns. A11 does not change that shutdown implementation. Closing Problem 69 does not
+claim terminal teardown is proven; overall readiness remains NOT READY pending that repair.

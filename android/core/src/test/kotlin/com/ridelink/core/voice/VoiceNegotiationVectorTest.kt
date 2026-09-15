@@ -15,6 +15,8 @@ import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.long
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
+import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 
 /**
@@ -140,6 +142,67 @@ class VoiceNegotiationVectorTest {
                     "${after.negotiationControlGeneration}; resulting state = $after",
             )
         }
+    }
+
+    /**
+     * **The pending gap-press intent is a one-shot that only an explicit event consumes** (STATUS §4
+     * problem 69, ADR-020 Amendment A11), as three properties over the whole vector file — the mirror
+     * of `VoiceNegotiationVectorTests`' Swift original:
+     *
+     * 1. An intent never coexists with the negotiation state it requests.
+     * 2. A `StartRequested` whose `controlGeneration` is null establishes a negotiation only when the
+     *    state it reduced against carried a lifetime an input delivered — the recorded
+     *    `authenticatedControlGeneration` — or a held offer whose own owner supplies the authority.
+     *    Null never invents a generation.
+     * 3. A `NegotiationSendFailed` result never carries a manufactured intent, and a
+     *    `ControlAuthenticated` result never leaves an intent standing beside a live negotiation.
+     */
+    @Test
+    fun `the pending gap-press intent is a one-shot consumed by explicit events`() {
+        var consumed = 0
+        for (element in doc["rows"]!!.jsonArray) {
+            val row = element.jsonObject
+            val name = row.string("name")
+            val before = state(row["state"]!!.jsonObject)
+            val inputSpec = row["input"]!!.jsonObject
+            val after = VoiceNegotiation.reduce(before, input(inputSpec)).state
+
+            if (after.pendingStartIntent) {
+                val holdsNegotiation = after.status.isNegotiationLive || after.voiceSessionId != null || after.heldRemoteOffer != null
+                assertFalse(
+                    holdsNegotiation,
+                    "row $name holds negotiation state the pending intent requested without consuming it",
+                )
+            }
+
+            if (inputSpec.string("kind") == "StartRequested" &&
+                inputSpec.requiredNullableLong("control_generation") == null &&
+                after.status.isNegotiationLive
+            ) {
+                val authority =
+                    before.authenticatedControlGeneration
+                        ?: before.heldRemoteOffer?.let { before.negotiationControlGeneration }
+                assertNotNull(
+                    authority,
+                    "row $name established a negotiation from a null press with no lifetime the table had seen",
+                )
+                consumed += 1
+            }
+
+            if (inputSpec.string("kind") == "NegotiationSendFailed") {
+                assertFalse(
+                    after.pendingStartIntent && !before.pendingStartIntent,
+                    "row $name manufactured a pending intent from a send failure",
+                )
+            }
+            if (inputSpec.string("kind") == "ControlAuthenticated" && after.pendingStartIntent) {
+                assertFalse(
+                    after.status.isNegotiationLive,
+                    "row $name left a pending intent standing beside the negotiation it just established",
+                )
+            }
+        }
+        assertTrue(consumed > 0, "the file must contain null-press resumption rows for this to mean anything")
     }
 
     /**
@@ -312,6 +375,8 @@ class VoiceNegotiationVectorTest {
             micMuted = spec.bool("mic_muted"),
             mode = VoiceMode.valueOf(spec.string("mode")),
             negotiationControlGeneration = spec.requiredNullableLong("negotiation_control_generation"),
+            pendingStartIntent = spec.bool("pending_start_intent"),
+            authenticatedControlGeneration = spec.requiredNullableLong("authenticated_control_generation"),
         )
 
     private fun input(spec: JsonObject): VoiceInput =
@@ -332,6 +397,13 @@ class VoiceNegotiationVectorTest {
             "ControlLinkLost" -> VoiceInput.ControlLinkLost(spec.requiredNullableLong("retired_control_generation"))
             "NegotiationSendFailed" ->
                 VoiceInput.NegotiationSendFailed(spec.nullableString("voice_session_id")?.let { VoiceSessionId(it) })
+            // ADR-020 Amendment A11: the successor-lifetime availability event. `control_generation`
+            // is required (never defaulted) — it is the authority for whatever the input consumes.
+            "ControlAuthenticated" ->
+                VoiceInput.ControlAuthenticated(
+                    spec.requiredLong("control_generation"),
+                    VoiceSessionId(spec.string("fresh_voice_session_id")),
+                )
             "MuteRequested" -> VoiceInput.MuteRequested(spec.bool("muted"))
             "ModeSelected" -> VoiceInput.ModeSelected(VoiceMode.valueOf(spec.string("mode")))
             "SignalReceived" ->
@@ -489,7 +561,7 @@ class VoiceNegotiationVectorTest {
         val GENERATION_GUARD_REASONS =
             setOf(VoiceSignalDropReason.GENERATION_MISMATCH, VoiceSignalDropReason.STALE_ENGINE_CALLBACK)
 
-        const val EXPECTED_MINIMUM_ROWS = 81
+        const val EXPECTED_MINIMUM_ROWS = 92
         const val VSID_A = "5e2a9c40b7f13d86e0a4c95b28f7d613"
         const val VSID_FRESH = "ffeeddccbbaa99887766554433221100"
     }

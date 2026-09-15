@@ -52,6 +52,11 @@ CTL_C = 3
 #: Marks "let `state()` decide from the state itself" — see its `negotiation_control_generation`.
 _OWNER_DEFAULT = object()
 
+#: Marks "this row does not exercise the pending-intent/resume machinery" (ADR-020 Amendment A11).
+#: Both are **required** keys on every state, mirroring `negotiation_control_generation`: a row that
+#: omits them fails both platforms' decoders rather than quietly meaning "false/absent".
+_PENDING_DEFAULT = object()
+
 
 def state(
     role: str,
@@ -65,6 +70,8 @@ def state(
     mic_muted: bool = False,
     mode: str = "CONTINUOUS",
     negotiation_control_generation: object = _OWNER_DEFAULT,
+    pending_start_intent: bool = False,
+    authenticated_control_generation: int | None = None,
 ) -> dict:
     """One `VoiceNegotiationState`.
 
@@ -78,6 +85,9 @@ def state(
     two come apart in both directions: an answerer's intent-to-talk is live with **no**
     `voice_session_id` (§7.3 — the offerer has not minted one yet), while a peer's `failed` leaves a
     `FAILED` status that owns nothing at all.
+
+    Pending intent defaults false and recorded availability defaults null: older rows describe a
+    table that has not received ControlAuthenticated. Neither field is inferred from consent.
     """
     owner = negotiation_control_generation
     if owner is _OWNER_DEFAULT:
@@ -95,6 +105,8 @@ def state(
         "mic_muted": mic_muted,
         "mode": mode,
         "negotiation_control_generation": owner,
+        "pending_start_intent": pending_start_intent,
+        "authenticated_control_generation": authenticated_control_generation,
     }
 
 
@@ -1237,7 +1249,7 @@ def build() -> list[dict]:
             ),
         )
     )
-    # --- StartRequested with no authenticated lifetime (P61-F) --------------------------------
+    # --- StartRequested with no authenticated lifetime (P61-F, ADR-020 Amendment A11) ----------
     #
     # A user can press Start in the gap between one control link dying and PROTOCOL §10's ladder
     # restoring the next. The press must not be refused — ARCHITECTURE §6.4 requires capture to be
@@ -1245,27 +1257,47 @@ def build() -> list[dict]:
     # must not create a negotiation, because there is no link to negotiate over and, worse, no
     # lifetime to own it. A negotiation owned by nobody is the one state no boundary can retire.
     #
-    # So: consent, and only consent. `SessionCoordinator.attachVoice` rebuilds under the successor
-    # the moment one authenticates, because it starts voice for any segment whose capture is open.
+    # So: consent, and only consent — plus a **one-shot pending intent** the successor's
+    # authentication event consumes (ADR-020 Amendment A11, STATUS §4 problem 69). `attachVoice`'s
+    # §7.8 rebuild was A8's answer, but it is gated on the *published* capture-open projection and a
+    # press deferred past `.connected` is invisible to it, which STATUS §2aq.6 measured. The intent
+    # is the designed answer: the press keeps its two halves (consent now, authority never), and
+    # the resume is an explicit reducer input rather than a coordinator re-read.
     rows.append(
         row(
-            "start-with-no-authenticated-lifetime-opens-capture-and-starts-no-negotiation",
-            state(OFFERER, IDLE),
+            "start-with-no-authenticated-lifetime-opens-capture-and-records-a-pending-intent",
+            state(OFFERER, IDLE, authenticated_control_generation=None),
             {"kind": "StartRequested", "fresh_voice_session_id": VSID_FRESH, "control_generation": None},
             [{"kind": "StartLocalAudio"}],
-            state(OFFERER, IDLE, None, local_audio_open=True, negotiation_control_generation=None),
+            state(
+                OFFERER,
+                IDLE,
+                None,
+                local_audio_open=True,
+                negotiation_control_generation=None,
+                pending_start_intent=True,
+                authenticated_control_generation=None,
+            ),
         )
     )
     rows.append(
         row(
             "an-answerers-start-with-no-authenticated-lifetime-states-no-intent",
-            state(ANSWERER, IDLE),
+            state(ANSWERER, IDLE, authenticated_control_generation=None),
             {"kind": "StartRequested", "fresh_voice_session_id": VSID_FRESH, "control_generation": None},
             # Not even a SendVoiceState: there is no link to send an intent-to-talk on, and §7.3's
             # intent is an answerer's *only* wire effect, so sending one that cannot leave is the
             # unrecoverable loss STATUS §4 problem 59 is about.
             [{"kind": "StartLocalAudio"}],
-            state(ANSWERER, IDLE, None, local_audio_open=True, negotiation_control_generation=None),
+            state(
+                ANSWERER,
+                IDLE,
+                None,
+                local_audio_open=True,
+                negotiation_control_generation=None,
+                pending_start_intent=True,
+                authenticated_control_generation=None,
+            ),
         )
     )
     rows.append(
@@ -1295,6 +1327,283 @@ def build() -> list[dict]:
             {"kind": "StartRequested", "fresh_voice_session_id": VSID_FRESH, "control_generation": CTL_B},
             [],
             state(OFFERER, NEGOTIATING, VSID_A, local_audio_open=True, negotiation_control_generation=CTL_A),
+        )
+    )
+    # --- the pending intent is a one-shot resume, not a retry (ADR-020 Amendment A11) -----------
+    #
+    # STATUS §4 problem 69. The successor's authentication is an explicit input, and it is what
+    # consumes the intent — exactly one fresh negotiation, owned by the generation the **event**
+    # named. The two halves of a gap press finally have a consumer: consent was recorded by the
+    # press, authority arrives with the event, and neither is reconstructed from the other.
+    rows.append(
+        row(
+            "the-successors-authentication-resumes-the-pending-gap-press-as-one-fresh-negotiation",
+            state(
+                OFFERER,
+                IDLE,
+                None,
+                local_audio_open=True,
+                negotiation_control_generation=None,
+                pending_start_intent=True,
+                authenticated_control_generation=None,
+            ),
+            {"kind": "ControlAuthenticated", "control_generation": CTL_B, "fresh_voice_session_id": VSID_FRESH},
+            [send_state(VSID_FRESH, "negotiating", owner=CTL_B), {"kind": "CreateOffer", "voice_session_id": VSID_FRESH}],
+            state(
+                OFFERER,
+                NEGOTIATING,
+                VSID_FRESH,
+                local_audio_open=True,
+                negotiation_control_generation=CTL_B,
+                pending_start_intent=False,
+                authenticated_control_generation=CTL_B,
+            ),
+        )
+    )
+    rows.append(
+        row(
+            # An answerer's resume states §7.3's intent-to-talk under the successor, on the successor's
+            # link — the wire effect the gap press could not produce because there was no link.
+            "an-answerers-pending-intent-resumes-as-the-successors-intent-to-talk",
+            state(
+                ANSWERER,
+                IDLE,
+                None,
+                local_audio_open=True,
+                negotiation_control_generation=None,
+                pending_start_intent=True,
+                authenticated_control_generation=None,
+            ),
+            {"kind": "ControlAuthenticated", "control_generation": CTL_B, "fresh_voice_session_id": VSID_FRESH},
+            [send_state(None, "negotiating", owner=CTL_B)],
+            state(
+                ANSWERER,
+                NEGOTIATING,
+                None,
+                local_audio_open=True,
+                negotiation_control_generation=CTL_B,
+                pending_start_intent=False,
+                authenticated_control_generation=CTL_B,
+            ),
+        )
+    )
+    rows.append(
+        row(
+            # P69-F — duplicate availability. A second authentication of the same lifetime (or any
+            # authentication arriving after the intent was consumed) finds a live negotiation and is
+            # a recorded no-op: never a second offer, never a second voice_session_id, never a re-own.
+            "a-duplicate-authentication-is-inert",
+            state(
+                OFFERER,
+                NEGOTIATING,
+                VSID_FRESH,
+                local_audio_open=True,
+                negotiation_control_generation=CTL_B,
+                authenticated_control_generation=CTL_B,
+            ),
+            {"kind": "ControlAuthenticated", "control_generation": CTL_B, "fresh_voice_session_id": VSID_B},
+            [],
+            state(
+                OFFERER,
+                NEGOTIATING,
+                VSID_FRESH,
+                local_audio_open=True,
+                negotiation_control_generation=CTL_B,
+                authenticated_control_generation=CTL_B,
+            ),
+        )
+    )
+    rows.append(
+        row(
+            # An authentication with nothing pending records the lifetime and does nothing else — the
+            # ordinary `attachVoice` first-connect case.
+            "an-authentication-with-no-pending-intent-records-the-lifetime-and-starts-nothing",
+            state(OFFERER, IDLE, authenticated_control_generation=None),
+            {"kind": "ControlAuthenticated", "control_generation": CTL_A, "fresh_voice_session_id": VSID_FRESH},
+            [],
+            state(
+                OFFERER,
+                IDLE,
+                None,
+                negotiation_control_generation=None,
+                pending_start_intent=False,
+                authenticated_control_generation=CTL_A,
+            ),
+        )
+    )
+    rows.append(
+        row(
+            # P69-B — the other order. The successor authenticated first (the event reduced), and the
+            # press arrives late, still carrying the honest nil it read at tap time. The press
+            # resolves against the lifetime the table has **seen** — the same decision the
+            # coordinator would have made had the press not deferred past `.connected`. One
+            # negotiation, owned by the event's lifetime, no intent left behind.
+            "a-late-gap-press-resolves-against-the-lifetime-the-table-has-seen",
+            state(
+                OFFERER,
+                IDLE,
+                None,
+                local_audio_open=True,
+                negotiation_control_generation=None,
+                authenticated_control_generation=CTL_B,
+            ),
+            {"kind": "StartRequested", "fresh_voice_session_id": VSID_FRESH, "control_generation": None},
+            [send_state(VSID_FRESH, "negotiating", owner=CTL_B), {"kind": "CreateOffer", "voice_session_id": VSID_FRESH}],
+            state(
+                OFFERER,
+                NEGOTIATING,
+                VSID_FRESH,
+                local_audio_open=True,
+                negotiation_control_generation=CTL_B,
+                pending_start_intent=False,
+                authenticated_control_generation=CTL_B,
+            ),
+        )
+    )
+    rows.append(
+        row(
+            # P69-H — the same late press meeting a **held** offer the successor delivered. The held
+            # offer supplies the authority (Amendment A10's rule, reached from the nil-press side):
+            # answered under the offer's own lifetime, exactly once, and never a second negotiation.
+            "a-late-gap-press-answers-the-lifetime-the-table-has-seens-held-offer",
+            state(
+                ANSWERER,
+                IDLE,
+                None,
+                peer_voice_enabled=True,
+                peer_reported_state=NEGOTIATING,
+                held_remote_offer={"voice_session_id": VSID_B, "sdp": SDP},
+                negotiation_control_generation=CTL_B,
+                authenticated_control_generation=CTL_B,
+            ),
+            {"kind": "StartRequested", "fresh_voice_session_id": VSID_FRESH, "control_generation": None},
+            [
+                {"kind": "StartLocalAudio"},
+                {"kind": "ApplyRemoteOffer", "voice_session_id": VSID_B, "sdp": SDP},
+                {"kind": "DrainQueuedCandidates"},
+                {"kind": "CreateAnswer", "voice_session_id": VSID_B},
+            ],
+            state(
+                ANSWERER,
+                NEGOTIATING,
+                VSID_B,
+                local_audio_open=True,
+                remote_description_applied=True,
+                peer_voice_enabled=True,
+                peer_reported_state=NEGOTIATING,
+                negotiation_control_generation=CTL_B,
+                pending_start_intent=False,
+                authenticated_control_generation=CTL_B,
+            ),
+        )
+    )
+    rows.append(
+        row(
+            # P69-C — the retry-loop hazard, refused by construction. A send failure degrades to IDLE
+            # with consent still recorded and **manufactures no intent**, so the next authentication
+            # has nothing to consume. Only a press in a real gap sets the intent.
+            "a-send-failure-leaves-no-pending-intent-for-the-next-authentication-to-consume",
+            state(
+                OFFERER,
+                NEGOTIATING,
+                VSID_B,
+                local_audio_open=True,
+                negotiation_control_generation=CTL_B,
+                authenticated_control_generation=CTL_B,
+            ),
+            {"kind": "NegotiationSendFailed", "voice_session_id": VSID_B},
+            [{"kind": "StopMediaTransport"}],
+            state(
+                OFFERER,
+                IDLE,
+                None,
+                local_audio_open=True,
+                negotiation_control_generation=None,
+                pending_start_intent=False,
+                authenticated_control_generation=CTL_B,
+            ),
+        )
+    )
+    rows.append(
+        row(
+            # P69-D — an explicit stop clears the intent: the same action that withdrew consent
+            # withdrew the request.
+            "an-explicit-stop-clears-a-pending-intent",
+            state(
+                OFFERER,
+                IDLE,
+                None,
+                local_audio_open=True,
+                negotiation_control_generation=None,
+                pending_start_intent=True,
+                authenticated_control_generation=None,
+            ),
+            {"kind": "StopRequested"},
+            # No SendVoiceState: there is no negotiation to name, and no link to send one on.
+            [{"kind": "StopMediaTransport"}, {"kind": "ReleaseLocalAudio"}],
+            state(
+                OFFERER,
+                IDLE,
+                None,
+                negotiation_control_generation=None,
+                pending_start_intent=False,
+                authenticated_control_generation=None,
+            ),
+        )
+    )
+    rows.append(
+        row(
+            # P69-E — the intent survives the boundary between two successors: that gap is exactly
+            # what it is for. The successor's authentication is what consumes it, and the
+            # negotiation is C's from creation.
+            "the-pending-intent-survives-a-boundary-and-is-consumed-by-the-next-successor",
+            state(
+                OFFERER,
+                IDLE,
+                None,
+                local_audio_open=True,
+                negotiation_control_generation=None,
+                pending_start_intent=True,
+                authenticated_control_generation=None,
+            ),
+            {"kind": "ControlAuthenticated", "control_generation": CTL_C, "fresh_voice_session_id": VSID_FRESH},
+            [send_state(VSID_FRESH, "negotiating", owner=CTL_C), {"kind": "CreateOffer", "voice_session_id": VSID_FRESH}],
+            state(
+                OFFERER,
+                NEGOTIATING,
+                VSID_FRESH,
+                local_audio_open=True,
+                negotiation_control_generation=CTL_C,
+                pending_start_intent=False,
+                authenticated_control_generation=CTL_C,
+            ),
+        )
+    )
+    rows.append(
+        row(
+            # A boundary clears the recorded lifetime — a press after it cannot resolve against a
+            # lifetime whose death the boundary itself just named.
+            "a-boundary-clears-the-recorded-lifetime-while-the-intent-survives",
+            state(
+                OFFERER,
+                IDLE,
+                None,
+                local_audio_open=True,
+                negotiation_control_generation=None,
+                pending_start_intent=True,
+                authenticated_control_generation=CTL_B,
+            ),
+            {"kind": "ControlLinkLost", "retired_control_generation": CTL_B},
+            [],
+            state(
+                OFFERER,
+                IDLE,
+                None,
+                local_audio_open=True,
+                negotiation_control_generation=None,
+                pending_start_intent=True,
+                authenticated_control_generation=None,
+            ),
         )
     )
     # --- a held offer may not cross a control lifetime (STATUS §4 problem 63) ------------------
@@ -1632,6 +1941,67 @@ def build() -> list[dict]:
         )
     )
 
+    # A11: availability is separate from negotiation ownership. Expected states are written from
+    # the event rules, independently of either reducer implementation.
+    for role in (OFFERER, ANSWERER):
+        available = state(role, authenticated_control_generation=CTL_B)
+        rows.append(row(
+            f"{role}-a-delayed-A-boundary-preserves-idle-B-availability", available,
+            {"kind": "ControlLinkLost", "retired_control_generation": CTL_A}, [], available,
+        ))
+        failed = state(role, local_audio_open=True, authenticated_control_generation=CTL_B)
+        rows.append(row(
+            f"{role}-duplicate-B-availability-cannot-retry-a-failed-send", failed,
+            {"kind": "ControlAuthenticated", "control_generation": CTL_B, "fresh_voice_session_id": VSID_FRESH},
+            [], failed,
+        ))
+        rows.append(row(
+            f"{role}-only-a-new-successor-can-rebuild-existing-consent", failed,
+            {"kind": "ControlAuthenticated", "control_generation": CTL_C, "fresh_voice_session_id": VSID_FRESH},
+            ([send_state(VSID_FRESH, "negotiating", owner=CTL_C),
+              {"kind": "CreateOffer", "voice_session_id": VSID_FRESH}] if role == OFFERER else
+             [send_state(None, "negotiating", owner=CTL_C)]),
+            state(role, NEGOTIATING, VSID_FRESH if role == OFFERER else None, local_audio_open=True,
+                  negotiation_control_generation=CTL_C, authenticated_control_generation=CTL_C),
+        ))
+        rows.append(row(
+            f"{role}-late-nil-press-opens-capture-under-recorded-B", available,
+            {"kind": "StartRequested", "control_generation": None, "fresh_voice_session_id": VSID_FRESH},
+            [{"kind": "StartLocalAudio"}] +
+            ([send_state(VSID_FRESH, "negotiating", owner=CTL_B),
+              {"kind": "CreateOffer", "voice_session_id": VSID_FRESH}] if role == OFFERER else
+             [send_state(None, "negotiating", owner=CTL_B)]),
+            state(role, NEGOTIATING, VSID_FRESH if role == OFFERER else None, local_audio_open=True,
+                  negotiation_control_generation=CTL_B, authenticated_control_generation=CTL_B),
+        ))
+    rows.append(row(
+        "held-B-alone-supplies-authority-to-nil-consent",
+        state(ANSWERER, held_remote_offer={"voice_session_id": VSID_B, "sdp": SDP},
+              negotiation_control_generation=CTL_B),
+        {"kind": "StartRequested", "control_generation": None, "fresh_voice_session_id": VSID_FRESH},
+        [{"kind": "StartLocalAudio"}, {"kind": "ApplyRemoteOffer", "voice_session_id": VSID_B, "sdp": SDP},
+         {"kind": "DrainQueuedCandidates"}, {"kind": "CreateAnswer", "voice_session_id": VSID_B}],
+        state(ANSWERER, NEGOTIATING, VSID_B, local_audio_open=True, remote_description_applied=True,
+              negotiation_control_generation=CTL_B),
+    ))
+    rows.append(row(
+        "retiring-A-negotiation-keeps-independent-B-availability",
+        state(OFFERER, NEGOTIATING, VSID_A, local_audio_open=True,
+              negotiation_control_generation=CTL_A, authenticated_control_generation=CTL_B),
+        {"kind": "ControlLinkLost", "retired_control_generation": CTL_A},
+        [{"kind": "StopMediaTransport"}],
+        state(OFFERER, local_audio_open=True, authenticated_control_generation=CTL_B),
+    ))
+    rows.append(row(
+        "Connected-B-before-delayed-loss-A-replaces-media-with-fresh-B-negotiation",
+        state(OFFERER, NEGOTIATING, VSID_A, local_audio_open=True,
+              negotiation_control_generation=CTL_A, authenticated_control_generation=CTL_A),
+        {"kind": "ControlAuthenticated", "control_generation": CTL_B, "fresh_voice_session_id": VSID_FRESH},
+        [{"kind": "StopMediaTransport"}, send_state(VSID_FRESH, "negotiating", owner=CTL_B),
+         {"kind": "CreateOffer", "voice_session_id": VSID_FRESH}],
+        state(OFFERER, NEGOTIATING, VSID_FRESH, local_audio_open=True,
+              negotiation_control_generation=CTL_B, authenticated_control_generation=CTL_B),
+    ))
     return rows
 
 
@@ -1660,6 +2030,8 @@ def main() -> None:
             "No ModeSelected row may emit any action other than SendVoiceState, and none may change the status: choosing a gate is a local policy change, not a state transition of the voice session (PROTOCOL §7.4, ADR-021).",
             "No ModeSelected row may emit StartLocalAudio or ReleaseLocalAudio. PTT and VOX gate transmission, never the capture device (ARCHITECTURE §6.3).",
             "No row whose input is a received signal may start a negotiation (CreateOffer/CreateAnswer) when local_audio_open is false. The microphone is never opened because a *peer* asked — only a local StartRequested, which is how consent arrives, may open it (ARCHITECTURE §6.4).",
+            "The pending gap-press intent is a one-shot, and only an explicit event consumes it: a ControlAuthenticated may start at most one negotiation from it, a send failure never manufactures it, an explicit stop clears it, and no row may create a second live negotiation over one that already exists (ADR-020 Amendment A11, STATUS §4 problem 69).",
+            "A StartRequested carrying control_generation=null may establish a negotiation only under a lifetime an input delivered — the state's authenticated_control_generation (set by ControlAuthenticated) or a held offer's own owner. Never may a null press invent a generation (ADR-020 Amendment A11).",
         ],
         "_test_values_only": "Every SDP, candidate and voice_session_id here is fabricated.",
         "rows": rows,

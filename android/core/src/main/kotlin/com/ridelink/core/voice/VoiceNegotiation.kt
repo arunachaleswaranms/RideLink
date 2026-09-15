@@ -115,10 +115,14 @@ data class VoiceNegotiationState(
      * predecessor the owner, exactly so its own boundary can still retire it.
      *
      * A third identity, and never to be conflated with the other two: `voice_session_id` owns one
-     * WebRTC negotiation, [VoiceInput.SignalReceived.controlGeneration] owns the frame that admitted
-     * a signal, and this owns the control lifetime a negotiation belongs to.
+     * WebRTC negotiation, [VoiceInput.SignalReceived.controlGeneration] owns the frame that admitted a
+     * signal, and this owns the control lifetime a negotiation belongs to.
      */
     val negotiationControlGeneration: Long? = null,
+    /** Unresolved local Start consent, with no control authority of its own (ADR-020 A11). */
+    val pendingStartIntent: Boolean = false,
+    /** Authority supplied by an explicit availability input, never a live coordinator read. */
+    val authenticatedControlGeneration: Long? = null,
 )
 
 /**
@@ -335,6 +339,16 @@ enum class VoiceSignalDropReason {
      * amendment exists for the only one with no evidence that it happened.
      */
     SUPERSEDED_CONTROL_LIFETIME,
+
+    /**
+     * A [VoiceInput.ControlAuthenticated] that found a **live negotiation already established**
+     * (STATUS §4 problem 69, ADR-020 Amendment A11). Not a failure: the successor lifetime's
+     * authentication arrived after whatever press, intent or offer already started this one, and
+     * that negotiation keeps the owner it was established with (Amendment A8's "never re-own"
+     * rule). Recorded rather than silent for the same reason [SUPERSEDED_CONTROL_LIFETIME] is: a
+     * no-op that leaves no evidence cannot be told apart from an input that never arrived.
+     */
+    AUTHENTICATED_DURING_LIVE_NEGOTIATION,
 }
 
 /** What drives the table. [VoiceInput.freshVoiceSessionId] exists because the table is pure. */
@@ -508,6 +522,16 @@ sealed class VoiceInput {
     data class NegotiationSendFailed(
         val voiceSessionId: VoiceSessionId?,
     ) : VoiceInput()
+
+    /**
+     * The trust gate admitted this lifetime. Records authority for a delayed Start(null), consumes
+     * pending intent, or performs the consented reconnect rebuild once for a new lifetime.
+     * A duplicate event cannot retry a failed send. This input is local; no wire field is added.
+     */
+    data class ControlAuthenticated(
+        val controlGeneration: Long,
+        val freshVoiceSessionId: VoiceSessionId,
+    ) : VoiceInput()
 }
 
 data class VoiceOutcome(
@@ -551,6 +575,7 @@ object VoiceNegotiation {
             is VoiceInput.MediaConnectivityChanged -> connectivity(state, input)
             is VoiceInput.ControlLinkLost -> controlLinkLost(state, input.retiredControlGeneration)
             is VoiceInput.NegotiationSendFailed -> negotiationSendFailed(state, input.voiceSessionId)
+            is VoiceInput.ControlAuthenticated -> controlAuthenticated(state, input.controlGeneration, input.freshVoiceSessionId)
         }
 
     // --- local user actions -------------------------------------------------------------------
@@ -570,10 +595,16 @@ object VoiceNegotiation {
         val actions = mutableListOf<VoiceAction>()
         if (!state.localAudioOpen) actions += VoiceAction.StartLocalAudio
 
-        // No authenticated control lifetime: consent, and only consent. See
-        // [VoiceInput.StartRequested.controlGeneration] for why this is not a refusal and not a
-        // negotiation owned by nobody.
-        if (owner == null) return VoiceOutcome(state.copy(localAudioOpen = true), actions)
+        // Nil supplies consent only; an explicit availability event or held offer supplies authority.
+        val heldOwner = state.heldRemoteOffer?.let { state.negotiationControlGeneration }
+        val resolved = owner ?: state.authenticatedControlGeneration ?: heldOwner
+        if (resolved == null) {
+            return VoiceOutcome(state.copy(localAudioOpen = true, pendingStartIntent = true), actions)
+        }
+        // Establishing a negotiation consumes the pending intent: the user's request has been
+        // answered by a real negotiation, and a second one would be a retry rather than a resume.
+        val next = state.copy(localAudioOpen = true, pendingStartIntent = false)
+        val owner = resolved
 
         // **A press authorised by a lifetime older than the one that owns state we are already
         // holding is a press from a lifetime that has ended** (STATUS §4 problem 63). Generations
@@ -600,10 +631,9 @@ object VoiceNegotiation {
                 actions += VoiceAction.DrainQueuedCandidates
                 actions += VoiceAction.CreateAnswer(held.voiceSessionId)
                 return VoiceOutcome(
-                    state.copy(
+                    next.copy(
                         status = VoiceStatus.NEGOTIATING,
                         voiceSessionId = held.voiceSessionId,
-                        localAudioOpen = true,
                         remoteDescriptionApplied = true,
                         heldRemoteOffer = null,
                         // Deliberately **not** [owner]: the negotiation is the held offer's lifetime's
@@ -620,7 +650,7 @@ object VoiceNegotiation {
             // [controlLinkLost]'s reason: a negotiation established by a lifetime that has ended is
             // exactly what Amendment A8 exists to prevent being created.
             actions += VoiceAction.RecordDroppedSignal(VoiceSignalDropReason.SUPERSEDED_START_LIFETIME)
-            return VoiceOutcome(state.copy(localAudioOpen = true), actions)
+            return VoiceOutcome(next, actions)
         }
 
         return when (state.role) {
@@ -628,10 +658,9 @@ object VoiceNegotiation {
                 actions += VoiceAction.SendVoiceState(fresh, VoiceWireState.NEGOTIATING, state.micMuted, state.mode, owner)
                 actions += VoiceAction.CreateOffer(fresh)
                 VoiceOutcome(
-                    state.copy(
+                    next.copy(
                         status = VoiceStatus.NEGOTIATING,
                         voiceSessionId = fresh,
-                        localAudioOpen = true,
                         remoteDescriptionApplied = false,
                         heldRemoteOffer = null,
                         negotiationControlGeneration = owner,
@@ -667,10 +696,9 @@ object VoiceNegotiation {
                     actions += VoiceAction.DrainQueuedCandidates
                     actions += VoiceAction.CreateAnswer(held.voiceSessionId)
                     VoiceOutcome(
-                        state.copy(
+                        next.copy(
                             status = VoiceStatus.NEGOTIATING,
                             voiceSessionId = held.voiceSessionId,
-                            localAudioOpen = true,
                             remoteDescriptionApplied = true,
                             heldRemoteOffer = null,
                             // The press's lifetime, which the guard above has just proved is also
@@ -685,10 +713,9 @@ object VoiceNegotiation {
                     // null because the offerer, not this side, creates one.
                     actions += VoiceAction.SendVoiceState(null, VoiceWireState.NEGOTIATING, state.micMuted, state.mode, owner)
                     VoiceOutcome(
-                        state.copy(
+                        next.copy(
                             status = VoiceStatus.NEGOTIATING,
                             voiceSessionId = null,
-                            localAudioOpen = true,
                             remoteDescriptionApplied = false,
                             heldRemoteOffer = null,
                             negotiationControlGeneration = owner,
@@ -724,7 +751,11 @@ object VoiceNegotiation {
         // restart can legally reopen it (ARCHITECTURE §6.4).
         if (state.localAudioOpen) actions += VoiceAction.ReleaseLocalAudio
         return VoiceOutcome(
-            VoiceNegotiationState(role = state.role, micMuted = state.micMuted, mode = state.mode),
+            VoiceNegotiationState(
+                role = state.role,
+                micMuted = state.micMuted,
+                mode = state.mode,
+            ),
             actions,
         )
     }
@@ -814,22 +845,28 @@ object VoiceNegotiation {
         state: VoiceNegotiationState,
         retired: Long?,
     ): VoiceOutcome {
+        val available = state.authenticatedControlGeneration
+        val next =
+            if (available != null && retired != null && available <= retired) {
+                state.copy(authenticatedControlGeneration = null)
+            } else {
+                state
+            }
         if (state.status == VoiceStatus.IDLE && state.voiceSessionId == null && state.heldRemoteOffer == null) {
-            return VoiceOutcome(state, emptyList())
+            return VoiceOutcome(next, emptyList())
         }
         val owner = state.negotiationControlGeneration
         if (owner != null && retired != null && owner > retired) {
-            return dropped(state, VoiceSignalDropReason.SUPERSEDED_CONTROL_LIFETIME)
+            return dropped(next, VoiceSignalDropReason.SUPERSEDED_CONTROL_LIFETIME)
         }
-        // Media goes; the capture device does not (ARCHITECTURE §6.3/§6.4 — see localAudioOpen).
-        // No VOICE_STATE is sent: there is no link to send it on. And nothing is retried here —
-        // PROTOCOL §10's control ladder is the only reconnect loop in the app (§7.8).
         return VoiceOutcome(
             VoiceNegotiationState(
                 role = state.role,
                 localAudioOpen = state.localAudioOpen,
+                pendingStartIntent = state.pendingStartIntent,
                 micMuted = state.micMuted,
                 mode = state.mode,
+                authenticatedControlGeneration = next.authenticatedControlGeneration,
             ),
             listOf(VoiceAction.StopMediaTransport),
         )
@@ -862,11 +899,48 @@ object VoiceNegotiation {
             VoiceNegotiationState(
                 role = state.role,
                 localAudioOpen = state.localAudioOpen,
+                // The recorded lifetime survives a send failure — the failure is about one frame,
+                // not about the link. `pendingStartIntent` is already false: the establishment this
+                // failure degrades consumed it, and the degrade does not resurrect it, which is the
+                // whole reason a send failure cannot loop (ADR-020 Amendment A11). The only thing
+                // that could set the intent again is a press in a *new* gap.
+                authenticatedControlGeneration = state.authenticatedControlGeneration,
                 micMuted = state.micMuted,
                 mode = state.mode,
             ),
             listOf(VoiceAction.StopMediaTransport),
         )
+    }
+
+    @Suppress("ReturnCount") // duplicate, live owner, obsolete owner, and idle consent are distinct cases
+    private fun controlAuthenticated(
+        state: VoiceNegotiationState,
+        generation: Long,
+        fresh: VoiceSessionId,
+    ): VoiceOutcome {
+        val available = state.authenticatedControlGeneration
+        if (available != null && generation <= available) return VoiceOutcome(state, emptyList())
+        val recorded = state.copy(authenticatedControlGeneration = generation)
+        if (state.status.isNegotiationLive) {
+            val owner = state.negotiationControlGeneration
+            if (owner != null && owner >= generation) {
+                return VoiceOutcome(
+                    recorded,
+                    listOf(VoiceAction.RecordDroppedSignal(VoiceSignalDropReason.AUTHENTICATED_DURING_LIVE_NEGOTIATION)),
+                )
+            }
+            // Stop obsolete media before establishing a fresh successor negotiation; never re-own it.
+            val retired = controlLinkLost(recorded, owner)
+            if (!state.localAudioOpen) return retired
+            val resumed = start(retired.state, fresh, generation)
+            return VoiceOutcome(resumed.state, retired.actions + resumed.actions)
+        }
+        // One new Connected event, one opportunity. No reaction to diagnostics or a failed send.
+        return if (state.pendingStartIntent || state.localAudioOpen) {
+            start(recorded, fresh, generation)
+        } else {
+            VoiceOutcome(recorded, emptyList())
+        }
     }
 
     // --- engine callbacks ---------------------------------------------------------------------
@@ -1061,6 +1135,9 @@ private fun offerReceived(
             remoteDescriptionApplied = true,
             heldRemoteOffer = null,
             negotiationControlGeneration = owner,
+            // The peer's offer answered the pending gap press: consumed, exactly as an establishment
+            // via `start` consumes it (ADR-020 Amendment A11).
+            pendingStartIntent = false,
         ),
         listOf(
             VoiceAction.ApplyRemoteOffer(id, offer.sdp),
@@ -1166,9 +1243,15 @@ private fun teardownFromPeer(
             role = state.role,
             status = newStatus,
             localAudioOpen = state.localAudioOpen,
+            // An involuntary teardown is exactly a link loss in this respect (ADR-020 Amendment A11):
+            // consent survives and so does a pending gap-press intent, for the same reason — the
+            // peer may come back within this ride segment. The recorded lifetime survives too: the
+            // *control* link is untouched by a peer's voice teardown.
+            pendingStartIntent = state.pendingStartIntent,
             peerReportedState = state.peerReportedState,
             micMuted = state.micMuted,
             mode = state.mode,
+            authenticatedControlGeneration = state.authenticatedControlGeneration,
         ),
         listOf(VoiceAction.StopMediaTransport),
     )
@@ -1201,6 +1284,8 @@ private fun peerWantsVoice(
             remoteDescriptionApplied = false,
             heldRemoteOffer = null,
             negotiationControlGeneration = owner,
+            // Glare establishment consumes the intent for the same reason `offerReceived`'s does.
+            pendingStartIntent = false,
         ),
         listOf(
             VoiceAction.SendVoiceState(fresh, VoiceWireState.NEGOTIATING, state.micMuted, state.mode, owner),

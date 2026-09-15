@@ -15,7 +15,7 @@ final class VoiceNegotiationVectorTests: XCTestCase {
     /// identity is a receiver-local concern and not a wire one.
     private let vectorControlGeneration: Int64 = 1
 
-    private let expectedMinimumRows = 81
+    private let expectedMinimumRows = 92
     private let vsidA = "5e2a9c40b7f13d86e0a4c95b28f7d613"
     private let vsidFresh = "ffeeddccbbaa99887766554433221100"
 
@@ -134,6 +134,68 @@ final class VoiceNegotiationVectorTests: XCTestCase {
                 """
             )
         }
+    }
+
+    /// **The pending gap-press intent is a one-shot that only an explicit event consumes** (STATUS §4
+    /// problem 69, ADR-020 Amendment A11), as three properties over the whole vector file:
+    ///
+    /// 1. An intent never coexists with the negotiation state it requests — the transition that
+    ///    establishes a negotiation consumes it, so `pendingStartIntent == true` in a *resulting*
+    ///    state means that state holds no negotiation.
+    /// 2. A `StartRequested` whose `controlGeneration` is nil establishes a negotiation only when
+    ///    the state it reduced against carried a lifetime an input delivered — the recorded
+    ///    `authenticatedControlGeneration` — or a held offer whose own owner supplies the authority.
+    ///    Nil never invents a generation.
+    /// 3. A `NegotiationSendFailed` result never carries a manufactured intent, and a
+    ///    `ControlAuthenticated` result never leaves an intent standing beside a live negotiation.
+    func testThePendingGapPressIntentIsAOneShotConsumedByExplicitEvents() throws {
+        var consumed = 0
+        for element in try rows() {
+            guard let row = element as? [String: Any] else { return XCTFail("row is not an object") }
+            let name = row.str("name")
+            let before = state(row.dict("state"))
+            let inputSpec = row.dict("input")
+            let after = VoiceNegotiation.reduce(state: before, input: input(inputSpec)).state
+
+            // 1. An intent and the thing it requests are mutually exclusive.
+            if after.pendingStartIntent {
+                let holdsNegotiation =
+                    after.status.isNegotiationLive || after.voiceSessionId != nil || after.heldRemoteOffer != nil
+                XCTAssertFalse(
+                    holdsNegotiation,
+                    "row \(name) holds negotiation state the pending intent requested without consuming it"
+                )
+            }
+
+            // 2. A nil press establishes only under delivered authority.
+            if inputSpec.str("kind") == "StartRequested", inputSpec.requiredInt64Opt("control_generation") == nil,
+                after.status.isNegotiationLive {
+                let authority = before.authenticatedControlGeneration ?? before.heldRemoteOffer.map { _ in
+                    before.negotiationControlGeneration
+                }
+                XCTAssertNotNil(
+                    authority,
+                    "row \(name) established a negotiation from a nil press with no lifetime the table had seen"
+                )
+                consumed += 1
+            }
+
+            // 3. Neither a send failure nor an authentication may leave an intent beside live work,
+            //    and a send failure may not manufacture one.
+            if inputSpec.str("kind") == "NegotiationSendFailed" {
+                XCTAssertFalse(
+                    after.pendingStartIntent && !before.pendingStartIntent,
+                    "row \(name) manufactured a pending intent from a send failure"
+                )
+            }
+            if inputSpec.str("kind") == "ControlAuthenticated", after.pendingStartIntent {
+                XCTAssertFalse(
+                    after.status.isNegotiationLive,
+                    "row \(name) left a pending intent standing beside the negotiation it just established"
+                )
+            }
+        }
+        XCTAssertGreaterThan(consumed, 0, "the file must contain nil-press resumption rows for this to mean anything")
     }
 
     /// **Every action that puts a frame on the wire names the control lifetime whose connection it may
@@ -298,7 +360,9 @@ final class VoiceNegotiationVectorTests: XCTestCase {
             },
             micMuted: spec.boolVal("mic_muted"),
             mode: mode(spec.str("mode")),
-            negotiationControlGeneration: spec.requiredInt64Opt("negotiation_control_generation")
+            negotiationControlGeneration: spec.requiredInt64Opt("negotiation_control_generation"),
+            pendingStartIntent: spec.boolVal("pending_start_intent"),
+            authenticatedControlGeneration: spec.requiredInt64Opt("authenticated_control_generation")
         )
     }
 
@@ -331,6 +395,14 @@ final class VoiceNegotiationVectorTests: XCTestCase {
             return .controlLinkLost(retiredControlGeneration: spec.requiredInt64Opt("retired_control_generation"))
         case "NegotiationSendFailed":
             return .negotiationSendFailed(voiceSessionId: spec.strOpt("voice_session_id").map(VoiceSessionId.init))
+        case "ControlAuthenticated":
+            // ADR-020 Amendment A11: the successor-lifetime availability event. `control_generation`
+            // is required (never defaulted) — it is the authority for whatever the input consumes,
+            // exactly the property the row is about.
+            return .controlAuthenticated(
+                controlGeneration: spec.requiredInt64("control_generation"),
+                freshVoiceSessionId: VoiceSessionId(spec.str("fresh_voice_session_id"))
+            )
         case "MuteRequested":
             return .muteRequested(muted: spec.boolVal("muted"))
         case "ModeSelected":

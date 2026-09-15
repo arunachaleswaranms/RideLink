@@ -993,6 +993,48 @@ mailbox properties; whether a real peer recovers a real voice session across a r
 
 ---
 
+### 3.1e Gap Start intent — ADR-020 Amendment A11, problem 69
+
+The shared `VoicePendingStartIntentTest[s]` exercises sequential reducer and mailbox transitions;
+`VoiceNegotiationVectorTest[s]` consumes the same 103 rows, including required pending-intent and
+recorded-availability keys. Android `network.voice.VoicePendingStartIntentTest` drives the real
+controller with a manual dispatcher. iOS `VoiceConsentAcrossLifetimesTests` uses the production
+controller, diagnostics channel and generation-bound transport with a coordinator-shaped host.
+The host's source check pins `SessionCoordinator.swift`'s immutable event generation, deferred
+session-owned Start, single Connected event, absence of a projection-gated second Start, and
+cancel/join wiring. No app XCTest bundle is introduced.
+
+| ID | Event ordering / fault | Required result |
+|---|---|---|
+| P69-A | Start(nil) reduces before B authenticates, both roles | Consent and pending intent, no negotiation; B consumes once, owns the result; offerer uses B event's fresh ID, answerer emits intent-to-talk |
+| P69-B | A dies; user tap captures nil; B Connected executes while published capture is false; only then deferred Start(nil) executes | Fresh B progress from production's event alone, no hand-injected Start(B) or second tap; both offerer and answerer hosts covered |
+| P69-C | Offer send or answerer intent send returns false | Idle with capture retained, no new pending intent; attempted sends and offer counts remain stable across drain barriers and duplicate B events |
+| P69-D | Start(nil), Stop, B | Pending intent cleared, capture released, no negotiation; session shutdown also reduces Stop |
+| P69-E | B availability queued, B retired before consumption, C authenticated | Mailbox discards/refuses B availability; C alone consumes pending intent. Separately park B's actual offer send, replace connection with C, release: no B offer is written through C |
+| P69-F | Duplicate B availability | One live negotiation, one offer/intent sequence, no extra engine start or fresh ID |
+| P69-G | Pending nil Start races an explicit Start(B), either order | Existing idempotence consumes the intent at most once |
+| P69-H | Held authenticated B offer meets Start(nil) | Nil supplies consent only; B supplies authority and ID, answer once; late A boundary inert, B boundary retires media but preserves capture |
+| P69-I | B availability recorded while idle, then delayed A loss | B availability survives, so a later nil Start cannot disappear |
+| P69-J | Connected(B) before delayed loss of live A | Stop A media before fresh B establishment; never re-own A or lose the only reconnect event |
+
+The iOS negative assertions use a deliberately stale coalesced engine callback as a drain barrier:
+its counted refusal occurs after critical voice work and send failures. New tests use no sequencing
+sleeps; timeouts only fail a stalled test. Android's real `SessionCoordinatorIntercomConsentTest`
+continues to pin its synchronous Start admission; identical iOS reachability is not claimed.
+
+Pre-fix P69-B was executed against an isolated archive of unchanged `50a7291` production sources.
+It failed on progress, status, ID and B outbound assertions, with idle/capture-open/no-frame state.
+The inherited implementation's tests passed before the audit, but omitted lifetime and retry cases;
+passing them alone was not closure evidence. See STATUS §2ar for full verification and stress counts.
+**Known limit, confirmed during the final self-audit (STATUS §4 problem 70):** the source mirror
+checks coordinator-owned work, not completion of the controller's own consumer. A separate parked
+send probe against unchanged `50a7291` proves iOS shutdown can return before that send, and the old
+action sequence can create media after shutdown. The pending-intent shutdown test covers the idle
+case only. Problem 70 requires a failing-before/fixed-after consumer-join regression in its repair.
+No wire-format or physical-device claim is made by these tests.
+
+---
+
 ### 3.1 The secure control channel — what is proven on a laptop, and what is not
 
 Phase 1b's security path is exercised end to end by `TlsControlChannelTest` (Android) and

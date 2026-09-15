@@ -1106,6 +1106,24 @@ negotiation degrades exactly as it does for any other unsendable offer or answer
 receiver-local: there is no new field and nothing about it appears on the wire; the peer's view is
 simply that the frame was never sent.
 
+**A Start pressed during the control gap** (ADR-020 Amendment A11, STATUS §4 problem 69) carries
+consent but no control authority. The local reducer records one `pendingStartIntent`, independently
+of capture consent. `Connected(B)` supplies an explicit `ControlAuthenticated(B)` input; it either
+consumes the pending intent or records B's authority for a delayed `Start(nil)` to meet. Thus both
+`Start(nil) → B` and `B → delayed Start(nil)` establish one B-owned negotiation without another tap.
+The offerer uses the establishing input's fresh `voice_session_id`; an answerer states §7.3 intent
+and waits, or answers an already-held B offer under that offer's own ID and owner.
+
+The authenticated event also owns the existing consented reconnect rebuild, once per new lifetime.
+There is no second Start from a published capture projection. If an older live negotiation remains,
+its media is stopped before a fresh successor negotiation is created; its owner is never relabelled.
+Duplicate availability cannot retry a failed send. `NegotiationSendFailed` preserves consent and
+creates no pending intent: **`IDLE + consent` alone is never permission to restart**. Stop and session
+ENDING clear pending intent. Availability obeys the same local lifetime retirement rules as admitted
+voice work, and every outbound effect keeps the generation that authorised it. These are local state
+and input fields, not changes to any wire schema. Android mirrors the table; its synchronous Start
+path does not currently have iOS's pre-mailbox Start deferral.
+
 ### 7.9 Test vectors
 
 `protocol/vectors/voice-signal/` pins the message layer — every field, every bound, every

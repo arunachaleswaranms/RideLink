@@ -1,12 +1,17 @@
 # RideLink — Status
 
-**Updated:** 14 September 2026 (**an independent review of the previous pass's own fix**, fortieth — see §2aq. **§4 problem 66 is CONFIRMED and FIXED** by [ADR-020 Amendment A10](DECISIONS/ADR-020-webrtc-voice-foundation.md). A9 answered "may this press answer that held offer?" safely in both directions and **not live** in one: a `StartRequested` from a lifetime older than the one owning a held `VOICE_OFFER` was refused, and nothing would ever have answered that offer — the peer sends one per `voice_session_id` (§7.4), §7.8's rebuild is gated on the published `localAudioOpen` and had already run, and a user who has consented does not press again. **A9's own regression hid it by supplying a second `start(B)` that production never sends**, which is why CI stayed green. Reproduced first on unmodified iOS production at the coordinator's real decisions. Fixed by separating a press's two halves: **control authority expires with its link; user consent is ride-segment state.** A newer held offer is now answered **under that offer's own lifetime** — its `voice_session_id`, its generation on every outbound frame, its boundary as the one that retires it — and the owner is deliberately **not** moved to the press's. **No wire change; the shared vectors change.** A separate rule-21 finding is recorded as **§4 problem 67** and fixed. A8 and A9 are otherwise unchanged and problems 61, 63 and 64 stay closed. The previous entry follows.)
+**Updated:** 15 September 2026 — **problem 69 implemented with one-shot pending Start intent**
+([ADR-020 Amendment A11](DECISIONS/ADR-020-webrtc-voice-foundation.md), §2ar). Both nil-Start
+orderings progress under explicit successor authority. No generic consent-driven retry, no wire
+change, no physical gate claim. **The final self-audit also confirmed open problem 70: iOS voice
+shutdown can return with a send suspended, then create media after shutdown. Overall readiness is
+NOT READY.** Verification is recorded in §2ar.
+
+**Previous update:** 14 September 2026 (**an independent review of the previous pass's own fix**, fortieth — see §2aq. **§4 problem 66 is CONFIRMED and FIXED** by [ADR-020 Amendment A10](DECISIONS/ADR-020-webrtc-voice-foundation.md). A9 answered "may this press answer that held offer?" safely in both directions and **not live** in one: a `StartRequested` from a lifetime older than the one owning a held `VOICE_OFFER` was refused, and nothing would ever have answered that offer — the peer sends one per `voice_session_id` (§7.4), §7.8's rebuild is gated on the published `localAudioOpen` and had already run, and a user who has consented does not press again. **A9's own regression hid it by supplying a second `start(B)` that production never sends**, which is why CI stayed green. Reproduced first on unmodified iOS production at the coordinator's real decisions. Fixed by separating a press's two halves: **control authority expires with its link; user consent is ride-segment state.** A newer held offer is now answered **under that offer's own lifetime** — its `voice_session_id`, its generation on every outbound frame, its boundary as the one that retires it — and the owner is deliberately **not** moved to the press's. **No wire change; the shared vectors change.** A separate rule-21 finding is recorded as **§4 problem 67** and fixed. A8 and A9 are otherwise unchanged and problems 61, 63 and 64 stay closed. The previous entry follows.)
 
 **Previously:** the thirty-ninth pass — see §2ap. **§4 problems 63 and 64 are CONFIRMED and FIXED** by [ADR-020 Amendment A9](DECISIONS/ADR-020-webrtc-voice-foundation.md): a held remote offer may be answered only by the lifetime that delivered it, and every outbound `VOICE_*` action names the control lifetime whose connection it may be written on. Both were reproduced from unmodified production on both platforms first. That fix is unchanged in substance; §2aq is the independent review **of** it, and it found one more — problem 66, a *liveness* defect in A9's own held-offer rule, plus the rule-21 finding recorded as problem 67. See the entry above.
-**Current milestone:** M1 (Private voice link) is software-complete **with one known open defect** —
-**§4 problem 69**, confirmed by measurement in §2aq.6 and deliberately left open because the obvious
-fix introduces a voice-layer retry loop §7.8 forbids;
-its hardware gate is the larger thing left open. §2an closed problem 60 and opened 61 in the same
+**Current milestone:** M1 (Private voice link) has its software implementation, including the
+problem 69 fix in §2ar, with open teardown defect 70; its hardware gate is the larger thing left open. §2an closed problem 60 and opened 61 in the same
 pass; §2ao closed 61 and claimed to open nothing, and **§2ap — an independent review of §2ao's own
 fix — found two reachable defects in it** (problems 63 and 64), one of which re-created the exact
 wedge an earlier amendment existed to remove. **§2aq — an independent review of §2ap's own fix —
@@ -71,8 +76,8 @@ lifetime and the `voice_session_id` for the negotiation that results. A separate
 same lines is recorded as **§4 problem 67** and fixed. A8 and A9 are otherwise unchanged; problems 61,
 63 and 64 stay closed.
 
-**Phase 5 status: software closure is CLAIMED (Phase 5 itself; **§4 problem 69 is a Phase 2a voice
-lifetime defect and is open**), re-affirmed after the thirty-sixth session's review
+**Phase 5 status: software closure is CLAIMED (Phase 5 itself; the Phase 2a voice
+lifetime defect §4 problem 69 is implemented in §2ar), re-affirmed after the thirty-sixth session's review
 (§2am), the thirty-seventh's fix (§2an), the thirty-eighth's (§2ao), the thirty-ninth's review of that
 (§2ap) and the fortieth's review of *that* (§2aq). Problems 61, 63, 64, 66 and 67 were voice lifetime
 residues rather than Phase 5 defects, and all five are now fixed. Real-device validation is a separate claim and is NOT made; no S-01…S-12 row has
@@ -5725,6 +5730,130 @@ old, CI-green, carried eleven regressions, and one of them reached its conclusio
 production state machine cannot produce. Nothing in CI could have caught that; only reading the
 regression could.
 
+## 2ar. Gap Start intent across an authenticated successor (15 September 2026, ADR-020 A11)
+
+### Audit and reproduction
+
+The branch began at `50a7291207706e5a246f2531cc0302ee61f7f770`, equal to its remote head after
+fetch, with thirteen modified voice/coordinator/vector files and no local-only commits. No reset,
+stash, checkout, history rewrite or Git identity change was used. The initial diff was preserved
+outside the repository before editing. An unrelated untracked local configuration was left untouched
+and excluded from the commit.
+
+The interrupted implementation introduced reducer-owned pending intent, explicit authentication
+availability, controller/coordinator wiring, shared vectors and an iOS host regression. Those concepts
+were retained. The audit corrected unconditional availability clearing on stale boundaries, missing
+Android mailbox parity, admission of superseded availability, and a separate projection-driven
+reconnect Start that could issue another attempt after the same event's first attempt failed. New
+sleep-based negative-test settling was removed; a counted stale callback now provides a drain barrier.
+No wire codec or message schema had been changed.
+
+P69-B was executed against an isolated archive of **unchanged reviewed production sources** at
+`50a7291`, with only the reproduction test added. A dies, the press captures nil, B's Connected runs
+with published capture false, and the delayed nil press finally arrives. The test failed its progress,
+negotiating-status, fresh-ID and B-outbound assertions: idle, capture open, no ID, no frames. It did
+not inject Start(B). The initial interrupted patch's five tests passed; the audit did not treat that
+as proof of cases they never exercised.
+
+### Decision and adversarial cases
+
+`pendingStartIntent` is pure reducer state, distinct from consent, explicit availability and live
+negotiation ownership. `ControlAuthenticated(B)` supplies the event's own generation; it consumes
+pending intent or records authority for a nil Start arriving later. Establishment consumes intent,
+Stop/ENDING clear it, and failed critical sends never create it. A new authenticated event also owns
+the existing §7.8 reconnect, once; the coordinator emits no second Start from diagnostics.
+
+One deliberately failing probe caught a necessary consequence of that change: B Connected may
+reduce before A's delayed loss while A still has live media. Merely recording B would lose the only
+reconnect opportunity. The new event therefore stops obsolete A media before creating a **fresh** B
+negotiation. It never re-owns A. Duplicate B leaves existing B untouched, and A's late boundary cannot
+retire it. A separate regression prevents delayed A loss clearing idle B availability.
+
+Both roles and both nil-Start orders are tested. A held B offer supplies its ID and authority to nil
+consent. Duplicate availability and an explicit B Start cannot create two live negotiations. If B's
+availability is retired before consumption, only C's explicit event can consume the surviving intent.
+A transport send parked under B and released after C authenticates cannot land on C. Every outbound
+action still carries its owner. Stop releases capture; a link boundary does not.
+
+Android mirrors the reducer and availability wiring. Its existing coordinator still admits Start
+synchronously and does not naturally have iOS's pre-mailbox reordering. iOS Start, Stop, mute and
+reconnect continuations remain session-owned and joined by teardown; the host checks the actual app
+source because there is still no app XCTest bundle. No wire change or retry timer was introduced.
+
+### Verification
+
+- Android full gate: `:core:test test ktlintCheck detekt lint assembleDebug assembleRelease` —
+  **passed**, using the repository's JDK 21 override. The full log reports **804 unit tests**:
+  core 287, network 277, app 176, audio 33, data 31. No failure in the final full run.
+- iOS `RideLinkCore`: **319/319**; `RideLinkPlatform`: **496/496**. Unsigned Debug and Release
+  simulator builds both passed. SwiftLint/SwiftFormat were not run and are not claimed.
+- Android lifetime stress: **50/50 clean iterations, 135 tests per iteration**, forcing execution
+  of the selected core, network and app test tasks each time. Includes P60/61/63/64/66, pending
+  intent, Stop, provenance and the real coordinator/session lifecycle suites.
+- iOS lifetime stress: **50/50 clean iterations**, each executing **52 Core and 60 Platform tests**
+  in fresh test processes. Includes the two production-shaped nil-Start roles/orderings, the source
+  mirror, existing lifetime regressions and session teardown ownership primitive tests.
+- Generated vectors: **103 rows**, exact match to the generator. After excluding the two new local
+  state fields, every surviving pre-A11 row retains its prior semantics; the nil-Start row is renamed
+  to describe pending intent. Both readers require the new keys.
+- No unexplained flakes occurred in either completed stress run. Problems 62/65/68 remain open and
+  unattributed as previously documented; none was used to excuse a failure in this work.
+- Git diff hygiene passed. The normal push and exact-PR-head CI results are reported in the handoff;
+  no physical gate, app-target XCTest execution, Phase 6 or Phase 7 claim is made.
+
+These passing gates do not cover problem 70's suspended-consumer teardown. Overall readiness is
+**NOT READY**, independently of CI's result.
+
+### A separate pre-existing teardown defect found by the final self-audit: problem 70
+
+The Problem 67 coordinator registry cancels and joins its Start/Stop/mute/reconnect continuations.
+That does **not** prove the controller's own mailbox consumer has finished. On iOS,
+`VoiceController.shutdown()` directly applies Stop, cancels `consumerTask`, sets it to nil and returns
+without awaiting its value. The consumer may already be suspended inside `perform`'s transport send.
+Neither the remaining action sequence nor `startEngine` checks cancellation before continuing.
+
+A deterministic probe against unchanged `50a7291` production sources parked the offerer's initial
+`SendVoiceState` (before `CreateOffer` in the same action sequence), awaited `shutdown`, and then
+released the send. Two assertions failed: shutdown had returned with the send still suspended, and
+retired work subsequently created media. The measured trace was:
+
+```text
+shutdown returned: send still holding=true; engine=[stop, release]
+after released old send: engine=[stop, release, start(aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa),
+                                setMicrophoneMuted(true), createOffer]
+```
+
+The session can therefore report `TeardownComplete` while an owned controller continuation remains
+in flight. A post-shutdown `startEngine` can also restart diagnostics polling. This code is unchanged
+by A11: the only iOS controller edit is the new authenticated-input method. The defect is recorded
+open, separately from the completed Problem 69 behavior; a controller-shutdown ownership repair
+needs its own cancellation/join regression and must not be silently folded into this task. Android's
+shutdown enqueues Stop and awaits its completion, and its controller jobs belong to the session
+runtime; identical Android reachability is **not** claimed by this iOS probe.
+
+**Final readiness is NOT READY while problem 70 remains open**, even if all existing suite and CI
+gates pass. P69's idle pending-intent shutdown test is a capture/intent proof, not an in-flight
+consumer-join proof. No physical validation is implied.
+
+### Failures encountered, kept separate from existing timing issues
+
+- The untouched-source P69-B reproduction failed as expected.
+- The reconnect-order probe above failed during implementation and prompted the fresh-media rule.
+- A new test barrier incorrectly used wire mute, which PTT can hold independently of user mute;
+  it timed out. It was replaced with a counted stale engine callback, not a longer timeout.
+- A new Android assertion counted all state announcements as negotiation attempts. Capture/gate
+  updates legitimately announce state, so the proof now compares the full frame list before and
+  after duplicate availability, alongside exact offer counts and shared reducer effects.
+- Initial Kotlin test compilation and formatting checks needed corrections. One Gradle invocation
+  failed to clean compiler outputs; the next diagnostic invocation completed compilation. No test
+  failure was attributed to that tooling failure.
+- Problems 62, 65 and 68 remain recorded separately; none is a blanket explanation for a new failure.
+
+Phase 6 and Phase 7 have not started. No phone, Bluetooth, voice hardware or S-01…S-12 gate was run.
+PR #3 remains unmerged and this work requires independent review.
+
+---
+
 ## 3. Tests passed / pending
 
 
@@ -6482,7 +6611,8 @@ as of this write-up — see §7.
 | 66 | **FIXED (fortieth session, §2aq, [ADR-020 Amendment A10](DECISIONS/ADR-020-webrtc-voice-foundation.md)). A9's held-offer rule was safe in both directions and *not live* in one.** A `StartRequested` authorised by a lifetime **older** than the one owning a held `VOICE_OFFER` recorded `SUPERSEDED_START_LIFETIME`, opened capture and started nothing — and nothing would ever have answered that offer: the offerer sends one `VOICE_OFFER` per `voice_session_id` (§7.4), §7.8's rebuild is gated on the **published** `localAudioOpen` and had already run before the press was reduced, and a user who has consented does not press Start again. So voice stayed dead for the ride segment with capture open. **A9's own regression hid it by supplying a second `start(B)` that production never sends** — found by reading the regression, not the code, and invisible to CI. Reachable on unmodified iOS production because `SessionCoordinator.startIntercom` reads the live generation and then defers `VoiceController.start` (actor-isolated, it stamps `VoiceSetupTimeline`), so the press lands behind a successor's admitted offer; reproduced at the coordinator's real decisions, with the mirror checked against `SessionCoordinator.swift`'s own source because the Xcode app target has no test bundle (problem 48). Fixed by separating a press's two halves: its **control authority** expires with its link and authorises no write; its **user consent** is ride-segment state, which is already why capture survives a link loss. `held > press` now **answers the offer under the held offer's own lifetime** — B's `voice_session_id`, B on every outbound frame, `negotiationControlGeneration` deliberately **not** moved to the press's, A's late boundary inert, B's own boundary retiring it. The three comparisons are three branches, never one early return, and the two orderings are **not** symmetric: an older held offer has a stale remote SDP nothing local can repair; a newer one has a live peer still holding that id. `SUPERSEDED_START_LIFETIME` now covers a residue that is unreachable by construction — proved by a vector row for it *failing* `testNegotiationStateAndItsOwningControlLifetimeArePresentTogetherOrNotAtAll` — and is kept fail-closed. **No wire change; the vectors moved.** Android cannot reach the ordering today (its press offers synchronously, ahead of any later-admitted frame in the same `CRITICAL` lane) and `SessionCoordinatorIntercomConsentTest` pins that against the real coordinator | ~~Medium~~ Fixed | See §2aq. Pre-fix reproduced on both platforms by reverting only `VoiceNegotiation`; P63-B4 passes pre-fix vacuously and is recorded as a preservation test, not a regression |
 | 67 | **FIXED (fortieth session, §2aq.4, ADR-020 Amendment A10). Three iOS voice actions were unstructured continuations nothing joined.** `SessionCoordinator.startIntercom`, `endIntercom` and `setMicrophoneMuted` each wrapped their `VoiceController` call in a bare `Task`, because `start`/`stop`/`setMicrophoneMuted` are actor-isolated there (unlike `submit`, `selectPolicy` and `setPushToTalkHeld`, which are `nonisolated` and reach the bounded mailbox directly). A bare `Task` is a continuation the session starts which `retireSession` neither cancels nor **joins**, so `.teardownComplete` — ADR-026 rule 21's claim that the session is terminal — could be emitted with a press still in flight against a controller it is about to shut down. All three now go through `launchInSession`. **The deferral itself is deliberately unchanged**: the hop is what the actor requires, and removing it to make problem 66's reproduction impossible would replace a proof with an assumption — and would not close 66 anyway, which is a property of the pure table. Found while auditing problem 66's seam and recorded separately rather than folded in. Android is structurally unaffected (`VoiceController.start` is an ordinary synchronous method) and is not mirrored | ~~Low~~ Fixed | See §2aq.4. No observed failure is attributed to it — it is a rule 21 shape violation, fixed on inspection |
 | 68 | **Two loopback-TLS suites each failed once under whole-suite contention, and both are recorded rather than attributed** (fortieth session, §2aq.5). `VoiceAuthenticationGateTest > the same peer's AUDIO_STATE is delivered once the trust gate has passed` failed once with `TimeoutCancellationException: Timed out waiting for 15000 ms` inside `FsmSession.awaitStatus`, under a deliberately heavy loop that recompiled and reran the whole `:network` **and** `:app` suites every iteration. `PairingSessionIntegrationTest > the peer confirming alone pairs nothing` failed once in **24** clean whole-`:network` runs on this branch. The pre-change baseline (`origin/main`, `dcc3805`) was **0 failures in 24** of the identical loop, and `VoiceAuthenticationGateTest` alone is 20/20 on this branch. So: 1 in 24 on the branch and 0 in 24 on the baseline for the comparable loop — **not enough to call it pre-existing, and not enough to call it this change's**, and both figures are recorded rather than one of them being asserted. What is certain is that this change touches nothing either suite exercises: within `:network` the only edits are the pure `VoiceNegotiation` table (reached solely through voice inputs) and `VoiceCrossLifetimeAuthorityTest` itself. What is plausible and unproven is load: this change **adds four tests** to a suite that runs alongside them, and both failures are 15 s `withTimeout` settles over two real TLS sessions on loopback — the same construction problems 62 and 65 already record for three other suites. Deliberately **not** fixed here: replacing those settles with awaited observables would edit suites this change does not otherwise touch, and it is the same call problem 65 made | Low (unattributed, test-side shape) | Investigate with problems 62 and 65 as one piece of work: replace every fixed settle in the loopback-TLS suites with an awaited observable. Do **not** lengthen the timeouts |
-| 69 | **OPEN, confirmed by measurement. The same ordering wedges a *null-generation* press, which Amendment A10 does not reach and the pure table cannot.** A user may press Start in the gap between one link dying and PROTOCOL §10's ladder restoring the next; `voice` survives a reconnect by design, so the press is reachable, and ADR-020 Amendment A8 answers it deliberately — consent is recorded, capture opens, **no** negotiation is created, because one owned by a lifetime that does not exist is the one state no boundary can retire. A8's justification then says `attachVoice` "rebuilds it under the successor the moment one authenticates, because it already starts voice for any segment whose capture is open. Deterministic, no wedge." **That sentence is false under problem 66's ordering**, and this pass measured it: with the press deferred past `.connected(B)` — iOS's `startIntercom` hands `VoiceController.start` to a task because `start` is actor-isolated — `attachVoice(B)` issues **no** rebuild (`rebuildStartsIssued == 0`, because the published `localAudioOpen` is still false), and the press then lands with `controlGeneration == nil`. Final state, measured against the fixed sources: `status == idle`, `localAudioOpen == true`, **nothing sent**, and no further event coming. Voice is dead for the ride segment with capture open — problem 66's consequence, reached without a held offer. **Deliberately not fixed here.** It is not the held-offer question this pass was scoped to, A10 cannot reach it (there is no held offer to answer and no lifetime for the table to name — rule 23 forbids the table inventing one), and the obvious coordinator fix is unsafe as stated: making the §7.8 rebuild a *reaction to consent becoming true* would also fire after `NegotiationSendFailed` degrades to idle with consent still recorded, which is a voice-layer retry loop — exactly what §7.8 forbids, since §10's control ladder is the only reconnect loop in the app. It needs a designed answer, not a patch. Android is not currently exposed, for problem 66's reason: its press offers synchronously | Medium (voice wedges for a ride segment; no data or security impact) | Design it with problem 66's lesson in hand: the rebuild decision must not be taken once from a projection that a still-in-flight press has not yet updated. Consider making consent-plus-live-generation an explicit reducer input rather than a coordinator re-read, so the retry-loop hazard is decided in the pure table where it can be pinned by vectors |
+| 69 | **FIXED (15 September 2026, §2ar, ADR-020 Amendment A11).** A gap Start captured nil, B Connected ran before that deferred Start reduced, and the published capture projection suppressed the only reconnect rebuild. The measured result was idle with capture open and nothing sent. The mirrored pure table now holds one unresolved `pendingStartIntent` and authority from an explicit `ControlAuthenticated` input. Both Start(nil)→B and B→delayed Start(nil) establish one B-owned negotiation; held B can supply its own authority. Connected owns the single reconnect opportunity, so duplicate events and critical send failure cannot retry through `IDLE + consent`. Stop/ENDING clear intent. Stale availability is discarded/refused by lifetime, outbound effects remain bound, and no wire field changed. Android mirrors semantics without claiming iOS pre-mailbox reachability. | ~~Medium~~ Fixed | See §2ar and TEST_PLAN §3.1e for reproduction, no-retry, ownership, stress and verification evidence. Physical voice gates remain pending. |
+| 70 | **OPEN, confirmed on unchanged `50a7291` production (15 September 2026, §2ar). iOS `VoiceController.shutdown()` cancels its mailbox consumer without joining it.** A suspended initial voice-state send survives shutdown; releasing it afterward continues the same action sequence and calls `startEngine`/`createOffer` after `stop` and `release` returned. The coordinator joins its own Problem 67 continuations, but that does not join this nested controller consumer. `TeardownComplete` can therefore precede completion of owned voice work. No A11 shutdown code changed, and identical Android reachability is not claimed. | Medium (terminal session ownership violation; media can restart after shutdown) | Repair controller cancellation and joining with a deterministic parked-send regression. Overall readiness remains NOT READY; do not treat passing P69 or existing CI tests as a consumer-join proof. |
 | 51 | **`session_id` is regenerated on every reconnect, which PROTOCOL §2 and §10 say it must not be.** §2's envelope table says "Regenerated on every fresh `CONNECTING`, **preserved across `RECONNECTING`**", and §10's ladder diagram shows `HELLO { session_id = <previous> }` as what distinguishes resuming from starting over. Both platforms' `ControlHandshake` call `freshSessionId()` unconditionally in the initiator role, and the acceptor mints a fresh one whenever it is leader, so a reconnect produces a **new** `session_id`. Found during §2aj's outbound `AUDIO_STATE` audit while checking whether `session_id` could name a sender lifetime — it cannot, and this is why | Low | **Not reachable as a bug today:** nothing in either codebase reads an inbound `session_id` to decide anything; session continuity is carried by the authentication generation (ADR-023 §3) and by `ControlSessionManager`'s own state, neither of which uses it. So this is a documentation-versus-implementation contradiction, which CLAUDE.md calls a bug in its own right. Resolve it deliberately — either implement §10's resume or correct §2/§10 — in a change that is *only* that, alongside problem 42's `STATE_REQUEST` work, which is the same reconnect story. **Re-audited in §2ak, now that a second session is genuinely reachable: still a documentation-versus-implementation mismatch only, and *not* made reachable by the lifecycle change.** Re-derived from production rather than from this row: `handleFrame` reads `binding.sessionId`, which is the locally-held `activeSessionId` recorded at read time and used only to stamp replies; `promote` takes the new id from the *handshake outcome*, never from an envelope. §2ak also notes one adjacent cosmetic point for whoever does resolve this: `shutdown()` does not reset `activeSessionId`, so between a shutdown and the next `promote` it still names the dead session. Nothing builds a frame in that window (the `BYE` that does is legitimately the dead session's), so it is inert — recorded so it is not rediscovered as a finding |
 | 52 | **`seq` never restarts at 1 per session**, which PROTOCOL §2 says it does ("Per-sender monotonic counter, starts at 1 per session"). `SeqCounter` is one `AtomicLong(1)` per `ControlSessionManager` — i.e. per process — and neither `promote` nor `shutdown` resets it, so the second session on a manager continues the first's numbering. Found alongside problem 51, in the same audit | Low | **Not reachable as a bug today:** `seq` is write-only across both codebases — no receiver reads it, and §2's stated uses (gap detection, duplicate dropping) are unimplemented. Fix it with problem 51, since both are the same question about what a "session" is on the wire, and both should move with §10's resume rather than piecemeal. **Re-audited in §2ak.** The lifecycle fix makes the contradicted behaviour *routine* rather than merely possible — a second session on one manager is now an ordinary thing to have — but not observable: `seq` is still write-only on both platforms. The sharper finding §2ak adds is that **the implementation is the safer of the two, and §2 is probably the side that should change**: a counter that restarts at 1 per session makes a straggler from the previous session indistinguishable from a valid low-`seq` frame of the new one, which is precisely the class ADR-025 closed everywhere else. The adversarial interleaving, written out so it is not re-derived: Session A ends at `seq` 400; Session B's first frame is `seq` 401; a receiver implementing §2's "starts at 1" gap detection sees a gap of 400 and, depending on how it reacts, either resyncs needlessly forever or discards B's traffic |
 | 53 | **FIXED (thirty-fourth session, §2ak, [ADR-026](DECISIONS/ADR-026-session-lifecycle-teardown-and-restart.md)).** Confirmed exactly as recorded: `TeardownComplete` (`ENDING -> IDLE`) and `RetryRequested` (`DISCONNECTED -> DISCOVERING`) were in `SessionFsm` on both platforms, mirrored, vector-covered, drawn in ARCHITECTURE §3.1 — and emitted by **nothing outside a test**, so an ended session or an exhausted reconnect budget required a force-quit. **Emitting them was the easy half.** `TeardownComplete` is the event a successor session walks through, and the pre-fix `ENDING` effect ended by *launching* `ControlSessionManager.shutdown()` and returning — so emitting it there would have let a successor bind a listener that the predecessor's pending `shutdown()` then closed, re-latched `isShutDown` behind, and (via `relays.reset()`) stripped the sinks from. Fixed with one teardown owner per platform (`SessionCoordinator.retireSession` over the new `SessionTeardownOwner`): everything the ending session owns is captured **synchronously** before the first suspension, then capture release is awaited, every continuation is cancelled **and joined**, `shutdown()` is awaited, and only then `TeardownComplete`. A successor joins that same job before touching anything shared. `retryDiscovery()`/`endSession()` are the new user entry points and the one session button now offers Start / Stop / End / Retry by FSM legality. ARCHITECTURE §3 rule 3 is amended to **two** deliberate ends (ADR-026 §5) and the FSM — not a coordinator — says which; the vector row and both platforms' effect assertions moved with it | ~~**Medium**~~ Fixed | See §2ak. `ErrorAcknowledged` remains un-emitted, tracked separately as problem 55 |

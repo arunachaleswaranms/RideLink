@@ -300,6 +300,17 @@ public actor VoiceController: VoiceSignalSink {
         mailbox.offer(.controlLinkLost(retiredControlGeneration: retiredControlGeneration), doorbell: doorbell)
     }
 
+    /// Explicit successor authority from Connected, consumed by the reducer (ADR-020 A11).
+    public func controlAuthenticated(controlGeneration: Int64) {
+        mailbox.offer(
+            .controlAuthenticated(
+                controlGeneration: controlGeneration,
+                freshVoiceSessionId: newVoiceSessionId()
+            ),
+            doorbell: doorbell
+        )
+    }
+
     /// A `VOICE_*` frame that has **already** passed the ADR-019 trust gate. There is no other entry
     /// point: an unauthenticated peer's frame is dropped by `ControlSessionManager` before it can reach
     /// this method (PROTOCOL §7.1).

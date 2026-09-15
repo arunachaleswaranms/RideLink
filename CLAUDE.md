@@ -295,15 +295,24 @@ luck. A second, separate finding is recorded on its own (problem 67): three bare
 has three passes behind it now: audit the newest fix first — and audit what a regression *supplies* as
 carefully as what it asserts.**
 
-**One defect is confirmed and OPEN: `docs/STATUS.md` §4 problem 69.** The same ordering wedges a
-*null-generation* press — Start pressed in the gap between two links — which rule 25 cannot reach,
-because there is no held offer to answer and no lifetime the pure table may name (rule 23). Measured,
-not argued: `attachVoice` issues no rebuild, and the press lands to `status == idle`,
-`localAudioOpen == true`, nothing sent. It is left open because the obvious coordinator fix would also
-fire after a send failure degrades to idle with consent still recorded — a voice-layer retry loop §7.8
-forbids, since §10's control ladder is the only reconnect loop in the app. **Do not patch it; design
-it**, and prefer making consent-plus-live-generation an explicit reducer input so the retry hazard is
-decided in the pure table where a vector can pin it.
+**Problem 69 is implemented with explicit one-shot intent (ADR-020 Amendment A11; STATUS §2ar).**
+A gap Start records consent plus `pendingStartIntent`; it owns no control lifetime.
+`ControlAuthenticated(B)`, emitted from the generation named by `Connected(B)`, supplies authority
+and consumes the intent once. If B reduces first, its recorded authority meets the delayed nil Start.
+The pure reducer owns both that decision and the existing consented reconnect rebuild; the
+coordinator must not emit a second Start from published `localAudioOpen`. Duplicate availability and
+`NegotiationSendFailed` never create a retry. Stop/ENDING clear intent. A held B offer supplies its
+own authority and ID when nil supplies consent. A new lifetime replaces obsolete media with a fresh
+negotiation, never by changing its owner in place. Mailbox retirement applies to availability as well
+as frames, and every outbound effect remains generation-bound. iOS delivery stays in
+`launchInSession`; teardown cancels and joins it. Android mirrors semantics but has synchronous Start
+admission. No wire change. See STATUS §2ar for measured verification and remaining gates.
+
+**A separate teardown defect remains OPEN: STATUS §4 problem 70.** The final A11 self-audit
+reproduced iOS `VoiceController.shutdown()` returning with its mailbox consumer suspended in a send;
+releasing that send then created media after shutdown. Problem 67's coordinator registry remains
+session-owned and joined, but does not join this nested consumer. Do not claim terminal voice
+teardown or overall readiness until the controller's cancellation/join ownership is repaired.
 
 **TEST_PLAN §5.2's S-01…S-12 remain pending and no alignment figure exists.** Fourteen passes have each
 found something already CI-green. §2al's lesson stands — two of the three areas it investigated were

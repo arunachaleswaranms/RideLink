@@ -231,14 +231,17 @@ public struct VoiceInputMailbox: Sendable {
     /// when its lifetime is retired is discarded here, and one arriving afterwards is refused here.
     @discardableResult
     public mutating func offer(_ input: VoiceInput) -> VoiceMailboxOutcome {
-        // The "admitted after retirement" half. Checked before the lane is even chosen: a refused
-        // signal occupies nothing, so it cannot overflow a lane and cannot force a degrade.
-        if case .signalReceived(_, let controlGeneration, _) = input {
-            if isStale(controlGeneration) {
+        // Both frames and availability carry immutable control authority. A newer availability
+        // proves older inputs stale just as a newer frame does (ADR-020 A11).
+        switch input {
+        case .signalReceived(_, let generation, _), .controlAuthenticated(let generation, _):
+            if isStale(generation) {
                 refusedRetiredSignalCount += 1
                 return .retiredGeneration
             }
-            admitGeneration(controlGeneration)
+            admitGeneration(generation)
+        default:
+            break
         }
         switch Self.lane(for: input) {
         case .teardown:
@@ -341,28 +344,37 @@ public struct VoiceInputMailbox: Sendable {
         discardRetiredRemoteSignals()
     }
 
-    /// Removes every queued `.signalReceived` **whose admitting generation has ended** -- and nothing
-    /// else -- from the four lanes that can hold one. Run whenever either half of `isStale` moves.
+    /// Removes every queued `.signalReceived` **whose admitting generation has ended** — and nothing
+    /// else — from the four lanes that can hold one. Run whenever either half of `isStale` moves.
     ///
     /// The predicate is the whole fix: it used to be "is this a `.signalReceived`", which discarded a
     /// successor lifetime's freshly admitted offer along with the predecessor's (STATUS §4 problem
-    /// 60). Local inputs match no branch of it and never could.
+    /// 60). Local inputs match no branch of it and never could — except `controlAuthenticated`, which
+    /// shares the peer signals' staleness rule (Amendment A11) and therefore the sweep: an
+    /// availability event still queued when its own lifetime's boundary lands would otherwise
+    /// resurrect that lifetime's record after the boundary cleared it.
     private mutating func discardRetiredRemoteSignals() {
         let stale = isStale
-        func isPeerSignal(_ input: VoiceInput) -> Bool {
-            if case .signalReceived(_, let controlGeneration, _) = input { return stale(controlGeneration) }
-            return false
+        func isStaleInput(_ input: VoiceInput) -> Bool {
+            switch input {
+            case .signalReceived(_, let controlGeneration, _):
+                return stale(controlGeneration)
+            case .controlAuthenticated(let controlGeneration, _):
+                return stale(controlGeneration)
+            default:
+                return false
+            }
         }
         discardedRetiredSignalCount +=
-            terminalPeerState.filter(isPeerSignal).count
-                + critical.filter(isPeerSignal).count
-                + ice.filter(isPeerSignal).count
-                + coalesced.values.filter(isPeerSignal).count
-        terminalPeerState.removeAll(where: isPeerSignal)
-        critical.removeAll(where: isPeerSignal)
-        ice.removeAll(where: isPeerSignal)
-        // The only coalesced kind a peer produces is `.peerState`; mute/mode/remote-track are local.
-        let retiredKeys = coalesced.filter { isPeerSignal($0.value) }.map(\.key)
+            terminalPeerState.filter(isStaleInput).count
+                + critical.filter(isStaleInput).count
+                + ice.filter(isStaleInput).count
+                + coalesced.values.filter(isStaleInput).count
+        terminalPeerState.removeAll(where: isStaleInput)
+        critical.removeAll(where: isStaleInput)
+        ice.removeAll(where: isStaleInput)
+        // The only coalesced kinds a peer produces is `.peerState`; mute/mode/remote-track are local.
+        let retiredKeys = coalesced.filter { isStaleInput($0.value) }.map(\.key)
         for key in retiredKeys {
             coalesced.removeValue(forKey: key)
             coalesceOrder.removeAll { $0 == key }
@@ -373,6 +385,10 @@ public struct VoiceInputMailbox: Sendable {
     public mutating func poll() -> VoiceInput? {
         if let next = teardown {
             teardown = nil
+            // Coalesced losses still name the newest lifetime known to have ended.
+            if case .controlLinkLost(let retired) = next, retired != nil {
+                return .controlLinkLost(retiredControlGeneration: retiredControlGenerationFloor)
+            }
             return next
         }
         if let next = sendFailure {
@@ -443,6 +459,13 @@ public struct VoiceInputMailbox: Sendable {
         case .negotiationSendFailed:
             return .sendFailure
         case .startRequested, .localOfferCreated, .localAnswerCreated, .mediaConnectivityChanged:
+            return .critical
+        // The successor-lifetime availability event (ADR-020 Amendment A11). Critical rather than
+        // coalesced: it must keep FIFO order against a deferred `.startRequested` in the same lane,
+        // which is exactly the ordering problem 69 is — the press and the authentication have to
+        // reduce in the order they actually happened, and a coalesced slot would let a second
+        // authentication overwrite a first before the press between them was ever seen.
+        case .controlAuthenticated:
             return .critical
         case .signalReceived(let signal, _, _):
             switch signal {
