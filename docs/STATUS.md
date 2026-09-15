@@ -5847,6 +5847,10 @@ consumer-join proof. No physical validation is implied.
 - Initial Kotlin test compilation and formatting checks needed corrections. One Gradle invocation
   failed to clean compiler outputs; the next diagnostic invocation completed compilation. No test
   failure was attributed to that tooling failure.
+- The first exact-head CI run (`34925803186`, head `b38e8b83b6f6712d224906922b63977990fc1e15`)
+  failed in Android SDK setup before compilation: the action's default `sdkmanager tools` returned
+  `Failed to find package 'tools'`. The workflow now explicitly requests `platform-tools`; its next
+  step still installs API 36 and build tools 36.1.0. No dependency version or test gate was weakened.
 - Problems 62, 65 and 68 remain recorded separately; none is a blanket explanation for a new failure.
 
 Phase 6 and Phase 7 have not started. No phone, Bluetooth, voice hardware or S-01…S-12 gate was run.
