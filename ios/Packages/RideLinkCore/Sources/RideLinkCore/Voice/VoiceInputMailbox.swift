@@ -139,6 +139,12 @@ public struct VoiceInputMailbox: Sendable {
     /// sitting behind it.
     public private(set) var refusedRetiredSignalCount = 0
 
+    /// Local authority events retired while queued; these are not dropped peer signals.
+    public private(set) var discardedRetiredAvailabilityCount = 0
+
+    /// Local authority events refused on arrival, separate from refused peer signals.
+    public private(set) var refusedRetiredAvailabilityCount = 0
+
     /// **The highest control authentication generation known to have been retired**, or nil while none
     /// has been (STATUS §4 problem 60).
     ///
@@ -236,7 +242,11 @@ public struct VoiceInputMailbox: Sendable {
         switch input {
         case .signalReceived(_, let generation, _), .controlAuthenticated(let generation, _):
             if isStale(generation) {
-                refusedRetiredSignalCount += 1
+                if case .signalReceived = input {
+                    refusedRetiredSignalCount += 1
+                } else {
+                    refusedRetiredAvailabilityCount += 1
+                }
                 return .retiredGeneration
             }
             admitGeneration(generation)
@@ -365,9 +375,14 @@ public struct VoiceInputMailbox: Sendable {
                 return false
             }
         }
+        let retiredAvailabilityCount = critical.filter {
+            if case .controlAuthenticated = $0 { return isStaleInput($0) }
+            return false
+        }.count
+        discardedRetiredAvailabilityCount += retiredAvailabilityCount
         discardedRetiredSignalCount +=
             terminalPeerState.filter(isStaleInput).count
-                + critical.filter(isStaleInput).count
+                + critical.filter(isStaleInput).count - retiredAvailabilityCount
                 + ice.filter(isStaleInput).count
                 + coalesced.values.filter(isStaleInput).count
         terminalPeerState.removeAll(where: isStaleInput)

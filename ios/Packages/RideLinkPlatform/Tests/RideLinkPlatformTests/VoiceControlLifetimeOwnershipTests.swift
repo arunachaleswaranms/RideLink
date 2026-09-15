@@ -180,13 +180,12 @@ final class VoiceControlLifetimeOwnershipTests: XCTestCase {
     /// not create a negotiation either, because there is no link to negotiate over and, worse, no
     /// lifetime to own one. A negotiation owned by nobody is the single state no boundary can retire.
     ///
-    /// So the press records consent and stops there, and `SessionCoordinator.attachVoice` starts the
-    /// negotiation under the successor the moment one authenticates — which is exactly the rebuild it
-    /// already performs for any segment whose capture is open. Deterministic, and no wedge.
+    /// The press records pending intent and consent. Production `attachVoice` delivers explicit
+    /// authenticated availability; that event consumes the intent under the successor (A11).
     func testAStartPressedBetweenTwoLifetimesOpensCaptureAndIsRebuiltByTheSuccessor() async throws {
         let harness = try await Harness(isLocalLeader: true)
         await harness.controller.start(controlGeneration: nil)
-        try await harness.awaitAudioCall("open")
+        try await harness.awaitCondition { await harness.controller.currentDiagnostics().localAudioOpen }
 
         var status = await harness.controller.currentDiagnostics().status
         var calls = await harness.engine.recordedCalls()
@@ -203,8 +202,8 @@ final class VoiceControlLifetimeOwnershipTests: XCTestCase {
         var audioOpen = await harness.audio.isOpen()
         XCTAssertTrue(audioOpen, "a boundary in the gap may not close capture")
 
-        // The ladder reconnects: `attachVoice` rebuilds voice for a segment whose capture is open.
-        await harness.controller.start(controlGeneration: Self.controlB)
+        // The same authenticated-availability event that production attachVoice emits.
+        await harness.controller.controlAuthenticated(controlGeneration: Self.controlB)
         try await harness.awaitEngineCall("createOffer")
         status = await harness.controller.currentDiagnostics().status
         XCTAssertEqual(status, .negotiating, "the successor rebuilds what the gap press could not start")
@@ -328,10 +327,7 @@ final class VoiceControlLifetimeOwnershipTests: XCTestCase {
 
         func awaitEngineCall(_ call: String) async throws {
             try await awaitCondition { await self.engine.recordedCalls().contains(call) }
-        }
-
-        func awaitAudioCall(_ call: String) async throws {
-            try await awaitCondition { await self.audio.recordedCalls().contains(call) }
+            try await settle()
         }
 
         /// Waits until `count` boundaries have been *reduced* and correctly ignored.
@@ -345,17 +341,28 @@ final class VoiceControlLifetimeOwnershipTests: XCTestCase {
             }
         }
 
-        /// Lets the consumer drain whatever is queued. Used only where the assertion that follows is
-        /// a *negative* with no positive to wait on.
+        /// A stale callback in the coalesced lane proves higher-priority work has reduced.
         func settle() async throws {
-            for _ in 0..<20 { try await Task.sleep(nanoseconds: 5_000_000) }
+            let count = await controller.currentDiagnostics().droppedSignals[.staleEngineCallback] ?? 0
+            await engine.emit(.remoteTrackChanged(
+                voiceSessionId: VoiceSessionId(String(repeating: "0", count: 32)), present: false
+            ))
+            try await awaitCondition {
+                await (self.controller.currentDiagnostics().droppedSignals[.staleEngineCallback] ?? 0) > count
+            }
         }
 
         func awaitCondition(_ condition: @escaping () async -> Bool) async throws {
-            let deadline = Date().addingTimeInterval(5.0)
-            while Date() < deadline {
+            let (edges, continuation) = AsyncStream<Void>.makeStream(bufferingPolicy: .bufferingNewest(1))
+            await controller.setOnDiagnosticsChanged { _ in continuation.yield(()) }
+            let watchdog = Task {
+                try? await Task.sleep(nanoseconds: 5_000_000_000)
+                if !Task.isCancelled { continuation.finish() }
+            }
+            defer { watchdog.cancel(); continuation.finish() }
+            if await condition() { return }
+            for await _ in edges {
                 if await condition() { return }
-                try await Task.sleep(nanoseconds: 5_000_000)
             }
             XCTFail("condition not met within the timeout")
         }

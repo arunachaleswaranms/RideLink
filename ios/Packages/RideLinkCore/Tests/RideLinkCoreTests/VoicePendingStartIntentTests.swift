@@ -83,8 +83,11 @@ final class VoicePendingStartIntentTests: XCTestCase {
             XCTAssertEqual(h.state.voiceSessionId, role == .offerer ? id(3) : nil)
             XCTAssertFalse(h.state.pendingStartIntent)
             XCTAssertTrue(h.actions.filter(\.isOutbound).allSatisfy { $0.controlGeneration == 3 })
-            XCTAssertEqual(mailbox.discardedRetiredSignalCount, 1)
+            XCTAssertEqual(mailbox.discardedRetiredAvailabilityCount, 1)
+            XCTAssertEqual(mailbox.discardedRetiredSignalCount, 0)
             XCTAssertEqual(mailbox.offer(.controlAuthenticated(controlGeneration: 2, freshVoiceSessionId: id(4))), .retiredGeneration)
+            XCTAssertEqual(mailbox.refusedRetiredAvailabilityCount, 1)
+            XCTAssertEqual(mailbox.refusedRetiredSignalCount, 0)
         }
     }
 
@@ -98,7 +101,8 @@ final class VoicePendingStartIntentTests: XCTestCase {
         XCTAssertEqual(h.state.negotiationControlGeneration, 3)
         XCTAssertFalse(h.state.pendingStartIntent)
         XCTAssertEqual(h.state.voiceSessionId, id(3))
-        XCTAssertEqual(mailbox.discardedRetiredSignalCount, 1)
+        XCTAssertEqual(mailbox.discardedRetiredAvailabilityCount, 1)
+        XCTAssertEqual(mailbox.discardedRetiredSignalCount, 0)
     }
 
     func testRecordedBAvailabilitySurvivesLateAWhileIdle() {

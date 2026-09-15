@@ -94,8 +94,11 @@ class VoicePendingStartIntentTest {
             assertEquals(if (role == VoiceRole.OFFERER) id(3) else null, h.state.voiceSessionId)
             assertFalse(h.state.pendingStartIntent)
             assertTrue(h.actions.filterIsInstance<OutboundVoiceAction>().all { it.controlGeneration == 3L })
-            assertEquals(1, mailbox.discardedRetiredSignalCount)
+            assertEquals(1, mailbox.discardedRetiredAvailabilityCount)
+            assertEquals(0, mailbox.discardedRetiredSignalCount)
             assertEquals(VoiceMailboxOutcome.RetiredGeneration, mailbox.offer(VoiceInput.ControlAuthenticated(2, id(4))))
+            assertEquals(1, mailbox.refusedRetiredAvailabilityCount)
+            assertEquals(0, mailbox.refusedRetiredSignalCount)
         }
     }
 
@@ -110,7 +113,8 @@ class VoicePendingStartIntentTest {
         assertEquals(3L, h.state.negotiationControlGeneration)
         assertFalse(h.state.pendingStartIntent)
         assertEquals(id(3), h.state.voiceSessionId)
-        assertEquals(1, mailbox.discardedRetiredSignalCount)
+        assertEquals(1, mailbox.discardedRetiredAvailabilityCount)
+        assertEquals(0, mailbox.discardedRetiredSignalCount)
     }
 
     @Test

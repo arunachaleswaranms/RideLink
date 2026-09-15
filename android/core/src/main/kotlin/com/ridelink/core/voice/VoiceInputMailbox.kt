@@ -169,6 +169,14 @@ class VoiceInputMailbox(
     var refusedRetiredSignalCount: Int = 0
         private set
 
+    /** Local authority events retired while queued; these are not dropped peer signals. */
+    var discardedRetiredAvailabilityCount: Int = 0
+        private set
+
+    /** Local authority events refused on arrival, separate from refused peer signals. */
+    var refusedRetiredAvailabilityCount: Int = 0
+        private set
+
     /**
      * **The highest control authentication generation known to have been retired**, or null while
      * none has been (STATUS §4 problem 60).
@@ -270,7 +278,7 @@ class VoiceInputMailbox(
             }
         if (inputGeneration != null) {
             if (isStale(inputGeneration)) {
-                refusedRetiredSignalCount += 1
+                recordRetiredInputRefusal(input)
                 return VoiceMailboxOutcome.RetiredGeneration
             }
             admitGeneration(inputGeneration)
@@ -351,6 +359,14 @@ class VoiceInputMailbox(
                 val replaced = coalesced.put(coalesceKeyFor(input), input) != null
                 if (replaced) VoiceMailboxOutcome.Coalesced else VoiceMailboxOutcome.Accepted(lane)
             }
+        }
+    }
+
+    private fun recordRetiredInputRefusal(input: VoiceInput) {
+        if (input is VoiceInput.SignalReceived) {
+            refusedRetiredSignalCount += 1
+        } else {
+            refusedRetiredAvailabilityCount += 1
         }
     }
 
@@ -449,7 +465,8 @@ class VoiceInputMailbox(
      *
      * The predicate is the whole fix: it used to be `it is SignalReceived`, which discarded a
      * successor lifetime's freshly admitted offer along with the predecessor's (STATUS §4 problem
-     * 60). Local inputs match no branch of it and never could.
+     * 60). Authenticated availability shares this rule, but is counted separately from peer signals.
+     * User intent and engine callbacks are never discarded by control retirement.
      */
     private fun discardRetiredRemoteSignals() {
         val retired: (VoiceInput) -> Boolean = {
@@ -459,9 +476,10 @@ class VoiceInputMailbox(
                 else -> false
             }
         }
+        discardedRetiredAvailabilityCount += critical.count { it is VoiceInput.ControlAuthenticated && retired(it) }
         discardedRetiredSignalCount +=
             terminalPeerState.count(retired) +
-            critical.count(retired) +
+            critical.count { it is VoiceInput.SignalReceived && retired(it) } +
             ice.count(retired) +
             coalesced.values.count(retired)
         terminalPeerState.removeAll(retired)

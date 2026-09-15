@@ -5787,9 +5787,10 @@ source because there is still no app XCTest bundle. No wire change or retry time
   core 287, network 277, app 176, audio 33, data 31. No failure in the final full run.
 - iOS `RideLinkCore`: **319/319**; `RideLinkPlatform`: **496/496**. Unsigned Debug and Release
   simulator builds both passed. SwiftLint/SwiftFormat were not run and are not claimed.
-- Android lifetime stress: **50/50 clean iterations, 135 tests per iteration**, forcing execution
+- Android lifetime stress: **50/50 clean iterations, 142 tests per iteration**, forcing execution
   of the selected core, network and app test tasks each time. Includes P60/61/63/64/66, pending
-  intent, Stop, provenance and the real coordinator/session lifecycle suites.
+  intent, Stop, provenance and the real coordinator/session lifecycle suites. The final run adds
+  all seven `SessionCoordinatorAudioStateLifetimeTest` rows to the earlier 135-test selection.
 - iOS lifetime stress: **50/50 clean iterations**, each executing **52 Core and 60 Platform tests**
   in fresh test processes. Includes the two production-shaped nil-Start roles/orderings, the source
   mirror, existing lifetime regressions and session teardown ownership primitive tests.
@@ -5851,6 +5852,24 @@ consumer-join proof. No physical validation is implied.
   failed in Android SDK setup before compilation: the action's default `sdkmanager tools` returned
   `Failed to find package 'tools'`. The workflow now explicitly requests `platform-tools`; its next
   step still installs API 36 and build tools 36.1.0. No dependency version or test gate was weakened.
+- The next CI run (`34925939190`, head `9188f84bd1902599c32c6b16c1cf9201827289d9`)
+  passed iOS but failed Android's `SessionCoordinatorAudioStateLifetimeTest` predecessor-loss row:
+  expected no retired peer-signal drops, observed one. This was an A11 diagnostics regression,
+  not attributed to problems 62/65/68. If initial `ControlAuthenticated(A)` was still queued when
+  A's loss arrived, the new sweep correctly retired it but incorrectly counted it as a dropped
+  peer signal. Both mailboxes now count discarded/refused local availability separately, preserving
+  the existing peer-signal counters. Deterministic pure tests assert both counts, and the unchanged
+  coordinator suite is included in the final stress run. No lifetime admission rule was relaxed.
+- Rechecking the counter correction hit Kotlin incremental compiler cache failures for missing
+  generated class files; the compiler's fallback rebuild completed. Detekt also rejected an added
+  branch at its complexity limit; extracting the counter update into a helper preserved that limit.
+- A later iOS stress attempt stopped at iteration 13: the existing P61 gap-Start row in
+  `VoiceControlLifetimeOwnershipTests` awaited the audio fixture's `open` call, then asserted the
+  controller's published capture projection before publication was guaranteed. The assertion saw
+  false. That row now awaits published consent itself and uses production's `ControlAuthenticated`
+  successor event. The suite's fixed settling sleeps were replaced with counted stale-callback
+  barriers and diagnostics-stream waits; timeouts remain failure watchdogs only. The failed attempt
+  is retained separately from the final 50-iteration run, and is not attributed to problems 62/65/68.
 - Problems 62, 65 and 68 remain recorded separately; none is a blanket explanation for a new failure.
 
 Phase 6 and Phase 7 have not started. No phone, Bluetooth, voice hardware or S-01…S-12 gate was run.
