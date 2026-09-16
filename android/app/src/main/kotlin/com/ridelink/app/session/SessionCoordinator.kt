@@ -260,7 +260,12 @@ class SessionCoordinator(
      * ARCHITECTURE §6.4 requires the service to be up **before** the capture path opens.
      */
     fun startIntercom() {
-        voice?.start()
+        // The live generation, read **now**, for an input that happens now: a local press carries no
+        // frame whose provenance could be preserved instead, and "which lifetime is authenticated at
+        // the moment the user taps" is exactly the lifetime that will carry its offer. Null in the
+        // gap between two links, which records consent and starts no negotiation — see
+        // `VoiceInput.StartRequested.controlGeneration` (STATUS §4 problem 61).
+        voice?.start(controlSessionManager.liveAuthenticatedGeneration)
     }
 
     fun endIntercom() {
@@ -643,7 +648,7 @@ class SessionCoordinator(
                 logger.warn("SessionCoordinator", "handshake refused: ${event.code}")
             }
             is ControlEvent.Connected -> {
-                attachVoice(event.isLocalLeader)
+                attachVoice(event.isLocalLeader, event.authGeneration)
                 // PROTOCOL §4.4 names `CONNECTED` as one of the two moments an `AUDIO_STATE` is sent
                 // regardless of whether anything changed: a peer that has just connected has never
                 // seen any of our state, so "nothing changed" is not a reason to stay silent.
@@ -680,11 +685,14 @@ class SessionCoordinator(
      * `ReconnectSucceeded`, and the existing controller is the right one to keep — it still holds the
      * open capture device for this ride segment, which a fresh one would have to reopen.
      */
-    private fun attachVoice(isLocalLeader: Boolean) {
+    private fun attachVoice(
+        isLocalLeader: Boolean,
+        authGeneration: Long,
+    ) {
         if (voice != null) {
-            // A reconnect. If the user had consented to voice, rebuild the media transport as a fresh
-            // negotiation (PROTOCOL §7.8); `start()` is idempotent when voice is already live.
-            if (_voiceDiagnostics.value.localAudioOpen) voice?.start()
+            // One Connected event supplies authority and the §7.8 rebuild opportunity. The reducer
+            // handles pending Start intent and consent without consulting a diagnostics projection.
+            voice?.controlAuthenticated(authGeneration)
             return
         }
         val controller = buildVoiceController(isLocalLeader)
@@ -698,6 +706,11 @@ class SessionCoordinator(
                 if (peerAudioStateInbox.accept(message)) _peerAudioState.value = message
             }
         controller.selectPolicy(_intercomPolicy.value)
+        // The lifetime this controller was born under, as an input like every other
+        // control-lifetime fact the table holds (ADR-020 Amendment A11). A first-ever press before
+        // this point reads the live generation itself; this is for the press that arrives after a
+        // boundary, whose own tap-time read can only ever be honest about the gap it was pressed in.
+        controller.controlAuthenticated(authGeneration)
         // On the session's own runtime, not the app scope: this collector publishes `AUDIO_STATE`,
         // so a teardown has to be able to prove it has *stopped*, not merely that it was asked to.
         voiceDiagnosticsJob =

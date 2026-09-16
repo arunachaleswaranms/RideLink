@@ -102,7 +102,7 @@ class SharedLibraryCoordinatorProviderAuthorizationTest {
             // The session boundary: a reconnect to a different peer while resolve() is suspended.
             session.currentAuthGeneration = 11L
             session.currentPeerSpki = peerB
-            session.emitEvent(ControlEvent.Connected(peerIdB, sessionIdB, isLocalLeader = false))
+            session.emitEvent(ControlEvent.Connected(peerIdB, sessionIdB, isLocalLeader = false, authGeneration = 2L))
             advanceUntilIdle()
             assertEquals(1, bulkTransport.closeCallCount) // onSessionBoundary() really ran
 

@@ -48,11 +48,17 @@ class VoiceSignalRelay internal constructor(
     private val nextSeq: () -> Long,
     private val activeSessionId: () -> SessionId,
     /**
-     * Yields a writer for the surviving connection **only while it is authenticated**, and null
-     * otherwise. A supplier rather than a socket because the connection comes and goes and this type
-     * must never hold one across a teardown.
+     * Yields a writer for the surviving connection **only while it is authenticated and owned by the
+     * generation asked for**, and null otherwise (STATUS §4 problem 64, ADR-020 Amendment A9).
+     *
+     * A supplier rather than a socket because the connection comes and goes and this type must never
+     * hold one across a teardown — and a *generation-bound* supplier because "is a session live" and
+     * "is **this** frame's session live" are different questions. It resolves the writer and the
+     * generation from the one immutable `AuthenticatedConnection` record, so there is no ordering in
+     * which a socket can be handed out under a generation that is not the one its own activation
+     * assigned.
      */
-    private val authenticatedWriter: () -> AuthenticatedFrameWriter?,
+    private val authenticatedWriterFor: (Long) -> AuthenticatedFrameWriter?,
     /**
      * ADR-025's liveness half: the generation owning the connection that is an authenticated session
      * **right now**, or null when none is. A frame's own authorising generation is *compared*
@@ -80,10 +86,50 @@ class VoiceSignalRelay internal constructor(
     var droppedRetiredGeneration: Int = 0
         private set
 
+    /**
+     * How many **outbound** `VOICE_*` frames were refused because the control lifetime that
+     * authorised them no longer owns the surviving connection (STATUS §4 problem 64, ADR-020
+     * Amendment A9).
+     *
+     * The mirror of [droppedRetiredGeneration], and counted for the same reason: a negotiation that
+     * degrades because its offer could not be placed is a fact about the ride, and "the link was
+     * gone" and "the link was *replaced*" are different facts — only the second one says a successor
+     * exists to rebuild under.
+     */
+    @Volatile
+    var droppedRetiredGenerationOutbound: Int = 0
+        private set
+
     val rejectionCounts: Map<VoiceSignalRejection, Int> get() = rejections.toMap()
 
-    override suspend fun send(signal: VoiceSignal): Boolean {
-        val write = authenticatedWriter() ?: return false
+    /**
+     * **A frame authorised by one control lifetime may be written only to that lifetime's
+     * connection** (STATUS §4 problem 64, ADR-020 Amendment A9).
+     *
+     * Before this, `send` asked for "the authenticated writer" at the moment the write happened —
+     * which is not the moment the frame was authorised, because everything between the two suspends:
+     * the mailbox's single consumer, the engine's offer/answer callbacks, `withContext(ioDispatcher)`,
+     * a write lock, a flush. So a `VOICE_OFFER` authorised by a lifetime that had since ended was
+     * written to its **successor's** socket, where the peer accepted it as current — and the
+     * predecessor's own boundary, arriving afterwards, then tore this side's media down while the
+     * peer was still negotiating. That is ADR-024 Amendment A7's rule in the outbound direction: a
+     * live value may be *compared* against an authorisation, never substituted for one.
+     *
+     * A refusal is a plain `false`, which is the outcome [VoiceSignalTransport] already defines and
+     * `VoiceController.degradeIfUnsent` already answers with `NegotiationSendFailed` — never with
+     * `ControlLinkLost`, for the reason ADR-020 Amendment A6 gives. It is counted rather than silent.
+     */
+    override suspend fun send(
+        signal: VoiceSignal,
+        controlGeneration: Long?,
+    ): Boolean {
+        // One lookup, one refusal: a null authorisation and a generation that no longer owns the
+        // surviving connection are the same fact -- there is no connection this frame may go on.
+        val write = controlGeneration?.let(authenticatedWriterFor)
+        if (write == null) {
+            droppedRetiredGenerationOutbound += 1
+            return false
+        }
         return runCatching {
             write.write(
                 ControlMessages.voiceSignal(
@@ -162,5 +208,6 @@ class VoiceSignalRelay internal constructor(
         rejections.clear()
         droppedPreAuthentication = 0
         droppedRetiredGeneration = 0
+        droppedRetiredGenerationOutbound = 0
     }
 }

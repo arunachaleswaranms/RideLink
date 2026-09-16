@@ -15,7 +15,7 @@ final class VoiceNegotiationVectorTests: XCTestCase {
     /// identity is a receiver-local concern and not a wire one.
     private let vectorControlGeneration: Int64 = 1
 
-    private let expectedMinimumRows = 59
+    private let expectedMinimumRows = 92
     private let vsidA = "5e2a9c40b7f13d86e0a4c95b28f7d613"
     private let vsidFresh = "ffeeddccbbaa99887766554433221100"
 
@@ -106,6 +106,182 @@ final class VoiceNegotiationVectorTests: XCTestCase {
         }
     }
 
+    /// **Every value that holds negotiation state names the lifetime that owns it, and every value
+    /// that holds none names nobody** (STATUS §4 problem 61, ADR-020 Amendment A8).
+    ///
+    /// Run over the resulting state of every row, this is what turns the generator's "a row that does
+    /// not say otherwise is about one control lifetime" from a convenience into a checked invariant.
+    /// A negotiation with no owner would be un-retirable by any boundary that names one; an owner
+    /// left behind on a state that holds nothing would let a later boundary be judged against a
+    /// negotiation that no longer exists.
+    ///
+    /// "Holds negotiation state" is spelled out rather than read off `isNegotiationLive`, because the
+    /// two come apart in both directions: an answerer's intent-to-talk is live with no
+    /// `voice_session_id` (§7.3), and a peer's `failed` leaves a `.failed` status owning nothing.
+    func testNegotiationStateAndItsOwningControlLifetimeArePresentTogetherOrNotAtAll() throws {
+        for element in try rows() {
+            guard let row = element as? [String: Any] else { return XCTFail("row is not an object") }
+            let outcome = VoiceNegotiation.reduce(state: state(row.dict("state")), input: input(row.dict("input")))
+            let after = outcome.state
+            let holdsNegotiation =
+                after.status.isNegotiationLive || after.voiceSessionId != nil || after.heldRemoteOffer != nil
+            XCTAssertEqual(
+                holdsNegotiation,
+                after.negotiationControlGeneration != nil,
+                """
+                row \(row.str("name")) holds negotiation state = \(holdsNegotiation) but names owner \
+                \(String(describing: after.negotiationControlGeneration))
+                """
+            )
+        }
+    }
+
+    /// **The pending gap-press intent is a one-shot that only an explicit event consumes** (STATUS §4
+    /// problem 69, ADR-020 Amendment A11), as three properties over the whole vector file:
+    ///
+    /// 1. An intent never coexists with the negotiation state it requests — the transition that
+    ///    establishes a negotiation consumes it, so `pendingStartIntent == true` in a *resulting*
+    ///    state means that state holds no negotiation.
+    /// 2. A `StartRequested` whose `controlGeneration` is nil establishes a negotiation only when
+    ///    the state it reduced against carried a lifetime an input delivered — the recorded
+    ///    `authenticatedControlGeneration` — or a held offer whose own owner supplies the authority.
+    ///    Nil never invents a generation.
+    /// 3. A `NegotiationSendFailed` result never carries a manufactured intent, and a
+    ///    `ControlAuthenticated` result never leaves an intent standing beside a live negotiation.
+    func testThePendingGapPressIntentIsAOneShotConsumedByExplicitEvents() throws {
+        var consumed = 0
+        for element in try rows() {
+            guard let row = element as? [String: Any] else { return XCTFail("row is not an object") }
+            let name = row.str("name")
+            let before = state(row.dict("state"))
+            let inputSpec = row.dict("input")
+            let after = VoiceNegotiation.reduce(state: before, input: input(inputSpec)).state
+
+            // 1. An intent and the thing it requests are mutually exclusive.
+            if after.pendingStartIntent {
+                let holdsNegotiation =
+                    after.status.isNegotiationLive || after.voiceSessionId != nil || after.heldRemoteOffer != nil
+                XCTAssertFalse(
+                    holdsNegotiation,
+                    "row \(name) holds negotiation state the pending intent requested without consuming it"
+                )
+            }
+
+            // 2. A nil press establishes only under delivered authority.
+            if inputSpec.str("kind") == "StartRequested", inputSpec.requiredInt64Opt("control_generation") == nil,
+                after.status.isNegotiationLive {
+                let authority = before.authenticatedControlGeneration ?? before.heldRemoteOffer.map { _ in
+                    before.negotiationControlGeneration
+                }
+                XCTAssertNotNil(
+                    authority,
+                    "row \(name) established a negotiation from a nil press with no lifetime the table had seen"
+                )
+                consumed += 1
+            }
+
+            // 3. Neither a send failure nor an authentication may leave an intent beside live work,
+            //    and a send failure may not manufacture one.
+            if inputSpec.str("kind") == "NegotiationSendFailed" {
+                XCTAssertFalse(
+                    after.pendingStartIntent && !before.pendingStartIntent,
+                    "row \(name) manufactured a pending intent from a send failure"
+                )
+            }
+            if inputSpec.str("kind") == "ControlAuthenticated", after.pendingStartIntent {
+                XCTAssertFalse(
+                    after.status.isNegotiationLive,
+                    "row \(name) left a pending intent standing beside the negotiation it just established"
+                )
+            }
+        }
+        XCTAssertGreaterThan(consumed, 0, "the file must contain nil-press resumption rows for this to mean anything")
+    }
+
+    /// **Every action that puts a frame on the wire names the control lifetime whose connection it may
+    /// be written to, and that lifetime is one the table was already holding** (STATUS §4 problem 64,
+    /// ADR-020 Amendment A9).
+    ///
+    /// Two halves, and both matter. **Non-nil**, because `VoiceSignalTransport.send` treats a nil
+    /// authorisation as a refusal — a transition that produced one would silently stop voice sending
+    /// anything at all. And **one of the two owners the row mentions**, because the alternative is a
+    /// table that invents a generation, which is the inbound defect (ADR-024 Amendment A7) pointing
+    /// outwards: the value has to come from state the table already held, never from anywhere else.
+    ///
+    /// The exact value per row is pinned by the rows themselves; this is what stops a *new* branch
+    /// being added without one. The mirror is Kotlin's
+    /// `every outbound action names a control lifetime the table already held`.
+    func testEveryOutboundActionNamesAControlLifetimeTheTableAlreadyHeld() throws {
+        var covered = 0
+        for element in try rows() {
+            guard let row = element as? [String: Any] else { return XCTFail("row is not an object") }
+            let before = state(row.dict("state"))
+            let outcome = VoiceNegotiation.reduce(state: before, input: input(row.dict("input")))
+            let permitted = Set([before.negotiationControlGeneration, outcome.state.negotiationControlGeneration]
+                .compactMap { $0 })
+            for action in outcome.actions where action.isOutbound {
+                guard let owner = action.controlGeneration else {
+                    XCTFail("""
+                    row \(row.str("name")) would send \(action) authorised by nobody,                     which can never be written
+                    """)
+                    continue
+                }
+                XCTAssertTrue(
+                    permitted.contains(owner),
+                    """
+                    row \(row.str("name")) sends \(action) under \(owner),                     which the table never held (it held \(permitted))
+                    """
+                )
+                covered += 1
+            }
+        }
+        XCTAssertGreaterThan(covered, 0, "the file must contain outbound rows for this to mean anything")
+    }
+
+    /// The ownership rule as a property over every role and status rather than the seven rows that
+    /// name it: **a boundary older than the owner is inert, and every other boundary tears down.**
+    ///
+    /// The `owner < retired` half is the one worth stating twice. A boundary naming a *newer* lifetime
+    /// than the owner must still tear down, because `ControlSessionManager` authenticates one
+    /// connection at a time and allocates strictly increasing generations — so a newer lifetime having
+    /// existed proves the owner's already ended. Making that case inert instead is exactly the
+    /// "suppress a superseded boundary" fix that was implemented and rejected: it leaves a dead
+    /// lifetime's negotiation standing, which then refuses every offer the successor sends.
+    func testOnlyABoundaryOlderThanTheOwnerIsInert() {
+        let owner: Int64 = 5
+        for role in VoiceRole.allCases {
+            for status in VoiceStatus.allCases where status != .idle {
+                let before = VoiceNegotiationState(
+                    role: role,
+                    status: status,
+                    voiceSessionId: VoiceSessionId(vsidA),
+                    localAudioOpen: true,
+                    negotiationControlGeneration: owner
+                )
+
+                let superseded = VoiceNegotiation.reduce(
+                    state: before, input: .controlLinkLost(retiredControlGeneration: owner - 1)
+                )
+                XCTAssertEqual(superseded.state, before, "\(role)/\(status): a predecessor's boundary changed state")
+                XCTAssertFalse(
+                    superseded.actions.contains(.stopMediaTransport),
+                    "\(role)/\(status): a predecessor's boundary stopped the successor's media"
+                )
+
+                for retired: Int64? in [owner, owner + 1, nil] {
+                    let outcome = VoiceNegotiation.reduce(
+                        state: before, input: .controlLinkLost(retiredControlGeneration: retired)
+                    )
+                    XCTAssertTrue(
+                        outcome.actions.contains(.stopMediaTransport),
+                        "\(role)/\(status): a boundary naming \(String(describing: retired)) failed to retire \(owner)"
+                    )
+                    XCTAssertNil(outcome.state.negotiationControlGeneration, "\(role)/\(status): owner survived")
+                }
+            }
+        }
+    }
+
     /// PROTOCOL §7.3, exhaustively: an answerer never authors an offer, from any status.
     func testAnAnswererNeverOffersFromAnyStatus() {
         for status in VoiceStatus.allCases {
@@ -116,7 +292,7 @@ final class VoiceNegotiationVectorTests: XCTestCase {
                 localAudioOpen: true
             )
             let inputs: [VoiceInput] = [
-                .startRequested(freshVoiceSessionId: VoiceSessionId(vsidFresh)),
+                .startRequested(freshVoiceSessionId: VoiceSessionId(vsidFresh), controlGeneration: vectorControlGeneration),
                 .signalReceived(
                     signal: .state(voiceSessionId: nil, state: .negotiating, micMuted: false, mode: .continuous),
                     controlGeneration: vectorControlGeneration, freshVoiceSessionId: VoiceSessionId(vsidFresh)
@@ -149,9 +325,9 @@ final class VoiceNegotiationVectorTests: XCTestCase {
             controlGeneration: vectorControlGeneration, freshVoiceSessionId: fresh
         )
         let orders: [[VoiceInput]] = [
-            [.startRequested(freshVoiceSessionId: fresh), peerIntent],
-            [peerIntent, .startRequested(freshVoiceSessionId: fresh)],
-            [peerIntent, peerIntent, .startRequested(freshVoiceSessionId: fresh), peerIntent],
+            [.startRequested(freshVoiceSessionId: fresh, controlGeneration: vectorControlGeneration), peerIntent],
+            [peerIntent, .startRequested(freshVoiceSessionId: fresh, controlGeneration: vectorControlGeneration)],
+            [peerIntent, peerIntent, .startRequested(freshVoiceSessionId: fresh, controlGeneration: vectorControlGeneration), peerIntent],
         ]
         for order in orders {
             var current = VoiceNegotiationState(role: .offerer, localAudioOpen: true)
@@ -183,7 +359,10 @@ final class VoiceNegotiationVectorTests: XCTestCase {
                 HeldRemoteOffer(voiceSessionId: VoiceSessionId($0.str("voice_session_id")), sdp: $0.str("sdp"))
             },
             micMuted: spec.boolVal("mic_muted"),
-            mode: mode(spec.str("mode"))
+            mode: mode(spec.str("mode")),
+            negotiationControlGeneration: spec.requiredInt64Opt("negotiation_control_generation"),
+            pendingStartIntent: spec.boolVal("pending_start_intent"),
+            authenticatedControlGeneration: spec.requiredInt64Opt("authenticated_control_generation")
         )
     }
 
@@ -201,15 +380,29 @@ final class VoiceNegotiationVectorTests: XCTestCase {
     private func input(_ spec: [String: Any]) -> VoiceInput {
         switch spec.str("kind") {
         case "StartRequested":
-            return .startRequested(freshVoiceSessionId: VoiceSessionId(spec.str("fresh_voice_session_id")))
+            return .startRequested(
+                freshVoiceSessionId: VoiceSessionId(spec.str("fresh_voice_session_id")),
+                controlGeneration: spec.requiredInt64Opt("control_generation")
+            )
         case "StopRequested":
             return .stopRequested
         case "ControlLinkLost":
-            // See `vectorControlGeneration`: the vectors carry no control generation because the
-            // reducer reads none.
-            return .controlLinkLost(retiredControlGeneration: vectorControlGeneration)
+            // Read from the file, never defaulted here. ADR-020 Amendment A7 could encode these as a
+            // constant because the reducer ignored them; Amendment A8 made the control lifetime part
+            // of what the table decides, so the vectors now carry it and a row that omits it fails
+            // rather than quietly meaning "the only lifetime there is". Still **not** a wire field:
+            // this is receiver-local provenance in a receiver-local table.
+            return .controlLinkLost(retiredControlGeneration: spec.requiredInt64Opt("retired_control_generation"))
         case "NegotiationSendFailed":
             return .negotiationSendFailed(voiceSessionId: spec.strOpt("voice_session_id").map(VoiceSessionId.init))
+        case "ControlAuthenticated":
+            // ADR-020 Amendment A11: the successor-lifetime availability event. `control_generation`
+            // is required (never defaulted) — it is the authority for whatever the input consumes,
+            // exactly the property the row is about.
+            return .controlAuthenticated(
+                controlGeneration: spec.requiredInt64("control_generation"),
+                freshVoiceSessionId: VoiceSessionId(spec.str("fresh_voice_session_id"))
+            )
         case "MuteRequested":
             return .muteRequested(muted: spec.boolVal("muted"))
         case "ModeSelected":
@@ -217,7 +410,8 @@ final class VoiceNegotiationVectorTests: XCTestCase {
         case "SignalReceived":
             return .signalReceived(
                 signal: signal(spec.dict("signal")),
-                controlGeneration: vectorControlGeneration, freshVoiceSessionId: VoiceSessionId(spec.str("fresh_voice_session_id"))
+                controlGeneration: spec.requiredInt64("control_generation"),
+                freshVoiceSessionId: VoiceSessionId(spec.str("fresh_voice_session_id"))
             )
         case "LocalOfferCreated":
             return .localOfferCreated(
@@ -277,6 +471,13 @@ final class VoiceNegotiationVectorTests: XCTestCase {
     /// Compares actions as a canonical label rather than by constructing an expected value per case. A
     /// label keeps the failure message readable — `sendVoiceState(nil,connecting,…)` says what went
     /// wrong; a structural diff of two enum payloads does not.
+    /// Kotlin renders a null `Long?` as "null"; Swift's own interpolation of `Optional<Int64>` would
+    /// render "nil" and, worse, differently again for `.some`. One spelling, so the two platforms'
+    /// labels are the same strings for the same actions.
+    private func describe(_ generation: Int64?) -> String {
+        generation.map(String.init) ?? "null"
+    }
+
     // swiftlint:disable:next cyclomatic_complexity
     private func actionLabel(_ spec: [String: Any]) -> String {
         let kind = spec.str("kind")
@@ -286,15 +487,26 @@ final class VoiceNegotiationVectorTests: XCTestCase {
             return kind
         case "CreateOffer", "CreateAnswer":
             return "\(kind)(\(spec.str("voice_session_id")))"
-        case "ApplyRemoteOffer", "ApplyRemoteAnswer", "SendOffer", "SendAnswer":
+        case "ApplyRemoteOffer", "ApplyRemoteAnswer":
             return "\(kind)(\(spec.str("voice_session_id")),\(spec.str("sdp")))"
+        // Every outbound kind below carries `control_generation`, read with `requiredInt64Opt` so a
+        // row that forgets it fails rather than quietly meaning "whichever lifetime is around" —
+        // which is the defect ADR-020 Amendment A9 closes.
+        case "SendOffer", "SendAnswer":
+            return "\(kind)(\(spec.str("voice_session_id")),\(spec.str("sdp")),"
+                + "\(describe(spec.requiredInt64Opt("control_generation"))))"
         case "SendVoiceState":
             let id = spec.strOpt("voice_session_id") ?? "nil"
-            return "SendVoiceState(\(id),\(spec.str("state")),\(spec.boolVal("mic_muted")),\(spec.str("mode")))"
-        case "ApplyRemoteCandidate", "QueueRemoteCandidate", "SendCandidate":
+            return "SendVoiceState(\(id),\(spec.str("state")),\(spec.boolVal("mic_muted")),\(spec.str("mode")),"
+                + "\(describe(spec.requiredInt64Opt("control_generation"))))"
+        case "ApplyRemoteCandidate", "QueueRemoteCandidate":
             let mid = spec.strOpt("sdp_mid") ?? "nil"
             return "\(kind)(\(spec.str("voice_session_id")),\(spec.str("candidate")),"
                 + "\(mid),\(spec.int("sdp_mline_index")))"
+        case "SendCandidate":
+            let mid = spec.strOpt("sdp_mid") ?? "nil"
+            return "SendCandidate(\(spec.str("voice_session_id")),\(spec.str("candidate")),"
+                + "\(mid),\(spec.int("sdp_mline_index")),\(describe(spec.requiredInt64Opt("control_generation"))))"
         case "SetMicrophoneMuted":
             return "SetMicrophoneMuted(\(spec.boolVal("muted")))"
         case "RecordDroppedSignal":
@@ -316,16 +528,17 @@ final class VoiceNegotiationVectorTests: XCTestCase {
         case .createAnswer(let id): return "CreateAnswer(\(id.value))"
         case .applyRemoteOffer(let id, let sdp): return "ApplyRemoteOffer(\(id.value),\(sdp))"
         case .applyRemoteAnswer(let id, let sdp): return "ApplyRemoteAnswer(\(id.value),\(sdp))"
-        case .sendOffer(let id, let sdp): return "SendOffer(\(id.value),\(sdp))"
-        case .sendAnswer(let id, let sdp): return "SendAnswer(\(id.value),\(sdp))"
-        case .sendVoiceState(let id, let state, let micMuted, let mode):
-            return "SendVoiceState(\(id?.value ?? "nil"),\(state.wire),\(micMuted),\(mode.rawValue.uppercased()))"
+        case .sendOffer(let id, let sdp, let owner): return "SendOffer(\(id.value),\(sdp),\(describe(owner)))"
+        case .sendAnswer(let id, let sdp, let owner): return "SendAnswer(\(id.value),\(sdp),\(describe(owner)))"
+        case .sendVoiceState(let id, let state, let micMuted, let mode, let owner):
+            return "SendVoiceState(\(id?.value ?? "nil"),\(state.wire),\(micMuted),"
+                + "\(mode.rawValue.uppercased()),\(describe(owner)))"
         case .applyRemoteCandidate(let id, let candidate, let mid, let index):
             return "ApplyRemoteCandidate(\(id.value),\(candidate),\(mid ?? "nil"),\(index))"
         case .queueRemoteCandidate(let id, let candidate, let mid, let index):
             return "QueueRemoteCandidate(\(id.value),\(candidate),\(mid ?? "nil"),\(index))"
-        case .sendCandidate(let id, let candidate, let mid, let index):
-            return "SendCandidate(\(id.value),\(candidate),\(mid ?? "nil"),\(index))"
+        case .sendCandidate(let id, let candidate, let mid, let index, let owner):
+            return "SendCandidate(\(id.value),\(candidate),\(mid ?? "nil"),\(index),\(describe(owner)))"
         case .setMicrophoneMuted(let muted): return "SetMicrophoneMuted(\(muted))"
         case .recordDroppedSignal(let reason): return "RecordDroppedSignal(\(reason.rawValue))"
         }

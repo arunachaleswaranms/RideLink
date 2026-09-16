@@ -315,7 +315,8 @@ class SessionLifecycleRestartTest {
             sut.coordinator.handleControlEvent(ControlEvent.LinkLost(LinkLossReason.NETWORK))
             assertEquals(SessionStatus.RECONNECTING, sut.coordinator.state.value.status)
             sut.coordinator.handleControlEvent(
-                ControlEvent.Connected(REMOTE_PEER, SessionId("s2"), isLocalLeader = true),
+                // The *successor* lifetime: this is the reconnect (STATUS §4 problem 61).
+                ControlEvent.Connected(REMOTE_PEER, SessionId("s2"), isLocalLeader = true, authGeneration = 2L),
             )
             delay(SETTLE_MS)
 
@@ -548,7 +549,7 @@ class SessionLifecycleRestartTest {
             coordinator.handleControlEvent(ControlEvent.PeerTrusted(REMOTE_PEER))
             assertEquals(SessionStatus.CONNECTING, coordinator.state.value.status)
             coordinator.handleControlEvent(
-                ControlEvent.Connected(REMOTE_PEER, SessionId("test-session"), isLocalLeader = true),
+                ControlEvent.Connected(REMOTE_PEER, SessionId("test-session"), isLocalLeader = true, authGeneration = 1L),
             )
             assertEquals(SessionStatus.CONNECTED, coordinator.state.value.status)
         }
@@ -697,7 +698,10 @@ class SessionLifecycleRestartTest {
     }
 
     private class NoOpVoiceTransport : VoiceSignalTransport {
-        override suspend fun send(signal: VoiceSignal): Boolean = false
+        override suspend fun send(
+            signal: VoiceSignal,
+            controlGeneration: Long?,
+        ): Boolean = false
     }
 
     private fun withSession(body: suspend (Sut) -> Unit) =

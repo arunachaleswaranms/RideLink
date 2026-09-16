@@ -172,7 +172,9 @@ final class VoiceControllerMailboxTests: XCTestCase {
         try await harness.awaitAudioCall("open")
 
         try await harness.awaitCondition {
-            (await harness.controller.currentDiagnostics().droppedSignals[.inputMailboxOverflow] ?? 0) > 0
+            let d = await harness.controller.currentDiagnostics()
+            // Audio.open and the admission counter can precede the gate's capture publication.
+            return (d.droppedSignals[.inputMailboxOverflow] ?? 0) > 0 && d.localAudioOpen
         }
         let diagnostics = await harness.controller.currentDiagnostics()
         let engineCalls = await harness.engine.recordedCalls()

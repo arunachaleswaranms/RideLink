@@ -54,7 +54,16 @@ public enum ControlEvent: Sendable {
     /// (PROTOCOL §4.5), and for a peer whose stored pin matched, only after `.peerTrusted`. It is
     /// emitted from exactly one place — `activateAuthenticatedSession` — and never from the
     /// handshake or from candidate promotion.
-    case connected(remotePeerId: PeerId, sessionId: SessionId, isLocalLeader: Bool)
+    ///
+    /// `authGeneration` is **the authentication generation this activation allocated** — the same
+    /// number `activateAuthenticatedSession` binds to the connection, emitted from the one statement
+    /// that mints it (STATUS §4 problem 61, ADR-020 Amendment A8). The counterpart of
+    /// `.linkLost`'s `retiredAuthGeneration`, and it exists for the same reason: this event is
+    /// consumed asynchronously, so a handler that wants to say "the lifetime that has just
+    /// authenticated" must be *told* which one rather than re-reading whatever is live by the time it
+    /// runs. `SessionCoordinator.attachVoice` carries it into PROTOCOL §7.8's reconnect rebuild,
+    /// where it becomes the owning lifetime of the rebuilt negotiation.
+    case connected(remotePeerId: PeerId, sessionId: SessionId, isLocalLeader: Bool, authGeneration: Int64)
     /// The peer's presented SPKI matched the stored pin, so the trust gate passed with no user
     /// action at all (PROTOCOL §4.1 "silent connect"). Raised only on the **surviving** connection
     /// and always immediately before `.connected` — it is what carries `PAIRING -> CONNECTING` for
@@ -260,7 +269,13 @@ public actor ControlSessionManager {
         monotonicNowUs: monotonicNowUs,
         nextSeq: { [seqCounter] in seqCounter.nextSeq() },
         activeSessionId: { [weak self] in await self?.currentSessionId() ?? SessionId("n/a") },
-        authenticatedWriter: { [weak self] in await self?.authenticatedWriter() },
+        // ADR-020 Amendment A9's outbound half, and only `voice` takes it. A `VOICE_*` frame is one
+        // step of a negotiation owned by a named control lifetime, and every step between that
+        // lifetime's authorisation and the write suspends — so "the authenticated writer, now" is not
+        // the connection the frame was authorised for.
+        authenticatedWriterFor: { [weak self] generation in
+            await self?.authenticatedWriter(for: generation)
+        },
         // ADR-025 §1: synchronous and non-isolated on purpose — a relay's `deliver` must never
         // `await` into this actor just to ask which session is live. nil when this manager is gone,
         // which matches no frame.
@@ -354,6 +369,27 @@ public actor ControlSessionManager {
     /// Non-nil only while the surviving connection has passed the trust gate. Returning a closure rather
     /// than the connection keeps `ControlConnection` — which is internal to this module — from leaking
     /// into the relay's signature, and keeps the relay unable to hold a socket across a teardown.
+    /// The same, **bound to one control lifetime** (STATUS §4 problem 64, ADR-020 Amendment A9).
+    ///
+    /// Resolved from the **one immutable `AuthenticatedConnection` record**, never from `activeSocket`
+    /// plus a separate generation read: the record pairs a connection with the generation its own
+    /// activation assigned and is replaced whole, so there is no interleaving in which a successor's
+    /// connection can be handed out under a predecessor's number. That is exactly the reasoning
+    /// `ReadFrameBinding.of` uses inbound; this is the same record answering the same question in the
+    /// other direction.
+    private func authenticatedWriter(for generation: Int64) -> AuthenticatedFrameWriter? {
+        guard let record = authenticatedConnection, record.generation == generation else { return nil }
+        let connection = record.connection
+        return { envelope in
+            do {
+                try await connection.writeFrame(envelope)
+                return true
+            } catch {
+                return false
+            }
+        }
+    }
+
     private func authenticatedWriter() -> AuthenticatedFrameWriter? {
         guard let socket = activeSocket, authenticated else { return nil }
         return { envelope in
@@ -663,7 +699,10 @@ public actor ControlSessionManager {
             connection: pending.socket, generation: authenticationGeneration)
         updateDiagnostics { $0.controlState = .connected }
         emit(.connected(
-            remotePeerId: pending.remotePeerId, sessionId: pending.sessionId, isLocalLeader: pending.isLocalLeader))
+            remotePeerId: pending.remotePeerId,
+            sessionId: pending.sessionId,
+            isLocalLeader: pending.isLocalLeader,
+            authGeneration: authenticationGeneration))
         clockSyncTask = Task { await self.clockSyncLoop(socket: pending.socket) }
     }
 

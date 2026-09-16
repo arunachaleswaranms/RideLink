@@ -17,4 +17,23 @@ extension Dictionary where Key == String, Value == Any {
     func int64Opt(_ key: String) -> Int64? { (self[key] as? NSNumber)?.int64Value }
     func doubleVal(_ key: String) -> Double { (self[key] as! NSNumber).doubleValue } // swiftlint:disable:this force_cast
     func hasKey(_ key: String) -> Bool { self[key] != nil }
+
+    /// A value that must be **present** and may be JSON `null` — the distinction a vector turns on
+    /// when null is a meaning rather than an omission (STATUS §4 problem 61's control-lifetime rows).
+    ///
+    /// `JSONSerialization` maps JSON `null` to `NSNull`, which `hasKey` sees and `int64Opt` does not,
+    /// so the two together separate "the row said nothing" from "the row said nobody". A missing key
+    /// is a failure rather than a nil, so a future row that forgets to say which lifetime it is about
+    /// fails the build instead of silently asserting the wrong thing.
+    func requiredInt64Opt(_ key: String) -> Int64? {
+        precondition(hasKey(key), "vector row is missing the required key '\(key)'")
+        return int64Opt(key)
+    }
+
+    func requiredInt64(_ key: String) -> Int64 {
+        guard let value = requiredInt64Opt(key) else {
+            preconditionFailure("vector row's '\(key)' may not be null")
+        }
+        return value
+    }
 }

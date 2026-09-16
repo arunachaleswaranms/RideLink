@@ -87,7 +87,7 @@ class SyncPlaybackLifecycleAuditTest {
         // scheduled-chain test passed vacuously.
         session.rttP95Us = LONG_LEAD_RTT_US
         session.currentAuthGeneration = generation
-        session.emit(ControlEvent.Connected(SyncTestValues.leaderPeerId, SessionId("S$generation"), true))
+        session.emit(ControlEvent.Connected(SyncTestValues.leaderPeerId, SessionId("S$generation"), true, generation))
         scope.runCurrent()
         for (hash in listOf(HASH_A, HASH_X, HASH_Y, HASH_Z)) {
             content.localHashes.add(hash.value)
@@ -131,7 +131,7 @@ class SyncPlaybackLifecycleAuditTest {
         // Session B stamps ordinary 120 ms deadlines, so its own work lands well before any
         // Session-A deadline arrives.
         session.rttP95Us = 8_000
-        session.emit(ControlEvent.Connected(SyncTestValues.leaderPeerId, SessionId("S$generation"), true))
+        session.emit(ControlEvent.Connected(SyncTestValues.leaderPeerId, SessionId("S$generation"), true, generation))
         scope.runCurrent()
     }
 

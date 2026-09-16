@@ -28,7 +28,7 @@ class VoiceInputMailboxTest {
 
     @Test
     fun `start, engine offer-answer callbacks, connectivity and peer offer-answer are critical`() {
-        assertEquals(VoiceMailboxLane.CRITICAL, VoiceInputMailbox.laneFor(VoiceInput.StartRequested(GEN_1)))
+        assertEquals(VoiceMailboxLane.CRITICAL, VoiceInputMailbox.laneFor(VoiceInput.StartRequested(GEN_1, CONTROL_A)))
         assertEquals(VoiceMailboxLane.CRITICAL, VoiceInputMailbox.laneFor(VoiceInput.LocalOfferCreated(GEN_1, SDP)))
         assertEquals(VoiceMailboxLane.CRITICAL, VoiceInputMailbox.laneFor(VoiceInput.LocalAnswerCreated(GEN_1, SDP)))
         assertEquals(
@@ -111,7 +111,7 @@ class VoiceInputMailboxTest {
     @Test
     fun `poll drains teardown before anything else, regardless of arrival order`() {
         val mailbox = VoiceInputMailbox()
-        mailbox.offer(VoiceInput.StartRequested(GEN_1))
+        mailbox.offer(VoiceInput.StartRequested(GEN_1, CONTROL_A))
         mailbox.offer(VoiceInput.LocalCandidateGathered(GEN_1, CANDIDATE, null, 0))
         mailbox.offer(VoiceInput.MuteRequested(true))
         val closed = signalReceived(VoiceSignal.State(GEN_1, VoiceWireState.CLOSED, false, VoiceMode.CONTINUOUS), GEN_1)
@@ -123,7 +123,7 @@ class VoiceInputMailboxTest {
         // that admitted it ended when `ControlLinkLost` was offered (STATUS §4 problem 50). The
         // local inputs behind it are untouched and still come back in lane order.
         assertEquals(1, mailbox.discardedRetiredSignalCount)
-        assertEquals(VoiceInput.StartRequested(GEN_1), mailbox.poll())
+        assertEquals(VoiceInput.StartRequested(GEN_1, CONTROL_A), mailbox.poll())
         assertEquals(VoiceInput.LocalCandidateGathered(GEN_1, CANDIDATE, null, 0), mailbox.poll())
         assertEquals(VoiceInput.MuteRequested(true), mailbox.poll())
         assertEquals(null, mailbox.poll())
@@ -147,7 +147,7 @@ class VoiceInputMailboxTest {
             signalReceived(VoiceSignal.State(GEN_1, VoiceWireState.CLOSED, false, VoiceMode.CONTINUOUS), GEN_1)
         listOf(offer, answer, remoteIce, peerState, terminal).forEach { mailbox.offer(it) }
         // ...alongside local work in every lane a peer signal can also occupy.
-        mailbox.offer(VoiceInput.StartRequested(GEN_1))
+        mailbox.offer(VoiceInput.StartRequested(GEN_1, CONTROL_A))
         mailbox.offer(VoiceInput.LocalCandidateGathered(GEN_1, CANDIDATE, null, 0))
         mailbox.offer(VoiceInput.MuteRequested(true))
         mailbox.offer(VoiceInput.ModeSelected(VoiceMode.PTT))
@@ -163,7 +163,7 @@ class VoiceInputMailboxTest {
         assertEquals(
             listOf(
                 VoiceInput.ControlLinkLost(CONTROL_A),
-                VoiceInput.StartRequested(GEN_1),
+                VoiceInput.StartRequested(GEN_1, CONTROL_A),
                 VoiceInput.LocalCandidateGathered(GEN_1, CANDIDATE, null, 0),
                 VoiceInput.MuteRequested(true),
                 VoiceInput.ModeSelected(VoiceMode.PTT),
@@ -258,12 +258,12 @@ class VoiceInputMailboxTest {
     fun `terminal peer state is drained ahead of ordinary coalesced updates, and after critical work`() {
         val mailbox = VoiceInputMailbox()
         mailbox.offer(VoiceInput.MuteRequested(true))
-        mailbox.offer(VoiceInput.StartRequested(GEN_1))
+        mailbox.offer(VoiceInput.StartRequested(GEN_1, CONTROL_A))
         val closed = signalReceived(VoiceSignal.State(GEN_1, VoiceWireState.CLOSED, false, VoiceMode.CONTINUOUS), GEN_1)
         mailbox.offer(closed)
 
         assertEquals(closed, mailbox.poll(), "terminal peer state outranks both critical and coalesced work")
-        assertEquals(VoiceInput.StartRequested(GEN_1), mailbox.poll())
+        assertEquals(VoiceInput.StartRequested(GEN_1, CONTROL_A), mailbox.poll())
         assertEquals(VoiceInput.MuteRequested(true), mailbox.poll())
     }
 
@@ -327,9 +327,9 @@ class VoiceInputMailboxTest {
     @Test
     fun `flooding the critical lane past capacity refuses new entries and counts an overflow`() {
         val mailbox = VoiceInputMailbox(criticalCapacity = 4)
-        repeat(4) { assertIs<VoiceMailboxOutcome.Accepted>(mailbox.offer(VoiceInput.StartRequested(GEN_1))) }
+        repeat(4) { assertIs<VoiceMailboxOutcome.Accepted>(mailbox.offer(VoiceInput.StartRequested(GEN_1, CONTROL_A))) }
 
-        val outcome = mailbox.offer(VoiceInput.StartRequested(GEN_1))
+        val outcome = mailbox.offer(VoiceInput.StartRequested(GEN_1, CONTROL_A))
         assertIs<VoiceMailboxOutcome.CriticalOverflow>(outcome)
         assertEquals(1, mailbox.overflowCount)
         // The refused input never entered the lane — the lane still holds exactly its capacity.
@@ -436,7 +436,7 @@ class VoiceInputMailboxTest {
     @Test
     fun `stop remains offerable and drainable even while every other lane is completely full`() {
         val mailbox = VoiceInputMailbox(criticalCapacity = 2, iceCapacity = 2, terminalPeerStateCapacity = 2)
-        repeat(2) { mailbox.offer(VoiceInput.StartRequested(GEN_1)) }
+        repeat(2) { mailbox.offer(VoiceInput.StartRequested(GEN_1, CONTROL_A)) }
         repeat(2) { i -> mailbox.offer(VoiceInput.LocalCandidateGathered(GEN_1, "c$i", null, 0)) }
         mailbox.offer(VoiceInput.MuteRequested(true))
         repeat(2) {
@@ -451,7 +451,7 @@ class VoiceInputMailboxTest {
     @Test
     fun `clear empties every lane and resets nothing that should survive a fresh session`() {
         val mailbox = VoiceInputMailbox()
-        mailbox.offer(VoiceInput.StartRequested(GEN_1))
+        mailbox.offer(VoiceInput.StartRequested(GEN_1, CONTROL_A))
         mailbox.offer(VoiceInput.LocalCandidateGathered(GEN_1, CANDIDATE, null, 0))
         mailbox.offer(VoiceInput.MuteRequested(true))
         mailbox.offer(signalReceived(VoiceSignal.State(GEN_1, VoiceWireState.CLOSED, false, VoiceMode.CONTINUOUS), GEN_1))
@@ -462,7 +462,7 @@ class VoiceInputMailboxTest {
         assertTrue(mailbox.isEmpty())
         assertEquals(null, mailbox.poll())
         // A fresh session offers cleanly afterward — clearing does not wedge the mailbox.
-        assertIs<VoiceMailboxOutcome.Accepted>(mailbox.offer(VoiceInput.StartRequested(GEN_2)))
+        assertIs<VoiceMailboxOutcome.Accepted>(mailbox.offer(VoiceInput.StartRequested(GEN_2, CONTROL_A)))
     }
 
     @Test
@@ -471,7 +471,7 @@ class VoiceInputMailboxTest {
         assertTrue(mailbox.isEmpty())
         assertEquals(0, mailbox.size)
 
-        mailbox.offer(VoiceInput.StartRequested(GEN_1))
+        mailbox.offer(VoiceInput.StartRequested(GEN_1, CONTROL_A))
         assertFalse(mailbox.isEmpty())
         assertEquals(1, mailbox.size)
 

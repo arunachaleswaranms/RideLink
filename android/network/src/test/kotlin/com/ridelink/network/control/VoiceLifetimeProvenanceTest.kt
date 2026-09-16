@@ -3,6 +3,8 @@ package com.ridelink.network.control
 import com.ridelink.core.model.PeerId
 import com.ridelink.core.model.SessionId
 import com.ridelink.core.protocol.VoiceMessageTypes
+import com.ridelink.core.protocol.VoiceSessionId
+import com.ridelink.core.protocol.VoiceSignal
 import com.ridelink.network.voice.AuthenticatedFrameWriter
 import com.ridelink.network.voice.VoiceSignalRelay
 import com.ridelink.network.voice.VoiceSignalSpy
@@ -22,6 +24,7 @@ import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.atomic.AtomicLong
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
@@ -192,6 +195,70 @@ class VoiceLifetimeProvenanceTest {
         }
 
     /**
+     * **STATUS §4 problem 64 — the same rule pointing outwards, over two real TLS sessions on one
+     * real manager** (ADR-020 Amendment A9).
+     *
+     * The three tests above prove a frame's *inbound* authority is the connection it was read from.
+     * This one proves the outbound half, which had no guard at all: `send` resolved "the
+     * authenticated writer" at the moment of the write, so a `VOICE_*` frame authorised by
+     * generation 1 was written to generation 2's socket — and the peer on that socket received it as
+     * current work.
+     *
+     * Deliberately built on the same two-session machinery rather than on a fake: what is under test
+     * is that `ControlSessionManager`'s writer supplier resolves the socket **and** the generation
+     * from the one immutable `AuthenticatedConnection` record, which no fake could get wrong for it.
+     */
+    @Test
+    fun `a VOICE frame authorised by a retired generation is never written on the successor's socket`() =
+        twoPeers { a, b, scope ->
+            val manager = a.manager(scope, MONOTONIC)
+            val session = FsmSession(a, manager)
+            session.collectInto(scope)
+
+            val first = connect(manager, session, a, b, scope)
+            assertEquals(1L, manager.liveAuthenticatedGeneration)
+            first.shutdown()
+            // Wait for *this* manager to have observed the loss before dialling again. `promote`
+            // requires `activeSocket` to be null, so reconnecting while the first connection is still
+            // being torn down can leave the successor unauthenticated — which is a fact about this
+            // test's setup, not about the rule under test. Gated on an observable, never on a sleep.
+            withTimeout(FsmSession.TIMEOUT_MS) {
+                while (manager.liveAuthenticatedGeneration != null) delay(POLL_MS)
+            }
+
+            val second = connect(manager, session, a, b, scope)
+            withTimeout(FsmSession.TIMEOUT_MS) {
+                while (manager.liveAuthenticatedGeneration != 2L) delay(POLL_MS)
+            }
+            assertEquals(2L, manager.liveAuthenticatedGeneration, "generation 2 owns the surviving connection")
+            // The successor's own peer is the only observer that matters: it is the socket the
+            // pre-fix `send` would have written generation 1's frame to.
+            val peerSpy = VoiceSignalSpy()
+            second.voice.sink = peerSpy
+
+            val offer = VoiceSignal.Offer(VoiceSessionId(VOICE_SESSION_ID), SDP)
+
+            assertFalse(manager.voice.send(offer, 1L), "a retired lifetime's frame must fail closed")
+            assertEquals(1, manager.voice.droppedRetiredGenerationOutbound, "and be counted, never silent")
+            assertFalse(manager.voice.send(offer, null), "and so must a frame authorised by nobody")
+            assertEquals(2, manager.voice.droppedRetiredGenerationOutbound)
+
+            assertTrue(manager.voice.send(offer, 2L), "the live lifetime's own frame still goes")
+            withTimeout(FsmSession.TIMEOUT_MS) {
+                while (peerSpy.received.isEmpty()) delay(POLL_MS)
+            }
+            assertEquals(
+                1,
+                peerSpy.received.size,
+                "exactly one frame reached the successor's peer -- generation 1's never did",
+            )
+            assertEquals(listOf(1L), peerSpy.generations, "and the peer read it under its own first generation")
+
+            manager.shutdown()
+            second.shutdown()
+        }
+
+    /**
      * The other half of the same event: a connection that never passed the trust gate retires no
      * generation, because it never admitted a `VOICE_*` frame for one to own. `connectTo` to a port
      * nothing is listening on is the production path that emits exactly that.
@@ -229,7 +296,9 @@ class VoiceLifetimeProvenanceTest {
             monotonicNowUs = MONOTONIC,
             nextSeq = { 1L },
             activeSessionId = { SessionId("00000000000000000000000000000000") },
-            authenticatedWriter = { AuthenticatedFrameWriter { } },
+            authenticatedWriterFor = { expected ->
+                if (expected == liveGeneration()) AuthenticatedFrameWriter { } else null
+            },
             liveGeneration = liveGeneration,
         ).also { it.sink = sink }
 

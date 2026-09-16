@@ -31,10 +31,16 @@ public actor VoiceSignalRelay: VoiceSignalTransport {
     private let monotonicNowUs: @Sendable () -> Int64
     private let nextSeq: @Sendable () -> Int64
     private let activeSessionId: @Sendable () async -> SessionId
-    /// Yields a writer for the surviving connection **only while it is authenticated**, and nil
-    /// otherwise. A supplier rather than a connection because the link comes and goes and this type must
-    /// never hold one across a teardown.
-    private let authenticatedWriter: @Sendable () async -> AuthenticatedFrameWriter?
+    /// Yields a writer for the surviving connection **only while it is authenticated and owned by the
+    /// generation asked for**, and nil otherwise (STATUS §4 problem 64, ADR-020 Amendment A9).
+    ///
+    /// A supplier rather than a connection because the link comes and goes and this type must never
+    /// hold one across a teardown — and a *generation-bound* supplier because "is a session live" and
+    /// "is **this** frame's session live" are different questions. It resolves the writer and the
+    /// generation from the one immutable `AuthenticatedConnection` record, so there is no ordering in
+    /// which a connection can be handed out under a generation that is not the one its own activation
+    /// assigned.
+    private let authenticatedWriterFor: @Sendable (Int64) async -> AuthenticatedFrameWriter?
 
     /// ADR-025's liveness half: the generation owning the connection that is an authenticated
     /// session **right now**, or nil when none is. Synchronous and non-isolated on purpose — a
@@ -52,19 +58,28 @@ public actor VoiceSignalRelay: VoiceSignalTransport {
     /// is gone.
     private var retiredGenerationDrops = 0
 
+    /// How many **outbound** `VOICE_*` frames were refused because the control lifetime that authorised
+    /// them no longer owns the surviving connection (STATUS §4 problem 64, ADR-020 Amendment A9).
+    ///
+    /// The mirror of `retiredGenerationDrops`, and counted for the same reason: a negotiation that
+    /// degrades because its offer could not be placed is a fact about the ride, and "the link was gone"
+    /// and "the link was *replaced*" are different facts — only the second one says a successor exists
+    /// to rebuild under.
+    private var outboundRetiredGenerationDrops = 0
+
     public init(
         localPeerId: PeerId,
         monotonicNowUs: @escaping @Sendable () -> Int64,
         nextSeq: @escaping @Sendable () -> Int64,
         activeSessionId: @escaping @Sendable () async -> SessionId,
-        authenticatedWriter: @escaping @Sendable () async -> AuthenticatedFrameWriter?,
+        authenticatedWriterFor: @escaping @Sendable (Int64) async -> AuthenticatedFrameWriter?,
         liveGeneration: @escaping @Sendable () -> Int64?
     ) {
         self.localPeerId = localPeerId
         self.monotonicNowUs = monotonicNowUs
         self.nextSeq = nextSeq
         self.activeSessionId = activeSessionId
-        self.authenticatedWriter = authenticatedWriter
+        self.authenticatedWriterFor = authenticatedWriterFor
         self.liveGeneration = liveGeneration
     }
 
@@ -82,8 +97,33 @@ public actor VoiceSignalRelay: VoiceSignalTransport {
     /// See `retiredGenerationDrops`.
     public func droppedRetiredGeneration() -> Int { retiredGenerationDrops }
 
-    public func send(_ signal: VoiceSignal) async -> Bool {
-        guard let write = await authenticatedWriter() else { return false }
+    /// See `outboundRetiredGenerationDrops`.
+    public func droppedRetiredGenerationOutbound() -> Int { outboundRetiredGenerationDrops }
+
+    /// **A frame authorised by one control lifetime may be written only to that lifetime's
+    /// connection** (STATUS §4 problem 64, ADR-020 Amendment A9).
+    ///
+    /// Before this, `send` asked for "the authenticated writer" at the moment the write happened --
+    /// which is not the moment the frame was authorised, because everything between the two suspends:
+    /// the mailbox's single consumer, the engine's offer/answer callbacks, the actor hop, the write
+    /// lock, the flush. So a `VOICE_OFFER` authorised by a lifetime that had since ended was written to
+    /// its **successor's** connection, where the peer accepted it as current -- and the predecessor's
+    /// own boundary, arriving afterwards, then tore this side's media down while the peer was still
+    /// negotiating. That is ADR-024 Amendment A7's rule in the outbound direction: a live value may be
+    /// *compared* against an authorisation, never substituted for one.
+    ///
+    /// A refusal is a plain `false`, which is the outcome `VoiceSignalTransport` already defines and
+    /// `VoiceController.degradeIfUnsent` already answers with `.negotiationSendFailed` -- never with
+    /// `.controlLinkLost`, for the reason ADR-020 Amendment A6 gives. It is counted rather than silent.
+    public func send(_ signal: VoiceSignal, controlGeneration: Int64?) async -> Bool {
+        guard let controlGeneration else {
+            outboundRetiredGenerationDrops += 1
+            return false
+        }
+        guard let write = await authenticatedWriterFor(controlGeneration) else {
+            outboundRetiredGenerationDrops += 1
+            return false
+        }
         let envelope = ControlMessages.voiceSignal(
             localPeerId: localPeerId,
             sessionId: await activeSessionId(),
@@ -152,5 +192,6 @@ public actor VoiceSignalRelay: VoiceSignalTransport {
         rejections.removeAll()
         preAuthenticationDrops = 0
         retiredGenerationDrops = 0
+        outboundRetiredGenerationDrops = 0
     }
 }

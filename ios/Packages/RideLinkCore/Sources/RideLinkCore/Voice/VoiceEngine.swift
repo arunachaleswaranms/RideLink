@@ -280,12 +280,24 @@ public protocol VoiceAudioSession: Sendable {
 /// TLS 1.3 control connection (PROTOCOL §7.1). There is no second signalling socket, no fallback
 /// transport, and no way for this protocol to reach an unauthenticated peer.
 public protocol VoiceSignalTransport: Sendable {
-    /// - Returns: true if the signal was handed to a live authenticated control connection.
+    /// - Parameter controlGeneration: **the authenticated control lifetime this frame is authorised
+    ///   to be written on**, taken from the outbound `VoiceAction` the pure table produced (STATUS §4
+    ///   problem 64, ADR-020 Amendment A9). The implementation **compares** it against the lifetime
+    ///   that owns the surviving connection and refuses on any mismatch; it must never substitute the
+    ///   live value, which is ADR-024 Amendment A7's defect pointing outwards.
+    ///
+    ///   Nil means the action named no authorising lifetime, and is likewise a refusal: there is no
+    ///   connection a frame authorised by nobody may be written to. No transition produces one.
+    ///
+    /// - Returns: true if the signal was handed to a live authenticated control connection **owned by
+    ///   `controlGeneration`**.
     ///
     /// False is a normal outcome, not an error: the link may have gone between the negotiation table
-    /// deciding to send and the write happening. The controller records it and lets PROTOCOL §10's
-    /// control ladder — the app's only reconnect loop — deal with the link.
-    func send(_ signal: VoiceSignal) async -> Bool
+    /// deciding to send and the write happening, or — since Amendment A9 — it may have gone and been
+    /// *replaced*, which is the case that used to put a retired lifetime's SDP on its successor's
+    /// socket. The controller records it and lets PROTOCOL §10's control ladder — the app's only
+    /// reconnect loop — deal with the link.
+    func send(_ signal: VoiceSignal, controlGeneration: Int64?) async -> Bool
 }
 
 /// Where a `VOICE_*` frame that has already passed the trust gate is delivered.
