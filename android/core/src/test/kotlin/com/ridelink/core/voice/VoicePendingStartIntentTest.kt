@@ -11,6 +11,32 @@ import kotlin.test.assertTrue
 /** Sequential ADR-020 A11 proofs, mirrored by VoicePendingStartIntentTests. */
 class VoicePendingStartIntentTest {
     @Test
+    fun `delayed predecessor Start uses only recorded successor authority`() {
+        for (role in VoiceRole.entries) {
+            val h = Trace(role)
+            h.apply(VoiceInput.ControlAuthenticated(1, id(1)))
+            h.apply(VoiceInput.ControlLinkLost(1))
+            h.apply(VoiceInput.ControlAuthenticated(2, id(2)))
+            h.apply(VoiceInput.StartRequested(id(3), 1))
+            assertEquals(2L, h.state.negotiationControlGeneration)
+            assertEquals(if (role == VoiceRole.OFFERER) id(3) else null, h.state.voiceSessionId)
+            assertFalse(h.state.pendingStartIntent)
+            assertTrue(h.actions.filterIsInstance<OutboundVoiceAction>().all { it.controlGeneration == 2L })
+            val effects = h.actions.toList()
+            h.apply(VoiceInput.ControlAuthenticated(2, id(4)))
+            assertEquals(effects, h.actions)
+            h.apply(VoiceInput.NegotiationSendFailed(h.state.voiceSessionId))
+            assertNull(h.state.negotiationControlGeneration)
+            assertNull(h.state.voiceSessionId)
+            assertTrue(h.state.localAudioOpen)
+            assertFalse(h.state.pendingStartIntent)
+            val degradedEffects = h.actions.toList()
+            h.apply(VoiceInput.ControlAuthenticated(2, id(4)))
+            assertEquals(degradedEffects, h.actions)
+        }
+    }
+
+    @Test
     fun `both orders consume once for both roles`() {
         for (role in VoiceRole.entries) {
             for (connectedFirst in listOf(false, true)) {

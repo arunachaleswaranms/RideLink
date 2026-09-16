@@ -3,6 +3,33 @@ import XCTest
 
 /// Sequential proofs of ADR-020 A11. No scheduler or elapsed-time assumptions.
 final class VoicePendingStartIntentTests: XCTestCase {
+    func testDelayedPredecessorStartUsesOnlyRecordedSuccessorAuthority() {
+        for role in VoiceRole.allCases {
+            var h = Trace(role)
+            h.apply(.controlAuthenticated(controlGeneration: 1, freshVoiceSessionId: id(1)))
+            h.apply(.controlLinkLost(retiredControlGeneration: 1))
+            h.apply(.controlAuthenticated(controlGeneration: 2, freshVoiceSessionId: id(2)))
+            h.apply(.startRequested(freshVoiceSessionId: id(3), controlGeneration: 1))
+            print("pure delayed A, role=\(role): state=\(h.state)")
+            XCTAssertEqual(h.state.negotiationControlGeneration, 2)
+            XCTAssertEqual(h.state.voiceSessionId, role == .offerer ? id(3) : nil)
+            XCTAssertFalse(h.state.pendingStartIntent)
+            XCTAssertTrue(h.actions.filter(\.isOutbound).allSatisfy { $0.controlGeneration == 2 })
+            let count = h.actions.count
+            h.apply(.controlAuthenticated(controlGeneration: 2, freshVoiceSessionId: id(4)))
+            XCTAssertEqual(h.actions.count, count)
+            h.apply(.negotiationSendFailed(voiceSessionId: h.state.voiceSessionId))
+            print("post-send-failure delayed A, role=\(role): state=\(h.state)")
+            XCTAssertNil(h.state.negotiationControlGeneration)
+            XCTAssertNil(h.state.voiceSessionId)
+            XCTAssertTrue(h.state.localAudioOpen)
+            XCTAssertFalse(h.state.pendingStartIntent)
+            let degradedEffects = h.actions
+            h.apply(.controlAuthenticated(controlGeneration: 2, freshVoiceSessionId: id(4)))
+            XCTAssertEqual(h.actions, degradedEffects)
+        }
+    }
+
     func testBothOrdersConsumeOnceForBothRoles() {
         for role in VoiceRole.allCases {
             for connectedFirst in [false, true] {

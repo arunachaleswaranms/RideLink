@@ -1455,3 +1455,70 @@ controller-shutdown defect. The coordinator's own continuations are joined, but 
 mailbox consumer is merely cancelled and can resume a suspended send's remaining effects after
 shutdown returns. A11 does not change that shutdown implementation. Closing Problem 69 does not
 claim terminal teardown is proven; overall readiness remains NOT READY pending that repair.
+
+
+## Amendment A12 — 16 September 2026 — join terminal work and preserve consent from a deferred predecessor tap
+
+**Decision:** repair STATUS problems 70 and 71. Independent review accepted Problem 69 at
+`4199d1254df16d9f7975bfe28bf5fdd13a662d5a`; A11's nil-Start model and A7–A10's ownership rules
+remain required. These are local lifecycle/authority changes, with no wire-format change.
+
+### Problem 70: cancellation does not imply completion
+
+The deterministic parked-send regression fails against the reviewed controller: shutdown performs
+stop/release before the suspended consumer completes, and that consumer can later call start and
+createOffer. A stale post-shutdown callback can also publish diagnostics. Cancellation alone does
+not end an awaited transport operation.
+
+Shutdown is now one shared terminal task. Before its first suspension it closes both input queues,
+finishes their delivery channels, and cancels attachment, mailbox consumption, diagnostics polling
+and route consumption. It retains each handle until awaiting its completion. Concurrent callers,
+including a cancelled caller, join the same terminal task. A controller cannot be reattached after
+shutdown. Attachment itself is owned and joined, with cancellation propagated from its session-owned
+caller and checks after the awaited sink installations.
+
+An interrupted ordinary input stops its remaining effects; an already-reduced Stop finishes its
+cleanup before the consumer joins. After all mutating tasks have joined, shutdown applies the
+idempotent Stop and closes the transmission projection. This ordering avoids losing cleanup when
+Stop has already reset pure state but is suspended in its closed-state send. Capture/media release
+happens once. Polling cannot start while closing, a cancelled timer cannot issue another refresh,
+and route callbacks cannot publish during closing. Closed admission makes retained engine, route,
+peer and UI callbacks inert. Task handles are never discarded before joining.
+
+There is no timeout that detaches unfinished work. An uncooperative awaited dependency must complete
+before shutdown can return. The production network write completes through its own callback; it
+does not await the later coordinator call to control-manager shutdown. The coordinator's existing
+session registry and teardown order are unchanged.
+
+### Problem 71: a non-null tap generation can also be stale
+
+Production-shaped reproduction, with no held B offer: A authenticates; a tap captures A but delivery
+is held; A retires; B's explicit ControlAuthenticated input reduces; then Start(A) arrives. Against
+unchanged reviewed sources, both roles create A-owned negotiation state while recorded availability
+is B. All attempted sends name A and are correctly refused by Problem 64. The critical send failure
+leaves idle, nil owner/ID, consent/capture open and pending intent false. There is no further event in
+this ordering: no second tap, no second Connected(B), and no peer offer. Another legitimate external
+request or lifetime event could recover it, but none is guaranteed for that ride segment.
+
+Start resolution now treats a recorded explicit successor newer than the tap as the authority for
+fresh establishment. The tap remains Start(A) and contributes consent; B comes from the immutable
+ControlAuthenticated(B) event already reduced. The reducer never queries a live connection and never
+relabels an A-authorized outbound action. An explicitly newer Start still supplies its own authority.
+Held-offer rules remain asymmetric: newer held SDP can supply its own owner/ID, while retired held
+SDP cannot be answered under a successor. Existing live negotiation idempotence is unchanged.
+
+Both mirrored reducers implement this rule. Four shared vectors cover older/newer tap-versus-event
+authority for both roles, bringing the corpus to 107 rows without changing the existing 103 rows.
+A critical send failure still creates no pending Start intent, and duplicate availability cannot
+retry it. There is no generic IDLE-with-consent restart.
+
+### Proof and limits
+
+VoiceControllerShutdownTests covers parked sends, an already-reduced Stop, concurrent/cancelled
+shutdown callers, in-flight diagnostics refresh, attachment, and inert late inputs/callbacks.
+VoiceConsentAcrossLifetimesTests uses the existing coordinator-shaped host for Problem 71 and
+continues to pin production source decisions. No held offer, Start(B), or second Connected(B) is
+injected into the Problem 71 host proof. Pure sequential tests mirror the authority and no-retry
+semantics on Android and iOS. Android's synchronous Start admission is not claimed to have iOS's
+pre-mailbox reachability. See STATUS §2as and TEST_PLAN §3.1f for actual verification and failures.
+No app XCTest bundle, physical gate, Phase 6 or Phase 7 work is included.

@@ -1026,12 +1026,31 @@ Pre-fix P69-B was executed against an isolated archive of unchanged `50a7291` pr
 It failed on progress, status, ID and B outbound assertions, with idle/capture-open/no-frame state.
 The inherited implementation's tests passed before the audit, but omitted lifetime and retry cases;
 passing them alone was not closure evidence. See STATUS §2ar for full verification and stress counts.
-**Known limit, confirmed during the final self-audit (STATUS §4 problem 70):** the source mirror
+**Historical A11 limit, repaired by A12 / §3.1f (STATUS §4 problem 70):** the source mirror
 checks coordinator-owned work, not completion of the controller's own consumer. A separate parked
 send probe against unchanged `50a7291` proves iOS shutdown can return before that send, and the old
 action sequence can create media after shutdown. The pending-intent shutdown test covers the idle
-case only. Problem 70 requires a failing-before/fixed-after consumer-join regression in its repair.
+case only. The separate A12 regression below proves the consumer join.
 No wire-format or physical-device claim is made by these tests.
+
+---
+
+### 3.1f Terminal voice ownership and deferred predecessor consent (ADR-020 A12)
+
+| Case | Deterministic proof |
+|---|---|
+| P70 send | Park the first negotiation-state send, start shutdown, observe cancellation without releasing the send. Cleanup must not have started. Release it, join two shutdown callers (one cancelled), assert one stop/release and no createOffer from the cancelled Start. The reviewed code fails this test before the fix. |
+| P70 Stop | Reduce Stop and park its closed-state send. Shutdown must join that consumer and allow the already-owned cleanup to finish exactly once, even though pure state has already reset. |
+| P70 poll | Await production's diagnostics poll entering a gated refresh. Shutdown cancels and joins it before cleanup; final diagnostics cannot be replaced by that stale refresh. |
+| P70 attachment/routes | Park sink installation; shutdown joins attachment and cannot be reattached. Retained route/engine callbacks and peer/UI inputs after shutdown produce no calls or publications. Route delivery is cancelled, its channel finished, and its handle joined. |
+| P71 host | Tap captures A while live; defer it; retire A; reduce B availability through the existing coordinator-shaped host; deliver Start(A). No held offer, extra tap or extra Connected. Both roles progress under B, with only B attempts accepted. Offerer sends a fresh-ID offer; answerer emits intent-to-talk and waits. |
+| P71 pure/parity | Both roles prefer recorded explicit B over stale tap A, preserve an explicitly newer tap, and retain existing held-offer asymmetry. Send failure clears negotiation without creating pending intent; duplicate B cannot retry. 107 shared vectors plus sequential tests. |
+
+Shutdown tests use gate-entry/cancellation observations and explicit release, never sleeps for
+sequencing. The poll test awaits the real production timer's refresh; its timeout is a failure
+watchdog. Problem 69's accepted source-mirror and ordering proofs remain in the focused suite.
+See STATUS §2as for failing-before evidence, full platform checks, the 50-run iOS stress result,
+and any corrected test failures. No app XCTest bundle or physical gate is claimed.
 
 ---
 

@@ -1114,6 +1114,11 @@ consumes the pending intent or records B's authority for a delayed `Start(nil)` 
 The offerer uses the establishing input's fresh `voice_session_id`; an answerer states §7.3 intent
 and waits, or answers an already-held B offer under that offer's own ID and owner.
 
+A deferred `Start(A)` can also arrive after the explicit B event, with no held offer. If recorded B
+is newer than A, the tap supplies consent and the recorded B event supplies fresh negotiation
+authority (ADR-020 A12, problem 71). The input is not relabelled, no live state is queried, and an
+A-authorized outbound effect is still refused over B.
+
 The authenticated event also owns the existing consented reconnect rebuild, once per new lifetime.
 There is no second Start from a published capture projection. If an older live negotiation remains,
 its media is stopped before a fresh successor negotiation is created; its owner is never relabelled.

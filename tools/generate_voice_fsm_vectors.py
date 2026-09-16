@@ -2002,6 +2002,21 @@ def build() -> list[dict]:
         state(OFFERER, NEGOTIATING, VSID_FRESH, local_audio_open=True,
               negotiation_control_generation=CTL_B, authenticated_control_generation=CTL_B),
     ))
+    # A12 / Problem 71: the stale press contributes consent; recorded successor authority wins.
+    for role in (OFFERER, ANSWERER):
+        for press, available, owner in ((CTL_A, CTL_B, CTL_B), (CTL_B, CTL_A, CTL_B)):
+            vsid = VSID_FRESH if role == OFFERER else None
+            actions = [{"kind": "StartLocalAudio"}, send_state(vsid, "negotiating", owner=owner)]
+            if role == OFFERER:
+                actions.append({"kind": "CreateOffer", "voice_session_id": vsid})
+            rows.append(row(
+                f"{role}-Start-{press}-with-recorded-{available}-establishes-under-{owner}",
+                state(role, authenticated_control_generation=available),
+                {"kind": "StartRequested", "control_generation": press, "fresh_voice_session_id": VSID_FRESH},
+                actions,
+                state(role, NEGOTIATING, vsid, local_audio_open=True,
+                      negotiation_control_generation=owner, authenticated_control_generation=available),
+            ))
     return rows
 
 
@@ -2021,6 +2036,7 @@ def main() -> None:
             "Edit the generator, never this file."
         ),
         "_invariants": [
+            "A Start carrying an older control generation than recorded ControlAuthenticated availability supplies consent only; the explicit successor event supplies authority, with no current-live lookup (ADR-020 A12, Problem 71).",
             "No row may have an ANSWERER emit CreateOffer or SendOffer. §7.3: only the leader offers.",
             "No row may have an OFFERER accept a VOICE_OFFER or an ANSWERER accept a VOICE_ANSWER.",
             "No row where the input's voice_session_id differs from the state's may produce any action other than RecordDroppedSignal. That is the §7.2 generation guard.",

@@ -498,7 +498,15 @@ public enum VoiceNegotiation {
         // A nil press contributes consent only. Authority must come from an explicit availability
         // event or an authenticated held offer. Neither source relabels the original press.
         let heldOwner = state.heldRemoteOffer == nil ? nil : state.negotiationControlGeneration
-        let resolved = owner ?? state.authenticatedControlGeneration ?? heldOwner
+        // An explicit successor event retires the older tap's authority, not its consent (A12).
+        // The input remains Start(A); the recorded event supplies B. No live-state lookup.
+        let available = state.authenticatedControlGeneration
+        let resolved: Int64?
+        if let available, owner.map({ available > $0 }) ?? true {
+            resolved = available
+        } else {
+            resolved = owner ?? heldOwner
+        }
         guard let owner = resolved else {
             next.pendingStartIntent = true
             return VoiceOutcome(state: next, actions: actions)

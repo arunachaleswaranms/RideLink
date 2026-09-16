@@ -597,7 +597,10 @@ object VoiceNegotiation {
 
         // Nil supplies consent only; an explicit availability event or held offer supplies authority.
         val heldOwner = state.heldRemoteOffer?.let { state.negotiationControlGeneration }
-        val resolved = owner ?: state.authenticatedControlGeneration ?: heldOwner
+        // The explicit successor event retires the older tap's authority, not its consent (A12).
+        // Start(A) is unchanged; B comes from the recorded event, never a live-state lookup.
+        val available = state.authenticatedControlGeneration
+        val resolved = if (available != null && (owner == null || available > owner)) available else owner ?: heldOwner
         if (resolved == null) {
             return VoiceOutcome(state.copy(localAudioOpen = true, pendingStartIntent = true), actions)
         }

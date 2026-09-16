@@ -308,11 +308,14 @@ as frames, and every outbound effect remains generation-bound. iOS delivery stay
 `launchInSession`; teardown cancels and joins it. Android mirrors semantics but has synchronous Start
 admission. No wire change. See STATUS §2ar for measured verification and remaining gates.
 
-**A separate teardown defect remains OPEN: STATUS §4 problem 70.** The final A11 self-audit
-reproduced iOS `VoiceController.shutdown()` returning with its mailbox consumer suspended in a send;
-releasing that send then created media after shutdown. Problem 67's coordinator registry remains
-session-owned and joined, but does not join this nested consumer. Do not claim terminal voice
-teardown or overall readiness until the controller's cancellation/join ownership is repaired.
+**Problems 70 and 71 are repaired by ADR-020 Amendment A12 (STATUS §2as), pending independent
+review.** iOS controller shutdown closes admission and cancels/joins attachment, mailbox consumer,
+diagnostics polling and route consumption before final idempotent cleanup. All shutdown callers
+join one terminal task; retain handles through their awaits and never reattach a closed controller.
+An already-reduced Stop must finish its cleanup even if shutdown interrupts its send. A deferred
+Start(A) arriving after recorded ControlAuthenticated(B) contributes consent only when B is newer;
+the explicit B event supplies authority. Never relabel an A effect or weaken transport binding.
+No generic consent-driven retry. Problem 69 remains accepted; physical gates remain pending.
 
 **TEST_PLAN §5.2's S-01…S-12 remain pending and no alignment figure exists.** Fourteen passes have each
 found something already CI-green. §2al's lesson stands — two of the three areas it investigated were

@@ -11,6 +11,59 @@ import XCTest
 final class VoiceConsentAcrossLifetimesTests: XCTestCase {
     // MARK: - the production ordering
 
+    /// A tap captures A, but B's explicit availability reduces before delivery; no held offer exists.
+    @MainActor
+    func testADeferredPredecessorPressUsesRecordedSuccessorAuthorityWithoutAHeldOffer() async throws {
+        for isLocalLeader in [true, false] {
+            let harness = try await Harness(isLocalLeader: isLocalLeader)
+            defer { harness.finish() }
+            let host = CoordinatorShapedVoiceHost(controller: harness.controller)
+            defer { host.finish() }
+            await host.attachVoice(authGeneration: Self.controlA, diagnostics: harness.diagnosticsChannel())
+            host.liveAuthenticatedGeneration = Self.controlA
+            host.startIntercom()
+            XCTAssertEqual(host.capturedStartGenerations, [Self.controlA])
+            await harness.controller.onControlLinkLost(retiredControlGeneration: Self.controlA)
+            host.liveAuthenticatedGeneration = nil
+            await harness.setLiveGeneration(Self.controlB)
+            host.liveAuthenticatedGeneration = Self.controlB
+            await host.attachVoice(authGeneration: Self.controlB, diagnostics: harness.diagnosticsChannel())
+            try await harness.settleViaDiagnostics()
+            XCTAssertFalse(host.voiceDiagnostics.localAudioOpen)
+            await host.runDeferredWork()
+            try await harness.expect("consent is published") { await $0.currentDiagnostics().localAudioOpen }
+            if isLocalLeader {
+                try await harness.expect("one offer is created") { _ in
+                    await harness.engine.recordedCalls().contains("createOffer")
+                }
+                await harness.engine.emit(.offerCreated(voiceSessionId: Self.expectedResumeVsid, sdp: Self.sdpB))
+            }
+            try await harness.settleViaDiagnostics()
+            let diagnostics = await harness.controller.currentDiagnostics()
+            let attempted = await harness.transport.attemptedSends()
+            let accepted = await harness.transport.sentGenerations()
+            print("delayed Start(A), leader=\(isLocalLeader): status=\(diagnostics.status), id=\(String(describing: diagnostics.voiceSessionPrefix)), capture=\(diagnostics.localAudioOpen), attempted=\(attempted.map { $0.1 }), accepted=\(accepted)")
+            XCTAssertEqual(diagnostics.status, .negotiating)
+            XCTAssertEqual(diagnostics.voiceSessionPrefix, isLocalLeader ? Self.expectedResumeVsid.description : nil)
+            XCTAssertFalse(attempted.isEmpty)
+            XCTAssertTrue(attempted.allSatisfy { $0.1 == Self.controlB }, "A supplies consent only")
+            XCTAssertEqual(accepted.count, attempted.count, "all sends must be accepted by the B-bound transport")
+            let sent = await harness.transport.sentSignals()
+            if isLocalLeader {
+                XCTAssertTrue(sent.contains { if case .offer(let id, _) = $0 { id == Self.expectedResumeVsid } else { false } })
+            } else {
+                XCTAssertTrue(sent.contains { if case .state(nil, .negotiating, _, _) = $0 { true } else { false } })
+            }
+            let calls = await harness.engine.recordedCalls()
+            XCTAssertEqual(calls.filter { $0 == "createOffer" }.count, isLocalLeader ? 1 : 0)
+            let before = attempted.count
+            try await harness.settleViaDiagnostics()
+            let after = await harness.transport.attemptedSends().count
+            XCTAssertEqual(after, before, "no second tap, Connected, held offer or retry event")
+            await harness.controller.shutdown()
+        }
+    }
+
     /// A stale explicit Start(A) supplies consent to B's held offer, without a second press (P66).
     @MainActor
     func testAPressDeliveredAfterItsLifetimeDiedStillAnswersTheSuccessorsHeldOffer() async throws {
