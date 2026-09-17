@@ -343,7 +343,7 @@ product (REQUIREMENTS §8) and the reason Phase 0 existed.
 | Background / lock screen | One foreground service, declared `mediaPlayback` and (when the intercom is part of the ride) `microphone` — see §6.4. Lock-screen transport controls reach the system via a `MediaStyle` notification carrying the `MediaSession`'s token, alongside the service's own mute/end-intercom actions in the same notification (ADR-022) |
 | Voice | WebRTC `PeerConnection` with the built-in `AudioDeviceModule` (owns its own `AudioRecord`/`AudioTrack`, HW AEC/NS/AGC where present). Implemented in `network/voice/WebRtcVoiceEngine`; the session and route half is `audio/route/AndroidVoiceAudioSession`, and the two are deliberately separate calls to tear down (ADR-020 §6) |
 | Route + focus | `AudioManager` — `setCommunicationDevice()` (API 31+, our `minSdk`) for the helmet unit, `AudioFocusRequest` with `WILL_PAUSE_WHEN_DUCKED = false` so *we* control ducking, `AudioDeviceCallback` for connect/disconnect |
-| Ducking | `ExoPlayer.volume` ramped over ~150–250 ms, never stepped (FR-016) |
+| Ducking | `ExoPlayer.volume` driven by the one coexistence coordinator through ten deterministic steps over 200 ms; stored/base volume is never overwritten (ADR-027) |
 
 ### 6.2 iOS
 
@@ -353,15 +353,17 @@ product (REQUIREMENTS §8) and the reason Phase 0 existed.
 | Background / lock screen | `UIBackgroundModes: audio`; `MPNowPlayingInfoCenter` + `MPRemoteCommandCenter` |
 | Voice | WebRTC `RTCPeerConnection` over the duplex session configuration below. Implemented in `RideLinkPlatform/Voice/WebRtcVoiceEngine`; the session and route half is `RideLinkPlatform/Route/IosVoiceAudioSession`, and the two are deliberately separate calls to tear down (ADR-020 §6) |
 | Route + interruption | `AVAudioSession.routeChangeNotification`, `interruptionNotification`, `mediaServicesWereResetNotification` — all three handled explicitly, not just the first (FR-019, NFR-02) |
-| Ducking | `AVAudioMixerNode.outputVolume` ramp, same 150–250 ms envelope |
+| Ducking | `AVAudioEngine.mainMixerNode.outputVolume` driven by the one coexistence coordinator through the same ten-step, 200 ms contract (ADR-027) |
 
-**Two audio-session configurations, switched only on an explicit user action.** Not one
-configuration with options that happen to cover both cases — that was the mistaken model.
+**Two audio-session configurations, one process-global owner.** `IosAudioSessionCoordinator` is the
+only writer of `AVAudioSession` category, mode, options and active state. Music and voice report
+their needs; voice-active configuration wins, and closing voice restores music-only configuration
+when music remains active (ADR-027).
 
 | Ride phase | Category | Mode | Options | Resulting route |
 |---|---|---|---|---|
 | Music only (intercom off, or Mode E) | `.playback` | `.default` | — | media-quality stereo output |
-| Intercom active | `.playAndRecord` | `.voiceChat` | `[.allowBluetoothHFP, .allowBluetoothA2DP, .duckOthers]` | duplex, reduced-quality output **and** input on the same device |
+| Intercom active | `.playAndRecord` | `.voiceChat` | `[.allowBluetoothHFP, .allowBluetoothA2DP, .mixWithOthers]` | duplex, reduced-quality output **and** input on the same device |
 
 `.allowBluetoothHFP` is the current spelling; the old `.allowBluetooth` is deprecated. With an
 iOS 26.0 deployment target (§1.2) no availability branch is needed, which is one reason the
@@ -373,10 +375,11 @@ follows the input onto the duplex profile. That is the whole shape of the produc
 and it is modelled explicitly on the wire as `profile_coupling: "input_forces_output"`
 ([PROTOCOL §4.3.1](PROTOCOL.md#431-audio-capability-vocabulary)).
 
-Switching between the two configurations is an audible route change costing roughly 0.5–2 s. It
-therefore happens **only** when the user turns the intercom on or off, is announced in the UI,
-and is reported to the peer as `AUDIO_STATE { route_state: "transitioning" }`. It never happens
-per utterance.
+Switching between the two configurations is an audible route change. Its duration has **not** been
+measured on the target Bluetooth chain. It therefore happens **only** when the user turns the
+intercom on or off, is announced in the UI, and is reported to the peer as
+`AUDIO_STATE { route_state: "transitioning" }`. Settlement comes from platform state/callbacks;
+the timeout is failure fallback, never a duration measurement. It never happens per utterance.
 
 ### 6.3 Intercom modes
 
@@ -457,6 +460,40 @@ to hand-write a detector to fill the gap, for the same reason ADR-003 declines c
 So selecting Mode B today means the gate cannot open; `voxLevelSourceAvailable` is `false`, the
 intercom card says so on screen, and this is marked **PENDING REAL AUDIO INPUT / LATER HARDENING**.
 The −35 dBFS / 700 ms defaults are reasoned starting points for TEST_PLAN A-14, not tuned values.
+
+#### 6.3.2 Intercom/music coexistence ownership (Phase 6)
+
+`IntercomMusicCoexistence` is the single deterministic owner of temporary music effects caused by
+voice. Its mirrored pure reducer consumes the interpreted intercom policy, accepted local/peer
+transmission state, voice and music availability, playback intent, base volume, route/interruption
+state, and the owning session generation. One platform coordinator per process executes its actions
+through the existing `MusicCoordinator` and player; the voice controller, UI, and audio-session layer
+do not set music volume independently. See ADR-027.
+
+Ducking is a temporary multiplier: `effective volume = user base volume × coexistence gain`. Modes A
+and B use 25%, Mode C uses 35%, and restoration returns to the exact base-volume value without
+changing it. Each change is a deterministic ten-step, 200 ms ramp; reversal continues from the last
+applied value, duplicate state creates no second ramp, and player/session generation checks make a
+retired completion inert.
+
+Mode D's pause is a local, exact-track suppression layer. It does not emit a second Phase 5 playback
+command or move the shared timeline. Speech end resumes only the track instance the coexistence layer
+paused and only if playback is still user-intended; a user pause, track replacement, track end, or
+session boundary wins. Terminal teardown joins gain restoration and any exact-track resume before
+`TeardownComplete`. A reconnect inherits only an outstanding restoration obligation, never an old
+speech/PTT edge.
+
+Voice and music failures are independent fallbacks. A voice failure removes the coexistence effect
+and leaves music usable; a music failure leaves voice usable. Route-transition timeout and
+interruption are explicit diagnostic states and do not create retry loops. `AUDIO_STATE` remains the
+effective platform-route report: transition start/settlement and revision behavior are unchanged,
+confidence stays `assumed`, and no platform vocabulary is added to the wire. Phase 5 drift correction
+continues to suspend while either peer reports `transitioning`, without consuming hard-seek budget.
+
+On iOS, `IosAudioSessionCoordinator` is the sole writer of the process-global `AVAudioSession`.
+Music and voice report their needs to it; they do not race category/mode/options writes. The intercom
+configuration uses `.playAndRecord`/`.voiceChat` with Bluetooth HFP/A2DP and `mixWithOthers`; RideLink
+performs its own per-player ducking rather than asking the system to duck unrelated audio.
 
 ### 6.4 Android ride lifecycle and the background-microphone rule
 

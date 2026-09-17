@@ -1054,6 +1054,47 @@ and any corrected test failures. No app XCTest bundle or physical gate is claime
 
 ---
 
+### 3.1g Phase 6 software closure and physical-qualification boundary (ADR-027)
+
+Phase 6 software evidence is deterministic and cross-platform. Android and iOS execute the same
+`protocol/vectors/coexistence/` rows for Modes A–E, active/inactive and duplicate edges, exact gain
+restoration, policy switching, unavailable subsystems, interruption, route transition/timeout,
+reconnect, teardown, and stale-generation input. Platform-driver tests use injected sleepers and
+observable player calls; sleeps are never sequencing evidence.
+
+| Software case | Required proof |
+|---|---|
+| D1 — Modes A/B | Active voice ramps from the current base volume to a 25% multiplier in ten steps over 200 ms; inactive restores the exact base value |
+| D2 — Mode C | At base 80%, PTT down targets 28%; PTT up restores exactly 80%; stored base volume never changes |
+| D3/D4 — duplicate and rapid reversal | Duplicate active/inactive input starts no competing effect; reversal begins at the last applied gain and converges without overshoot |
+| D5/D6 — teardown and reconnect | Terminal teardown joins restoration; old ramp completion cannot touch a successor player; reconnect derives current coexistence state and cannot stay ducked from predecessor transmission |
+| PTT-50 | One ride/voice/player lifetime, 50 down and 50 up transmission edges, 50 duck and restore cycles; capture opens once, closes zero times during presses; voice session, peer connection and audio session are not rebuilt |
+| Mode D | Active pauses once; duplicate active is inert; inactive resumes only the exact track locally paused by coexistence; user pause, track end/replacement, reconnect and teardown prevent stale resume |
+| Mode switches | A→C, C→A, C→D, D→E, E→C, B→C and C→B clear obsolete gate/duck/pause state, preserve base volume and advance the effective audio projection through existing policy publication |
+| Independent fallback | Microphone/voice/signalling/input failure leaves music usable; music/sync failure leaves voice usable; interruption and route timeout enter an explicit bounded fallback without a retry loop |
+| Route and drift | Transition start/settlement remains callback-driven, timeout is failure rather than a measurement, stale generation callbacks are inert, and Phase 5 produces no correction or hard-seek-budget use while either peer is transitioning |
+| Lifetime | Control A may die while ducked or transitioning; B may authenticate and rebuild voice; A's later speech/PTT/ramp callbacks are inert; terminal shutdown waits for owned coexistence work before a second session starts |
+
+The following rows remain **DEFERRED — PHYSICAL QUALIFICATION**. Simulator/emulator or pure-driver
+evidence must not mark them passed:
+
+| Physical case | Deferred evidence |
+|---|---|
+| A-03 | Microphone active while music plays on the actual Android/iPhone endpoints |
+| A-05 | Real Bluetooth disconnect/reconnect and effective route/profile publication |
+| A-06 | Real inbound phone call, interruption and should-resume behavior |
+| A-08 | Audible duck/restore quality, clicks and perceived 150–250 ms ramp quality |
+| A-10 | 50 physical PTT presses using helmet/TWS hardware; the software PTT-50 case above is not A-10 |
+| A-11 | Real intercom off/on profile transition and measured settlement time |
+| Physical matrix | Real iPhone, Android↔iPhone Wi-Fi/hotspot, helmet Bluetooth, TWS, profile/sample-rate switching, microphone behavior, screen lock, and riding/wind noise |
+
+Until those rows run, Mode C remains the unmeasured architecture default,
+`AUDIO_STATE.confidence` remains `assumed`, and no hardware-selected winner, audible-quality result,
+or route-transition time may be claimed. Mode B remains **PENDING REAL AUDIO INPUT / LATER
+HARDENING** because the pinned public WebRTC APIs provide no suitably fast production level source.
+
+---
+
 ### 3.1 The secure control channel — what is proven on a laptop, and what is not
 
 Phase 1b's security path is exercised end to end by `TlsControlChannelTest` (Android) and
@@ -1210,7 +1251,7 @@ correctly assumes is unchanged and still pending — same gate, narrower unknown
 | ID | Procedure | Pass condition | Phase |
 |---|---|---|---|
 | IA-01 | Configure the music-only session (`.playback`) | Route is media-quality stereo; `AUDIO_STATE` reports `media_stereo` / `media_quality: "full"` | 2 |
-| IA-02 | Switch to the intercom session (`.playAndRecord`, `.voiceChat`, `[.allowBluetoothHFP, .allowBluetoothA2DP, .duckOthers]`) | Duplex route activates; `AUDIO_STATE` reports a duplex profile for **both** input and output and `media_quality: "reduced"` — never independent media output plus duplex input | 2 |
+| IA-02 | Switch to the intercom session (`.playAndRecord`, `.voiceChat`, `[.allowBluetoothHFP, .allowBluetoothA2DP, .mixWithOthers]`) through the sole process-global audio-session owner | Duplex route activates; `AUDIO_STATE` reports a duplex profile for **both** input and output and `media_quality: "reduced"` — never independent media output plus duplex input | 2 |
 | IA-03 | Media-quality → duplex transition, timed | `route_state: "transitioning"` emitted at the start and `"stable"` at the end; measured duration recorded in `docs/test-results/`; the drift ladder is suspended for the duration | 2/6 |
 | IA-04 | Duplex → media-quality transition (intercom off) | Route returns to media-quality stereo; `AUDIO_STATE` updated with an incremented `revision` | 6 |
 | IA-05 | Disconnect the Bluetooth device mid-session, then reconnect | `routeChangeNotification` handled for both `oldDeviceUnavailable` and `newDeviceAvailable`; route recovers; no crash; `AUDIO_STATE` tracks each step | 6 |
