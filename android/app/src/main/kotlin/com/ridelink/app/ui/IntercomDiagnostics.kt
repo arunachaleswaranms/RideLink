@@ -6,6 +6,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.unit.dp
+import com.ridelink.app.music.CoexistenceDiagnostics
 import com.ridelink.core.audiopolicy.AudioRouteSnapshot
 import com.ridelink.core.protocol.AudioStateMessage
 import com.ridelink.core.voice.VoiceEngineDiagnostics
@@ -28,15 +29,28 @@ import java.util.Locale
 @Composable
 internal fun IntercomDiagnosticsSections(
     voice: VoiceDiagnostics,
+    coexistence: CoexistenceDiagnostics,
     peerAudioState: AudioStateMessage?,
 ) {
     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
         VoiceMediaDiagnostics(voice.engine)
         VoiceSetupDiagnostics(voice.setup)
         VoiceRouteDiagnostics(voice.route)
+        CoexistenceDiagnosticsSection(coexistence)
         PeerAudioStateDiagnostics(peerAudioState)
         VoiceSignallingDiagnostics(voice)
     }
+}
+
+@Composable
+private fun CoexistenceDiagnosticsSection(coexistence: CoexistenceDiagnostics) {
+    Text("COEXISTENCE", style = MaterialTheme.typography.labelSmall)
+    DiagnosticRow("gain target / applied", "${coexistence.targetVolumePermille} / ${coexistence.appliedVolumePermille}")
+    DiagnosticRow("paused by voice", coexistence.pausedByVoice.toString())
+    DiagnosticRow("fallback", coexistence.fallback.name)
+    DiagnosticRow("ramp revision / cancelled", "${coexistence.rampRevision} / ${coexistence.rampCancellationCount}")
+    DiagnosticRow("pause / resume", "${coexistence.pauseCount} / ${coexistence.resumeCount}")
+    DiagnosticRow("stale inputs", coexistence.staleInputCount.toString())
 }
 
 @Composable
@@ -118,6 +132,7 @@ private fun VoiceRouteDiagnostics(route: AudioRouteSnapshot) {
     DiagnosticRow("coupling", route.profileCoupling.name)
     DiagnosticRow("route state", route.routeState.name)
     DiagnosticRow("last transition", formatMs(route.lastTransitionDurationUs?.let { it / MICROS_PER_MS }))
+    DiagnosticRow("transition timeouts", route.transitionTimedOutCount.toString())
     DiagnosticRow("confidence", route.confidence.name)
     DiagnosticRow("last change", route.lastChangeReason.name)
     DiagnosticRow("interrupted", route.interrupted.toString())

@@ -175,6 +175,10 @@ public struct AudioRouteSnapshot: Sendable, Equatable {
     /// from PROTOCOL §4.4's field table, so `AudioStateCodec` — which has an explicit field list — cannot
     /// put it on the wire.
     public var lastTransitionDurationUs: Int64?
+    /// Number of timeout-settled route transitions. Diagnostics only; never encoded on the wire.
+    public var transitionTimedOutCount: Int
+    /// True until a new transition begins after the most recent timeout settlement. Local only.
+    public var lastTransitionTimedOut: Bool
 
     public init(
         endpointClass: EndpointClass = .unknown,
@@ -188,7 +192,9 @@ public struct AudioRouteSnapshot: Sendable, Equatable {
         confidence: AudioConfidence = .assumed,
         interrupted: Bool = false,
         lastChangeReason: AudioRouteChangeReason = .unknown,
-        lastTransitionDurationUs: Int64? = nil
+        lastTransitionDurationUs: Int64? = nil,
+        transitionTimedOutCount: Int = 0,
+        lastTransitionTimedOut: Bool = false
     ) {
         self.endpointClass = endpointClass
         self.microphoneOpen = microphoneOpen
@@ -202,6 +208,8 @@ public struct AudioRouteSnapshot: Sendable, Equatable {
         self.interrupted = interrupted
         self.lastChangeReason = lastChangeReason
         self.lastTransitionDurationUs = lastTransitionDurationUs
+        self.transitionTimedOutCount = transitionTimedOutCount
+        self.lastTransitionTimedOut = lastTransitionTimedOut
     }
 
     /// ADR-016, as corrected by its Amendment A1: `reduced` whenever the effective output profile is a

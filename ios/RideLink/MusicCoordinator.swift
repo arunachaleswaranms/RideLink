@@ -21,6 +21,8 @@ public final class MusicCoordinator {
     public private(set) var libraryEntries: [LibraryEntry] = []
     public private(set) var queueState = LocalQueueState()
     public private(set) var playerState = PlayerState()
+    public private(set) var baseVolumePermille = CoexistenceState.fullGainPermille
+    public var coexistenceEvents: (any CoexistenceEventSink)?
 
     /// The library entry the queue's current item resolves to, if any — the same derived lookup
     /// `MusicSection`'s Android counterpart does at the UI layer, done here once instead of in every
@@ -66,7 +68,7 @@ public final class MusicCoordinator {
     public var syncGate: (any SyncPlaybackGate)?
 
     private let player: any Player
-    private let musicAudioSession = MusicAudioSession()
+    private let musicAudioSession: MusicAudioSession
     private var audioSessionActivated = false
     private let monotonicNowUs: @Sendable () -> Int64
     private var libraryObservationTask: Task<Void, Never>?
@@ -99,8 +101,12 @@ public final class MusicCoordinator {
         return externalCacheSources[item.localEntryId]?.contentHash
     }
 
-    public init(monotonicNowUs: @escaping @Sendable () -> Int64 = { Int64(DispatchTime.now().uptimeNanoseconds / 1000) }) throws {
+    public init(
+        audioSessionCoordinator: IosAudioSessionCoordinator = IosAudioSessionCoordinator(),
+        monotonicNowUs: @escaping @Sendable () -> Int64 = { Int64(DispatchTime.now().uptimeNanoseconds / 1000) }
+    ) throws {
         self.monotonicNowUs = monotonicNowUs
+        self.musicAudioSession = MusicAudioSession(coordinator: audioSessionCoordinator)
         let directories = try Self.makeDirectories()
         let dbQueue = try DatabaseQueue(path: directories.database.path)
         try LibraryDatabase.makeMigrator().migrate(dbQueue)
@@ -200,6 +206,7 @@ public final class MusicCoordinator {
     /// track" affordance, as one atomic queue operation rather than an add followed by a
     /// UI-observed "select the item I just added" that would race a second rapid tap.
     public func playNow(_ entry: LibraryEntry) {
+        coexistenceEvents?.onPlaybackIntent(playing: true)
         let item = newItem(entry)
         dispatch(.add(item))
         dispatch(.select(id: item.id))
@@ -215,6 +222,7 @@ public final class MusicCoordinator {
     /// does for an imported `LibraryEntry`. brief §24: local-only playback on *this* device; no
     /// peer command, no synchronized playback, no second player.
     public func playExternalVerifiedCachedTrack(_ contentHash: ContentHash, fileURL: URL) {
+        coexistenceEvents?.onPlaybackIntent(playing: true)
         let entryId = LocalEntryId(UUID().uuidString.lowercased())
         externalCacheSources[entryId] = ExternalCacheSource(contentHash: contentHash, location: LocalTrackLocation(uri: fileURL.absoluteString))
         let item = LocalQueueItem(id: UUID().uuidString, localEntryId: entryId, insertedAtMonoUs: monotonicNowUs())
@@ -239,12 +247,16 @@ public final class MusicCoordinator {
     public func selectQueueItem(id: String) { dispatch(.select(id: id)) }
 
     public func play() {
-        activateAudioSessionIfNeeded()
+        coexistenceEvents?.onPlaybackIntent(playing: true)
         if syncGate?.interceptPlay() == true { return }
-        Task { await player.execute(.play) }
+        Task {
+            await activateAudioSessionIfNeeded()
+            await player.execute(.play)
+        }
     }
 
     public func pause() {
+        coexistenceEvents?.onPlaybackIntent(playing: false)
         if syncGate?.interceptPause() == true { return }
         Task { await player.execute(.pause) }
     }
@@ -283,31 +295,46 @@ public final class MusicCoordinator {
 
     /// ARCHITECTURE §7.2's pre-roll, first half: hand the decoder the file. Never starts.
     public func syncLoad(localEntryId: LocalEntryId, location: LocalTrackLocation) async {
-        activateAudioSessionIfNeeded()
+        await activateAudioSessionIfNeeded()
         await player.execute(.load(localEntryId: localEntryId, location: location))
     }
 
     /// The tail of what used to be inside `syncStop`.
     public func syncClearSelection() { queueState = LocalQueueState() }
 
-    public func syncStart() async { await player.execute(.play) }
+    public func syncStart() async {
+        coexistenceEvents?.onPlaybackIntent(playing: true)
+        await player.execute(.play)
+    }
 
-    public func syncPause() async { await player.execute(.pause) }
+    public func syncPause() async {
+        coexistenceEvents?.onPlaybackIntent(playing: false)
+        await player.execute(.pause)
+    }
 
     public func syncSeek(positionMs: Int64) async { await player.execute(.seek(positionMs: positionMs)) }
 
     /// ADR-004's rate-nudge tier. Always exactly 1.0 when correction ends (brief §38).
     public func syncSetRate(_ rate: Double) async { await player.execute(.setRate(rate: rate)) }
 
-    public func syncStop() async { await player.execute(.stop) }
+    public func syncStop() async {
+        coexistenceEvents?.onPlaybackIntent(playing: false)
+        await player.execute(.stop)
+    }
+
+    public func setBaseVolumePermille(_ volumePermille: Int) {
+        precondition((CoexistenceState.minGainPermille...CoexistenceState.fullGainPermille).contains(volumePermille))
+        baseVolumePermille = volumePermille
+        coexistenceEvents?.onBaseVolumeChanged(volumePermille)
+    }
 
     /// Activated once, lazily, on the first real play — matching `MainActivity.attemptMusicPlay`'s
     /// "configure before use" discipline on Android, without an iOS equivalent of its
     /// foreground-visible gate (there is no foreground-service start to protect here).
-    private func activateAudioSessionIfNeeded() {
+    private func activateAudioSessionIfNeeded() async {
         guard !audioSessionActivated else { return }
         do {
-            try musicAudioSession.activate()
+            try await musicAudioSession.activate()
             audioSessionActivated = true
         } catch {
             // Best-effort, matching MainActivity.attemptMusicPlay's non-fatal treatment of a failed
@@ -322,8 +349,10 @@ public final class MusicCoordinator {
         for effect in outcome.effects {
             switch effect {
             case .loadAndPlay(let localEntryId):
-                activateAudioSessionIfNeeded()
-                Task { await self.loadAndPlay(localEntryId) }
+                Task {
+                    await self.activateAudioSessionIfNeeded()
+                    await self.loadAndPlay(localEntryId)
+                }
             case .stopPlayback:
                 Task { await self.player.execute(.stop) }
             }
@@ -351,12 +380,37 @@ public final class MusicCoordinator {
     private func handlePlayerState(_ state: PlayerState) {
         let previous = playerState
         playerState = state
+        coexistenceEvents?.onMusicChanged(state)
         if TrackEndEdge.advancedNow(previous: previous, current: state) {
             // In a synchronised session only the ADR-010 leader decides what plays next, and it does
             // so with an authoritative NEXT both phones schedule. Advancing the local queue here as
             // well would put this phone a track ahead of the other.
             if syncGate?.interceptTrackEnded() != true { dispatch(.next) }
         }
+    }
+}
+
+extension MusicCoordinator: MusicCoexistencePort {
+    public var coexistencePlayerState: PlayerState { playerState }
+    public var coexistenceBaseVolumePermille: Int { baseVolumePermille }
+
+    public func beginCoexistenceLifetime(_ generation: Int64) async {
+        await player.beginCoexistenceLifetime(generation)
+    }
+
+    public func applyCoexistenceGain(generation: Int64, volumePermille: Int) async -> Bool {
+        await player.setCoexistenceGain(
+            Double(volumePermille) / Double(CoexistenceState.fullGainPermille),
+            generation: generation
+        )
+    }
+
+    public func pauseForVoice(generation: Int64, trackToken: String) async -> Bool {
+        await player.pauseForVoice(generation: generation, trackToken: trackToken)
+    }
+
+    public func resumeAfterVoice(generation: Int64, trackToken: String) async -> Bool {
+        await player.resumeAfterVoice(generation: generation, trackToken: trackToken)
     }
 }
 

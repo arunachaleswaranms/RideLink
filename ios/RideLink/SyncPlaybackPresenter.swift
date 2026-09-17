@@ -23,11 +23,17 @@ public final class SyncPlaybackPresenter {
 
     private let coordinator: SyncPlaybackCoordinator
 
-    public init(coordinator: SyncPlaybackCoordinator) {
+    public init(
+        coordinator: SyncPlaybackCoordinator,
+        onDiagnostics: (@MainActor (SyncPlaybackDiagnostics) -> Void)? = nil
+    ) {
         self.coordinator = coordinator
         Task { [weak self] in
             await coordinator.setDiagnosticsObserver { value in
-                Task { @MainActor in self?.diagnostics = value }
+                Task { @MainActor in
+                    self?.diagnostics = value
+                    onDiagnostics?(value)
+                }
             }
             await coordinator.setQueueObserver { value in
                 Task { @MainActor in self?.queueState = value }

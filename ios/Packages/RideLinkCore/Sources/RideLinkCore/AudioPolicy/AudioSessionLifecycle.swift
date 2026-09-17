@@ -49,17 +49,21 @@ public struct RouteTransitionState: Sendable, Equatable {
     public var lastDurationUs: Int64?
     /// How many transitions have been declared settled by a timeout rather than by the platform.
     public var timedOutCount: Int
+    /// Whether the most recent settlement was the failure timeout rather than a platform callback.
+    public var lastSettlementTimedOut: Bool
 
     public init(
         transitioning: Bool = false,
         startedAtMonoUs: Int64? = nil,
         lastDurationUs: Int64? = nil,
-        timedOutCount: Int = 0
+        timedOutCount: Int = 0,
+        lastSettlementTimedOut: Bool = false
     ) {
         self.transitioning = transitioning
         self.startedAtMonoUs = startedAtMonoUs
         self.lastDurationUs = lastDurationUs
         self.timedOutCount = timedOutCount
+        self.lastSettlementTimedOut = lastSettlementTimedOut
     }
 
     public var lastDurationMs: Double? {
@@ -86,6 +90,7 @@ public enum RouteTransitionTracker {
         var next = state
         next.transitioning = true
         next.startedAtMonoUs = nowMonoUs
+        next.lastSettlementTimedOut = false
         return next
     }
 
@@ -96,7 +101,8 @@ public enum RouteTransitionTracker {
             transitioning: false,
             startedAtMonoUs: nil,
             lastDurationUs: duration,
-            timedOutCount: state.timedOutCount
+            timedOutCount: state.timedOutCount,
+            lastSettlementTimedOut: false
         )
     }
 
@@ -111,6 +117,7 @@ public enum RouteTransitionTracker {
         guard nowMonoUs - started >= timeoutUs else { return state }
         var settled = settle(state, nowMonoUs: nowMonoUs)
         settled.timedOutCount = state.timedOutCount + 1
+        settled.lastSettlementTimedOut = true
         return settled
     }
 }

@@ -72,6 +72,8 @@ data class VoiceDiagnostics(
     val intercomMode: IntercomMode = IntercomPolicy.DEFAULT.intercomWireMode,
     /** Whether outbound audio is flowing **right now**. The gate's whole output. */
     val transmitting: Boolean = false,
+    /** Whether the peer's last accepted `VOICE_STATE` says its outbound track is carrying speech. */
+    val peerTransmitting: Boolean = false,
     /** The PTT control's current position, for the UI to reflect back at the user. */
     val pttHeld: Boolean = false,
     /** The user's own Mute toggle, as distinct from [micMuted]. Survives a policy change. */
@@ -194,6 +196,12 @@ class VoiceController(
     private var unexpectedCandidateSeen = false
     private var setup = VoiceSetupTimeline()
     private var lastFailure: VoiceFailure? = null
+
+    /**
+     * A diagnostics/coexistence projection of the last *accepted* peer state. It is updated only
+     * after [VoiceNegotiation] accepts the generation-bound signal, never directly from the wire.
+     */
+    private var peerTransmitting = false
 
     /**
      * The intercom transmission gate's state (ARCHITECTURE §6.3, ADR-021). Guarded by [mailboxLock]
@@ -608,6 +616,18 @@ class VoiceController(
     private suspend fun apply(input: VoiceInput) {
         val outcome = VoiceNegotiation.reduce(state, input)
         state = outcome.state
+        val peerState = (input as? VoiceInput.SignalReceived)?.signal as? VoiceSignal.State
+        val rejected = outcome.actions.any { it is VoiceAction.RecordDroppedSignal }
+        if (peerState != null && !rejected) {
+            peerTransmitting =
+                state.peerVoiceEnabled &&
+                !peerState.micMuted &&
+                peerState.state != VoiceWireState.IDLE &&
+                peerState.state != VoiceWireState.CLOSED &&
+                peerState.state != VoiceWireState.FAILED
+        } else if (!state.peerVoiceEnabled) {
+            peerTransmitting = false
+        }
         for (action in outcome.actions) perform(action)
         publishDiagnostics()
         // By the time `perform` returns for every action above, a `VoiceAction.ReleaseLocalAudio` this
@@ -975,6 +995,7 @@ class VoiceController(
                 policy = snapshot.transmission.policy,
                 intercomMode = snapshot.transmission.policy.intercomWireMode,
                 transmitting = snapshot.transmission.transmitting,
+                peerTransmitting = peerTransmitting,
                 pttHeld = snapshot.transmission.pttHeld,
                 userMuted = snapshot.transmission.userMuted,
                 // False until a microphone-driven level exists on this platform, which is currently

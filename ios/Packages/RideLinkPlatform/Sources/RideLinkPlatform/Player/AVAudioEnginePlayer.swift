@@ -46,6 +46,7 @@ public actor AVAudioEnginePlayer: Player {
     /// twice or for the wrong track. Matches `RideLinkPlatform.Voice`'s existing generation-guard
     /// convention (ADR-019's direct lesson, applied here).
     private var generation = 0
+    private var coexistenceGeneration: Int64 = 0
 
     private var cachedState = PlayerState()
     private var stateSink: (@Sendable (PlayerState) -> Void)?
@@ -81,6 +82,33 @@ public actor AVAudioEnginePlayer: Player {
 
     public func setStateSink(_ sink: @escaping @Sendable (PlayerState) -> Void) async {
         stateSink = sink
+    }
+
+    public func beginCoexistenceLifetime(_ generation: Int64) async {
+        if generation > coexistenceGeneration { coexistenceGeneration = generation }
+    }
+
+    public func setCoexistenceGain(_ gain: Double, generation: Int64) async -> Bool {
+        guard generation == coexistenceGeneration else { return false }
+        engine.mainMixerNode.outputVolume = Float(min(max(gain, 0), 1))
+        return true
+    }
+
+    public func pauseForVoice(generation: Int64, trackToken: String) async -> Bool {
+        guard generation == coexistenceGeneration,
+              cachedState.localEntryId?.value == trackToken,
+              cachedState.playing else { return false }
+        pauseCommand()
+        return true
+    }
+
+    public func resumeAfterVoice(generation: Int64, trackToken: String) async -> Bool {
+        guard generation == coexistenceGeneration,
+              cachedState.localEntryId?.value == trackToken,
+              !cachedState.ended,
+              !cachedState.playing else { return false }
+        playCommand()
+        return true
     }
 
     public func release() async {

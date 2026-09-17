@@ -24,6 +24,30 @@ interface Player {
     fun setStateSink(sink: (PlayerState) -> Unit)
 
     /**
+     * Installs the Phase 6 coexistence lifetime. A later generation invalidates every delayed gain,
+     * pause and resume from its predecessor before that effect can touch the renderer.
+     */
+    suspend fun beginCoexistenceLifetime(generation: Long) = Unit
+
+    /** Applies one already-interpolated temporary gain step if [generation] still owns the player. */
+    suspend fun setCoexistenceGain(
+        generation: Long,
+        gain: Double,
+    ): Boolean = false
+
+    /** Temporarily pauses only if the exact expected track is still loaded. */
+    suspend fun pauseForVoice(
+        generation: Long,
+        trackToken: String,
+    ): Boolean = false
+
+    /** Resumes only the exact track that coexistence previously suppressed. */
+    suspend fun resumeAfterVoice(
+        generation: Long,
+        trackToken: String,
+    ): Boolean = false
+
+    /**
      * Releases the underlying decoder/renderer resources. Unlike
      * [com.ridelink.core.voice.VoiceEngine]'s `stop`/`release` split, there is no hardware reason
      * to keep two lifecycles here — a local player has no Bluetooth profile to avoid disturbing —

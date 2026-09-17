@@ -22,6 +22,7 @@ import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.role
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
+import com.ridelink.app.music.CoexistenceDiagnostics
 import com.ridelink.core.audiopolicy.IntercomPolicy
 import com.ridelink.core.audiopolicy.RideStartDecision
 import com.ridelink.core.audiopolicy.TransmissionGate
@@ -49,6 +50,7 @@ import com.ridelink.network.voice.VoiceDiagnostics
 @Composable
 internal fun VoiceCard(
     voice: VoiceDiagnostics,
+    coexistence: CoexistenceDiagnostics,
     policy: IntercomPolicy,
     peerAudioState: AudioStateMessage?,
     refusal: RideStartDecision.Refused?,
@@ -66,7 +68,7 @@ internal fun VoiceCard(
             Text("INTERCOM (Phase 2b)", style = MaterialTheme.typography.titleSmall)
             IntercomControls(voice, refusal, onStartIntercom, onStopIntercom, onToggleMute)
             IntercomModeControls(voice, policy, onSelectPolicy, onPushToTalkHeld)
-            IntercomDiagnosticsSections(voice, peerAudioState)
+            IntercomDiagnosticsSections(voice, coexistence, peerAudioState)
         }
     }
 }

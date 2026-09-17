@@ -47,7 +47,10 @@ import android.net.Uri as PlatformUri
  * Player failure never reaches [com.ridelink.app.session.SessionCoordinator] and never touches the
  * control session — this phase's brief §30's "player error must not affect control/TLS session" is
  * structural here: this class has no reference to it at all.
+ *
+ * One queue and one player deliberately meet here; the Phase 6 port adds adapters, not ownership.
  */
+@Suppress("TooManyFunctions")
 class MusicCoordinator(
     private val repository: LibraryRepository,
     private val indexer: LibraryIndexer,
@@ -55,7 +58,10 @@ class MusicCoordinator(
     private val scope: CoroutineScope,
     private val monotonicNowUs: () -> Long,
     private val nextQueueItemId: () -> String,
-) {
+) : MusicCoexistencePort {
+    /** The one Phase 6 owner receives player state and playback intent through this narrow seam. */
+    override var coexistenceEvents: CoexistenceEventSink? = null
+
     private val _query = MutableStateFlow(LibraryQuery())
     val query: StateFlow<LibraryQuery> = _query.asStateFlow()
 
@@ -70,6 +76,11 @@ class MusicCoordinator(
 
     private val _playerState = MutableStateFlow(PlayerState())
     val playerState: StateFlow<PlayerState> = _playerState.asStateFlow()
+    override val coexistencePlayerState: StateFlow<PlayerState> get() = playerState
+
+    private val _baseVolumePermille = MutableStateFlow(FULL_VOLUME_PERMILLE)
+    val baseVolumePermille: StateFlow<Int> = _baseVolumePermille.asStateFlow()
+    override val coexistenceBaseVolumePermille: StateFlow<Int> get() = baseVolumePermille
 
     /**
      * Set when the platform refused to start the ride foreground service for a music-play attempt
@@ -137,6 +148,7 @@ class MusicCoordinator(
             player.setStateSink { state ->
                 val previous = _playerState.value
                 _playerState.value = state
+                coexistenceEvents?.onMusicChanged(state)
                 // A track ending or its file going missing both mean "move on" — the queue owner's
                 // job (LocalQueue.kt's own KDoc: this is deliberately not a queue-internal concept).
                 // Edge-triggered via TrackEndEdge, not level-triggered on `state` alone: a real bug
@@ -177,6 +189,7 @@ class MusicCoordinator(
      *  UI-observed "select the item I just added" that would race a second rapid tap. */
     fun playNow(entry: LibraryEntry) {
         _lastMusicStartRefusal.value = null
+        coexistenceEvents?.onPlaybackIntent(playing = true)
         val item = newItem(entry)
         dispatch(LocalQueueAction.Add(item))
         dispatch(LocalQueueAction.Select(item.id))
@@ -199,6 +212,7 @@ class MusicCoordinator(
         artist: String?,
     ) {
         _lastMusicStartRefusal.value = null
+        coexistenceEvents?.onPlaybackIntent(playing = true)
         val entryId = LocalEntryId(UUID.randomUUID().toString())
         externalCacheSources.register(entryId, ExternalCacheSource(contentHash, LocalTrackLocation(file.toURI().toString()), title, artist))
         val item = LocalQueueItem(id = nextQueueItemId(), localEntryId = entryId, insertedAtMonoUs = monotonicNowUs())
@@ -229,11 +243,13 @@ class MusicCoordinator(
 
     fun play() {
         _lastMusicStartRefusal.value = null
+        coexistenceEvents?.onPlaybackIntent(playing = true)
         if (syncGate?.interceptPlay() == true) return
         scope.launch { player.execute(PlaybackCommand.Play) }
     }
 
     fun pause() {
+        coexistenceEvents?.onPlaybackIntent(playing = false)
         if (syncGate?.interceptPause() == true) return
         scope.launch { player.execute(PlaybackCommand.Pause) }
     }
@@ -295,10 +311,12 @@ class MusicCoordinator(
     }
 
     suspend fun syncStart() {
+        coexistenceEvents?.onPlaybackIntent(playing = true)
         player.execute(PlaybackCommand.Play)
     }
 
     suspend fun syncPause() {
+        coexistenceEvents?.onPlaybackIntent(playing = false)
         player.execute(PlaybackCommand.Pause)
     }
 
@@ -312,8 +330,34 @@ class MusicCoordinator(
     }
 
     suspend fun syncStop() {
+        coexistenceEvents?.onPlaybackIntent(playing = false)
         player.execute(PlaybackCommand.Stop)
     }
+
+    fun setBaseVolumePermille(volumePermille: Int) {
+        require(volumePermille in 0..FULL_VOLUME_PERMILLE) { "base volume must be 0...1000" }
+        _baseVolumePermille.value = volumePermille
+        coexistenceEvents?.onBaseVolumeChanged(volumePermille)
+    }
+
+    override suspend fun beginCoexistenceLifetime(generation: Long) {
+        player.beginCoexistenceLifetime(generation)
+    }
+
+    override suspend fun applyCoexistenceGain(
+        generation: Long,
+        volumePermille: Int,
+    ): Boolean = player.setCoexistenceGain(generation, volumePermille.toDouble() / FULL_VOLUME_PERMILLE)
+
+    override suspend fun pauseForVoice(
+        generation: Long,
+        trackToken: String,
+    ): Boolean = player.pauseForVoice(generation, trackToken)
+
+    override suspend fun resumeAfterVoice(
+        generation: Long,
+        trackToken: String,
+    ): Boolean = player.resumeAfterVoice(generation, trackToken)
 
     fun importTree(treeUri: PlatformUri) =
         scope.launch {
@@ -369,5 +413,9 @@ class MusicCoordinator(
         val entry = repository.findByLocalEntryId(localEntryId) ?: return
         player.execute(PlaybackCommand.Load(localEntryId, entry.location, entry.track.title, entry.track.artist))
         player.execute(PlaybackCommand.Play)
+    }
+
+    private companion object {
+        const val FULL_VOLUME_PERMILLE = 1_000
     }
 }

@@ -447,6 +447,8 @@ class AndroidVoiceAudioSession(
             mapped.copy(
                 interrupted = lifecycle.interrupted,
                 lastTransitionDurationUs = lifecycle.transition.lastDurationUs,
+                transitionTimedOutCount = lifecycle.transition.timedOutCount,
+                lastTransitionTimedOut = lifecycle.transition.lastSettlementTimedOut,
             )
         snapshot = next
         sink?.invoke(next)

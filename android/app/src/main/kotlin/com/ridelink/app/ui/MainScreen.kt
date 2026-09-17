@@ -80,6 +80,7 @@ fun MainScreen(
     val pairingPrompt by coordinator.pairingPrompt.collectAsState()
     val securityAlert by coordinator.securityAlert.collectAsState()
     val voice by coordinator.voiceDiagnostics.collectAsState()
+    val coexistence by coordinator.coexistenceDiagnostics.collectAsState()
     val policy by coordinator.intercomPolicy.collectAsState()
     val peerAudioState by coordinator.peerAudioState.collectAsState()
     val intercomRefusal by coordinator.lastIntercomRefusal.collectAsState()
@@ -122,6 +123,7 @@ fun MainScreen(
             if (state.status == SessionStatus.CONNECTED || state.status == SessionStatus.RIDE_ACTIVE) {
                 VoiceCard(
                     voice = voice,
+                    coexistence = coexistence,
                     policy = policy,
                     peerAudioState = peerAudioState,
                     refusal = intercomRefusal,

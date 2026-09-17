@@ -1,0 +1,610 @@
+{
+  "version": 1,
+  "ramp_duration_ms": 200,
+  "measurement_status": "SOFTWARE_ONLY_PHYSICAL_QUALIFICATION_DEFERRED",
+  "scenarios": [
+    {
+      "name": "mode-a-duck-and-exact-restore",
+      "policy_id": "MODE_A",
+      "base_volume_permille": 1000,
+      "events": [
+        {
+          "kind": "VoiceChanged",
+          "available": true,
+          "local_transmitting": true,
+          "peer_transmitting": false
+        },
+        {
+          "kind": "VoiceChanged",
+          "available": true,
+          "local_transmitting": false,
+          "peer_transmitting": false
+        }
+      ],
+      "expect_actions": [
+        "Ramp(250,200)",
+        "Ramp(1000,200)"
+      ],
+      "expect_target_permille": 1000,
+      "expect_base_permille": 1000,
+      "expect_fallback": "NONE",
+      "expect_stale_count": 0
+    },
+    {
+      "name": "mode-b-synthetic-vox-duck",
+      "policy_id": "MODE_B",
+      "base_volume_permille": 1000,
+      "events": [
+        {
+          "kind": "VoiceChanged",
+          "available": true,
+          "local_transmitting": true,
+          "peer_transmitting": false
+        },
+        {
+          "kind": "VoiceChanged",
+          "available": true,
+          "local_transmitting": false,
+          "peer_transmitting": false
+        }
+      ],
+      "expect_actions": [
+        "Ramp(250,200)",
+        "Ramp(1000,200)"
+      ],
+      "expect_target_permille": 1000,
+      "expect_base_permille": 1000,
+      "expect_fallback": "NONE",
+      "expect_stale_count": 0
+    },
+    {
+      "name": "mode-c-multiplies-eighty-percent-base",
+      "policy_id": "MODE_C",
+      "base_volume_permille": 800,
+      "events": [
+        {
+          "kind": "VoiceChanged",
+          "available": true,
+          "local_transmitting": true,
+          "peer_transmitting": false
+        },
+        {
+          "kind": "VoiceChanged",
+          "available": true,
+          "local_transmitting": false,
+          "peer_transmitting": false
+        }
+      ],
+      "expect_actions": [
+        "Ramp(280,200)",
+        "Ramp(800,200)"
+      ],
+      "expect_target_permille": 800,
+      "expect_base_permille": 800,
+      "expect_fallback": "NONE",
+      "expect_stale_count": 0
+    },
+    {
+      "name": "mode-d-temporary-pause-and-resume",
+      "policy_id": "MODE_D",
+      "base_volume_permille": 1000,
+      "events": [
+        {
+          "kind": "VoiceChanged",
+          "available": true,
+          "local_transmitting": true,
+          "peer_transmitting": false
+        },
+        {
+          "kind": "MusicChanged",
+          "available": true,
+          "track_token": "track-a",
+          "playing": false,
+          "ended": false
+        },
+        {
+          "kind": "VoiceChanged",
+          "available": true,
+          "local_transmitting": false,
+          "peer_transmitting": false
+        }
+      ],
+      "expect_actions": [
+        "Pause(track-a)",
+        "Resume(track-a)"
+      ],
+      "expect_target_permille": 1000,
+      "expect_base_permille": 1000,
+      "expect_fallback": "NONE",
+      "expect_stale_count": 0
+    },
+    {
+      "name": "mode-e-never-changes-music-for-voice",
+      "policy_id": "MODE_E",
+      "base_volume_permille": 1000,
+      "events": [
+        {
+          "kind": "VoiceChanged",
+          "available": false,
+          "local_transmitting": true,
+          "peer_transmitting": true
+        }
+      ],
+      "expect_actions": [],
+      "expect_target_permille": 1000,
+      "expect_base_permille": 1000,
+      "expect_fallback": "NONE",
+      "expect_stale_count": 0
+    },
+    {
+      "name": "duplicate-and-rapid-reversal",
+      "policy_id": "MODE_C",
+      "base_volume_permille": 1000,
+      "events": [
+        {
+          "kind": "VoiceChanged",
+          "available": true,
+          "local_transmitting": true,
+          "peer_transmitting": false
+        },
+        {
+          "kind": "VoiceChanged",
+          "available": true,
+          "local_transmitting": true,
+          "peer_transmitting": false
+        },
+        {
+          "kind": "VoiceChanged",
+          "available": true,
+          "local_transmitting": false,
+          "peer_transmitting": false
+        },
+        {
+          "kind": "VoiceChanged",
+          "available": true,
+          "local_transmitting": false,
+          "peer_transmitting": false
+        }
+      ],
+      "expect_actions": [
+        "Ramp(350,200)",
+        "Ramp(1000,200)"
+      ],
+      "expect_target_permille": 1000,
+      "expect_base_permille": 1000,
+      "expect_fallback": "NONE",
+      "expect_stale_count": 0
+    },
+    {
+      "name": "policy-change-while-ducked",
+      "policy_id": "MODE_C",
+      "base_volume_permille": 1000,
+      "events": [
+        {
+          "kind": "VoiceChanged",
+          "available": true,
+          "local_transmitting": true,
+          "peer_transmitting": false
+        },
+        {
+          "kind": "PolicySelected",
+          "policy_id": "MODE_A"
+        }
+      ],
+      "expect_actions": [
+        "Ramp(350,200)",
+        "Ramp(250,200)"
+      ],
+      "expect_target_permille": 250,
+      "expect_base_permille": 1000,
+      "expect_fallback": "NONE",
+      "expect_stale_count": 0
+    },
+    {
+      "name": "duck-to-pause-restores-gain",
+      "policy_id": "MODE_C",
+      "base_volume_permille": 1000,
+      "events": [
+        {
+          "kind": "VoiceChanged",
+          "available": true,
+          "local_transmitting": true,
+          "peer_transmitting": false
+        },
+        {
+          "kind": "PolicySelected",
+          "policy_id": "MODE_D"
+        }
+      ],
+      "expect_actions": [
+        "Ramp(350,200)",
+        "Pause(track-a)",
+        "Ramp(1000,200)"
+      ],
+      "expect_target_permille": 1000,
+      "expect_base_permille": 1000,
+      "expect_fallback": "NONE",
+      "expect_stale_count": 0
+    },
+    {
+      "name": "user-pause-wins-over-mode-d-resume",
+      "policy_id": "MODE_D",
+      "base_volume_permille": 1000,
+      "events": [
+        {
+          "kind": "VoiceChanged",
+          "available": true,
+          "local_transmitting": true,
+          "peer_transmitting": false
+        },
+        {
+          "kind": "UserPlaybackIntent",
+          "playing": false
+        },
+        {
+          "kind": "VoiceChanged",
+          "available": true,
+          "local_transmitting": false,
+          "peer_transmitting": false
+        }
+      ],
+      "expect_actions": [
+        "Pause(track-a)"
+      ],
+      "expect_target_permille": 1000,
+      "expect_base_permille": 1000,
+      "expect_fallback": "NONE",
+      "expect_stale_count": 0
+    },
+    {
+      "name": "voice-unavailable-restores-music",
+      "policy_id": "MODE_C",
+      "base_volume_permille": 1000,
+      "events": [
+        {
+          "kind": "VoiceChanged",
+          "available": true,
+          "local_transmitting": true,
+          "peer_transmitting": false
+        },
+        {
+          "kind": "VoiceChanged",
+          "available": false,
+          "local_transmitting": false,
+          "peer_transmitting": false
+        }
+      ],
+      "expect_actions": [
+        "Ramp(350,200)",
+        "Ramp(1000,200)"
+      ],
+      "expect_target_permille": 1000,
+      "expect_base_permille": 1000,
+      "expect_fallback": "VOICE_UNAVAILABLE",
+      "expect_stale_count": 0
+    },
+    {
+      "name": "music-unavailable-does-not-stop-voice",
+      "policy_id": "MODE_C",
+      "base_volume_permille": 1000,
+      "events": [
+        {
+          "kind": "MusicChanged",
+          "available": false,
+          "track_token": null,
+          "playing": false,
+          "ended": false
+        },
+        {
+          "kind": "VoiceChanged",
+          "available": true,
+          "local_transmitting": true,
+          "peer_transmitting": false
+        }
+      ],
+      "expect_actions": [],
+      "expect_target_permille": 350,
+      "expect_base_permille": 1000,
+      "expect_fallback": "MUSIC_UNAVAILABLE",
+      "expect_stale_count": 0
+    },
+    {
+      "name": "interruption-restores-then-reapplies-duck",
+      "policy_id": "MODE_A",
+      "base_volume_permille": 1000,
+      "events": [
+        {
+          "kind": "VoiceChanged",
+          "available": true,
+          "local_transmitting": true,
+          "peer_transmitting": false
+        },
+        {
+          "kind": "RouteChanged",
+          "route_state": "TRANSITIONING",
+          "interrupted": true,
+          "transition_timed_out": false
+        },
+        {
+          "kind": "RouteChanged",
+          "route_state": "STABLE",
+          "interrupted": false,
+          "transition_timed_out": false
+        }
+      ],
+      "expect_actions": [
+        "Ramp(250,200)",
+        "Ramp(1000,200)",
+        "Ramp(250,200)"
+      ],
+      "expect_target_permille": 250,
+      "expect_base_permille": 1000,
+      "expect_fallback": "NONE",
+      "expect_stale_count": 0
+    },
+    {
+      "name": "route-timeout-is-explicit-fallback",
+      "policy_id": "MODE_C",
+      "base_volume_permille": 1000,
+      "events": [
+        {
+          "kind": "RouteChanged",
+          "route_state": "STABLE",
+          "interrupted": false,
+          "transition_timed_out": true
+        }
+      ],
+      "expect_actions": [],
+      "expect_target_permille": 1000,
+      "expect_base_permille": 1000,
+      "expect_fallback": "ROUTE_TRANSITION_TIMEOUT",
+      "expect_stale_count": 0
+    },
+    {
+      "name": "track-replacement-reasserts-duck",
+      "policy_id": "MODE_C",
+      "base_volume_permille": 1000,
+      "events": [
+        {
+          "kind": "VoiceChanged",
+          "available": true,
+          "local_transmitting": true,
+          "peer_transmitting": false
+        },
+        {
+          "kind": "MusicChanged",
+          "available": true,
+          "track_token": "track-b",
+          "playing": true,
+          "ended": false
+        }
+      ],
+      "expect_actions": [
+        "Ramp(350,200)",
+        "Ramp(350,200)"
+      ],
+      "expect_target_permille": 350,
+      "expect_base_permille": 1000,
+      "expect_fallback": "NONE",
+      "expect_stale_count": 0
+    },
+    {
+      "name": "teardown-restores-duck",
+      "policy_id": "MODE_C",
+      "base_volume_permille": 1000,
+      "events": [
+        {
+          "kind": "VoiceChanged",
+          "available": true,
+          "local_transmitting": true,
+          "peer_transmitting": false
+        },
+        {
+          "kind": "LifetimeEnded"
+        }
+      ],
+      "expect_actions": [
+        "Ramp(350,200)",
+        "Ramp(1000,200)"
+      ],
+      "expect_target_permille": 1000,
+      "expect_base_permille": 1000,
+      "expect_fallback": "NONE",
+      "expect_stale_count": 0
+    },
+    {
+      "name": "stale-predecessor-event-is-inert",
+      "policy_id": "MODE_C",
+      "base_volume_permille": 1000,
+      "events": [
+        {
+          "kind": "LifetimeStarted",
+          "generation": 2,
+          "policy_id": "MODE_C"
+        },
+        {
+          "kind": "VoiceChanged",
+          "available": true,
+          "local_transmitting": true,
+          "peer_transmitting": false,
+          "generation": 1
+        }
+      ],
+      "expect_actions": [
+        "Ramp(1000,200)"
+      ],
+      "expect_target_permille": 1000,
+      "expect_base_permille": 1000,
+      "expect_fallback": "VOICE_UNAVAILABLE",
+      "expect_stale_count": 1
+    },
+    {
+      "name": "reconnect-restores-predecessor-mode-d-pause",
+      "policy_id": "MODE_D",
+      "base_volume_permille": 1000,
+      "events": [
+        {
+          "kind": "VoiceChanged",
+          "available": true,
+          "local_transmitting": true,
+          "peer_transmitting": false
+        },
+        {
+          "kind": "MusicChanged",
+          "available": true,
+          "track_token": "track-a",
+          "playing": false,
+          "ended": false
+        },
+        {
+          "kind": "LifetimeStarted",
+          "generation": 2,
+          "policy_id": "MODE_C"
+        },
+        {
+          "kind": "VoiceChanged",
+          "available": true,
+          "local_transmitting": true,
+          "peer_transmitting": false,
+          "generation": 1
+        }
+      ],
+      "expect_actions": [
+        "Pause(track-a)",
+        "Resume(track-a)",
+        "Ramp(1000,200)"
+      ],
+      "expect_target_permille": 1000,
+      "expect_base_permille": 1000,
+      "expect_fallback": "VOICE_UNAVAILABLE",
+      "expect_stale_count": 1
+    },
+    {
+      "name": "sync-failure-is-independent-fallback",
+      "policy_id": "MODE_C",
+      "base_volume_permille": 1000,
+      "events": [
+        {
+          "kind": "SyncAvailabilityChanged",
+          "available": false
+        },
+        {
+          "kind": "VoiceChanged",
+          "available": true,
+          "local_transmitting": true,
+          "peer_transmitting": false
+        }
+      ],
+      "expect_actions": [
+        "Ramp(350,200)"
+      ],
+      "expect_target_permille": 350,
+      "expect_base_permille": 1000,
+      "expect_fallback": "SYNC_UNAVAILABLE",
+      "expect_stale_count": 0
+    },
+    {
+      "name": "mode-switch-a-c-a-recomputes-duck",
+      "policy_id": "MODE_A",
+      "base_volume_permille": 1000,
+      "events": [
+        {
+          "kind": "VoiceChanged",
+          "available": true,
+          "local_transmitting": true,
+          "peer_transmitting": false
+        },
+        {
+          "kind": "PolicySelected",
+          "policy_id": "MODE_C"
+        },
+        {
+          "kind": "PolicySelected",
+          "policy_id": "MODE_A"
+        }
+      ],
+      "expect_actions": [
+        "Ramp(250,200)",
+        "Ramp(350,200)",
+        "Ramp(250,200)"
+      ],
+      "expect_target_permille": 250,
+      "expect_base_permille": 1000,
+      "expect_fallback": "NONE",
+      "expect_stale_count": 0
+    },
+    {
+      "name": "mode-switch-c-d-e-c-clears-temporary-effects",
+      "policy_id": "MODE_C",
+      "base_volume_permille": 1000,
+      "events": [
+        {
+          "kind": "VoiceChanged",
+          "available": true,
+          "local_transmitting": true,
+          "peer_transmitting": false
+        },
+        {
+          "kind": "PolicySelected",
+          "policy_id": "MODE_D"
+        },
+        {
+          "kind": "MusicChanged",
+          "available": true,
+          "track_token": "track-a",
+          "playing": false,
+          "ended": false
+        },
+        {
+          "kind": "PolicySelected",
+          "policy_id": "MODE_E"
+        },
+        {
+          "kind": "PolicySelected",
+          "policy_id": "MODE_C"
+        }
+      ],
+      "expect_actions": [
+        "Ramp(350,200)",
+        "Pause(track-a)",
+        "Ramp(1000,200)",
+        "Resume(track-a)",
+        "Ramp(350,200)"
+      ],
+      "expect_target_permille": 350,
+      "expect_base_permille": 1000,
+      "expect_fallback": "NONE",
+      "expect_stale_count": 0
+    },
+    {
+      "name": "mode-switch-b-c-b-recomputes-duck",
+      "policy_id": "MODE_B",
+      "base_volume_permille": 1000,
+      "events": [
+        {
+          "kind": "VoiceChanged",
+          "available": true,
+          "local_transmitting": true,
+          "peer_transmitting": false
+        },
+        {
+          "kind": "PolicySelected",
+          "policy_id": "MODE_C"
+        },
+        {
+          "kind": "PolicySelected",
+          "policy_id": "MODE_B"
+        }
+      ],
+      "expect_actions": [
+        "Ramp(250,200)",
+        "Ramp(350,200)",
+        "Ramp(250,200)"
+      ],
+      "expect_target_permille": 250,
+      "expect_base_permille": 1000,
+      "expect_fallback": "NONE",
+      "expect_stale_count": 0
+    }
+  ]
+}

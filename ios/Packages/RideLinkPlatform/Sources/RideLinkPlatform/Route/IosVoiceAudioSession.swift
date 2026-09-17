@@ -7,13 +7,14 @@ import AVFoundation
 /// The iOS half of the audio route: `AVAudioSession`'s duplex configuration, its three notifications,
 /// and the route mapped into ADR-016's platform-neutral vocabulary by `IosAudioRouteMapper`.
 ///
-/// ARCHITECTURE §6.2 specifies **two** audio-session configurations and this class owns the switch
-/// between them:
+/// ARCHITECTURE §6.2 specifies **two** audio-session configurations. This type owns voice route
+/// lifecycle and notification truth; `IosAudioSessionCoordinator` alone owns the process-global
+/// switch between them:
 ///
 /// | Ride phase | Category | Mode | Options |
 /// |---|---|---|---|
 /// | music only | `.playback` | `.default` | — |
-/// | intercom active | `.playAndRecord` | `.voiceChat` | `[.allowBluetoothHFP, .allowBluetoothA2DP, .duckOthers]` |
+/// | intercom active | `.playAndRecord` | `.voiceChat` | `[.allowBluetoothHFP, .allowBluetoothA2DP, .mixWithOthers]` |
 ///
 /// `.allowBluetoothHFP` is the current spelling; the deprecated `.allowBluetooth` appears nowhere. With
 /// the ADR-011 iOS 26.0 deployment target there is no availability branch, which is one of the reasons
@@ -64,6 +65,7 @@ import AVFoundation
 /// (docs/STATUS.md §7, TEST_PLAN IA-01…IA-09, V-01…V-11).
 public actor IosVoiceAudioSession: VoiceAudioSession {
     private let session = AVAudioSession.sharedInstance()
+    private let audioSessionCoordinator: IosAudioSessionCoordinator
     private var observers: [NSObjectProtocol] = []
     private var snapshot = AudioRouteSnapshot()
     private var sink: (@Sendable (AudioRouteSnapshot) -> Void)?
@@ -85,8 +87,10 @@ public actor IosVoiceAudioSession: VoiceAudioSession {
     private var transitionTimeoutTask: Task<Void, Never>?
 
     public init(
+        audioSessionCoordinator: IosAudioSessionCoordinator = IosAudioSessionCoordinator(),
         monotonicNowUs: @escaping @Sendable () -> Int64 = { Int64(DispatchTime.now().uptimeNanoseconds / 1000) }
     ) {
+        self.audioSessionCoordinator = audioSessionCoordinator
         self.monotonicNowUs = monotonicNowUs
     }
 
@@ -108,7 +112,7 @@ public actor IosVoiceAudioSession: VoiceAudioSession {
     public func open() async -> Result<Void, VoiceAudioSessionError> {
         if lifecycle.open { return .success(()) }
         guard await hasMicrophonePermission() else {
-            return fail(.micPermissionDenied)
+            return await fail(.micPermissionDenied)
         }
 
         // A fresh signal path for this generation, and the observers that will confirm the request below
@@ -125,24 +129,19 @@ public actor IosVoiceAudioSession: VoiceAudioSession {
         // `.categoryChange` notification the call itself can produce synchronously finds a
         // transition already begun to settle, rather than one that has not started yet (this
         // phase's final hardening pass, Issue 1).
-        apply(.openRequested(generation: lifecycle.generation, atMonoUs: monotonicNowUs()))
+        await apply(.openRequested(generation: lifecycle.generation, atMonoUs: monotonicNowUs()))
 
         do {
-            try session.setCategory(
-                .playAndRecord,
-                mode: .voiceChat,
-                options: [.allowBluetoothHFP, .allowBluetoothA2DP, .duckOthers]
-            )
-            try session.setActive(true)
+            try await audioSessionCoordinator.activateVoice()
         } catch {
             unregisterObservers()
             stopConsumer()
             signals = nil
             doorbell = nil
-            apply(.openAborted(generation: lifecycle.generation, atMonoUs: monotonicNowUs(), failure: .audioSessionActivationFailed))
+            await apply(.openAborted(generation: lifecycle.generation, atMonoUs: monotonicNowUs(), failure: .audioSessionActivationFailed))
             return .failure(VoiceAudioSessionError(.audioSessionActivationFailed))
         }
-        apply(.opened(generation: lifecycle.generation, atMonoUs: monotonicNowUs()))
+        await apply(.opened(generation: lifecycle.generation, atMonoUs: monotonicNowUs()))
         return .success(())
     }
 
@@ -151,12 +150,12 @@ public actor IosVoiceAudioSession: VoiceAudioSession {
         // Begun before the restoring call below, for the same reason as `open()` above — the
         // platform's confirming `.categoryChange` notification can arrive synchronously as part of
         // it (this phase's final hardening pass, Issue 1).
-        apply(.closeRequested(generation: lifecycle.generation, atMonoUs: monotonicNowUs()))
+        await apply(.closeRequested(generation: lifecycle.generation, atMonoUs: monotonicNowUs()))
         // Observers stay registered through the restoring call below, so a `.categoryChange`
         // confirming *this* close has a chance to be observed (Issue D) — removing them is one of the
         // very last steps, once nothing further this generation's box needs to receive remains.
-        try? session.setCategory(.playback, mode: .default, options: [])
-        apply(.closed(generation: lifecycle.generation, atMonoUs: monotonicNowUs()))
+        try? await audioSessionCoordinator.deactivateVoice()
+        await apply(.closed(generation: lifecycle.generation, atMonoUs: monotonicNowUs()))
         // The closing transition owns its notification consumer and its failure-protection timeout
         // until the transition has actually settled — by a real `.categoryChange` confirmation, or by
         // the timeout itself — and not a moment before (this phase's final hardening pass, Issue 1's
@@ -203,7 +202,7 @@ public actor IosVoiceAudioSession: VoiceAudioSession {
     /// never confirmed the change, the transition is declared settled and *counted as a timeout* so the
     /// diagnostics can say the number came from a timer rather than from `AVAudioSession`.
     public func pollTransitionTimeout() async {
-        apply(
+        await apply(
             .transitionTimeoutCheck(
                 generation: lifecycle.generation,
                 atMonoUs: monotonicNowUs(),
@@ -237,7 +236,7 @@ public actor IosVoiceAudioSession: VoiceAudioSession {
     /// rather than arrival order — a reset can never be stuck behind a route change it must invalidate.
     private func drainSignals(box: AudioSessionSignalBox) async {
         while let delivered = box.poll() {
-            handle(delivered)
+            await handle(delivered)
         }
     }
 
@@ -283,7 +282,7 @@ public actor IosVoiceAudioSession: VoiceAudioSession {
         observers.removeAll()
     }
 
-    private func handle(_ delivered: GeneratedAudioSessionSignal) {
+    private func handle(_ delivered: GeneratedAudioSessionSignal) async {
         let now = monotonicNowUs()
         let generation = delivered.generation
         switch delivered.signal {
@@ -292,7 +291,7 @@ public actor IosVoiceAudioSession: VoiceAudioSession {
             // `.categoryChange` is the platform confirming the configuration change **we** asked for, so
             // it settles the transition. Anything else — a device unplugged, a new one appearing — is a
             // change we did not ask for and begins a transition of its own (TEST_PLAN IA-05).
-            apply(
+            await apply(
                 .routeChanged(
                     generation: generation,
                     reason: reason,
@@ -302,13 +301,13 @@ public actor IosVoiceAudioSession: VoiceAudioSession {
             )
         case .interruptionBegan:
             lastReason = .interruptionBegan
-            apply(.interruptionBegan(generation: generation, atMonoUs: now))
+            await apply(.interruptionBegan(generation: generation, atMonoUs: now))
         case .interruptionEnded(let shouldResume):
             lastReason = .interruptionEnded
-            apply(.interruptionEnded(generation: generation, shouldResume: shouldResume, atMonoUs: now))
+            await apply(.interruptionEnded(generation: generation, shouldResume: shouldResume, atMonoUs: now))
         case .mediaServicesReset:
             lastReason = .mediaServicesReset
-            apply(.mediaServicesReset(generation: generation, atMonoUs: now))
+            await apply(.mediaServicesReset(generation: generation, atMonoUs: now))
         }
     }
 
@@ -319,7 +318,7 @@ public actor IosVoiceAudioSession: VoiceAudioSession {
     /// lines up (ADR-020 Amendment A2's rule, applied to the audio session) — and, since this hardening
     /// pass, by comparison against the generation the notification was actually stamped with at the
     /// callback boundary, not whatever generation happens to be current when this runs.
-    private func apply(_ event: AudioSessionEvent) {
+    private func apply(_ event: AudioSessionEvent) async {
         let previousStartedAt = lifecycle.transition.startedAtMonoUs
         let outcome = AudioSessionLifecycle.reduce(state: lifecycle, event: event)
         lifecycle = outcome.state
@@ -329,7 +328,7 @@ public actor IosVoiceAudioSession: VoiceAudioSession {
                 publish(routeState: routeState)
             case .reactivate:
                 // Only reached when the platform said `.shouldResume`.
-                try? session.setActive(true)
+                try? await audioSessionCoordinator.reactivateAfterInterruption()
             case .rebuildAfterReset:
                 // Every audio object this process holds is invalid. The old observers and this
                 // generation's signal path belonged to the superseded generation, so both go; the user
@@ -340,7 +339,7 @@ public actor IosVoiceAudioSession: VoiceAudioSession {
                 signals?.finish()
                 signals = nil
                 doorbell = nil
-                try? session.setCategory(.playback, mode: .default, options: [])
+                await audioSessionCoordinator.resetAfterMediaServicesFailure()
             case .reportFailure:
                 break // recorded in `lifecycle.lastFailure`
             }
@@ -381,8 +380,8 @@ public actor IosVoiceAudioSession: VoiceAudioSession {
         }
     }
 
-    private func timeoutTransition(generation: Int) {
-        apply(
+    private func timeoutTransition(generation: Int) async {
+        await apply(
             .transitionTimeoutCheck(
                 generation: generation,
                 atMonoUs: monotonicNowUs(),
@@ -410,12 +409,14 @@ public actor IosVoiceAudioSession: VoiceAudioSession {
             interrupted: lifecycle.interrupted
         )
         next.lastTransitionDurationUs = lifecycle.transition.lastDurationUs
+        next.transitionTimedOutCount = lifecycle.transition.timedOutCount
+        next.lastTransitionTimedOut = lifecycle.transition.lastSettlementTimedOut
         snapshot = next
         sink?(next)
     }
 
-    private func fail(_ failure: VoiceFailure) -> Result<Void, VoiceAudioSessionError> {
-        apply(.failed(generation: lifecycle.generation, failure: failure))
+    private func fail(_ failure: VoiceFailure) async -> Result<Void, VoiceAudioSessionError> {
+        await apply(.failed(generation: lifecycle.generation, failure: failure))
         return .failure(VoiceAudioSessionError(failure))
     }
 
@@ -444,7 +445,10 @@ public actor IosVoiceAudioSession: VoiceAudioSession {
 public actor IosVoiceAudioSession: VoiceAudioSession {
     private var sink: (@Sendable (AudioRouteSnapshot) -> Void)?
 
-    public init(monotonicNowUs: @escaping @Sendable () -> Int64 = { 0 }) {
+    public init(
+        audioSessionCoordinator _: IosAudioSessionCoordinator = IosAudioSessionCoordinator(),
+        monotonicNowUs: @escaping @Sendable () -> Int64 = { 0 }
+    ) {
         _ = monotonicNowUs
     }
 

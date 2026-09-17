@@ -18,6 +18,7 @@ import SwiftUI
 /// rows.
 struct VoiceCard: View {
     let voice: VoiceDiagnostics
+    let coexistence: CoexistenceDiagnostics
     let policy: IntercomPolicy
     let peerAudioState: AudioStateMessage?
     let refusal: VoiceFailure?
@@ -35,12 +36,25 @@ struct VoiceCard: View {
             media
             setup
             route
+            coexistenceSection
             peer
             signalling
         }
         .padding()
         .background(Color(white: 0.95))
         .clipShape(RoundedRectangle(cornerRadius: 12))
+    }
+
+    private var coexistenceSection: some View {
+        Group {
+            Text("COEXISTENCE").font(.caption2).foregroundStyle(.secondary)
+            row("gain target / applied", "\(coexistence.targetVolumePermille) / \(coexistence.appliedVolumePermille)")
+            row("paused by voice", "\(coexistence.pausedByVoice)")
+            row("fallback", coexistence.fallback.rawValue)
+            row("ramp revision / cancelled", "\(coexistence.rampRevision) / \(coexistence.rampCancellationCount)")
+            row("pause / resume", "\(coexistence.pauseCount) / \(coexistence.resumeCount)")
+            row("stale inputs", "\(coexistence.staleInputCount)")
+        }
     }
 
     @ViewBuilder
@@ -240,6 +254,7 @@ struct VoiceCard: View {
         row("media quality", voice.route.mediaQuality.wire)
         row("coupling", voice.route.profileCoupling.wire)
         row("route state", voice.route.routeState.wire)
+        row("transition timeouts", "\(voice.route.transitionTimedOutCount)")
         row("last transition", msLabel(voice.route.lastTransitionDurationUs.map { Double($0) / 1_000 }))
         row("confidence", voice.route.confidence.wire)
         row("last change", "\(voice.route.lastChangeReason)")

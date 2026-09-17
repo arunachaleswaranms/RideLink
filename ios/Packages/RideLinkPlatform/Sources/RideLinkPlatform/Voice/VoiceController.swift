@@ -18,6 +18,8 @@ public struct VoiceDiagnostics: Sendable, Equatable {
     public var intercomMode: IntercomMode = IntercomPolicy.default.intercomWireMode
     /// Whether outbound audio is flowing **right now**. The gate's whole output.
     public var transmitting = false
+    /// Whether the peer's last accepted `VOICE_STATE` says its outbound track is carrying speech.
+    public var peerTransmitting = false
     /// The PTT control's current position, for the UI to reflect back at the user.
     public var pttHeld = false
     /// The user's own Mute toggle, as distinct from `micMuted`. Survives a policy change.
@@ -90,6 +92,8 @@ public actor VoiceController: VoiceSignalSink {
     private var startedGeneration: VoiceSessionId?
     private var setupTimeline = VoiceSetupTimeline()
     private var lastFailure: VoiceFailure?
+    /// A coexistence projection updated only after the generation-bound reducer accepts a signal.
+    private var peerTransmitting = false
 
     /// The intercom transmission gate's state (ARCHITECTURE §6.3, ADR-021). Actor-isolated and mutated
     /// only by `applyIntercom`, on the single consumer.
@@ -495,6 +499,22 @@ public actor VoiceController: VoiceSignalSink {
         noteFromInput(input)
         let outcome = VoiceNegotiation.reduce(state: state, input: input)
         state = outcome.state
+        let rejected = outcome.actions.contains {
+            if case .recordDroppedSignal = $0 { return true }
+            return false
+        }
+        if case .signalReceived(let signal, _, _) = input,
+           case .state(_, let wireState, let micMuted, _) = signal,
+           !rejected {
+            peerTransmitting =
+                state.peerVoiceEnabled &&
+                !micMuted &&
+                wireState != .idle &&
+                wireState != .closed &&
+                wireState != .failed
+        } else if !state.peerVoiceEnabled {
+            peerTransmitting = false
+        }
         for action in outcome.actions {
             guard !isShuttingDown || completesCleanup else { break }
             await perform(action)
@@ -836,6 +856,7 @@ public actor VoiceController: VoiceSignalSink {
         diagnostics.policy = transmission.policy
         diagnostics.intercomMode = transmission.policy.intercomWireMode
         diagnostics.transmitting = transmission.transmitting
+        diagnostics.peerTransmitting = peerTransmitting
         diagnostics.pttHeld = transmission.pttHeld
         diagnostics.userMuted = transmission.userMuted
         // False until a microphone-driven level exists on this platform, which is currently always —

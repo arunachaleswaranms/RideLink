@@ -54,6 +54,7 @@ public final class SessionCoordinator {
 
     /// FR-023 voice diagnostics. Empty until an authenticated session exists (PROTOCOL §7.1).
     public private(set) var voiceDiagnostics = VoiceDiagnostics()
+    public private(set) var coexistenceDiagnostics = CoexistenceDiagnostics()
 
     /// ARCHITECTURE §6.3's selected policy. Owned here rather than in the voice controller because it
     /// outlives any one voice session: a user's choice of gate is a property of the ride, and
@@ -150,6 +151,9 @@ public final class SessionCoordinator {
     /// `attachVoice` and finished in `retireSession`, so a diagnostics callback still in flight from a
     /// torn-down controller lands as a no-op `send` rather than mutating the session that replaced it.
     private var voiceDiagnosticsChannel: OrderedEventChannel<VoiceDiagnostics>?
+    private let audioSessionCoordinator: IosAudioSessionCoordinator
+    private var coexistence: IntercomMusicCoexistenceCoordinator?
+    private var coexistenceGeneration: Int64?
 
     /// Assembles the security wiring, and nothing else does: the Keychain identity (ADR-017), the
     /// one production `ControlChannel` — TLS 1.3 — and the trusted-peer store the SPKI pin is
@@ -158,7 +162,8 @@ public final class SessionCoordinator {
     /// Throws if the device identity cannot be created. That is deliberately fatal to the session
     /// rather than degraded: without an identity there is no certificate, no pin and no channel
     /// binding, and PROTOCOL §1 admits no plaintext alternative to fall back to.
-    public init() throws {
+    public init(audioSessionCoordinator: IosAudioSessionCoordinator = IosAudioSessionCoordinator()) throws {
+        self.audioSessionCoordinator = audioSessionCoordinator
         let sink = InMemoryLogSink()
         // DispatchTime's uptimeNanoseconds is mach_absolute_time-backed — monotonic, matching
         // ARCHITECTURE §7's "monotonic clocks only" rule.
@@ -471,6 +476,9 @@ public final class SessionCoordinator {
     @discardableResult
     private func retireSession(_ end: SessionEnd) -> Task<Void, Never> {
         let endingVoice = voice
+        let endingCoexistence = coexistence
+        if let generation = coexistenceGeneration { endingCoexistence?.endLifetime(generation) }
+        coexistenceGeneration = nil
         if endingVoice != nil {
             voice = nil
             voiceDiagnostics = VoiceDiagnostics()
@@ -496,6 +504,10 @@ public final class SessionCoordinator {
         let manager = controlSessionManager
 
         return teardown.retire { [weak self] in
+            // Ending a lifetime can enqueue an exact-volume restore or a Mode D resume. It belongs
+            // to this session just as much as voice shutdown does, so terminal teardown awaits it
+            // before a successor may start.
+            await endingCoexistence?.awaitLifetimeEnded()
             for task in endingWork.values { task.cancel() }
             for task in endingWork.values { await task.value }
             // Re-read *after* every continuation of this session is terminal, which is the one point
@@ -636,6 +648,7 @@ public final class SessionCoordinator {
     public func selectIntercomPolicy(_ policy: IntercomPolicy) {
         intercomPolicy = policy
         voice?.selectPolicy(policy)
+        if let generation = coexistenceGeneration { coexistence?.selectPolicy(policy, generation: generation) }
         // With no controller there is no diagnostics change to ride on, so the mode change is published
         // here — `AUDIO_STATE.intercom_mode` is meaningful before the intercom has ever started (Mode E
         // is exactly that case).
@@ -659,12 +672,15 @@ public final class SessionCoordinator {
     /// ride segment, which a fresh one would have to reopen.
     private func attachVoice(isLocalLeader: Bool, authGeneration: Int64) {
         if let voice {
+            coexistenceGeneration = coexistence?.beginLifetime(policy: intercomPolicy)
+            if let generation = coexistenceGeneration { updateCoexistence(generation: generation, diagnostics: voiceDiagnostics) }
             // One authenticated event supplies successor authority and the §7.8 rebuild opportunity.
             // The reducer also sees a gap press delivered after this task; diagnostics decide neither.
             launchInSession { _ in await voice.controlAuthenticated(controlGeneration: authGeneration) }
             return
         }
         let manager = controlSessionManager
+        let audioSessionCoordinator = audioSessionCoordinator
         launchInSession { [weak self] id in
             // The relay is actor-isolated on the manager, so it is awaited rather than read: it captures
             // the manager's `activeSocket`/`authenticated`, which is what makes its writer non-nil only
@@ -672,7 +688,7 @@ public final class SessionCoordinator {
             let relay = await manager.voiceRelay()
             let controller = VoiceController(
                 engine: WebRtcVoiceEngine(),
-                audioSession: IosVoiceAudioSession(),
+                audioSession: IosVoiceAudioSession(audioSessionCoordinator: audioSessionCoordinator),
                 transport: relay,
                 isLocalLeader: isLocalLeader,
                 // One audio track per peer (ADR-003). A fixed, non-identifying id: a track id crosses
@@ -695,6 +711,7 @@ public final class SessionCoordinator {
             // gap it was pressed in.
             await controller.controlAuthenticated(controlGeneration: authGeneration)
             guard self.ownsSessionWork(id) else { return }
+            self.coexistenceGeneration = self.coexistence?.beginLifetime(policy: self.intercomPolicy)
 
             // Exactly one consumer, draining in a single `for await` loop — see `OrderedEventChannel`'s
             // doc comment for why a `Task` per event cannot make the ordering guarantee `AUDIO_STATE`'s
@@ -706,6 +723,9 @@ public final class SessionCoordinator {
                 for await diagnostics in diagnosticsChannel.stream {
                     guard let self else { return }
                     self.voiceDiagnostics = diagnostics
+                    if let generation = self.coexistenceGeneration {
+                        self.updateCoexistence(generation: generation, diagnostics: diagnostics)
+                    }
                     // Every observable audio change publishes, and the publisher itself decides whether
                     // there is anything new to say — which is what makes `revision` mean "the state
                     // changed" rather than "a callback fired".
@@ -724,6 +744,32 @@ public final class SessionCoordinator {
             })
             self.logger.info("SessionCoordinator", "voice subsystem attached (offerer=\(isLocalLeader))")
         }
+    }
+
+    public func attachCoexistence(music: any MusicCoexistencePort) {
+        guard coexistence == nil else { return }
+        coexistence = IntercomMusicCoexistenceCoordinator(music: music)
+        coexistence?.setDiagnosticsObserver { [weak self] diagnostics in
+            self?.coexistenceDiagnostics = diagnostics
+        }
+    }
+
+    /// Phase 6 fallback projection; it changes no Phase 5 authority and starts no retry.
+    public func updateSyncAvailability(_ available: Bool) {
+        coexistence?.updateSyncAvailability(available)
+    }
+
+    private func updateCoexistence(generation: Int64, diagnostics: VoiceDiagnostics) {
+        coexistence?.updateVoice(
+            generation: generation,
+            available: diagnostics.status != .failed,
+            localTransmitting: diagnostics.transmitting,
+            peerTransmitting: diagnostics.peerTransmitting,
+            routeState: diagnostics.route.routeState,
+            interrupted: diagnostics.route.interrupted,
+            transitionTimedOut: diagnostics.route.lastTransitionTimedOut
+        )
+        coexistenceDiagnostics = coexistence?.diagnostics ?? CoexistenceDiagnostics()
     }
 
     /// PROTOCOL §4.4's revision rule lives in the shared `AudioStateInbox`: anything not strictly greater
