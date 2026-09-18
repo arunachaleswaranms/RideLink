@@ -1064,16 +1064,18 @@ observable player calls; sleeps are never sequencing evidence.
 
 | Software case | Required proof |
 |---|---|
-| D1 — Modes A/B | Active voice ramps from the current base volume to a 25% multiplier in ten steps over 200 ms; inactive restores the exact base value |
-| D2 — Mode C | At base 80%, PTT down targets 28%; PTT up restores exactly 80%; stored base volume never changes |
+| D0 — no honest speech signal | Continuous Modes A/D report `SpeechActivity.unavailable`, never fabricate `.active` from an enabled track, produce no duck/pause, and surface `speechActivityUnavailable`; a genuine PTT or synthetic-VOX signal ducks/pauses normally once it arrives (ADR-027 Amendment A1, blocker 1) |
+| D1 — Modes A/B | A genuine `SpeechActivity.active` signal ramps from the current base volume to a 25% multiplier in ten steps over 200 ms; inactive restores the exact base value |
+| D2 — Mode C | At base 80%, PTT down (a genuine signal) targets 28%; PTT up restores exactly 80%; stored base volume never changes |
 | D3/D4 — duplicate and rapid reversal | Duplicate active/inactive input starts no competing effect; reversal begins at the last applied gain and converges without overshoot |
-| D5/D6 — teardown and reconnect | Terminal teardown joins restoration; old ramp completion cannot touch a successor player; reconnect derives current coexistence state and cannot stay ducked from predecessor transmission |
+| D5/D6 — teardown and reconnect | Terminal teardown joins restoration; old ramp completion cannot touch a successor player; a successor's coexistence generation starts neutral and is never seeded from a predecessor's cached diagnostics |
+| P1/P2 — reconnect provenance | `VoiceDiagnostics.controlGeneration` (from `VoiceNegotiationState.negotiationControlGeneration`) is stamped at production time and checked, never re-derived, before a snapshot reaches coexistence; a snapshot naming a foreign or retired control lifetime is refused and counted rather than relabelled as the live generation's (ADR-027 Amendment A1, blocker 2) |
 | PTT-50 | One ride/voice/player lifetime, 50 down and 50 up transmission edges, 50 duck and restore cycles; capture opens once, closes zero times during presses; voice session, peer connection and audio session are not rebuilt |
-| Mode D | Active pauses once; duplicate active is inert; inactive resumes only the exact track locally paused by coexistence; user pause, track end/replacement, reconnect and teardown prevent stale resume |
+| Mode D | A genuine (peer or local) signal pauses once; duplicate active is inert; inactive resumes only the exact track locally paused by coexistence; user pause, track end/replacement, reconnect and teardown prevent stale resume |
 | Mode switches | A→C, C→A, C→D, D→E, E→C, B→C and C→B clear obsolete gate/duck/pause state, preserve base volume and advance the effective audio projection through existing policy publication |
 | Independent fallback | Microphone/voice/signalling/input failure leaves music usable; music/sync failure leaves voice usable; interruption and route timeout enter an explicit bounded fallback without a retry loop |
 | Route and drift | Transition start/settlement remains callback-driven, timeout is failure rather than a measurement, stale generation callbacks are inert, and Phase 5 produces no correction or hard-seek-budget use while either peer is transitioning |
-| Lifetime | Control A may die while ducked or transitioning; B may authenticate and rebuild voice; A's later speech/PTT/ramp callbacks are inert; terminal shutdown waits for owned coexistence work before a second session starts |
+| Lifetime | Control A may die while ducked or transitioning; B may authenticate and rebuild voice; A's later diagnostics/speech/PTT/ramp callbacks are provenance-checked and inert against B; terminal shutdown waits for owned coexistence work before a second session starts |
 
 The following rows remain **DEFERRED — PHYSICAL QUALIFICATION**. Simulator/emulator or pure-driver
 evidence must not mark them passed:

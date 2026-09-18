@@ -1,15 +1,30 @@
 # RideLink — Status
 
-**Updated:** 17 September 2026 — **Phase 6 software closure is implemented on the feature branch**
+**Updated:** 18 September 2026 — **an independent review of Phase 6 software closure found two
+confirmed, reachable blockers; both are fixed** ([ADR-027 Amendment A1](DECISIONS/ADR-027-intercom-music-coexistence-ownership.md#amendment-a1--18-sep-2026-independent-review-two-confirmed-blockers),
+§2au). **Blocker 1**: the coexistence reducer read continuous (gate-`none`, Modes A/D) transmission as
+speech, which permanently ducked/paused music the instant the intercom started regardless of whether
+anyone spoke — fixed by a genuinely separate `SpeechActivity` signal (`.active`/`.inactive`/`.unavailable`)
+that a continuous gate honestly reports as `.unavailable`, never a fabricated `.active`. **Blocker 2**:
+`SessionCoordinator`'s reconnect branch could relabel a predecessor's cached voice diagnostics as the
+successor's own — the same defect class ADR-024 Amendment A7 named, reached one layer up — fixed by
+stamping `VoiceDiagnostics.controlGeneration` from the negotiation's own existing
+`negotiationControlGeneration` and refusing any snapshot whose provenance does not match the live
+control lifetime, rather than reconstructing it at consumption time. Both were reproduced against the
+unmodified pre-fix sources first. No wire change; the shared vectors moved. Software closure is
+re-affirmed with these fixes; physical qualification remains explicitly deferred and independent
+review remains required.
+
+**Previous update:** 17 September 2026 — **Phase 6 software closure is implemented on the feature branch**
 ([ADR-027](DECISIONS/ADR-027-intercom-music-coexistence-ownership.md), §2at). Intercom-caused music
 effects now have one mirrored, vector-pinned owner; ducking is multiplicative and temporary; Mode D
 is an exact-track local suppression layer; voice/music failures degrade independently; and all
 effects carry session/player ownership through teardown and reconnect. Physical qualification is
 explicitly deferred because the complete iPhone and Bluetooth helmet/TWS chain is unavailable. No
 hardware, audible-quality, latency, or route-time claim is made. Phase 7 is untouched. Independent
-review remains required.
+review remains required. (This entry's blockers 1 and 2 are recorded and fixed in §2au above.)
 
-**Previous update:** 14 September 2026 (**an independent review of the previous pass's own fix**, fortieth — see §2aq. **§4 problem 66 is CONFIRMED and FIXED** by [ADR-020 Amendment A10](DECISIONS/ADR-020-webrtc-voice-foundation.md). A9 answered "may this press answer that held offer?" safely in both directions and **not live** in one: a `StartRequested` from a lifetime older than the one owning a held `VOICE_OFFER` was refused, and nothing would ever have answered that offer — the peer sends one per `voice_session_id` (§7.4), §7.8's rebuild is gated on the published `localAudioOpen` and had already run, and a user who has consented does not press again. **A9's own regression hid it by supplying a second `start(B)` that production never sends**, which is why CI stayed green. Reproduced first on unmodified iOS production at the coordinator's real decisions. Fixed by separating a press's two halves: **control authority expires with its link; user consent is ride-segment state.** A newer held offer is now answered **under that offer's own lifetime** — its `voice_session_id`, its generation on every outbound frame, its boundary as the one that retires it — and the owner is deliberately **not** moved to the press's. **No wire change; the shared vectors change.** A separate rule-21 finding is recorded as **§4 problem 67** and fixed. A8 and A9 are otherwise unchanged and problems 61, 63 and 64 stay closed. The previous entry follows.)
+**Before that:** 14 September 2026 (**an independent review of the previous pass's own fix**, fortieth — see §2aq. **§4 problem 66 is CONFIRMED and FIXED** by [ADR-020 Amendment A10](DECISIONS/ADR-020-webrtc-voice-foundation.md). A9 answered "may this press answer that held offer?" safely in both directions and **not live** in one: a `StartRequested` from a lifetime older than the one owning a held `VOICE_OFFER` was refused, and nothing would ever have answered that offer — the peer sends one per `voice_session_id` (§7.4), §7.8's rebuild is gated on the published `localAudioOpen` and had already run, and a user who has consented does not press again. **A9's own regression hid it by supplying a second `start(B)` that production never sends**, which is why CI stayed green. Reproduced first on unmodified iOS production at the coordinator's real decisions. Fixed by separating a press's two halves: **control authority expires with its link; user consent is ride-segment state.** A newer held offer is now answered **under that offer's own lifetime** — its `voice_session_id`, its generation on every outbound frame, its boundary as the one that retires it — and the owner is deliberately **not** moved to the press's. **No wire change; the shared vectors change.** A separate rule-21 finding is recorded as **§4 problem 67** and fixed. A8 and A9 are otherwise unchanged and problems 61, 63 and 64 stay closed. The previous entry follows.)
 
 **Previously:** the thirty-ninth pass — see §2ap. **§4 problems 63 and 64 are CONFIRMED and FIXED** by [ADR-020 Amendment A9](DECISIONS/ADR-020-webrtc-voice-foundation.md): a held remote offer may be answered only by the lifetime that delivered it, and every outbound `VOICE_*` action names the control lifetime whose connection it may be written on. Both were reproduced from unmodified production on both platforms first. That fix is unchanged in substance; §2aq is the independent review **of** it, and it found one more — problem 66, a *liveness* defect in A9's own held-offer rule, plus the rule-21 finding recorded as problem 67. See the entry above.
 **Current milestone:** M1 (Private voice link) has its software implementation, including the
@@ -29,7 +44,8 @@ closure-audited (§2q/§2r). Phase 4 is closure-audited **six** times (§2v–§
 44 is now fixed** (ADR-023 Amendment A6 / ADR-025 §1). **M4 (Synced ride music) has its software
 half, and it has been audited seven times**: Phase 5 is closure-audited A1 (§2ab), A2 (§2ac),
 A3 (§2ad), A4 (§2ae), A5 (§2af), A6 (§2ag) and A7 (§2ah), with its real-device gate open.
-**Current phase:** Phase 6 — intercom/music coexistence software closure. Phase 5 remains the
+**Current phase:** Phase 6 — intercom/music coexistence software closure, now independently
+reviewed once with two confirmed findings fixed (§2au). Phase 5 remains the
 accepted synchronized-playback baseline. The thirty-second session did **not** advance
 Phase 5; it closed the cross-phase control-plane defect A7 confirmed and deliberately did not fix
 (§2ai, ADR-025). The thirty-third session (§2aj) did not advance Phase 5 either: it closed **§4
@@ -6058,8 +6074,109 @@ No final test or build flake remains.
 TWS; actual microphone and Bluetooth profile/sample-rate switching; audible duck/no-click quality;
 route transition time; real call/interruption; screen-lock audio; A-03, A-05, A-06, A-08, A-10 and
 A-11; riding/wind noise. No simulator result retires those rows. Mode C remains the unmeasured
-architecture default, not a measured winner. The only known Phase 6 software limitation is the
-missing production-rate VOX level source stated above.
+architecture default, not a measured winner. **This entry's claim that the missing production-rate
+VOX level source was the only known Phase 6 software limitation was wrong — §2au's independent
+review found two more, confirmed and fixed.** The missing VOX level source remains the one accepted,
+by-design limitation.
+
+---
+
+## 2au. Phase 6 independent review — two confirmed blockers, both fixed (18 September 2026, ADR-027 Amendment A1)
+
+**Scope:** an independent review of §2at's software closure, against the same standing instruction
+this file's Phase 5 history already establishes — audit the newest fix first. Both findings were
+reproduced against the unmodified pre-fix sources before either was changed. Neither required
+rewriting §2at's accepted design; both are narrow, targeted fixes, mirrored on both platforms.
+
+### Blocker 1 — continuous transmission is not speech
+
+`CoexistenceState.voiceActive` read `localTransmitting || peerTransmitting` as "speech is
+happening." `TransmissionGate.none` (Modes A and D, ARCHITECTURE §6.3) has no gate at all, so the
+outbound track is enabled for the whole ride segment the instant capture opens — §2at's own
+`VoiceControllerIntercomTest`-style reasoning about the gate already established this, but the
+coexistence reducer read it as speech anyway. The reachable consequence: selecting Mode A ducked
+music to 25% **permanently** from the moment the intercom started, and Mode D paused music
+**permanently**, in both cases regardless of whether either user ever spoke — the opposite of
+ARCHITECTURE §6.3's "on speech" contract. The peer side had the identical defect, reading
+`VOICE_STATE.mic_muted == false` alone, which for a continuous peer's wire report means nothing
+about speech either.
+
+**Fixed** by `SpeechActivity` (`.active` / `.inactive` / `.unavailable`), mirrored in
+`TransmissionState.speechActivity` and the new `peerSpeechActivity(mode:transmittingOnWire:)`,
+genuinely distinct from `transmitting`/`peerTransmitting` (which keep their existing, correct
+meaning — "the track is enabled," used for the UI's on-air indicator and nothing else).
+`TransmissionGate.none` reports `.unavailable` unconditionally; `.ptt` and `.vox` report the gate's
+own state, because both have a real signal — a button a human holds, or a level a human
+produces — and VOX's still-pending production level source (ADR-021 §6, unchanged) means it
+honestly reports `.inactive` rather than a fabricated `.active`. `CoexistenceState.voiceActive` now
+requires `localSpeechActive || peerSpeechActive`; a new `CoexistenceFallback.speechActivityUnavailable`
+surfaces the resulting silence explicitly. `IntercomMusicCoexistenceCoordinator.updateVoice` and the
+shared `CoexistenceInput.VoiceChanged` carry the renamed, honestly-sourced fields; two new vector
+rows (`mode-a-continuous-track-enabled-is-not-speech`, `mode-d-continuous-track-enabled-is-not-speech`)
+pin the fail-honest behaviour. Mode C's PTT-driven duck and Mode B's synthetic-VOX-driven duck are
+behaviourally unchanged — both already carried a genuine signal.
+
+### Blocker 2 — a reconnect could relabel a predecessor's voice snapshot as the successor's own
+
+`VoiceController` is deliberately retained across a control-plane reconnect (ADR-020 §6). The one
+diagnostics collector `SessionCoordinator.attachVoice` installs at first construction forwards every
+snapshot it publishes to coexistence for the controller's whole lifetime, spanning as many control
+lifetimes as the ride segment does — but neither the diagnostics value nor the forwarding code
+carried any record of which control lifetime had produced a given snapshot. `attachVoice`'s
+reconnect branch synchronously reused `_voiceDiagnostics.value` — whatever the collector had last
+written — to seed the successor's brand-new coexistence generation. If the predecessor was actively
+ducking or Mode-D-pausing when the successor authenticated, that stale snapshot was still the only
+one on record at that exact instant, so the misattribution was not a race to provoke: it happened on
+every such reconnect where the predecessor's last known state was non-neutral. This is the identical
+class ADR-024 Amendment A7 named for Phase 5 ingress ("never read a live generation... to decide what
+a frame you already have belongs to"), reached one layer up, at a seam A7 never touched.
+
+**Fixed** the same way A7 fixed it: provenance travels with the value, never reconstructed at
+consumption time. `VoiceDiagnostics` gained `controlGeneration`, stamped once inside
+`VoiceController.publishDiagnostics` from the already-existing, already-audited
+`VoiceNegotiationState.negotiationControlGeneration` (ADR-020 rule 23's own field — no new authority
+source introduced). `SessionCoordinator` records `voiceControlGeneration` from the same
+`authGeneration` `Connected` already supplies, and `updateCoexistence` refuses — and counts, via a
+new test-visible `staleVoiceDiagnosticsCount` — any snapshot whose `controlGeneration` does not
+match it. The former synchronous reconnect-branch seed is removed outright: a freshly begun
+coexistence generation starts neutral, and the same persistent collector applies the successor's own
+genuine diagnostics once they arrive, exactly as it already did for the ride segment's first control
+lifetime.
+
+A narrow sweep for the same defect class elsewhere in the Phase 6 code (route/interruption state,
+sync availability, ramp and pause/resume completion, policy selection) found no second instance:
+route state rides inside the same now-provenanced `VoiceDiagnostics`; sync availability and policy
+selection are locally-sourced facts with no cross-boundary asynchronous gap to go stale across; and
+every ramp/pause/resume completion already re-proves its own generation against the player
+(`MusicCoexistencePort.applyCoexistenceGain`/`pauseForVoice`/`resumeAfterVoice`) before taking
+effect, which the previous pass had already built correctly.
+
+### Verification
+
+Both findings were reproduced by temporarily reverting the fix and confirming the exact failure
+described above, then reverting the revert — standard practice for this file's audits. New
+regressions: `IntercomMusicCoexistenceTest`/`IntercomMusicCoexistenceTests` (Android/iOS) prove
+continuous Modes A/D never duck or pause with no honest signal, and do so normally once one arrives;
+`IntercomTransmissionTest`/`IntercomTransmissionTests` prove `speechActivity`/`peerSpeechActivity`
+case by case, including the muted/interrupted/capture-closed and continuous-peer cases;
+`VoiceControllerTest`/`VoiceControllerTests` prove the same properties through the real driver, plus
+that `controlGeneration` is stamped and cleared correctly across a link loss;
+`SessionCoordinatorCoexistenceProvenanceTest` (Android; iOS has no `SessionCoordinator` test bundle
+at all — STATUS §4 problem 48, pre-existing and unrelated to this fix) drives the real
+`SessionCoordinator`, `VoiceController` and `IntercomMusicCoexistenceCoordinator` together through a
+production-shaped reconnect and proves the predecessor's stale duck/pause cannot cross onto the
+successor while the successor's own genuine PTT/peer-speech events still work normally — using
+`kotlinx.coroutines.test`'s deterministic scheduler (`runCurrent()`, no `advanceUntilIdle()`, which
+would hang against `VoiceController`'s intentionally infinite diagnostics-poll loop) rather than real
+threading, specifically so the regression is a deterministic fact rather than a timing-dependent one.
+Both new Android tests were confirmed to fail against the pre-fix code (a 20-step double-ramp for
+blocker 2's duck case; two pauses instead of one for its Mode D case) and pass against the fix, 5/5
+repeated runs.
+
+Full local gates re-run clean on both platforms: Android `:core:test :network:test :app:test
+:audio:test :data:test`, `ktlintCheck detekt lint assembleDebug assembleRelease`; iOS
+`RideLinkCore` 334/334, `RideLinkPlatform` 509/509, unsigned Debug and Release iOS Simulator builds.
+No wire change; the shared `protocol/vectors/coexistence/` vectors moved from 21 to 23 rows.
 
 ---
 

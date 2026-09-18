@@ -464,11 +464,24 @@ The −35 dBFS / 700 ms defaults are reasoned starting points for TEST_PLAN A-14
 #### 6.3.2 Intercom/music coexistence ownership (Phase 6)
 
 `IntercomMusicCoexistence` is the single deterministic owner of temporary music effects caused by
-voice. Its mirrored pure reducer consumes the interpreted intercom policy, accepted local/peer
-transmission state, voice and music availability, playback intent, base volume, route/interruption
-state, and the owning session generation. One platform coordinator per process executes its actions
-through the existing `MusicCoordinator` and player; the voice controller, UI, and audio-session layer
-do not set music volume independently. See ADR-027.
+voice. Its mirrored pure reducer consumes the interpreted intercom policy, each side's own honest
+`SpeechActivity` (never "the outbound track is enabled" — see below), voice and music availability,
+playback intent, base volume, route/interruption state, and the owning session generation. One
+platform coordinator per process executes its actions through the existing `MusicCoordinator` and
+player; the voice controller, UI, and audio-session layer do not set music volume independently. See
+ADR-027 and its Amendment A1.
+
+**Continuous transmission is not speech.** `TransmissionGate.none` (Modes A and D) has no gate at
+all, so the outbound track is enabled for the whole ride segment the instant capture opens — that is
+not evidence anyone is talking, and coexistence must not treat it as such (ADR-027 Amendment A1).
+`SpeechActivity` (`.active` / `.inactive` / `.unavailable`) is the honest signal coexistence actually
+reduces on: PTT and VOX each have a real one (a button a human holds, or a level a human produces),
+so their own gate state is the proxy; a continuous gate reports `.unavailable` unconditionally, and a
+new `CoexistenceFallback.speechActivityUnavailable` says so explicitly rather than silently behaving
+like permanent silence. The peer side mirrors this from `VOICE_STATE.mode` — `mic_muted == false`
+means nothing about speech for a continuous peer either. `VoiceDiagnostics.transmitting` keeps
+meaning "the track is enabled"; `localSpeechActivity`/`peerSpeechActivity` are the separate fields
+coexistence actually consumes.
 
 Ducking is a temporary multiplier: `effective volume = user base volume × coexistence gain`. Modes A
 and B use 25%, Mode C uses 35%, and restoration returns to the exact base-volume value without

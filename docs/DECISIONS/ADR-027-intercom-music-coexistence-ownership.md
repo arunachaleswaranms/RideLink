@@ -74,3 +74,74 @@ directly, which was safe only while coexistence was out of scope. Phase 6 cannot
 - **Use the WebRTC statistics poll as VOX input.** Its cadence is unsuitable for speech gating.
 - **Treat a route timeout as measured settlement.** A timeout is failure protection, not evidence of
   the platform's transition time.
+
+## Amendment A1 — 18 Sep 2026 (independent review, two confirmed blockers)
+
+An independent review of the initial implementation found two confirmed, reachable defects — both
+reproduced against the unmodified pre-fix sources before either was changed, matching this
+codebase's standing audit discipline. Neither required rewriting the software-closure work this ADR
+already accepted; both were narrow, targeted fixes.
+
+**Blocker 1 — continuous transmission is not speech.** The coexistence reducer treated
+`localTransmitting || peerTransmitting` as "speech is happening." For `TransmissionGate.none`
+(Modes A and D) the outbound track is enabled for the whole ride segment the moment capture opens
+(ARCHITECTURE §6.3), so this made Mode A duck — and Mode D pause — music **permanently**, the
+instant the intercom started, regardless of whether anyone was speaking. The peer side had the same
+defect: it read `VOICE_STATE.mic_muted == false` alone, which for a continuous peer means nothing
+about speech either.
+
+Fixed by introducing `SpeechActivity` (`.active` / `.inactive` / `.unavailable`) as a value
+genuinely distinct from `transmitting`, mirrored on both platforms
+(`TransmissionState.speechActivity`, `peerSpeechActivity(mode:transmittingOnWire:)`).
+`TransmissionGate.none` has no honest speech signal at all and reports `.unavailable`, never a
+fabricated `.active` or a silently-identical-to-`.active` value. `TransmissionGate.ptt` and `.vox`
+have a genuine signal — a button a human is actually holding, or a level a human actually
+produced — so their own gate state **is** the honest proxy; VOX's gate simply never opens in
+production today (no fast level source — unchanged from ADR-021 §6), which correctly reports
+`.inactive` rather than fabricating activity. `CoexistenceState.voiceActive` now requires
+`localSpeechActive || peerSpeechActive` from this honest source, and a new
+`CoexistenceFallback.speechActivityUnavailable` — surfaced whenever voice is up, the policy wants an
+on-speech effect, and neither side has a signal — makes the resulting silence an explicit,
+diagnosable state rather than an indistinguishable "nobody is talking." Mode A and Mode D now
+produce **no** duck or pause from continuous transmission alone; Mode C's PTT-driven duck and Mode
+B's synthetic-VOX-driven duck are unchanged, because both already carried a genuine signal.
+`VoiceDiagnostics.transmitting` keeps its existing meaning ("the outbound track is enabled") — it was
+never wrong, only insufficient for coexistence — and gained siblings `localSpeechActivity` and
+`peerSpeechActivity` alongside it, never a replacement.
+
+**Blocker 2 — a reconnect could relabel a predecessor's voice snapshot as the successor's own.**
+`VoiceController` is deliberately retained across a control-plane reconnect (ADR-020 §6), and the one
+diagnostics collector `SessionCoordinator.attachVoice` installs at first construction keeps
+forwarding every snapshot it publishes to coexistence for the controller's whole lifetime — spanning
+as many control lifetimes as the ride segment does. Neither the diagnostics value nor the forwarding
+code carried any record of *which* control lifetime produced a given snapshot, so a reconnect's own
+`attachVoice` branch synchronously reused whatever snapshot the collector had last written — A's, if
+A was still the freshest thing on record the instant B authenticated — and applied it to B's
+brand-new coexistence generation. This is the exact class ADR-024 Amendment A7 already named
+("never read a live generation, epoch or session id to decide what a frame you already have
+belongs to"), reached one layer up: at the coexistence-forwarding seam, which A7 did not touch.
+
+Fixed the same way A7 fixed it: provenance travels with the value instead of being reconstructed at
+consumption time. `VoiceDiagnostics` gained `controlGeneration`, stamped once, inside
+`VoiceController.publishDiagnostics`, from the already-existing, already-audited
+`VoiceNegotiationState.negotiationControlGeneration` (ADR-020 rule 23's own ownership field) — no
+new authority source. `SessionCoordinator` records `voiceControlGeneration` from the same
+`authGeneration` it already receives on `Connected`, and `updateCoexistence` refuses (and counts) any
+diagnostics snapshot whose `controlGeneration` does not match it, rather than forwarding it under
+whatever coexistence generation happens to be live. The former synchronous reconnect-branch seed —
+`updateCoexistence(generation, _voiceDiagnostics.value)` — is removed outright: a freshly begun
+coexistence generation starts neutral, and the same persistent collector applies the successor's own
+genuine diagnostics once they arrive, exactly as it always has for the *first* control lifetime.
+
+A narrow sweep for the same class elsewhere in Phase 6 (route state, sync availability, ramp and
+pause/resume completion, policy events) found no second instance: route/interruption state rides
+inside the same now-provenanced `VoiceDiagnostics`; sync availability and policy selection are
+locally-sourced facts with no cross-boundary asynchronous gap; and every ramp/pause/resume completion
+already re-proves its own generation against the player before taking effect (unchanged from the
+initial implementation, and correct).
+
+No wire change. The shared `protocol/vectors/coexistence/` vectors moved — `VoiceChanged` carries
+`local_speech_active` / `peer_speech_active` / `speech_activity_available` instead of the removed
+`local_transmitting` / `peer_transmitting`, and two rows (`mode-a-continuous-track-enabled-is-not-speech`,
+`mode-d-continuous-track-enabled-is-not-speech`) were added — because the *pure table's* input shape
+changed to demand an honest signal, not because its policy changed.
