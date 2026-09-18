@@ -72,8 +72,9 @@ class CoexistenceVectorTest {
                 CoexistenceInput.VoiceChanged(
                     generation,
                     spec.bool("available"),
-                    spec.bool("local_transmitting"),
-                    spec.bool("peer_transmitting"),
+                    spec.bool("local_speech_active"),
+                    spec.bool("peer_speech_active"),
+                    spec.bool("speech_activity_available"),
                 )
             "MusicChanged" ->
                 CoexistenceInput.MusicChanged(
@@ -122,6 +123,6 @@ class CoexistenceVectorTest {
     private companion object {
         const val GENERATION = 1L
         const val TRACK = "track-a"
-        const val EXPECTED_MINIMUM_SCENARIOS = 21
+        const val EXPECTED_MINIMUM_SCENARIOS = 23
     }
 }

@@ -7,6 +7,7 @@ import com.ridelink.core.audiopolicy.IntercomPolicy
 import com.ridelink.core.audiopolicy.RideStartDecision
 import com.ridelink.core.audiopolicy.RideStartPolicy
 import com.ridelink.core.audiopolicy.RideStartRequest
+import com.ridelink.core.audiopolicy.SpeechActivity
 import com.ridelink.core.audiopolicy.VoiceFailure
 import com.ridelink.core.logging.LogSink
 import com.ridelink.core.logging.StructuredLogger
@@ -183,6 +184,19 @@ class SessionCoordinator(
     private var voice: VoiceController? = null
     private var voiceDiagnosticsJob: Job? = null
     private var coexistenceGeneration: Long? = null
+
+    /**
+     * The authenticated control lifetime [attachVoice] was last called under. Compared — never
+     * used to relabel — against [VoiceDiagnostics.controlGeneration] in [updateCoexistence], so a
+     * predecessor's diagnostics snapshot cannot be forwarded to coexistence under a successor's
+     * generation merely because it happens to be the one live when the snapshot is consumed (Phase 6
+     * review blocker 2; ADR-027 Amendment A1).
+     */
+    private var voiceControlGeneration: Long? = null
+
+    /** Test-visible count of [VoiceDiagnostics] snapshots [updateCoexistence] refused as stale. */
+    internal var staleVoiceDiagnosticsCount: Int = 0
+        private set
 
     val coexistenceDiagnostics: StateFlow<CoexistenceDiagnostics> =
         coexistence?.diagnostics ?: MutableStateFlow(CoexistenceDiagnostics()).asStateFlow()
@@ -545,6 +559,7 @@ class SessionCoordinator(
         val endingCoexistence = coexistence
         coexistenceGeneration?.let { endingCoexistence?.endLifetime(it) }
         coexistenceGeneration = null
+        voiceControlGeneration = null
         if (endingVoice != null) {
             voice = null
             controlSessionManager.voice.sink = null
@@ -710,9 +725,15 @@ class SessionCoordinator(
         isLocalLeader: Boolean,
         authGeneration: Long,
     ) {
+        // Read once, here, and compared (never used to relabel) in `updateCoexistence` — see
+        // `voiceControlGeneration`'s own doc.
+        voiceControlGeneration = authGeneration
         if (voice != null) {
             coexistenceGeneration = coexistence?.beginLifetime(_intercomPolicy.value)
-            coexistenceGeneration?.let { generation -> updateCoexistence(generation, _voiceDiagnostics.value) }
+            // Deliberately **not** seeded from `_voiceDiagnostics.value` here: that projection can
+            // still be a predecessor's, and `updateCoexistence`'s provenance check would refuse it
+            // anyway. This generation starts neutral; the persistent collector below applies its own
+            // genuine diagnostics once they arrive (Phase 6 review blocker 2; ADR-027 Amendment A1).
             // One Connected event supplies authority and the §7.8 rebuild opportunity. The reducer
             // handles pending Start intent and consent without consulting a diagnostics projection.
             voice?.controlAuthenticated(authGeneration)
@@ -755,11 +776,28 @@ class SessionCoordinator(
         generation: Long,
         diagnostics: VoiceDiagnostics,
     ) {
+        // Provenance gate (Phase 6 review blocker 2; ADR-027 Amendment A1). `diagnostics` is stamped,
+        // at production time inside `VoiceController.publishDiagnostics`, with the control lifetime
+        // that owned `VoiceNegotiationState` when it was computed (ADR-020 rule 23's own
+        // `negotiationControlGeneration`) — never re-derived here. A snapshot whose provenance does
+        // not match the control lifetime this coexistence generation was begun under is a
+        // predecessor's (or not-yet-owned) state and is refused rather than relabelled as this
+        // generation's: `VoiceController` is retained across a reconnect and keeps publishing to the
+        // one collector `attachVoice` set up on first construction, so this check — not which
+        // reconnect branch happened to run — is what stops a stale duck, pause or resume crossing a
+        // control-lifetime boundary.
+        if (diagnostics.controlGeneration != voiceControlGeneration) {
+            staleVoiceDiagnosticsCount += 1
+            return
+        }
         coexistence?.updateVoice(
             generation = generation,
             available = diagnostics.status != VoiceStatus.FAILED,
-            localTransmitting = diagnostics.transmitting,
-            peerTransmitting = diagnostics.peerTransmitting,
+            localSpeechActive = diagnostics.localSpeechActivity == SpeechActivity.ACTIVE,
+            peerSpeechActive = diagnostics.peerSpeechActivity == SpeechActivity.ACTIVE,
+            speechActivityAvailable =
+                diagnostics.localSpeechActivity != SpeechActivity.UNAVAILABLE ||
+                    diagnostics.peerSpeechActivity != SpeechActivity.UNAVAILABLE,
             routeState = diagnostics.route.routeState,
             interrupted = diagnostics.route.interrupted,
             transitionTimedOut = diagnostics.route.lastTransitionTimedOut,

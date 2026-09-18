@@ -100,11 +100,47 @@ final class IntercomMusicCoexistenceTests: XCTestCase {
         state = reduce(state, .lifetimeStarted(generation: generation + 1, policy: .modeC)).state
         let stale = reduce(
             state,
-            .voiceChanged(generation: generation, available: true, localTransmitting: false, peerTransmitting: false)
+            .voiceChanged(
+                generation: generation,
+                available: true,
+                localSpeechActive: false,
+                peerSpeechActive: false,
+                speechActivityAvailable: true
+            )
         )
         XCTAssertTrue(stale.actions.isEmpty)
         XCTAssertEqual(generation + 1, stale.state.generation)
         XCTAssertEqual(1, stale.state.staleInputCount)
+    }
+
+    /// Phase 6 review blocker 1: `localSpeechActive`/`peerSpeechActive` both false and
+    /// `speechActivityAvailable` false is exactly what a continuous (gate = none) policy reports —
+    /// the outbound track being permanently enabled is not evidence of speech, so this must never
+    /// duck or pause, and the fallback must say why rather than pretend nothing is wrong.
+    func testContinuousModesANeverDuckOrPauseWithNoHonestSpeechSignal() {
+        var modeA = started(.modeA)
+        let noSignalA = voice(modeA, local: false, speechActivityAvailable: false)
+        XCTAssertTrue(noSignalA.actions.isEmpty, "Mode A must not duck with no honest speech signal")
+        XCTAssertEqual(1_000, noSignalA.state.targetVolumePermille)
+        XCTAssertEqual(.speechActivityUnavailable, noSignalA.state.fallback)
+        modeA = noSignalA.state
+
+        var modeD = started(.modeD)
+        let noSignalD = voice(modeD, local: false, speechActivityAvailable: false)
+        XCTAssertTrue(noSignalD.actions.isEmpty, "Mode D must not pause with no honest speech signal")
+        XCTAssertFalse(noSignalD.state.pausedByVoice)
+        XCTAssertEqual(.speechActivityUnavailable, noSignalD.state.fallback)
+        modeD = noSignalD.state
+
+        // And once a genuine signal arrives (PTT held, or a real VOX open), the same track carries
+        // on ducking/pausing normally — the fallback is not a permanent state.
+        let signalA = voice(modeA, local: true, speechActivityAvailable: true)
+        XCTAssertEqual([.rampMusicVolume(targetPermille: 250, durationMs: 200)], signalA.actions)
+        XCTAssertEqual(.none, signalA.state.fallback)
+
+        let signalD = voice(modeD, local: true, speechActivityAvailable: true)
+        XCTAssertEqual([.pauseMusicForVoice(trackToken: track)], signalD.actions)
+        XCTAssertEqual(.none, signalD.state.fallback)
     }
 
     func testSuccessorReconcilesPredecessorModeDPauseBeforeRejectingStaleInput() {
@@ -118,8 +154,8 @@ final class IntercomMusicCoexistenceTests: XCTestCase {
             .rampMusicVolume(targetPermille: 1_000, durationMs: 200),
         ])
         XCTAssertFalse(successor.state.pausedByVoice)
-        XCTAssertFalse(successor.state.localTransmitting)
-        XCTAssertFalse(successor.state.peerTransmitting)
+        XCTAssertFalse(successor.state.localSpeechActive)
+        XCTAssertFalse(successor.state.peerSpeechActive)
     }
 
     func testTeardownRestoresDuckAndTemporaryPause() {
@@ -157,15 +193,17 @@ final class IntercomMusicCoexistenceTests: XCTestCase {
     private func voice(
         _ state: CoexistenceState,
         local: Bool,
-        available: Bool = true
+        available: Bool = true,
+        speechActivityAvailable: Bool = true
     ) -> CoexistenceOutcome {
         reduce(
             state,
             .voiceChanged(
                 generation: generation,
                 available: available,
-                localTransmitting: local,
-                peerTransmitting: false
+                localSpeechActive: local,
+                peerSpeechActive: false,
+                speechActivityAvailable: speechActivityAvailable
             )
         )
     }

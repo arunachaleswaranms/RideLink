@@ -14,8 +14,9 @@ final class IntercomMusicCoexistenceCoordinatorTests: XCTestCase {
             coordinator.updateVoice(
                 generation: generation,
                 available: true,
-                localTransmitting: true,
-                peerTransmitting: false,
+                localSpeechActive: true,
+                peerSpeechActive: false,
+                speechActivityAvailable: true,
                 routeState: .stable,
                 interrupted: false,
                 transitionTimedOut: false
@@ -25,8 +26,9 @@ final class IntercomMusicCoexistenceCoordinatorTests: XCTestCase {
             coordinator.updateVoice(
                 generation: generation,
                 available: true,
-                localTransmitting: false,
-                peerTransmitting: false,
+                localSpeechActive: false,
+                peerSpeechActive: false,
+                speechActivityAvailable: true,
                 routeState: .stable,
                 interrupted: false,
                 transitionTimedOut: false
@@ -49,8 +51,9 @@ final class IntercomMusicCoexistenceCoordinatorTests: XCTestCase {
         coordinator.updateVoice(
             generation: first,
             available: true,
-            localTransmitting: true,
-            peerTransmitting: false,
+            localSpeechActive: true,
+            peerSpeechActive: false,
+            speechActivityAvailable: true,
             routeState: .stable,
             interrupted: false,
             transitionTimedOut: false
@@ -61,8 +64,9 @@ final class IntercomMusicCoexistenceCoordinatorTests: XCTestCase {
         coordinator.updateVoice(
             generation: second,
             available: true,
-            localTransmitting: false,
-            peerTransmitting: false,
+            localSpeechActive: false,
+            peerSpeechActive: false,
+            speechActivityAvailable: true,
             routeState: .stable,
             interrupted: false,
             transitionTimedOut: false
@@ -83,8 +87,9 @@ final class IntercomMusicCoexistenceCoordinatorTests: XCTestCase {
         coordinator.updateVoice(
             generation: generation,
             available: true,
-            localTransmitting: true,
-            peerTransmitting: false,
+            localSpeechActive: true,
+            peerSpeechActive: false,
+            speechActivityAvailable: true,
             routeState: .stable,
             interrupted: false,
             transitionTimedOut: false
@@ -115,8 +120,9 @@ final class IntercomMusicCoexistenceCoordinatorTests: XCTestCase {
         coordinator.updateVoice(
             generation: generation,
             available: true,
-            localTransmitting: true,
-            peerTransmitting: false,
+            localSpeechActive: true,
+            peerSpeechActive: false,
+            speechActivityAvailable: true,
             routeState: .stable,
             interrupted: false,
             transitionTimedOut: false
@@ -128,8 +134,9 @@ final class IntercomMusicCoexistenceCoordinatorTests: XCTestCase {
         coordinator.updateVoice(
             generation: generation,
             available: true,
-            localTransmitting: false,
-            peerTransmitting: false,
+            localSpeechActive: false,
+            peerSpeechActive: false,
+            speechActivityAvailable: true,
             routeState: .stable,
             interrupted: false,
             transitionTimedOut: false
@@ -141,8 +148,9 @@ final class IntercomMusicCoexistenceCoordinatorTests: XCTestCase {
         coordinator.updateVoice(
             generation: generation,
             available: true,
-            localTransmitting: true,
-            peerTransmitting: false,
+            localSpeechActive: true,
+            peerSpeechActive: false,
+            speechActivityAvailable: true,
             routeState: .stable,
             interrupted: false,
             transitionTimedOut: false
@@ -153,8 +161,9 @@ final class IntercomMusicCoexistenceCoordinatorTests: XCTestCase {
         coordinator.updateVoice(
             generation: generation,
             available: true,
-            localTransmitting: false,
-            peerTransmitting: false,
+            localSpeechActive: false,
+            peerSpeechActive: false,
+            speechActivityAvailable: true,
             routeState: .stable,
             interrupted: false,
             transitionTimedOut: false

@@ -154,6 +154,14 @@ public final class SessionCoordinator {
     private let audioSessionCoordinator: IosAudioSessionCoordinator
     private var coexistence: IntercomMusicCoexistenceCoordinator?
     private var coexistenceGeneration: Int64?
+    /// The authenticated control lifetime `attachVoice` was last called under. Compared — never used
+    /// to relabel — against `VoiceDiagnostics.controlGeneration` in `updateCoexistence`, so a
+    /// predecessor's diagnostics snapshot cannot be forwarded to coexistence under a successor's
+    /// generation merely because it happens to be the one live when the snapshot is consumed (Phase 6
+    /// review blocker 2; ADR-027 Amendment A1).
+    private var voiceControlGeneration: Int64?
+    /// Test-visible count of `VoiceDiagnostics` snapshots `updateCoexistence` refused as stale.
+    public private(set) var staleVoiceDiagnosticsCount = 0
 
     /// Assembles the security wiring, and nothing else does: the Keychain identity (ADR-017), the
     /// one production `ControlChannel` — TLS 1.3 — and the trusted-peer store the SPKI pin is
@@ -479,6 +487,7 @@ public final class SessionCoordinator {
         let endingCoexistence = coexistence
         if let generation = coexistenceGeneration { endingCoexistence?.endLifetime(generation) }
         coexistenceGeneration = nil
+        voiceControlGeneration = nil
         if endingVoice != nil {
             voice = nil
             voiceDiagnostics = VoiceDiagnostics()
@@ -671,9 +680,16 @@ public final class SessionCoordinator {
     /// existing controller is the right one to keep — it still holds the open capture device for this
     /// ride segment, which a fresh one would have to reopen.
     private func attachVoice(isLocalLeader: Bool, authGeneration: Int64) {
+        // Read once, here, and compared (never used to relabel) in `updateCoexistence` — see
+        // `voiceControlGeneration`'s own doc.
+        voiceControlGeneration = authGeneration
         if let voice {
             coexistenceGeneration = coexistence?.beginLifetime(policy: intercomPolicy)
-            if let generation = coexistenceGeneration { updateCoexistence(generation: generation, diagnostics: voiceDiagnostics) }
+            // Deliberately **not** seeded from `voiceDiagnostics` here: that projection can still be
+            // a predecessor's, and `updateCoexistence`'s provenance check would refuse it anyway.
+            // This generation starts neutral; the persistent diagnostics channel below applies its
+            // own genuine diagnostics once they arrive (Phase 6 review blocker 2; ADR-027 Amendment
+            // A1).
             // One authenticated event supplies successor authority and the §7.8 rebuild opportunity.
             // The reducer also sees a gap press delivered after this task; diagnostics decide neither.
             launchInSession { _ in await voice.controlAuthenticated(controlGeneration: authGeneration) }
@@ -760,11 +776,26 @@ public final class SessionCoordinator {
     }
 
     private func updateCoexistence(generation: Int64, diagnostics: VoiceDiagnostics) {
+        // Provenance gate (Phase 6 review blocker 2; ADR-027 Amendment A1). `diagnostics` is stamped,
+        // at production time inside `VoiceController.publishDiagnostics`, with the control lifetime
+        // that owned `VoiceNegotiationState` when it was computed (ADR-020 rule 23's own
+        // `negotiationControlGeneration`) — never re-derived here. A snapshot whose provenance does
+        // not match the control lifetime this coexistence generation was begun under is a
+        // predecessor's (or not-yet-owned) state and is refused rather than relabelled as this
+        // generation's: `VoiceController` is retained across a reconnect and keeps publishing to the
+        // one diagnostics channel `attachVoice` set up on first construction, so this check — not
+        // which reconnect branch happened to run — is what stops a stale duck, pause or resume
+        // crossing a control-lifetime boundary.
+        guard diagnostics.controlGeneration == voiceControlGeneration else {
+            staleVoiceDiagnosticsCount += 1
+            return
+        }
         coexistence?.updateVoice(
             generation: generation,
             available: diagnostics.status != .failed,
-            localTransmitting: diagnostics.transmitting,
-            peerTransmitting: diagnostics.peerTransmitting,
+            localSpeechActive: diagnostics.localSpeechActivity == .active,
+            peerSpeechActive: diagnostics.peerSpeechActivity == .active,
+            speechActivityAvailable: diagnostics.localSpeechActivity != .unavailable || diagnostics.peerSpeechActivity != .unavailable,
             routeState: diagnostics.route.routeState,
             interrupted: diagnostics.route.interrupted,
             transitionTimedOut: diagnostics.route.lastTransitionTimedOut

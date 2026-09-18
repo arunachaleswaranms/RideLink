@@ -45,7 +45,7 @@ final class CoexistenceVectorTests: XCTestCase {
             XCTAssertEqual(scenario.int("expect_stale_count"), state.staleInputCount, "vector \(name) stale count")
             checked += 1
         }
-        XCTAssertGreaterThanOrEqual(checked, 21, "shared coverage unexpectedly shrank")
+        XCTAssertGreaterThanOrEqual(checked, 23, "shared coverage unexpectedly shrank")
         XCTAssertEqual(CoexistenceAction.rampDurationMs, document.int64("ramp_duration_ms"))
     }
 
@@ -62,8 +62,9 @@ final class CoexistenceVectorTests: XCTestCase {
             return .voiceChanged(
                 generation: owner,
                 available: spec.boolVal("available"),
-                localTransmitting: spec.boolVal("local_transmitting"),
-                peerTransmitting: spec.boolVal("peer_transmitting")
+                localSpeechActive: spec.boolVal("local_speech_active"),
+                peerSpeechActive: spec.boolVal("peer_speech_active"),
+                speechActivityAvailable: spec.boolVal("speech_activity_available")
             )
         case "MusicChanged":
             return .musicChanged(
@@ -101,6 +102,7 @@ final class CoexistenceVectorTests: XCTestCase {
         case "ROUTE_TRANSITION_TIMEOUT": return .routeTransitionTimeout
         case "INTERRUPTED": return .interrupted
         case "SYNC_UNAVAILABLE": return .syncUnavailable
+        case "SPEECH_ACTIVITY_UNAVAILABLE": return .speechActivityUnavailable
         default: preconditionFailure("unknown fallback \(raw)")
         }
     }

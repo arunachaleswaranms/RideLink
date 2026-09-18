@@ -120,11 +120,52 @@ class IntercomMusicCoexistenceTest {
     }
 
     @Test
+    fun `continuous Modes A and D never duck or pause merely because a track is enabled with no speech signal`() {
+        // Phase 6 review blocker 1: `localSpeechActive`/`peerSpeechActive` both false and
+        // `speechActivityAvailable` false is exactly what a continuous (gate = none) policy reports —
+        // the outbound track being permanently enabled is not evidence of speech, so this must never
+        // duck or pause, and the fallback must say why rather than pretend nothing is wrong.
+        var modeA = started(IntercomPolicy.MODE_A)
+        val noSignalA = voice(modeA, local = false, speechActivityAvailable = false)
+        assertTrue(noSignalA.actions.isEmpty(), "Mode A must not duck with no honest speech signal")
+        assertEquals(1_000, noSignalA.state.targetVolumePermille)
+        assertEquals(CoexistenceFallback.SPEECH_ACTIVITY_UNAVAILABLE, noSignalA.state.fallback)
+        modeA = noSignalA.state
+
+        var modeD = started(IntercomPolicy.MODE_D)
+        val noSignalD = voice(modeD, local = false, speechActivityAvailable = false)
+        assertTrue(noSignalD.actions.isEmpty(), "Mode D must not pause with no honest speech signal")
+        assertFalse(noSignalD.state.pausedByVoice)
+        assertEquals(CoexistenceFallback.SPEECH_ACTIVITY_UNAVAILABLE, noSignalD.state.fallback)
+        modeD = noSignalD.state
+
+        // And once a genuine signal arrives (PTT held, or a real VOX open), the same track carries on
+        // ducking/pausing normally — the fallback is not a permanent state.
+        val signalA = voice(modeA, local = true, speechActivityAvailable = true)
+        assertEquals(listOf(CoexistenceAction.RampMusicVolume(250)), signalA.actions)
+        assertEquals(CoexistenceFallback.NONE, signalA.state.fallback)
+
+        val signalD = voice(modeD, local = true, speechActivityAvailable = true)
+        assertEquals(listOf(CoexistenceAction.PauseMusicForVoice(TRACK)), signalD.actions)
+        assertEquals(CoexistenceFallback.NONE, signalD.state.fallback)
+    }
+
+    @Test
     fun `a stale predecessor cannot alter the successor`() {
         var state = started(IntercomPolicy.MODE_C)
         state = voice(state, local = true).state
         state = reduce(state, CoexistenceInput.LifetimeStarted(GENERATION + 1, IntercomPolicy.MODE_C)).state
-        val stale = reduce(state, CoexistenceInput.VoiceChanged(GENERATION, true, false, false))
+        val stale =
+            reduce(
+                state,
+                CoexistenceInput.VoiceChanged(
+                    GENERATION,
+                    available = true,
+                    localSpeechActive = false,
+                    peerSpeechActive = false,
+                    speechActivityAvailable = true,
+                ),
+            )
         assertTrue(stale.actions.isEmpty())
         assertEquals(GENERATION + 1, stale.state.generation)
         assertEquals(1, stale.state.staleInputCount)
@@ -145,8 +186,8 @@ class IntercomMusicCoexistenceTest {
             successor.actions,
         )
         assertFalse(successor.state.pausedByVoice)
-        assertFalse(successor.state.localTransmitting)
-        assertFalse(successor.state.peerTransmitting)
+        assertFalse(successor.state.localSpeechActive)
+        assertFalse(successor.state.peerSpeechActive)
     }
 
     @Test
@@ -175,10 +216,17 @@ class IntercomMusicCoexistenceTest {
         state: CoexistenceState,
         local: Boolean,
         available: Boolean = true,
+        speechActivityAvailable: Boolean = true,
     ): CoexistenceOutcome =
         reduce(
             state,
-            CoexistenceInput.VoiceChanged(GENERATION, available, localTransmitting = local, peerTransmitting = false),
+            CoexistenceInput.VoiceChanged(
+                GENERATION,
+                available,
+                localSpeechActive = local,
+                peerSpeechActive = false,
+                speechActivityAvailable = speechActivityAvailable,
+            ),
         )
 
     private fun reduce(

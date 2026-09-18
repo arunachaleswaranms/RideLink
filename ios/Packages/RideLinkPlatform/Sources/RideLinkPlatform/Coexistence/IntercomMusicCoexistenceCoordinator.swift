@@ -94,13 +94,20 @@ public final class IntercomMusicCoexistenceCoordinator: CoexistenceEventSink {
     public func updateVoice(
         generation: Int64,
         available: Bool,
-        localTransmitting: Bool,
-        peerTransmitting: Bool,
+        localSpeechActive: Bool,
+        peerSpeechActive: Bool,
+        speechActivityAvailable: Bool,
         routeState: RouteState,
         interrupted: Bool,
         transitionTimedOut: Bool
     ) {
-        submit(.voiceChanged(generation: generation, available: available, localTransmitting: localTransmitting, peerTransmitting: peerTransmitting))
+        submit(.voiceChanged(
+            generation: generation,
+            available: available,
+            localSpeechActive: localSpeechActive,
+            peerSpeechActive: peerSpeechActive,
+            speechActivityAvailable: speechActivityAvailable
+        ))
         submit(.routeChanged(generation: generation, routeState: routeState, interrupted: interrupted, transitionTimedOut: transitionTimedOut))
     }
 

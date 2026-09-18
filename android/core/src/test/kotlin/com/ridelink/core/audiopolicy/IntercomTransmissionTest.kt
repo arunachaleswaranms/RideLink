@@ -181,6 +181,63 @@ class IntercomTransmissionTest {
         )
     }
 
+    /**
+     * **Phase 6 review blocker 1, at its source.** `transmitting` answers "may audio leave right
+     * now," which for a continuous policy (Modes A/D) is true for the whole ride segment the moment
+     * capture opens — that is not evidence anyone is talking. `speechActivity` must say
+     * [SpeechActivity.UNAVAILABLE] for that gate regardless of `transmitting`'s own value, and must
+     * still honestly track a real signal under PTT and VOX.
+     */
+    @Test
+    fun `continuous transmission is never read as speech, but a real ptt or vox signal is`() {
+        val continuousTransmitting = open(IntercomPolicy.MODE_A)
+        assertTrue(continuousTransmitting.transmitting, "precondition: the track is enabled")
+        assertEquals(
+            SpeechActivity.UNAVAILABLE,
+            continuousTransmitting.speechActivity,
+            "an enabled continuous track is not a speech signal",
+        )
+        assertEquals(SpeechActivity.UNAVAILABLE, open(IntercomPolicy.MODE_D).speechActivity, "Mode D is the same gate")
+
+        val pttReleased = open(IntercomPolicy.MODE_C)
+        assertEquals(SpeechActivity.INACTIVE, pttReleased.speechActivity, "released PTT is a real 'not talking'")
+        val pttHeld = pttReleased.copy(pttHeld = true)
+        assertEquals(SpeechActivity.ACTIVE, pttHeld.speechActivity, "held PTT is a real 'talking'")
+
+        val voxClosed = open(IntercomPolicy.MODE_B)
+        assertEquals(SpeechActivity.INACTIVE, voxClosed.speechActivity, "an unopened VOX gate is honestly silent")
+        val voxOpen =
+            IntercomTransmission.reduce(voxClosed, IntercomInput.SpeechLevel(-10.0, 0)).state
+        assertEquals(SpeechActivity.ACTIVE, voxOpen.speechActivity, "a genuinely opened VOX gate is speech")
+
+        assertEquals(SpeechActivity.INACTIVE, open(IntercomPolicy.MODE_E).speechActivity, "no intercom, no signal")
+    }
+
+    /** Muted, interrupted or capture-closed always reads as [SpeechActivity.INACTIVE], never a lie. */
+    @Test
+    fun `speech activity is inactive whenever transmission itself cannot leave`() {
+        val heldPtt = open(IntercomPolicy.MODE_C).copy(pttHeld = true)
+        assertEquals(SpeechActivity.ACTIVE, heldPtt.speechActivity, "precondition: a genuine signal")
+        assertEquals(SpeechActivity.INACTIVE, heldPtt.copy(userMuted = true).speechActivity, "mute wins")
+        assertEquals(SpeechActivity.INACTIVE, heldPtt.copy(interrupted = true).speechActivity, "interruption wins")
+        assertEquals(SpeechActivity.INACTIVE, heldPtt.copy(captureOpen = false).speechActivity, "no capture, no signal")
+    }
+
+    /**
+     * The peer half of blocker 1: `mic_muted == false` alone must never read as speech for a
+     * continuous peer, and must honestly track it for a PTT/VOX one.
+     */
+    @Test
+    fun `a peers un-muted track is speech only when their own mode has a real gate`() {
+        assertEquals(SpeechActivity.UNAVAILABLE, peerSpeechActivity(VoiceMode.CONTINUOUS, transmittingOnWire = true))
+        assertEquals(SpeechActivity.UNAVAILABLE, peerSpeechActivity(VoiceMode.CONTINUOUS, transmittingOnWire = false))
+        assertEquals(SpeechActivity.UNAVAILABLE, peerSpeechActivity(VoiceMode.UNKNOWN, transmittingOnWire = true))
+        assertEquals(SpeechActivity.ACTIVE, peerSpeechActivity(VoiceMode.PTT, transmittingOnWire = true))
+        assertEquals(SpeechActivity.INACTIVE, peerSpeechActivity(VoiceMode.PTT, transmittingOnWire = false))
+        assertEquals(SpeechActivity.ACTIVE, peerSpeechActivity(VoiceMode.VOX, transmittingOnWire = true))
+        assertEquals(SpeechActivity.INACTIVE, peerSpeechActivity(VoiceMode.VOX, transmittingOnWire = false))
+    }
+
     private companion object {
         const val PRESS_COUNT = 50
         const val VOX_HANGOVER_MS = 700L

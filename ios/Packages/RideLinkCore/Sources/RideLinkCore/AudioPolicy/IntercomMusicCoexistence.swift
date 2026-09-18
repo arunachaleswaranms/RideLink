@@ -9,8 +9,20 @@ public struct CoexistenceState: Sendable, Equatable {
     public var active: Bool
     public var policy: IntercomPolicy
     public var voiceAvailable: Bool
-    public var localTransmitting: Bool
-    public var peerTransmitting: Bool
+    /// Whether *this device's* `SpeechActivity` is `.active` — never merely "the outbound WebRTC
+    /// track is enabled." A continuous policy (Modes A/D) has no honest signal at all, so
+    /// `speechActivityAvailable` is what tells the fallback that apart, rather than this field
+    /// silently defaulting to false forever looking identical to "nobody is talking" (Phase 6 review
+    /// blocker 1; ADR-027 Amendment A1).
+    public var localSpeechActive: Bool
+    /// The peer's own honest `SpeechActivity`, from `peerSpeechActivity(mode:transmittingOnWire:)` —
+    /// never `mic_muted` alone.
+    public var peerSpeechActive: Bool
+    /// True once at least one side (local or peer) is running a policy whose gate can honestly
+    /// report speech at all — `.ptt` or `.vox`. False for two continuous (Mode A/D) peers, which is
+    /// exactly the case `fallback` must surface rather than silently behaving as "no one is
+    /// speaking" forever.
+    public var speechActivityAvailable: Bool
     public var musicAvailable: Bool
     public var trackToken: String?
     public var musicPlaying: Bool
@@ -34,8 +46,9 @@ public struct CoexistenceState: Sendable, Equatable {
         active: Bool = false,
         policy: IntercomPolicy = .default,
         voiceAvailable: Bool = false,
-        localTransmitting: Bool = false,
-        peerTransmitting: Bool = false,
+        localSpeechActive: Bool = false,
+        peerSpeechActive: Bool = false,
+        speechActivityAvailable: Bool = true,
         musicAvailable: Bool = true,
         trackToken: String? = nil,
         musicPlaying: Bool = false,
@@ -59,8 +72,9 @@ public struct CoexistenceState: Sendable, Equatable {
         self.active = active
         self.policy = policy
         self.voiceAvailable = voiceAvailable
-        self.localTransmitting = localTransmitting
-        self.peerTransmitting = peerTransmitting
+        self.localSpeechActive = localSpeechActive
+        self.peerSpeechActive = peerSpeechActive
+        self.speechActivityAvailable = speechActivityAvailable
         self.musicAvailable = musicAvailable
         self.trackToken = trackToken
         self.musicPlaying = musicPlaying
@@ -79,7 +93,7 @@ public struct CoexistenceState: Sendable, Equatable {
     }
 
     public var voiceActive: Bool {
-        active && policy.intercomEnabled && voiceAvailable && !interrupted && (localTransmitting || peerTransmitting)
+        active && policy.intercomEnabled && voiceAvailable && !interrupted && (localSpeechActive || peerSpeechActive)
     }
 
     public static let minGainPermille = 0
@@ -93,13 +107,26 @@ public enum CoexistenceFallback: String, Sendable, Equatable {
     case routeTransitionTimeout
     case interrupted
     case syncUnavailable
+    /// Voice is up and the policy wants an on-speech effect, but neither side has an honest speech
+    /// signal — both are running a continuous (Mode A/D) policy. Fail-honest: no permanent duck or
+    /// pause is applied while this holds (Phase 6 review blocker 1; ADR-027 Amendment A1).
+    case speechActivityUnavailable
 }
 
 public enum CoexistenceInput: Sendable, Equatable {
     case lifetimeStarted(generation: Int64, policy: IntercomPolicy)
     case lifetimeEnded(generation: Int64)
     case policySelected(generation: Int64, policy: IntercomPolicy)
-    case voiceChanged(generation: Int64, available: Bool, localTransmitting: Bool, peerTransmitting: Bool)
+    case voiceChanged(
+        generation: Int64,
+        available: Bool,
+        /// `SpeechActivity.active` on this device, never merely "the outbound track is enabled."
+        localSpeechActive: Bool,
+        /// The peer's own `SpeechActivity.active`, from `peerSpeechActivity` — never `mic_muted` alone.
+        peerSpeechActive: Bool,
+        /// See `CoexistenceState.speechActivityAvailable`.
+        speechActivityAvailable: Bool
+    )
     case musicChanged(generation: Int64, available: Bool, trackToken: String?, playing: Bool, ended: Bool)
     case userPlaybackIntent(generation: Int64, playing: Bool)
     case baseVolumeChanged(generation: Int64, volumePermille: Int)
@@ -153,25 +180,28 @@ public enum IntercomMusicCoexistence {
             next.active = true
             next.policy = policy
             next.voiceAvailable = false
-            next.localTransmitting = false
-            next.peerTransmitting = false
+            next.localSpeechActive = false
+            next.peerSpeechActive = false
+            next.speechActivityAvailable = true
             next.interrupted = false
             next.routeTransitionTimedOut = false
             next.fallback = .none
         case .lifetimeEnded:
             next.active = false
             next.voiceAvailable = false
-            next.localTransmitting = false
-            next.peerTransmitting = false
+            next.localSpeechActive = false
+            next.peerSpeechActive = false
+            next.speechActivityAvailable = true
             next.interrupted = false
             next.routeTransitionTimedOut = false
             next.fallback = .none
         case .policySelected(_, let policy):
             next.policy = policy
-        case .voiceChanged(_, let available, let localTransmitting, let peerTransmitting):
+        case .voiceChanged(_, let available, let localSpeechActive, let peerSpeechActive, let speechActivityAvailable):
             next.voiceAvailable = available
-            next.localTransmitting = localTransmitting
-            next.peerTransmitting = peerTransmitting
+            next.localSpeechActive = localSpeechActive
+            next.peerSpeechActive = peerSpeechActive
+            next.speechActivityAvailable = speechActivityAvailable
         case .musicChanged(_, let available, let trackToken, let playing, let ended):
             let trackChanged = state.trackToken != trackToken
             next.musicAvailable = available
@@ -257,6 +287,9 @@ public enum IntercomMusicCoexistence {
         if state.interrupted { return .interrupted }
         if state.routeTransitionTimedOut { return .routeTransitionTimeout }
         if state.policy.intercomEnabled && !state.voiceAvailable { return .voiceUnavailable }
+        if state.policy.intercomEnabled && state.voiceAvailable && !state.speechActivityAvailable {
+            return .speechActivityUnavailable
+        }
         if !state.musicAvailable { return .musicUnavailable }
         if !state.syncAvailable { return .syncUnavailable }
         return .none
@@ -282,7 +315,7 @@ private extension CoexistenceInput {
         case .lifetimeStarted(let generation, _),
              .lifetimeEnded(let generation),
              .policySelected(let generation, _),
-             .voiceChanged(let generation, _, _, _),
+             .voiceChanged(let generation, _, _, _, _),
              .musicChanged(let generation, _, _, _, _),
              .userPlaybackIntent(let generation, _),
              .baseVolumeChanged(let generation, _),

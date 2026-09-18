@@ -138,13 +138,22 @@ class IntercomMusicCoexistenceCoordinator(
     fun updateVoice(
         generation: Long,
         available: Boolean,
-        localTransmitting: Boolean,
-        peerTransmitting: Boolean,
+        localSpeechActive: Boolean,
+        peerSpeechActive: Boolean,
+        speechActivityAvailable: Boolean,
         routeState: RouteState,
         interrupted: Boolean,
         transitionTimedOut: Boolean,
     ) {
-        submit(CoexistenceInput.VoiceChanged(generation, available, localTransmitting, peerTransmitting))
+        submit(
+            CoexistenceInput.VoiceChanged(
+                generation,
+                available,
+                localSpeechActive,
+                peerSpeechActive,
+                speechActivityAvailable,
+            ),
+        )
         submit(CoexistenceInput.RouteChanged(generation, routeState, interrupted, transitionTimedOut))
     }
 

@@ -350,6 +350,74 @@ final class VoiceControllerTests: XCTestCase {
         await harness.controller.shutdown()
     }
 
+    // MARK: - speech activity (Phase 6 review blocker 1)
+
+    /// **The exact failure blocker 1 named**: under a continuous policy (Modes A/D) the outbound
+    /// track is enabled for the whole ride segment the moment capture opens, and that alone must
+    /// never read as "someone is speaking." `VoiceDiagnostics.transmitting` keeps meaning "the track
+    /// is enabled" — `localSpeechActivity` is the separate, honest answer.
+    func testAContinuousPolicysPermanentlyEnabledTrackNeverReadsAsLocalSpeechActivity() async throws {
+        let harness = try await Harness(isLocalLeader: true, ids: gen1, gen2, gen3, policy: .modeA)
+        await harness.controller.start()
+        try await harness.awaitEngineCall("createOffer")
+        try await harness.awaitCondition { await harness.controller.currentDiagnostics().transmitting }
+
+        let diagnostics = await harness.controller.currentDiagnostics()
+        XCTAssertTrue(diagnostics.transmitting, "precondition: the track is enabled")
+        XCTAssertEqual(.unavailable, diagnostics.localSpeechActivity, "an enabled continuous track is not evidence of speech")
+        await harness.controller.shutdown()
+    }
+
+    /// The same policy switched to PTT: releasing/holding the button is an honest signal both ways.
+    func testAPttPolicysLocalSpeechActivityTracksTheButtonNotMereCapture() async throws {
+        let harness = try await Harness(isLocalLeader: true, ids: gen1, gen2, gen3, policy: .modeC)
+        await harness.controller.start()
+        try await harness.awaitEngineCall("createOffer")
+        let released = await harness.controller.currentDiagnostics().localSpeechActivity
+        XCTAssertEqual(.inactive, released, "capture is open but the button is not held")
+
+        harness.controller.setPushToTalkHeld(true)
+        try await harness.awaitCondition { await harness.controller.currentDiagnostics().localSpeechActivity == .active }
+
+        harness.controller.setPushToTalkHeld(false)
+        try await harness.awaitCondition { await harness.controller.currentDiagnostics().localSpeechActivity == .inactive }
+        await harness.controller.shutdown()
+    }
+
+    /// The peer half: `mic_muted == false` alone must never read as speech for a continuous peer.
+    func testMicMutedFalseFromAContinuousPeerIsNotReadAsPeerSpeechActivity() async throws {
+        let harness = try await Harness(isLocalLeader: true, ids: gen1, gen2, gen3, policy: .modeA)
+        harness.controller.submit(.state(voiceSessionId: VoiceSessionId(gen2), state: .active, micMuted: false, mode: .continuous))
+        try await harness.awaitCondition { await harness.controller.currentDiagnostics().peerReportedState == .active }
+        let continuousPeer = await harness.controller.currentDiagnostics().peerSpeechActivity
+        XCTAssertEqual(.unavailable, continuousPeer, "a continuous peer's un-muted track is not evidence of speech")
+
+        harness.controller.submit(.state(voiceSessionId: VoiceSessionId(gen2), state: .active, micMuted: false, mode: .ptt))
+        try await harness.awaitCondition { await harness.controller.currentDiagnostics().peerSpeechActivity == .active }
+        await harness.controller.shutdown()
+    }
+
+    // MARK: - provenance (Phase 6 review blocker 2)
+
+    /// `VoiceDiagnostics.controlGeneration` must name the control lifetime that actually owns the
+    /// negotiation right now — `VoiceNegotiationState.negotiationControlGeneration` — and must go
+    /// back to `nil` the moment a link loss retires that ownership, never keep naming a lifetime that
+    /// has already ended (Phase 6 review blocker 2).
+    func testDiagnosticsCarryTheNegotiationsOwnOwningControlGenerationAndLoseItOnRetirement() async throws {
+        let harness = try await Harness(isLocalLeader: true, ids: gen1, gen2, gen3, policy: .modeA)
+        let beforeStart = await harness.controller.currentDiagnostics().controlGeneration
+        XCTAssertNil(beforeStart, "nothing owns a negotiation before one starts")
+
+        await harness.controller.controlAuthenticated(controlGeneration: testControlGenerationA)
+        await harness.controller.start()
+        try await harness.awaitEngineCall("createOffer")
+        try await harness.awaitCondition { await harness.controller.currentDiagnostics().controlGeneration == testControlGenerationA }
+
+        await harness.controller.onControlLinkLost()
+        try await harness.awaitCondition { await harness.controller.currentDiagnostics().controlGeneration == nil }
+        await harness.controller.shutdown()
+    }
+
     // MARK: - harness
 
     private final class Harness {

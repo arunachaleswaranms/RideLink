@@ -15,12 +15,24 @@ from pathlib import Path
 RAMP_MS = 200
 
 
-def voice(available: bool, local: bool, peer: bool, generation: int | None = None) -> dict:
+def voice(
+    available: bool,
+    local: bool,
+    peer: bool,
+    generation: int | None = None,
+    speech_activity_available: bool = True,
+) -> dict:
+    # `local`/`peer` are this device's and the peer's own honest `SpeechActivity.ACTIVE` reads —
+    # never "the outbound track is enabled" (Phase 6 review blocker 1). `speech_activity_available`
+    # defaults to True because every row below stands for a genuine PTT/VOX signal having been fed to
+    # the reducer; the two rows that instead model a continuous (Mode A/D) policy's honest absence of
+    # any speech signal at all pass it explicitly.
     event = {
         "kind": "VoiceChanged",
         "available": available,
-        "local_transmitting": local,
-        "peer_transmitting": peer,
+        "local_speech_active": local,
+        "peer_speech_active": peer,
+        "speech_activity_available": speech_activity_available,
     }
     if generation is not None:
         event["generation"] = generation
@@ -86,6 +98,19 @@ def scenarios() -> list[dict]:
             "mode-d-temporary-pause-and-resume", "MODE_D",
             [voice(True, True, False), music(True, "track-a", False, False), voice(True, False, False)],
             ["Pause(track-a)", "Resume(track-a)"], 1000,
+        ),
+        scenario(
+            "mode-a-continuous-track-enabled-is-not-speech", "MODE_A",
+            # A continuous policy's outbound track is enabled for the whole ride segment, which is
+            # not a speech signal at all (Phase 6 review blocker 1) — no honest local or peer signal
+            # means no duck, ever, however long the track stays enabled.
+            [voice(True, False, False, speech_activity_available=False)],
+            [], 1000, fallback="SPEECH_ACTIVITY_UNAVAILABLE",
+        ),
+        scenario(
+            "mode-d-continuous-track-enabled-is-not-speech", "MODE_D",
+            [voice(True, False, False, speech_activity_available=False)],
+            [], 1000, fallback="SPEECH_ACTIVITY_UNAVAILABLE",
         ),
         scenario(
             "mode-e-never-changes-music-for-voice", "MODE_E",

@@ -12,8 +12,23 @@ data class CoexistenceState(
     val active: Boolean = false,
     val policy: IntercomPolicy = IntercomPolicy.DEFAULT,
     val voiceAvailable: Boolean = false,
-    val localTransmitting: Boolean = false,
-    val peerTransmitting: Boolean = false,
+    /**
+     * Whether *this device's* [SpeechActivity] is [SpeechActivity.ACTIVE] — never merely "the
+     * outbound WebRTC track is enabled." A continuous policy (Modes A/D) has no honest signal at
+     * all, so [speechActivityAvailable] is what tells the fallback that apart, rather than this
+     * field silently defaulting to false forever looking identical to "nobody is talking" (Phase 6
+     * review blocker 1; ADR-027 Amendment A1).
+     */
+    val localSpeechActive: Boolean = false,
+    /** The peer's own honest [SpeechActivity], from [peerSpeechActivity] — never `mic_muted` alone. */
+    val peerSpeechActive: Boolean = false,
+    /**
+     * True once at least one side (local or peer) is running a policy whose gate can honestly report
+     * speech at all — [TransmissionGate.Ptt] or [TransmissionGate.Vox]. False for two continuous
+     * (Mode A/D) peers, which is exactly the case [fallback] must surface rather than silently
+     * behaving as "no one is speaking" forever.
+     */
+    val speechActivityAvailable: Boolean = true,
     val musicAvailable: Boolean = true,
     val trackToken: String? = null,
     val musicPlaying: Boolean = false,
@@ -39,7 +54,7 @@ data class CoexistenceState(
     }
 
     val voiceActive: Boolean
-        get() = active && policy.intercomEnabled && voiceAvailable && !interrupted && (localTransmitting || peerTransmitting)
+        get() = active && policy.intercomEnabled && voiceAvailable && !interrupted && (localSpeechActive || peerSpeechActive)
 
     companion object {
         const val MIN_GAIN_PERMILLE = 0
@@ -54,6 +69,13 @@ enum class CoexistenceFallback {
     ROUTE_TRANSITION_TIMEOUT,
     INTERRUPTED,
     SYNC_UNAVAILABLE,
+
+    /**
+     * Voice is up and the policy wants an on-speech effect, but neither side has an honest speech
+     * signal — both are running a continuous (Mode A/D) policy. Fail-honest: no permanent duck or
+     * pause is applied while this holds (Phase 6 review blocker 1; ADR-027 Amendment A1).
+     */
+    SPEECH_ACTIVITY_UNAVAILABLE,
 }
 
 sealed class CoexistenceInput {
@@ -74,8 +96,12 @@ sealed class CoexistenceInput {
     data class VoiceChanged(
         val generation: Long,
         val available: Boolean,
-        val localTransmitting: Boolean,
-        val peerTransmitting: Boolean,
+        /** [SpeechActivity.ACTIVE] on this device, never merely "the outbound track is enabled." */
+        val localSpeechActive: Boolean,
+        /** The peer's own [SpeechActivity.ACTIVE], from [peerSpeechActivity] — never `mic_muted` alone. */
+        val peerSpeechActive: Boolean,
+        /** See [CoexistenceState.speechActivityAvailable]. */
+        val speechActivityAvailable: Boolean,
     ) : CoexistenceInput()
 
     data class MusicChanged(
@@ -174,8 +200,9 @@ object IntercomMusicCoexistence {
                         active = true,
                         policy = input.policy,
                         voiceAvailable = false,
-                        localTransmitting = false,
-                        peerTransmitting = false,
+                        localSpeechActive = false,
+                        peerSpeechActive = false,
+                        speechActivityAvailable = true,
                         interrupted = false,
                         routeTransitionTimedOut = false,
                         fallback = CoexistenceFallback.NONE,
@@ -186,8 +213,9 @@ object IntercomMusicCoexistence {
                 state.copy(
                     active = false,
                     voiceAvailable = false,
-                    localTransmitting = false,
-                    peerTransmitting = false,
+                    localSpeechActive = false,
+                    peerSpeechActive = false,
+                    speechActivityAvailable = true,
                     interrupted = false,
                     routeTransitionTimedOut = false,
                     fallback = CoexistenceFallback.NONE,
@@ -197,8 +225,9 @@ object IntercomMusicCoexistence {
             is CoexistenceInput.VoiceChanged ->
                 state.copy(
                     voiceAvailable = input.available,
-                    localTransmitting = input.localTransmitting,
-                    peerTransmitting = input.peerTransmitting,
+                    localSpeechActive = input.localSpeechActive,
+                    peerSpeechActive = input.peerSpeechActive,
+                    speechActivityAvailable = input.speechActivityAvailable,
                 )
             is CoexistenceInput.MusicChanged -> {
                 val trackChanged = state.trackToken != input.trackToken
@@ -291,6 +320,8 @@ object IntercomMusicCoexistence {
             state.interrupted -> CoexistenceFallback.INTERRUPTED
             state.routeTransitionTimedOut -> CoexistenceFallback.ROUTE_TRANSITION_TIMEOUT
             state.policy.intercomEnabled && !state.voiceAvailable -> CoexistenceFallback.VOICE_UNAVAILABLE
+            state.policy.intercomEnabled && state.voiceAvailable && !state.speechActivityAvailable ->
+                CoexistenceFallback.SPEECH_ACTIVITY_UNAVAILABLE
             !state.musicAvailable -> CoexistenceFallback.MUSIC_UNAVAILABLE
             !state.syncAvailable -> CoexistenceFallback.SYNC_UNAVAILABLE
             else -> CoexistenceFallback.NONE

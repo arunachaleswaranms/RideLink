@@ -28,10 +28,10 @@ class IntercomMusicCoexistenceCoordinatorTest {
             runCurrent()
 
             repeat(50) {
-                coordinator.updateVoice(generation, true, true, false, RouteState.STABLE, false, false)
+                coordinator.updateVoice(generation, true, true, false, true, RouteState.STABLE, false, false)
                 advanceUntilIdle()
                 assertEquals(350, port.gains.last())
-                coordinator.updateVoice(generation, true, false, false, RouteState.STABLE, false, false)
+                coordinator.updateVoice(generation, true, false, false, true, RouteState.STABLE, false, false)
                 advanceUntilIdle()
                 assertEquals(1_000, port.gains.last())
             }
@@ -51,11 +51,11 @@ class IntercomMusicCoexistenceCoordinatorTest {
             val coordinator = IntercomMusicCoexistenceCoordinator(this, port, GainRampSleeper { gate.await() })
             val first = coordinator.beginLifetime(IntercomPolicy.MODE_C)
             runCurrent()
-            coordinator.updateVoice(first, true, true, false, RouteState.STABLE, false, false)
+            coordinator.updateVoice(first, true, true, false, true, RouteState.STABLE, false, false)
             runCurrent()
 
             val second = coordinator.beginLifetime(IntercomPolicy.MODE_A)
-            coordinator.updateVoice(second, true, false, false, RouteState.STABLE, false, false)
+            coordinator.updateVoice(second, true, false, false, true, RouteState.STABLE, false, false)
             runCurrent()
             gate.complete(Unit)
             advanceUntilIdle()
@@ -73,7 +73,7 @@ class IntercomMusicCoexistenceCoordinatorTest {
             val coordinator = IntercomMusicCoexistenceCoordinator(this, port, GainRampSleeper { gate.await() })
             val generation = coordinator.beginLifetime(IntercomPolicy.MODE_C)
             runCurrent()
-            coordinator.updateVoice(generation, true, true, false, RouteState.STABLE, false, false)
+            coordinator.updateVoice(generation, true, true, false, true, RouteState.STABLE, false, false)
             coordinator.endLifetime(generation)
 
             var returned = false
@@ -97,21 +97,21 @@ class IntercomMusicCoexistenceCoordinatorTest {
             val port = FakeMusicPort(playingState("first"))
             val coordinator = IntercomMusicCoexistenceCoordinator(this, port, GainRampSleeper { })
             val generation = coordinator.beginLifetime(IntercomPolicy.MODE_D)
-            coordinator.updateVoice(generation, true, true, false, RouteState.STABLE, false, false)
+            coordinator.updateVoice(generation, true, true, false, true, RouteState.STABLE, false, false)
             advanceUntilIdle()
             assertEquals(1, port.pauseCalls.size)
 
             coordinator.onPlaybackIntent(false)
-            coordinator.updateVoice(generation, true, false, false, RouteState.STABLE, false, false)
+            coordinator.updateVoice(generation, true, false, false, true, RouteState.STABLE, false, false)
             advanceUntilIdle()
             assertTrue(port.resumeCalls.isEmpty())
 
             port.emit(playingState("second"))
-            coordinator.updateVoice(generation, true, true, false, RouteState.STABLE, false, false)
+            coordinator.updateVoice(generation, true, true, false, true, RouteState.STABLE, false, false)
             advanceUntilIdle()
             val replacedTrack = port.pauseCalls.last()
             port.emit(playingState("third"))
-            coordinator.updateVoice(generation, true, false, false, RouteState.STABLE, false, false)
+            coordinator.updateVoice(generation, true, false, false, true, RouteState.STABLE, false, false)
             advanceUntilIdle()
             assertFalse(port.resumeCalls.contains(replacedTrack))
         }
