@@ -172,4 +172,64 @@ final class IntercomTransmissionTests: XCTestCase {
             }
         }
     }
+
+    /// **Phase 6 review blocker 1, at its source.** `transmitting` answers "may audio leave right
+    /// now," which for a continuous policy (Modes A/D) is true for the whole ride segment the
+    /// moment capture opens — that is not evidence anyone is talking. `speechActivity` must say
+    /// `.unavailable` for that gate regardless of `transmitting`'s own value, and must still
+    /// honestly track a real signal under PTT and VOX.
+    func testContinuousTransmissionIsNeverReadAsSpeechButARealPttOrVoxSignalIs() {
+        let continuousTransmitting = open(.modeA)
+        XCTAssertTrue(continuousTransmitting.transmitting, "precondition: the track is enabled")
+        XCTAssertEqual(
+            .unavailable,
+            continuousTransmitting.speechActivity,
+            "an enabled continuous track is not a speech signal"
+        )
+        XCTAssertEqual(.unavailable, open(.modeD).speechActivity, "Mode D is the same gate")
+
+        let pttReleased = open(.modeC)
+        XCTAssertEqual(.inactive, pttReleased.speechActivity, "released PTT is a real 'not talking'")
+        var pttHeld = pttReleased
+        pttHeld.pttHeld = true
+        XCTAssertEqual(.active, pttHeld.speechActivity, "held PTT is a real 'talking'")
+
+        let voxClosed = open(.modeB)
+        XCTAssertEqual(.inactive, voxClosed.speechActivity, "an unopened VOX gate is honestly silent")
+        let voxOpen = IntercomTransmission.reduce(state: voxClosed, input: .speechLevel(levelDbfs: -10.0, atMonoUs: 0)).state
+        XCTAssertEqual(.active, voxOpen.speechActivity, "a genuinely opened VOX gate is speech")
+
+        XCTAssertEqual(.inactive, open(.modeE).speechActivity, "no intercom, no signal")
+    }
+
+    /// Muted, interrupted or capture-closed always reads as `.inactive`, never a lie.
+    func testSpeechActivityIsInactiveWheneverTransmissionItselfCannotLeave() {
+        var heldPtt = open(.modeC)
+        heldPtt.pttHeld = true
+        XCTAssertEqual(.active, heldPtt.speechActivity, "precondition: a genuine signal")
+
+        var muted = heldPtt
+        muted.userMuted = true
+        XCTAssertEqual(.inactive, muted.speechActivity, "mute wins")
+
+        var interrupted = heldPtt
+        interrupted.interrupted = true
+        XCTAssertEqual(.inactive, interrupted.speechActivity, "interruption wins")
+
+        var captureClosed = heldPtt
+        captureClosed.captureOpen = false
+        XCTAssertEqual(.inactive, captureClosed.speechActivity, "no capture, no signal")
+    }
+
+    /// The peer half of blocker 1: `mic_muted == false` alone must never read as speech for a
+    /// continuous peer, and must honestly track it for a PTT/VOX one.
+    func testAPeersUnmutedTrackIsSpeechOnlyWhenTheirOwnModeHasARealGate() {
+        XCTAssertEqual(.unavailable, peerSpeechActivity(mode: .continuous, transmittingOnWire: true))
+        XCTAssertEqual(.unavailable, peerSpeechActivity(mode: .continuous, transmittingOnWire: false))
+        XCTAssertEqual(.unavailable, peerSpeechActivity(mode: .unknown, transmittingOnWire: true))
+        XCTAssertEqual(.active, peerSpeechActivity(mode: .ptt, transmittingOnWire: true))
+        XCTAssertEqual(.inactive, peerSpeechActivity(mode: .ptt, transmittingOnWire: false))
+        XCTAssertEqual(.active, peerSpeechActivity(mode: .vox, transmittingOnWire: true))
+        XCTAssertEqual(.inactive, peerSpeechActivity(mode: .vox, transmittingOnWire: false))
+    }
 }

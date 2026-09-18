@@ -1,10 +1,13 @@
 package com.ridelink.app.session
 
+import com.ridelink.app.music.CoexistenceDiagnostics
+import com.ridelink.app.music.IntercomMusicCoexistenceCoordinator
 import com.ridelink.core.audiopolicy.AudioRouteSnapshot
 import com.ridelink.core.audiopolicy.IntercomPolicy
 import com.ridelink.core.audiopolicy.RideStartDecision
 import com.ridelink.core.audiopolicy.RideStartPolicy
 import com.ridelink.core.audiopolicy.RideStartRequest
+import com.ridelink.core.audiopolicy.SpeechActivity
 import com.ridelink.core.audiopolicy.VoiceFailure
 import com.ridelink.core.logging.LogSink
 import com.ridelink.core.logging.StructuredLogger
@@ -20,6 +23,7 @@ import com.ridelink.core.sessionfsm.FsmState
 import com.ridelink.core.sessionfsm.SessionEvent
 import com.ridelink.core.sessionfsm.SessionFsm
 import com.ridelink.core.sessionfsm.SessionStatus
+import com.ridelink.core.voice.VoiceStatus
 import com.ridelink.network.control.AudioStateEpochGenerator
 import com.ridelink.network.control.AudioStateInboxHolder
 import com.ridelink.network.control.AudioStateSink
@@ -97,7 +101,11 @@ fun interface ForegroundServiceController {
  * confirmed the six digits and the pin has been written. What stays here is ownership of the
  * state itself (CLAUDE.md rule 8) and the side effects a control event carries: persisting trust,
  * raising a security alert, starting a reconnect.
+ *
+ * Composition-root collaborators stay explicit; hiding the coexistence owner in a service locator
+ * would make its lifetime less visible, not make this constructor simpler.
  */
+@Suppress("LongParameterList")
 class SessionCoordinator(
     private val discovery: DiscoveryController,
     private val controlSessionManager: ControlSessionManager,
@@ -122,6 +130,8 @@ class SessionCoordinator(
      * `VoiceNegotiation` table, for the reason STATUS §4 problem 20 gives.
      */
     private val buildVoiceController: (isLocalLeader: Boolean) -> VoiceController,
+    /** Sole owner of temporary intercom/music effects; optional only for narrow legacy tests. */
+    private val coexistence: IntercomMusicCoexistenceCoordinator? = null,
 ) {
     private val logger = StructuredLogger(logSink, environment.monotonicNowUs)
 
@@ -173,6 +183,23 @@ class SessionCoordinator(
     @Volatile
     private var voice: VoiceController? = null
     private var voiceDiagnosticsJob: Job? = null
+    private var coexistenceGeneration: Long? = null
+
+    /**
+     * The authenticated control lifetime [attachVoice] was last called under. Compared — never
+     * used to relabel — against [VoiceDiagnostics.controlGeneration] in [updateCoexistence], so a
+     * predecessor's diagnostics snapshot cannot be forwarded to coexistence under a successor's
+     * generation merely because it happens to be the one live when the snapshot is consumed (Phase 6
+     * review blocker 2; ADR-027 Amendment A1).
+     */
+    private var voiceControlGeneration: Long? = null
+
+    /** Test-visible count of [VoiceDiagnostics] snapshots [updateCoexistence] refused as stale. */
+    internal var staleVoiceDiagnosticsCount: Int = 0
+        private set
+
+    val coexistenceDiagnostics: StateFlow<CoexistenceDiagnostics> =
+        coexistence?.diagnostics ?: MutableStateFlow(CoexistenceDiagnostics()).asStateFlow()
 
     private val _intercomPolicy = MutableStateFlow(IntercomPolicy.DEFAULT)
 
@@ -326,6 +353,7 @@ class SessionCoordinator(
     fun selectIntercomPolicy(policy: IntercomPolicy) {
         _intercomPolicy.value = policy
         voice?.selectPolicy(policy)
+        coexistenceGeneration?.let { coexistence?.selectPolicy(it, policy) }
         // With no controller there is no diagnostics change to ride on, so the mode change is
         // published here — `AUDIO_STATE.intercom_mode` is meaningful before the intercom has ever
         // started (Mode E is exactly that case).
@@ -528,6 +556,10 @@ class SessionCoordinator(
      */
     private fun retireSession(end: SessionEnd): Job {
         val endingVoice = voice
+        val endingCoexistence = coexistence
+        coexistenceGeneration?.let { endingCoexistence?.endLifetime(it) }
+        coexistenceGeneration = null
+        voiceControlGeneration = null
         if (endingVoice != null) {
             voice = null
             controlSessionManager.voice.sink = null
@@ -545,6 +577,10 @@ class SessionCoordinator(
         controlPlaneStarted = false
 
         return teardown.retire {
+            // Ending a lifetime can enqueue an exact-volume restore or a Mode D resume. It belongs
+            // to this session just as much as capture release does, so terminal teardown joins it
+            // before a successor may start.
+            endingCoexistence?.awaitLifetimeEnded()
             val release = endingVoice?.let { releaseAndShutdown(it) } ?: StopReleaseResult.AlreadyReleased
             if (end.stopsForegroundService) {
                 when (release) {
@@ -689,7 +725,15 @@ class SessionCoordinator(
         isLocalLeader: Boolean,
         authGeneration: Long,
     ) {
+        // Read once, here, and compared (never used to relabel) in `updateCoexistence` — see
+        // `voiceControlGeneration`'s own doc.
+        voiceControlGeneration = authGeneration
         if (voice != null) {
+            coexistenceGeneration = coexistence?.beginLifetime(_intercomPolicy.value)
+            // Deliberately **not** seeded from `_voiceDiagnostics.value` here: that projection can
+            // still be a predecessor's, and `updateCoexistence`'s provenance check would refuse it
+            // anyway. This generation starts neutral; the persistent collector below applies its own
+            // genuine diagnostics once they arrive (Phase 6 review blocker 2; ADR-027 Amendment A1).
             // One Connected event supplies authority and the §7.8 rebuild opportunity. The reducer
             // handles pending Start intent and consent without consulting a diagnostics projection.
             voice?.controlAuthenticated(authGeneration)
@@ -711,12 +755,14 @@ class SessionCoordinator(
         // this point reads the live generation itself; this is for the press that arrives after a
         // boundary, whose own tap-time read can only ever be honest about the gap it was pressed in.
         controller.controlAuthenticated(authGeneration)
+        coexistenceGeneration = coexistence?.beginLifetime(_intercomPolicy.value)
         // On the session's own runtime, not the app scope: this collector publishes `AUDIO_STATE`,
         // so a teardown has to be able to prove it has *stopped*, not merely that it was asked to.
         voiceDiagnosticsJob =
             (sessionRuntime?.scope ?: scope).launch {
                 controller.diagnostics.collect { diagnostics ->
                     _voiceDiagnostics.value = diagnostics
+                    coexistenceGeneration?.let { generation -> updateCoexistence(generation, diagnostics) }
                     // Every observable audio change publishes, and the publisher itself decides
                     // whether there is anything new to say — which is what makes `revision` mean "the
                     // state changed" rather than "a callback fired".
@@ -724,6 +770,38 @@ class SessionCoordinator(
                 }
             }
         logger.info("SessionCoordinator", "voice subsystem attached (offerer=$isLocalLeader)")
+    }
+
+    private fun updateCoexistence(
+        generation: Long,
+        diagnostics: VoiceDiagnostics,
+    ) {
+        // Provenance gate (Phase 6 review blocker 2; ADR-027 Amendment A1). `diagnostics` is stamped,
+        // at production time inside `VoiceController.publishDiagnostics`, with the control lifetime
+        // that owned `VoiceNegotiationState` when it was computed (ADR-020 rule 23's own
+        // `negotiationControlGeneration`) — never re-derived here. A snapshot whose provenance does
+        // not match the control lifetime this coexistence generation was begun under is a
+        // predecessor's (or not-yet-owned) state and is refused rather than relabelled as this
+        // generation's: `VoiceController` is retained across a reconnect and keeps publishing to the
+        // one collector `attachVoice` set up on first construction, so this check — not which
+        // reconnect branch happened to run — is what stops a stale duck, pause or resume crossing a
+        // control-lifetime boundary.
+        if (diagnostics.controlGeneration != voiceControlGeneration) {
+            staleVoiceDiagnosticsCount += 1
+            return
+        }
+        coexistence?.updateVoice(
+            generation = generation,
+            available = diagnostics.status != VoiceStatus.FAILED,
+            localSpeechActive = diagnostics.localSpeechActivity == SpeechActivity.ACTIVE,
+            peerSpeechActive = diagnostics.peerSpeechActivity == SpeechActivity.ACTIVE,
+            speechActivityAvailable =
+                diagnostics.localSpeechActivity != SpeechActivity.UNAVAILABLE ||
+                    diagnostics.peerSpeechActivity != SpeechActivity.UNAVAILABLE,
+            routeState = diagnostics.route.routeState,
+            interrupted = diagnostics.route.interrupted,
+            transitionTimedOut = diagnostics.route.lastTransitionTimedOut,
+        )
     }
 
     /**

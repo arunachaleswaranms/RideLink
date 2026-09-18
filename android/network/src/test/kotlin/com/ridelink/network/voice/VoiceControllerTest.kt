@@ -5,7 +5,9 @@ import com.ridelink.core.audiopolicy.AudioRouteSnapshot
 import com.ridelink.core.audiopolicy.EndpointClass
 import com.ridelink.core.audiopolicy.IntercomPolicy
 import com.ridelink.core.audiopolicy.ProfileCoupling
+import com.ridelink.core.audiopolicy.SpeechActivity
 import com.ridelink.core.protocol.VoiceBounds
+import com.ridelink.core.protocol.VoiceMode
 import com.ridelink.core.protocol.VoiceSessionId
 import com.ridelink.core.protocol.VoiceSignal
 import com.ridelink.core.protocol.VoiceWireState
@@ -400,6 +402,106 @@ class VoiceControllerTest {
             )
         }
 
+    // --- speech activity (Phase 6 review blocker 1) ----------------------------------------------
+
+    /**
+     * **The exact failure blocker 1 named**: under a continuous policy (Modes A/D) the outbound
+     * track is enabled for the whole ride segment the moment capture opens, and that alone must
+     * never read as "someone is speaking." [VoiceDiagnostics.transmitting] keeps meaning "the track
+     * is enabled" — [VoiceDiagnostics.localSpeechActivity] is the separate, honest answer.
+     */
+    @Test
+    fun `a continuous policy's permanently enabled track never reads as local speech activity`() =
+        withController(isLocalLeader = true, policy = IntercomPolicy.MODE_A) { leader, fakes ->
+            leader.start()
+            fakes.awaitEngineCall("createOffer")
+            withTimeout(TIMEOUT_MS) {
+                while (!leader.diagnostics.value.transmitting) delay(POLL_MS)
+            }
+            assertEquals(
+                SpeechActivity.UNAVAILABLE,
+                leader.diagnostics.value.localSpeechActivity,
+                "an enabled continuous track is not evidence of speech",
+            )
+        }
+
+    /** The same policy switched to PTT: releasing/holding the button is an honest signal both ways. */
+    @Test
+    fun `a ptt policy's local speech activity tracks the button, not mere capture`() =
+        withController(isLocalLeader = true, policy = IntercomPolicy.MODE_C) { leader, fakes ->
+            leader.start()
+            fakes.awaitEngineCall("createOffer")
+            assertEquals(
+                SpeechActivity.INACTIVE,
+                leader.diagnostics.value.localSpeechActivity,
+                "capture is open but the button is not held",
+            )
+            leader.setPushToTalkHeld(true)
+            withTimeout(TIMEOUT_MS) {
+                while (leader.diagnostics.value.localSpeechActivity != SpeechActivity.ACTIVE) {
+                    delay(POLL_MS)
+                }
+            }
+            leader.setPushToTalkHeld(false)
+            withTimeout(TIMEOUT_MS) {
+                while (leader.diagnostics.value.localSpeechActivity != SpeechActivity.INACTIVE) {
+                    delay(POLL_MS)
+                }
+            }
+        }
+
+    /** The peer half: `mic_muted == false` alone must never read as speech for a continuous peer. */
+    @Test
+    fun `mic_muted false from a continuous peer is not read as peer speech activity`() =
+        withController(isLocalLeader = true, policy = IntercomPolicy.MODE_A) { leader, fakes ->
+            leader.submit(
+                VoiceSignal.State(VoiceSessionId(GEN_2), VoiceWireState.ACTIVE, micMuted = false, mode = VoiceMode.CONTINUOUS),
+            )
+            withTimeout(TIMEOUT_MS) {
+                while (leader.diagnostics.value.peerReportedState != VoiceWireState.ACTIVE) delay(POLL_MS)
+            }
+            assertEquals(
+                SpeechActivity.UNAVAILABLE,
+                leader.diagnostics.value.peerSpeechActivity,
+                "a continuous peer's un-muted track is not evidence of speech",
+            )
+
+            leader.submit(
+                VoiceSignal.State(VoiceSessionId(GEN_2), VoiceWireState.ACTIVE, micMuted = false, mode = VoiceMode.PTT),
+            )
+            withTimeout(TIMEOUT_MS) {
+                while (leader.diagnostics.value.peerSpeechActivity != SpeechActivity.ACTIVE) {
+                    delay(POLL_MS)
+                }
+            }
+        }
+
+    // --- provenance (Phase 6 review blocker 2) -----------------------------------------------------
+
+    /**
+     * [VoiceDiagnostics.controlGeneration] must name the control lifetime that actually owns the
+     * negotiation right now — [VoiceNegotiationState.negotiationControlGeneration] — and must go
+     * back to `null` the moment a link loss retires that ownership, never keep naming a lifetime that
+     * has already ended (Phase 6 review blocker 2).
+     */
+    @Test
+    fun `diagnostics carry the negotiation's own owning control generation, and lose it on retirement`() =
+        withController(isLocalLeader = true, policy = IntercomPolicy.MODE_A) { leader, fakes ->
+            assertNull(leader.diagnostics.value.controlGeneration, "nothing owns a negotiation before one starts")
+
+            leader.controlAuthenticated(CONTROL_A)
+            leader.start(CONTROL_A)
+            fakes.awaitEngineCall("createOffer")
+            withTimeout(TIMEOUT_MS) {
+                while (leader.diagnostics.value.controlGeneration != CONTROL_A) delay(POLL_MS)
+            }
+
+            leader.onControlLinkLost(CONTROL_A)
+            withTimeout(TIMEOUT_MS) {
+                while (leader.diagnostics.value.controlGeneration != null) delay(POLL_MS)
+            }
+        }
+
     // --- the bounded queue ----------------------------------------------------------------------
 
     @Test
@@ -546,6 +648,7 @@ class VoiceControllerTest {
         const val GEN_2 = "22222222222222222222222222222222"
         const val GEN_3 = "33333333333333333333333333333333"
         const val FOREIGN_GEN = "abababababababababababababababab"
+        const val CONTROL_A = 1L
         const val OFFER_SDP = "v=0\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\na=mid:0\r\na=setup:actpass\r\n"
         const val ANSWER_SDP = "v=0\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\na=mid:0\r\na=setup:active\r\n"
         const val CANDIDATE = "candidate:1 1 udp 1 192.0.2.11 51234 typ host"

@@ -18,6 +18,23 @@ public struct VoiceDiagnostics: Sendable, Equatable {
     public var intercomMode: IntercomMode = IntercomPolicy.default.intercomWireMode
     /// Whether outbound audio is flowing **right now**. The gate's whole output.
     public var transmitting = false
+    /// Whether the peer's last accepted `VOICE_STATE` says its outbound track is carrying speech.
+    public var peerTransmitting = false
+    /// This device's honest `SpeechActivity` (`TransmissionState.speechActivity`) — deliberately a
+    /// separate field from `transmitting`, which answers "may audio leave" and nothing about whether
+    /// anyone is actually talking (Phase 6 review blocker 1; ADR-027 Amendment A1).
+    public var localSpeechActivity: SpeechActivity = .unavailable
+    /// The peer's honest `SpeechActivity`, from `peerSpeechActivity(mode:transmittingOnWire:)` —
+    /// never `mic_muted` alone.
+    public var peerSpeechActivity: SpeechActivity = .unavailable
+    /// The authenticated control lifetime `VoiceNegotiationState.negotiationControlGeneration` owned
+    /// this negotiation under when this snapshot was produced — `nil` when nothing owns it. Carried
+    /// so a consumer that outlives a reconnect (`SessionCoordinator`'s coexistence forwarding) can
+    /// refuse a snapshot whose provenance predates the control lifetime it is being asked to
+    /// represent, rather than relabelling it under whatever generation happens to be current at the
+    /// point the snapshot is consumed (Phase 6 review blocker 2; ADR-027 Amendment A1). Stamped once
+    /// here, at production time, and never re-derived downstream.
+    public var controlGeneration: Int64?
     /// The PTT control's current position, for the UI to reflect back at the user.
     public var pttHeld = false
     /// The user's own Mute toggle, as distinct from `micMuted`. Survives a policy change.
@@ -90,6 +107,12 @@ public actor VoiceController: VoiceSignalSink {
     private var startedGeneration: VoiceSessionId?
     private var setupTimeline = VoiceSetupTimeline()
     private var lastFailure: VoiceFailure?
+    /// A coexistence projection updated only after the generation-bound reducer accepts a signal.
+    private var peerTransmitting = false
+    /// The peer's own honest `SpeechActivity`, derived from their last accepted `VOICE_STATE.mode`
+    /// and `peerTransmitting` together — never from `peerTransmitting` alone, which for a continuous
+    /// peer (Mode A/D) means nothing about speech (Phase 6 review blocker 1).
+    private var peerSpeechActivityValue: SpeechActivity = .unavailable
 
     /// The intercom transmission gate's state (ARCHITECTURE §6.3, ADR-021). Actor-isolated and mutated
     /// only by `applyIntercom`, on the single consumer.
@@ -495,6 +518,28 @@ public actor VoiceController: VoiceSignalSink {
         noteFromInput(input)
         let outcome = VoiceNegotiation.reduce(state: state, input: input)
         state = outcome.state
+        let rejected = outcome.actions.contains {
+            if case .recordDroppedSignal = $0 { return true }
+            return false
+        }
+        if case .signalReceived(let signal, _, _) = input,
+           case .state(_, let wireState, let micMuted, let peerMode) = signal,
+           !rejected {
+            let onWire =
+                state.peerVoiceEnabled &&
+                !micMuted &&
+                wireState != .idle &&
+                wireState != .closed &&
+                wireState != .failed
+            peerTransmitting = onWire
+            // The peer's own reported mode, not a guess: `VOICE_STATE.mode` is the wire vocabulary
+            // PROTOCOL §7.4 already carries for exactly this (this peer's policy, not a negotiated
+            // value). A continuous peer's un-muted track is not evidence of speech (blocker 1).
+            peerSpeechActivityValue = peerSpeechActivity(mode: peerMode, transmittingOnWire: onWire)
+        } else if !state.peerVoiceEnabled {
+            peerTransmitting = false
+            peerSpeechActivityValue = .unavailable
+        }
         for action in outcome.actions {
             guard !isShuttingDown || completesCleanup else { break }
             await perform(action)
@@ -836,6 +881,13 @@ public actor VoiceController: VoiceSignalSink {
         diagnostics.policy = transmission.policy
         diagnostics.intercomMode = transmission.policy.intercomWireMode
         diagnostics.transmitting = transmission.transmitting
+        diagnostics.peerTransmitting = peerTransmitting
+        diagnostics.localSpeechActivity = transmission.speechActivity
+        diagnostics.peerSpeechActivity = peerSpeechActivityValue
+        // The negotiation's own owner (ADR-020 rule 23), stamped now rather than left for a
+        // downstream consumer to re-derive from whatever is live when it happens to look (blocker
+        // 2): `nil` here truthfully means "nothing owns this snapshot yet."
+        diagnostics.controlGeneration = state.negotiationControlGeneration
         diagnostics.pttHeld = transmission.pttHeld
         diagnostics.userMuted = transmission.userMuted
         // False until a microphone-driven level exists on this platform, which is currently always —

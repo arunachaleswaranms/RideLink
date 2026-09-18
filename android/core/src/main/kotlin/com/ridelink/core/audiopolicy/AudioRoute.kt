@@ -184,6 +184,10 @@ data class AudioRouteSnapshot(
      * list — cannot put it on the wire.
      */
     val lastTransitionDurationUs: Long? = null,
+    /** Number of timeout-settled route transitions. Diagnostics only; never encoded on the wire. */
+    val transitionTimedOutCount: Int = 0,
+    /** True until a new transition begins after the most recent timeout settlement. Local only. */
+    val lastTransitionTimedOut: Boolean = false,
 ) {
     /**
      * ADR-016, as corrected by its Amendment A1: `reduced` whenever the effective output profile is a

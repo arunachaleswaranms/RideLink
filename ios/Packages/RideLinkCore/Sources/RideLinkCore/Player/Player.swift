@@ -21,9 +21,28 @@ public protocol Player: Sendable {
     /// Pushed on every state change, including position ticks while playing.
     func setStateSink(_ sink: @escaping @Sendable (PlayerState) -> Void) async
 
+    /// Installs the Phase 6 coexistence lifetime. Delayed predecessor effects become inert.
+    func beginCoexistenceLifetime(_ generation: Int64) async
+
+    /// Applies one already-interpolated temporary gain step only for the owning lifetime.
+    func setCoexistenceGain(_ gain: Double, generation: Int64) async -> Bool
+
+    /// Temporarily pauses only if the exact expected track is still loaded.
+    func pauseForVoice(generation: Int64, trackToken: String) async -> Bool
+
+    /// Resumes only the exact track that coexistence previously suppressed.
+    func resumeAfterVoice(generation: Int64, trackToken: String) async -> Bool
+
     /// Releases the underlying decoder/engine resources. Unlike `VoiceEngine`'s `stop`/`release`
     /// split, there is no hardware reason to keep two lifecycles here — a local player has no
     /// Bluetooth profile to avoid disturbing — so one method covers what a control-link blip and a
     /// deliberate app teardown both need. Idempotent.
     func release() async
+}
+
+public extension Player {
+    func beginCoexistenceLifetime(_: Int64) async {}
+    func setCoexistenceGain(_: Double, generation _: Int64) async -> Bool { false }
+    func pauseForVoice(generation _: Int64, trackToken _: String) async -> Bool { false }
+    func resumeAfterVoice(generation _: Int64, trackToken _: String) async -> Bool { false }
 }

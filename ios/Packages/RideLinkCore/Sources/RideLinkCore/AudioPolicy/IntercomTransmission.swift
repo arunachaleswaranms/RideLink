@@ -70,6 +70,58 @@ public struct TransmissionState: Sendable, Equatable {
 
     /// What `VOICE_STATE.mic_muted` reports: "this peer is transmitting silence" (PROTOCOL §7.4).
     public var micMutedForWire: Bool { !transmitting }
+
+    /// **Whether a human is currently producing speech, honestly, as this gate can actually know it —
+    /// never "the outbound track happens to be enabled."** `transmitting` answers "may audio leave
+    /// right now"; this answers "is there a real signal saying someone is talking", which for
+    /// `.none` (Modes A and D) does not exist at all: full duplex has no gate, so `transmitting` is
+    /// true for the whole ride segment regardless of speech, and treating that as detected speech
+    /// would duck or pause music permanently the moment capture opens (Phase 6 review blocker 1;
+    /// ADR-027 Amendment A1).
+    ///
+    /// `.ptt` and `.vox` both have a genuine signal — a button a human is actually holding, or a
+    /// level a human actually produced — so their own gate state **is** an honest speech proxy.
+    /// VOX's gate never opens in production today (no fast level source exists; see
+    /// `TransmissionGate.vox`'s own doc), which this correctly reports as `.inactive` rather than
+    /// fabricating `.active` — it is not lying, it is simply silent.
+    public var speechActivity: SpeechActivity {
+        if !captureOpen || interrupted || userMuted { return .inactive }
+        switch policy.gate {
+        case .none: return .unavailable
+        case .vox: return voxOpen ? .active : .inactive
+        case .ptt: return pttHeld ? .active : .inactive
+        case .disabled: return .inactive
+        }
+    }
+}
+
+/// Whether a human is producing speech right now, as honestly as the available signal allows.
+///
+/// Deliberately three states, not two: `.unavailable` is not "false" — it is "this policy's gate has
+/// no signal that could ever mean speech," which is a different fact from `.inactive`'s "the signal
+/// exists and currently says no." Collapsing the two would let `.none`'s permanently enabled track
+/// masquerade as silence rather than as what it is: unmeasured (Phase 6 review blocker 1).
+public enum SpeechActivity: Sendable, Equatable {
+    case active
+    case inactive
+    case unavailable
+}
+
+/// The peer's own honest speech-activity read, from the wire vocabulary `VoiceMode` already carries
+/// in `VOICE_STATE.mode` (PROTOCOL §7.4) — never from `mic_muted` alone. `mic_muted == false` is
+/// "this peer's gate is open," and for `.continuous` (the wire report for `.none`, i.e. Modes A and
+/// D) an open gate carries exactly the same non-signal `TransmissionState.speechActivity` refuses to
+/// trust locally — full duplex has no gate at all, so a continuous peer's un-muted track is not
+/// evidence anyone is talking.
+///
+/// `transmittingOnWire` is the same condition `VoiceController` already computes for its (unchanged)
+/// `VoiceDiagnostics.peerTransmitting` field: `mic_muted == false` and the peer's reported state is
+/// neither idle, closed nor failed.
+public func peerSpeechActivity(mode: VoiceMode, transmittingOnWire: Bool) -> SpeechActivity {
+    switch mode {
+    case .continuous, .unknown: return .unavailable
+    case .ptt, .vox: return transmittingOnWire ? .active : .inactive
+    }
 }
 
 /// What drives `IntercomTransmission`. Each is an absolute assignment, never an edge — see

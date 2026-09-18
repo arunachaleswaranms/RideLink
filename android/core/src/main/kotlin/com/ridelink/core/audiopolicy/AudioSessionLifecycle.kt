@@ -66,6 +66,8 @@ data class RouteTransitionState(
     val lastDurationUs: Long? = null,
     /** How many transitions have been declared settled by a timeout rather than by the platform. */
     val timedOutCount: Int = 0,
+    /** Whether the most recent settlement was the failure timeout rather than a platform callback. */
+    val lastSettlementTimedOut: Boolean = false,
 ) {
     val lastDurationMs: Double? get() = lastDurationUs?.let { it / MICROS_PER_MS }
 
@@ -93,7 +95,15 @@ object RouteTransitionTracker {
     ): RouteTransitionState =
         // Already transitioning: keep the original start instant, so a burst of route callbacks
         // measures one transition rather than resetting the clock and under-reporting it.
-        if (state.transitioning) state else state.copy(transitioning = true, startedAtMonoUs = nowMonoUs)
+        if (state.transitioning) {
+            state
+        } else {
+            state.copy(
+                transitioning = true,
+                startedAtMonoUs = nowMonoUs,
+                lastSettlementTimedOut = false,
+            )
+        }
 
     fun settle(
         state: RouteTransitionState,
@@ -106,6 +116,7 @@ object RouteTransitionTracker {
             startedAtMonoUs = null,
             lastDurationUs = if (started == null) state.lastDurationUs else (nowMonoUs - started).coerceAtLeast(0),
             timedOutCount = state.timedOutCount,
+            lastSettlementTimedOut = false,
         )
     }
 
@@ -120,7 +131,14 @@ object RouteTransitionTracker {
     ): RouteTransitionState {
         val started = state.startedAtMonoUs
         val elapsed = state.transitioning && started != null && nowMonoUs - started >= timeoutUs
-        return if (elapsed) settle(state, nowMonoUs).copy(timedOutCount = state.timedOutCount + 1) else state
+        return if (elapsed) {
+            settle(state, nowMonoUs).copy(
+                timedOutCount = state.timedOutCount + 1,
+                lastSettlementTimedOut = true,
+            )
+        } else {
+            state
+        }
     }
 }
 

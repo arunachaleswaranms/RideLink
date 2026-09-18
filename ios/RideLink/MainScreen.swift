@@ -66,6 +66,7 @@ struct MainScreen: View {
                 if coordinator.state.status == .connected || coordinator.state.status == .rideActive {
                     VoiceCard(
                         voice: coordinator.voiceDiagnostics,
+                        coexistence: coordinator.coexistenceDiagnostics,
                         policy: coordinator.intercomPolicy,
                         peerAudioState: coordinator.peerAudioState,
                         refusal: coordinator.lastIntercomRefusal,

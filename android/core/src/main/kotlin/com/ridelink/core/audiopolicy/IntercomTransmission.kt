@@ -63,7 +63,70 @@ data class TransmissionState(
 
     /** What `VOICE_STATE.mic_muted` reports: "this peer is transmitting silence" (PROTOCOL §7.4). */
     val micMutedForWire: Boolean get() = !transmitting
+
+    /**
+     * **Whether a human is currently producing speech, honestly, as this gate can actually know it —
+     * never "the outbound track happens to be enabled."** [transmitting] answers "may audio leave
+     * right now"; this answers "is there a real signal saying someone is talking", which for
+     * [TransmissionGate.None] (Modes A and D) does not exist at all: full duplex has no gate, so
+     * [transmitting] is true for the whole ride segment regardless of speech, and treating that as
+     * detected speech would duck or pause music permanently the moment capture opens (Phase 6 review
+     * blocker 1; ADR-027 Amendment A1).
+     *
+     * [TransmissionGate.Ptt] and [TransmissionGate.Vox] both have a genuine signal — a button a human
+     * is actually holding, or a level a human actually produced — so their own gate state **is** an
+     * honest speech proxy. VOX's gate never opens in production today (no fast level source exists;
+     * see [TransmissionGate.Vox]'s own doc), which this correctly reports as [SpeechActivity.INACTIVE]
+     * rather than fabricating [SpeechActivity.ACTIVE] — it is not lying, it is simply silent.
+     */
+    val speechActivity: SpeechActivity
+        get() =
+            when {
+                !captureOpen || interrupted || userMuted -> SpeechActivity.INACTIVE
+                else ->
+                    when (policy.gate) {
+                        TransmissionGate.None -> SpeechActivity.UNAVAILABLE
+                        is TransmissionGate.Vox -> if (voxOpen) SpeechActivity.ACTIVE else SpeechActivity.INACTIVE
+                        TransmissionGate.Ptt -> if (pttHeld) SpeechActivity.ACTIVE else SpeechActivity.INACTIVE
+                        TransmissionGate.Disabled -> SpeechActivity.INACTIVE
+                    }
+            }
 }
+
+/**
+ * Whether a human is producing speech right now, as honestly as the available signal allows.
+ *
+ * Deliberately three states, not two: [UNAVAILABLE] is not "false" — it is "this policy's gate has
+ * no signal that could ever mean speech," which is a different fact from [INACTIVE]'s "the signal
+ * exists and currently says no." Collapsing the two would let [TransmissionGate.None]'s permanently
+ * enabled track masquerade as silence rather than as what it is: unmeasured (Phase 6 review blocker 1).
+ */
+enum class SpeechActivity {
+    ACTIVE,
+    INACTIVE,
+    UNAVAILABLE,
+}
+
+/**
+ * The peer's own honest speech-activity read, from the wire vocabulary [VoiceMode] already carries in
+ * `VOICE_STATE.mode` (PROTOCOL §7.4) — never from `mic_muted` alone. `mic_muted == false` is "this
+ * peer's gate is open," and for [VoiceMode.CONTINUOUS] (the wire report for [TransmissionGate.None],
+ * i.e. Modes A and D) an open gate carries exactly the same non-signal [TransmissionState.speechActivity]
+ * refuses to trust locally — full duplex has no gate at all, so a continuous peer's un-muted track is
+ * not evidence anyone is talking.
+ *
+ * [transmittingOnWire] is the same condition `VoiceController` already computed for its (unchanged)
+ * [com.ridelink.network.voice.VoiceDiagnostics.peerTransmitting] field: `mic_muted == false` and the
+ * peer's reported state is neither idle, closed nor failed.
+ */
+fun peerSpeechActivity(
+    mode: VoiceMode,
+    transmittingOnWire: Boolean,
+): SpeechActivity =
+    when (mode) {
+        VoiceMode.CONTINUOUS, VoiceMode.UNKNOWN -> SpeechActivity.UNAVAILABLE
+        VoiceMode.PTT, VoiceMode.VOX -> if (transmittingOnWire) SpeechActivity.ACTIVE else SpeechActivity.INACTIVE
+    }
 
 /**
  * What drives [IntercomTransmission]. Each is an absolute assignment, never an edge — see

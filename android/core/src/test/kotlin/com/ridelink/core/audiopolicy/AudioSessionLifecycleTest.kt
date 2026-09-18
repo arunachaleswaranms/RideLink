@@ -193,7 +193,11 @@ class AudioSessionLifecycleTest {
         state = late.state
         assertFalse(state.transition.transitioning, "at the window it is settled")
         assertEquals(1, state.transition.timedOutCount, "and counted as a timeout, not a measurement")
+        assertTrue(state.transition.lastSettlementTimedOut, "fallback truth persists after the timeout publication")
         assertEquals(listOf(AudioSessionAction.PublishSnapshot(RouteState.STABLE)), late.actions)
+
+        val nextTransition = RouteTransitionTracker.begin(state.transition, RouteTransitionTracker.DEFAULT_TIMEOUT_US + 1)
+        assertFalse(nextTransition.lastSettlementTimedOut, "a new observable transition clears the prior fallback")
     }
 
     @Test

@@ -22,10 +22,10 @@ subscription and no telemetry — the app is expected to work with mobile data s
 
 ## Status
 
-**Phase 0 (hardware feasibility) is done. Phases 1a, 1b, 2a, 2b, 3, 4 and 5 are
-implementation-complete; the real-device gate is pending for all of them.** The overall "2 Intercom"
-milestone is **not** complete — its hardware gates have not run. Phase 6 (intercom/music
-coexistence) and Phase 7 (Ride Mode + resilience) have not started.
+**Phases 1a, 1b, 2a, 2b, 3, 4 and 5 are implementation-complete. Phase 6 software closure is
+implemented on its feature branch; physical qualification is deferred because the complete iPhone
+and Bluetooth helmet/TWS chain is unavailable.** The overall "2 Intercom" milestone is **not**
+complete — its hardware gates have not run. Phase 7 (Ride Mode + resilience) has not started.
 
 Phase 1b's two open security risks are closed with measurements rather than argument: a
 hand-encoded self-signed X.509 certificate that Apple's parser, BoringSSL and OpenSSL all accept,
@@ -71,14 +71,22 @@ vector sets rather than inside a coordinator, and a follower's intent is the *sa
 [`ADR-004`](docs/DECISIONS/ADR-004-local-synchronized-playback.md) and
 [`ADR-024`](docs/DECISIONS/ADR-024-synchronized-playback-integration.md).
 
-**None of it has run on the two real phones, and no audio has been captured or played anywhere.**
-This environment has no Android device or emulator and only an iOS simulator; the Android media path
-has no test at all, and neither audio-session implementation has ever executed on a device.
+**Phase 6 adds one intercom/music coexistence owner:** a mirrored, vector-pinned reducer temporarily
+ramps the existing player's gain to 25% for Modes A/B or 35% for Mode C, while preserving the user's
+base volume. Mode D uses an exact-track local suppression layer, so it neither creates a second
+playback authority nor resumes over a user pause, track end, replacement, or session boundary. Mode E
+leaves music alone. Effects carry session/player ownership, terminal teardown joins restoration, and
+voice/music failures degrade independently. On iOS one coordinator is the sole writer of the
+process-global `AVAudioSession`. Decision: [`ADR-027`](docs/DECISIONS/ADR-027-intercom-music-coexistence-ownership.md).
+
+**Phase 6 has not been physically qualified.** No real iPhone or complete Bluetooth helmet/TWS chain
+was available, so no real profile switch, microphone behavior, audible ramp quality, route-transition
+time, screen-lock audio, cross-phone coexistence, or riding/wind result is claimed.
 Microphone-driven VOX has no level source on either platform, so selecting that mode cannot open the
 gate yet — the app says so on screen. **No latency figure exists**, and the setup timings above
 measure how long the app took to bring voice up: they contain no Bluetooth hop and no jitter buffer,
 and mouth-to-ear latency cannot be inferred from them. See [`docs/STATUS.md`](docs/STATUS.md) for
-exactly what is verified and what is not, and [`docs/TEST_PLAN.md`](docs/TEST_PLAN.md) §3.1a/§3.1b
+exactly what is verified and what is not, and [`docs/TEST_PLAN.md`](docs/TEST_PLAN.md) §3.1g
 for the line drawn item by item. Phase 5 adds nothing to that picture: **no alignment figure of any
 kind exists**, and the <100 ms music-synchronisation target must not be described as approached until
 TEST_PLAN §5.2's S-03 produces a real measurement from two phones and a recorder.

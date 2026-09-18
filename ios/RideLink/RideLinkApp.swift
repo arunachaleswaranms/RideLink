@@ -30,9 +30,10 @@ struct RideLinkApp: App {
     @State private var syncPlayback: SyncPlaybackPresenter?
 
     init() {
-        let sessionResult = Result { try SessionCoordinator() }
+        let audioSessionCoordinator = IosAudioSessionCoordinator()
+        let sessionResult = Result { try SessionCoordinator(audioSessionCoordinator: audioSessionCoordinator) }
         _session = State(initialValue: sessionResult)
-        let musicResult = Result { try MusicCoordinator() }
+        let musicResult = Result { try MusicCoordinator(audioSessionCoordinator: audioSessionCoordinator) }
         _music = State(initialValue: musicResult)
         _nowPlayingController = State(initialValue: (try? musicResult.get()).map { NowPlayingController(musicCoordinator: $0) })
 
@@ -41,6 +42,7 @@ struct RideLinkApp: App {
         // not a second one). Neither failure disables the other: a broken shared library is not a
         // reason to refuse local music or the control session, and the reverse.
         if let coordinator = try? sessionResult.get(), let musicCoordinator = try? musicResult.get() {
+            coordinator.attachCoexistence(music: musicCoordinator)
             coordinator.attachSharedLibrary(
                 libraryRepository: musicCoordinator.libraryRepositoryForSharedLibrary,
                 libraryDatabaseQueue: musicCoordinator.libraryDatabaseQueueForSharedLibrary,
@@ -62,7 +64,11 @@ struct RideLinkApp: App {
                content: SharedLibraryContentPort(music: musicCoordinator, sharedLibrary: sharedLibrary),
                nextQueueItemId: { Ulid.generate() }
            ) {
-            let presenter = SyncPlaybackPresenter(coordinator: sync)
+            let presenter = SyncPlaybackPresenter(coordinator: sync) { [weak coordinator] diagnostics in
+                coordinator?.updateSyncAvailability(
+                    ![SyncState.syncFailed, .desynchronized, .transportFailed].contains(diagnostics.syncState)
+                )
+            }
             _syncPlayback = State(initialValue: presenter)
             musicCoordinator.syncGate = SyncPlaybackGateAdapter(
                 sync: sync,

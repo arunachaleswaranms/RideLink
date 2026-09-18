@@ -167,7 +167,14 @@ final class AudioSessionLifecycleTests: XCTestCase {
         state = late.state
         XCTAssertFalse(state.transition.transitioning, "at the window it is settled")
         XCTAssertEqual(1, state.transition.timedOutCount, "and counted as a timeout, not a measurement")
+        XCTAssertTrue(state.transition.lastSettlementTimedOut, "fallback truth persists after the timeout publication")
         XCTAssertEqual([.publishSnapshot(routeState: .stable)], late.actions)
+
+        let nextTransition = RouteTransitionTracker.begin(
+            state.transition,
+            nowMonoUs: RouteTransitionTracker.defaultTimeoutUs + 1
+        )
+        XCTAssertFalse(nextTransition.lastSettlementTimedOut, "a new observable transition clears the prior fallback")
     }
 
     func testATimeoutCheckWithNoTransitionInProgressDoesNothing() {

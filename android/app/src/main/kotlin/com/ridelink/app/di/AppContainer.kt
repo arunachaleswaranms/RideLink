@@ -8,6 +8,7 @@ import com.ridelink.app.library.BulkTransportManagerAdapter
 import com.ridelink.app.library.ControlSessionManagerAdapter
 import com.ridelink.app.library.LocalContentResolverAdapter
 import com.ridelink.app.library.SharedLibraryCoordinator
+import com.ridelink.app.music.IntercomMusicCoexistenceCoordinator
 import com.ridelink.app.music.MusicCoordinator
 import com.ridelink.app.service.RideCommand
 import com.ridelink.app.service.RideCommandBus
@@ -22,6 +23,7 @@ import com.ridelink.app.sync.SharedLibraryContentPort
 import com.ridelink.app.sync.SyncPlaybackCoordinator
 import com.ridelink.app.sync.SyncPlaybackGateAdapter
 import com.ridelink.app.sync.SyncSessionManagerAdapter
+import com.ridelink.app.sync.SyncState
 import com.ridelink.audio.player.ExoPlayerMusicPlayer
 import com.ridelink.audio.route.AndroidVoiceAudioSession
 import com.ridelink.audio.route.AudioEndpointPreference
@@ -193,6 +195,12 @@ class AppContainer(
             nextQueueItemId = { UUID.randomUUID().toString() },
         )
 
+    private val coexistenceCoordinator =
+        IntercomMusicCoexistenceCoordinator(
+            scope = appScope,
+            music = musicCoordinator,
+        )
+
     /**
      * Phase 4's shared-library stack (ADR-023). [bulkTransport] deliberately gets its **own**
      * [TlsControlChannel] instance rather than reusing [controlChannel] — the bulk plane is a
@@ -284,9 +292,11 @@ class AppContainer(
                 // usable" graceful-degradation rule, applied to the one shared foreground service.
                 foregroundService = ForegroundServiceController { RideForegroundService.stopIntercom(context) },
                 buildVoiceController = ::voiceController,
+                coexistence = coexistenceCoordinator,
             )
         installRideNotificationCommands()
         observeMusicActivity()
+        observeSyncAvailability()
         // ADR-022: hand RideForegroundService the one real player and the one real queue owner so
         // its MediaSession is a control surface in front of them, never a second player or a second
         // queue owner. Set once, here, well before any user action can start that service.
@@ -307,6 +317,22 @@ class AppContainer(
         appScope.launch {
             musicCoordinator.isMusicActive.collect { active ->
                 RideForegroundService.updateMusicPlaying(context, active)
+            }
+        }
+    }
+
+    /** Phase 6 fallback projection; it never changes Phase 5 authority or starts a retry. */
+    private fun observeSyncAvailability() {
+        appScope.launch {
+            syncPlaybackCoordinator.diagnostics.collect { diagnostics ->
+                coexistenceCoordinator.updateSyncAvailability(
+                    diagnostics.syncState !in
+                        setOf(
+                            SyncState.SYNC_FAILED,
+                            SyncState.DESYNCHRONIZED,
+                            SyncState.TRANSPORT_FAILED,
+                        ),
+                )
             }
         }
     }

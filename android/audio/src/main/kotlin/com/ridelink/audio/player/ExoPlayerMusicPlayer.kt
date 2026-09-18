@@ -56,6 +56,7 @@ class ExoPlayerMusicPlayer(
     @Volatile
     private var stateSink: ((PlayerState) -> Unit)? = null
     private var positionTickJob: Job? = null
+    private var coexistenceGeneration = 0L
 
     init {
         exoPlayer.addListener(
@@ -154,6 +155,50 @@ class ExoPlayerMusicPlayer(
         stateSink = sink
     }
 
+    override suspend fun beginCoexistenceLifetime(generation: Long) =
+        withContext(Dispatchers.Main.immediate) {
+            if (generation > coexistenceGeneration) coexistenceGeneration = generation
+        }
+
+    override suspend fun setCoexistenceGain(
+        generation: Long,
+        gain: Double,
+    ): Boolean =
+        withContext(Dispatchers.Main.immediate) {
+            if (generation != coexistenceGeneration) return@withContext false
+            exoPlayer.volume = gain.coerceIn(MIN_GAIN, MAX_GAIN).toFloat()
+            true
+        }
+
+    override suspend fun pauseForVoice(
+        generation: Long,
+        trackToken: String,
+    ): Boolean =
+        withContext(Dispatchers.Main.immediate) {
+            if (generation != coexistenceGeneration || cachedState.localEntryId?.value != trackToken || !cachedState.playing) {
+                return@withContext false
+            }
+            exoPlayer.pause()
+            true
+        }
+
+    override suspend fun resumeAfterVoice(
+        generation: Long,
+        trackToken: String,
+    ): Boolean =
+        withContext(Dispatchers.Main.immediate) {
+            if (
+                generation != coexistenceGeneration ||
+                cachedState.localEntryId?.value != trackToken ||
+                cachedState.ended ||
+                cachedState.playing
+            ) {
+                return@withContext false
+            }
+            exoPlayer.play()
+            true
+        }
+
     override suspend fun release() =
         withContext(Dispatchers.Main.immediate) {
             stopPositionTicking()
@@ -223,5 +268,7 @@ class ExoPlayerMusicPlayer(
     private companion object {
         const val POSITION_TICK_MS = 250L
         const val NORMAL_RATE = 1.0
+        const val MIN_GAIN = 0.0
+        const val MAX_GAIN = 1.0
     }
 }
