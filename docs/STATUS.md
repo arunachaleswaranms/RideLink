@@ -1,6 +1,28 @@
 # RideLink — Status
 
-**Updated:** 19 September 2026 — **Phase 7 (Ride Mode + resilience) software closure is implemented
+**Updated:** 20 September 2026 — **an independent review of the Phase 7 PR found two confirmed
+blocker groups; both are fixed** ([ADR-028 Amendment A1](DECISIONS/ADR-028-ride-mode-and-state-resynchronization.md#amendment-a1--20-september-2026--independent-review-two-confirmed-blocker-groups-both-fixed) +
+[ADR-024 Amendment A9](DECISIONS/ADR-024-synchronized-playback-integration.md#amendment-a9--20-september-2026--a-null-timeline-is-not-the-same-fact-as-nothing-to-restore),
+§2aw). **Blocker 1**: outbound `STATE_SNAPSHOT`/`STATE_REQUEST` were admission-checked but not
+generation-*bound* to the actual socket write — the same class ADR-020 Amendment A9 fixed for
+`VOICE_*` and ADR-024 Amendment A2 fixed for Playback, reopened here because this ADR's own original
+"alternatives rejected" section wrongly concluded the admission check made a bound writer redundant.
+Fixed by reusing the existing bound-writer mechanism outright. **Blocker 2**: reconnect/resync did not
+reliably reconstruct authoritative playback, for five linked reasons in Phase 5's own
+`resetForNewSession`/`applyPeerPlaybackState`/`restoreFromPlaybackState` — a leader's own current track
+did not survive a link loss, a normal reconnect's snapshot silently skipped restoration, a
+clock-or-content-not-ready snapshot was dropped rather than held, the outer coordinator could not tell
+applied from deferred from rejected, and (found while fixing the first) a leader's track identity
+could survive past its own ride's end. All five are Phase 5 defects Phase 7's own new call path was
+the first to reliably exercise; all five fixed with no wire change. Both blockers reproduced against
+unmodified production before fixing, on both platforms, per this codebase's standing audit discipline.
+954→966 Android tests, 573→588 iOS tests (`RideLinkPlatform`), 0 failures, independently re-verified;
+one genuine app-target build break (a non-exhaustive `switch` over the extended outcome enum in
+`MainScreen.swift`, missed because the fix's own test passes only exercised the Swift packages, not
+the Xcode app target) found and fixed during final verification. Physical qualification remains
+**DEFERRED — HARDWARE NOT AVAILABLE**. Independent review of *this* pass has not yet run.
+
+**Previous update:** 19 September 2026 — **Phase 7 (Ride Mode + resilience) software closure is implemented
 on the feature branch** ([ADR-028](DECISIONS/ADR-028-ride-mode-and-state-resynchronization.md) +
 [ADR-024 Amendment A8](DECISIONS/ADR-024-synchronized-playback-integration.md#amendment-a8--19-september-2026--a-leaders-own-queue-must-survive-a-link-it-did-not-choose-to-lose),
 §2av). `STATE_REQUEST`/`STATE_SNAPSHOT` close the recorded problem 42 gap exactly per PROTOCOL §10's
@@ -62,10 +84,11 @@ closure-audited (§2q/§2r). Phase 4 is closure-audited **six** times (§2v–§
 44 is now fixed** (ADR-023 Amendment A6 / ADR-025 §1). **M4 (Synced ride music) has its software
 half, and it has been audited seven times**: Phase 5 is closure-audited A1 (§2ab), A2 (§2ac),
 A3 (§2ad), A4 (§2ae), A5 (§2af), A6 (§2ag) and A7 (§2ah), with its real-device gate open.
-**Current phase:** Phase 7 — Ride Mode and resilience, software closure implemented and self-audited
-with two real defects found and fixed (§2av, ADR-028, ADR-024 Amendment A8); independent review has
-not yet run. Phase 6 is the accepted baseline beneath it, independently
-reviewed once with two confirmed findings fixed (§2au). Phase 5 remains the
+**Current phase:** Phase 7 — Ride Mode and resilience, now independently reviewed once with two
+confirmed blocker groups fixed (§2aw, ADR-028 Amendment A1, ADR-024 Amendment A9), on top of the two
+real defects this phase's own self-audit had already found and fixed (§2av, ADR-024 Amendment A8).
+Independent review of this second pass has not yet run. Phase 6 is the accepted baseline beneath it,
+independently reviewed once with two confirmed findings fixed (§2au). Phase 5 remains the
 accepted synchronized-playback baseline. The thirty-second session did **not** advance
 Phase 5; it closed the cross-phase control-plane defect A7 confirmed and deliberately did not fix
 (§2ai, ADR-025). The thirty-third session (§2aj) did not advance Phase 5 either: it closed **§4
@@ -6273,6 +6296,89 @@ AVAILABLE**, identical in kind to every phase before this one.
 
 ---
 
+## 2aw. Independent review of Phase 7 — two confirmed blocker groups, both fixed (20 September 2026, ADR-028 Amendment A1 + ADR-024 Amendment A9)
+
+**§2av's own self-audit found two real defects before calling itself done and said as much: "this
+pass already found two real defects in its own newly-written code... which is itself evidence an
+independent pass is likely to find something this one missed."** It did. An independent review of the
+whole Phase 7 pass found two confirmed blocker groups, neither of which §2av's own audit reached,
+because both live one layer below where §2av was looking: §2av audited Phase 7's *new* code for the
+provenance bug class; both of these are either an incomplete *application* of an already-known fix
+(Blocker 1) or a defect in *existing, already-accepted* Phase 5 machinery that Phase 7's new call path
+was merely the first to reliably exercise (Blocker 2).
+
+**Blocker 1 — outbound `STATE_SNAPSHOT`/`STATE_REQUEST` were admission-checked but not
+generation-bound to the actual write.** `ResyncRelay.send`/`ResyncChannel.send` resolved the
+authenticated writer *live*, at the moment of the write, discarding the `generation` its caller
+already had — so a frame admitted under a generation that then retired could be written on a
+successor's connection during the suspension between admission and the actual socket write. This is
+the identical class ADR-020 Amendment A9 (`VOICE_*`) and ADR-024 Amendment A2 (Playback) already
+fixed; it was reopened here because ADR-028's own "alternatives rejected" section concluded the
+admission-time proof already in place made the bound-writer pattern unnecessary for resync, which was
+wrong — admission proves a decision was current when made, the bound writer proves the connection is
+still owned by the generation that made it, and the two questions are not the same one. Fixed by
+reusing `VoiceSignalRelay`'s existing bound-writer mechanism outright, on both platforms, with no new
+socket-ownership logic.
+
+**Blocker 2 — reconnect/resync did not reliably reconstruct authoritative playback**, for five linked
+reasons, all in Phase 5's `resetForNewSession`/`applyPeerPlaybackState`/`restoreFromPlaybackState`/
+`drainDeferredEvents`, all pre-existing (like problem 72's queue wipe): (A) a leader's own current
+track did not survive a link loss, because `emitStateSnapshot` read the session-clock-scoped
+`timeline` for content identity rather than anything ride-segment-scoped; (B) a normal reconnect's
+snapshot silently skipped restoration, because the routing decision used the ingress-overflow-specific
+`playbackDesynchronized` flag alone and `resetForNewSession` clears that flag and `timeline` together;
+(C) a snapshot needing the fresh clock — or, on iOS specifically, locally-available content — was
+dropped rather than held, with the restoration obligation already cleared before the drop; (D) the
+outer `ResyncCoordinator` could not distinguish applied from deferred from rejected, because
+`onStateSnapshot` returned nothing; (E) iOS-only: a missing local copy of the authoritative track had
+nowhere to be retried, since `applyPlay`'s content-unavailable branch requested the transfer but
+retained nothing for it to complete against; (F) found while building the fix for (A)'s own
+regression: a leader's new ride-segment track identity survived past its own ride's end, so Ride 1
+could leak into Ride 2's reconnect resync. All six fixed; full technical account in
+[ADR-024 Amendment A9](DECISIONS/ADR-024-synchronized-playback-integration.md#amendment-a9--20-september-2026--a-null-timeline-is-not-the-same-fact-as-nothing-to-restore),
+summary in [ADR-028 Amendment A1](DECISIONS/ADR-028-ride-mode-and-state-resynchronization.md#amendment-a1--20-september-2026--independent-review-two-confirmed-blocker-groups-both-fixed).
+
+**One more thing this pass found, in its own verification rather than in either fork's work:** after
+both fixes landed and all package-level tests were green on both platforms, the actual `ios/RideLink`
+Xcode app target failed to build — `MainScreen.swift`'s `outcomeLabel(_ outcome: ResyncOutcome)`
+switch was not exhaustive against the extended enum, because every verification step up to that point
+had run `swift test` against the two Swift **packages** only, never the app target itself, which is a
+separate Xcode project with its own compilation unit. Fixed with one missing case. **Standing lesson
+this repeats**: "all package tests pass" and "the app builds" are different claims, and this is not
+the first time in this repository's history that the gap between them hid something (§4 problem 20's
+"iOS app target has no test target" is the same seam, from the other direction).
+
+**Verified test counts** (independently re-run after both fixes, not self-reported): Android
+`:core:test` 447, `:network:test` 283, `:app:test` 236 — **966 total, 0 failures**, stable across
+repeated `--rerun-tasks` runs; `ktlintCheck detekt lint assembleDebug assembleRelease` all clean. iOS
+`RideLinkCore` 343/343, `RideLinkPlatform` 588/588; unsigned generic-iOS-device, Debug-Simulator and
+Release-Simulator builds all `BUILD SUCCEEDED` after the `MainScreen.swift` fix above.
+
+**A note on iOS test-run variance, recorded honestly rather than swept under a bigger timeout.** Two
+distinct, real intermittent single-test failures were investigated during this pass. The first (in
+`ReconnectResyncStressTests`' Case B regression) was root-caused conclusively to a genuine test-only
+ordering bug — the test called `triggerDesync` without first settling an auto-triggered reconnect
+request for the same live generation, so `StateResyncGate`'s correct dedup silently absorbed the
+trigger and the test's own poll spun to its timeout — fixed by settling the auto-triggered request
+first, the same fix already applied once elsewhere in this file. Confirmed via 20+ repeated runs
+clean after the fix, versus roughly 1-in-4-5 before. The second was traced to a false alarm in this
+orchestrator's own verification method: running `swift test` against a package while a background
+fork was still actively mid-edit on the same package produces a genuine build error (a temporarily
+non-exhaustive `switch`, mid-refactor) that looks identical to a flaky test failure in a shell
+summary line if not read carefully — not a flake at all. After both were accounted for, roughly 25
+further isolated full-suite runs (no concurrent build racing the same files) produced 2 more
+single-test failures, both immediately following one fork's very large edit session and none in the
+22+ runs since — consistent with transient build/module-cache settling immediately after a large
+incremental compile rather than a reproducible logic defect, but not conclusively proven absent given
+the inability to capture the exact failing assertion on those two occasions. Recorded honestly as a
+residual, low-confidence, unresolved data point rather than either dismissed or allowed to block
+closure — CI runs on isolated, dedicated runners per job and is the stronger signal in practice (see
+current head's CI result in §7/PR #5).
+
+**New problem rows**: 74 (Blocker 1, fixed) and 75 (Blocker 2, fixed) in §4.
+
+---
+
 ## 3. Tests passed / pending
 
 ### Phase 7 software closure (19 September 2026) — see §2av
@@ -7099,6 +7205,8 @@ as of this write-up — see §7.
 
 | 72 | **FIXED 19 September 2026 (Phase 7, ADR-024 Amendment A8, §2av).** `SyncPlaybackCoordinator.resetForNewSession()` unconditionally wiped `queueState`/`_queueState` to empty on every session boundary — including a **leader's**, on a mere `LinkLost` with no reconnect and no peer — which erased a ride's whole queue on an ordinary Wi-Fi blip, for the one role nothing on the wire could ever restore it for. Pre-existing since the original Phase 5 integration commit (confirmed by `git log -S` on iOS); found by Phase 7's own reconnect/second-ride stress tests, not by a dedicated audit of this ADR | ~~High~~ Fixed | Removed the unconditional queue reset; every other session-scoped reset (sequence numbers, chains, epoch, drift, desync flags, tick job) is unchanged. No role gate needed — a follower's stale queue is overwritten wholesale by the next snapshot regardless. Regression tests on both platforms; three pre-existing tests per platform that had baked the wipe in as an invariant were corrected |
 | 73 | **FIXED 19 September 2026 (Phase 7, ADR-028, iOS only).** `MainScreen.swift`'s `fullScreenCover` gating Ride Mode's visibility read `coordinator.state.status == .rideActive` only, so the screen **disappeared** the instant an ordinary reconnect began (`status` moves to `.reconnecting` for up to PROTOCOL §10's 120 s budget) — dropping the rider back to the developer/diagnostics screen exactly when brief §15 requires Ride Mode to stay up with a passive indicator. Android's equivalent (`nextRideModeVisibility`) was correct from first implementation; only iOS had the naive predicate. Found by direct review, not by either platform's own stress testing (a static-analysis-shaped gap, not a lifecycle race) | Medium | Fixed by `RideModePresentation.nextRideModeVisibility(previous:status:returnTo:)`, mirroring Android's function exactly: `.reconnecting` stays visible only when `returnTo == .rideActive`; `.disconnected` preserves whatever the previous frame showed, for the budget-exhausted retry banner. Wired into `MainScreen` via one `@State` bit updated on `.onChange(of: coordinator.state.status)` — derived from the FSM's own output every time, never an independent decision. 7 new regression tests, including the full ride/reconnect/recovery/end cycle frame by frame |
+| 74 | **FIXED 20 September 2026 (independent review, Phase 7 PR, ADR-028 Amendment A1, Blocker 1).** Outbound `STATE_SNAPSHOT`/`STATE_REQUEST` were admission-checked (`stillCurrent`/`stillCurrentNow` before `enqueueOutbound`) but the actual write resolved the authenticated writer *live*, discarding the `generation` already captured — the identical class ADR-020 A9 (`VOICE_*`) and ADR-024 A2 (Playback) already fixed, reopened here because ADR-028's own "alternatives rejected" section wrongly concluded the admission proof made a bound writer redundant | ~~High~~ Fixed | `ResyncRelay.send`/`ResyncChannel.send` now takes the authorising generation and resolves the writer from the same bound-writer mechanism `VoiceSignalRelay` already uses, on both platforms. Regressions on both platforms: a paused-then-resumed send across a generation boundary is refused and never reaches the successor's wire; a queued stale item does not wedge a following live one |
+| 75 | **FIXED 20 September 2026 (independent review, Phase 7 PR, ADR-024 Amendment A9, Blocker 2).** Reconnect/resync did not reliably reconstruct authoritative playback, for five linked pre-existing Phase 5 defects in `resetForNewSession`/`applyPeerPlaybackState`/`restoreFromPlaybackState`/`drainDeferredEvents` plus one found while fixing them: (A) a leader's own current track did not survive a link loss; (B) a normal reconnect's snapshot silently skipped restoration; (C) a clock-or-content-not-ready snapshot was dropped rather than held; (D) the outer coordinator could not tell applied from deferred from rejected; (E) iOS-only, a missing local copy of the authoritative track had nowhere to be retried; (F) a leader's ride-segment track identity survived past its own ride's end. All reachable through the same `onPeerPlaybackState` the ordinary wire `PLAYBACK_STATE` message already used — Phase 7's reconnect path was simply the first reliable trigger of the specific preconditions (null timeline, not-yet-ready clock) that expose them | ~~High~~ Fixed | New ride-segment-scoped `PlaybackIdentity` (survives `resetForNewSession`, cleared by `leaveSynchronizedMode`); routing restores whenever `playbackDesynchronized \|\| timeline == null`; a clock/content-not-ready snapshot is held in the existing `deferredEvents`/drain machinery and only clears the obligation on genuine completion; new `StateSnapshotOutcome` contract flows the real result to `ResyncCoordinator`. No wire change; full account in ADR-024 Amendment A9 |
 
 Resolved 26 Aug 2026 session: `CLAUDE.md` in `.gitignore` (was problem 1); `.DS_Store` tracking
 (was problem 7 — the claim was incorrect; the files are untracked and now ignored); the ADR-015/
@@ -7133,17 +7241,33 @@ Not blocking Phase 1. Answers needed before Phase 6.
 
 ## 7. Next exact task
 
-**Phase 7 — Ride Mode and resilience. SOFTWARE CLOSURE IS IMPLEMENTED AND SELF-AUDITED (§2av,
-ADR-028, ADR-024 Amendment A8). INDEPENDENT REVIEW HAS NOT YET RUN. PHYSICAL RIDE QUALIFICATION
-REMAINS DEFERRED — HARDWARE NOT AVAILABLE.**
+**Phase 7 — Ride Mode and resilience. SOFTWARE CLOSURE IS IMPLEMENTED, SELF-AUDITED (§2av), AND HAS
+NOW SURVIVED ONE ROUND OF INDEPENDENT REVIEW WITH TWO CONFIRMED BLOCKER GROUPS FIXED (§2aw, ADR-028
+Amendment A1, ADR-024 Amendment A9). A SECOND ROUND OF INDEPENDENT REVIEW HAS NOT YET RUN. PHYSICAL
+RIDE QUALIFICATION REMAINS DEFERRED — HARDWARE NOT AVAILABLE.**
 
-The exact next task is an **independent review of this pass**, per this codebase's own repeatedly
-confirmed lesson (§2am onward: "audit the newest fix first — the freshest fix is the least-audited
-code in the repository"). This pass already found two real defects in its own newly-written code
-before calling itself done (problem 72's queue-wipe fix, and the `STATE_SNAPSHOT` outbound-ordering
-fix — both in ADR-028/ADR-024 A8) plus one more by direct review rather than by its own stress suite
-(problem 73, iOS-only) — which is itself evidence an independent pass is likely to find something
-this one missed, exactly as happened to Phase 5 and Phase 6 before it. Priority areas for that review,
+The exact next task is **another independent review of this pass**, for the same reason the first one
+was necessary and found something: §2aw's own two blocker groups were reachable precisely because
+§2av's self-audit, thorough as it was, looked at Phase 7's *new* code for the provenance bug class and
+did not re-derive whether an existing "alternatives rejected" decision (Blocker 1) still held once the
+architecture around it changed, or step one layer down into already-accepted Phase 5 machinery
+(Blocker 2) that Phase 7's new call path was merely the first to reliably exercise. That is now this
+codebase's *fourth* time this exact shape has repeated — Phase 5's A1 through A7, Phase 6's Amendment
+A1, and now Phase 7's own §2av-then-§2aw — and the standing lesson gets one more clause: **a defect in
+an "alternatives rejected" paragraph is as real as a defect in the code it describes**, because Blocker
+1 was exactly that — a decision written down and never revisited when the premise underneath it
+changed. Priority areas for the next review, in the order this codebase's history suggests they are
+most likely to hide something: (0, new) the two-fork verification discipline itself — this pass's own
+orchestrator ran test commands against a working tree a background fork was still actively editing and
+briefly mistook a genuine build error for a flaky test; confirm the actual fix quality was not
+similarly affected anywhere, and treat the still-not-fully-explained residual iOS test-run variance
+(§2aw's own honest disclosure) as worth one more look, not as closed; (1) the
+`STATE_SNAPSHOT`/`STATE_REQUEST` provenance chain under a *third* consecutive reconnect within one
+test, not just two; (2) whether `ResyncCoordinator`'s manifest-revision gating or `transfersInFlight`'s
+disclosed no-consumer limitation hides a reachable case neither platform's stress suite constructed;
+(3) whether Ride Mode's End Ride button can race `ControlSessionManager`'s reconnect ladder in a way
+neither platform's harness could reach (both platforms' own reports flagged this as the harness's
+honest limit, not a proof of safety — see §2av); (4) a fresh grep-for-the-pattern sweep of anything
 in the order this codebase's history suggests they are most likely to hide something: (1) the
 `STATE_SNAPSHOT`/`STATE_REQUEST` provenance chain under a *third* consecutive reconnect within one
 test, not just two; (2) whether `ResyncCoordinator`'s manifest-revision gating or `transfersInFlight`'s

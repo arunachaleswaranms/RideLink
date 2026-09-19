@@ -230,8 +230,24 @@ and `STATE_SNAPSHOT` could reach the wire out of order relative to `QUEUE_SNAPSH
 because it bypassed the single ordered outbound writer ([ADR-028](docs/DECISIONS/ADR-028-ride-mode-and-state-resynchronization.md)).
 A third, iOS-only defect — Ride Mode's visibility gate dropping the rider back to the main screen the
 instant an ordinary reconnect began — was found by direct review and fixed. All three reproduced
-against unmodified production before fixing. Independent review of this pass has not yet run. No
-physical Bluetooth, iPhone, battery/thermal, or riding result is claimed. Phase 8 is untouched.
+against unmodified production before fixing.
+
+**An independent review of that pass then found two more confirmed blocker groups, both fixed**
+([ADR-028 Amendment A1](docs/DECISIONS/ADR-028-ride-mode-and-state-resynchronization.md#amendment-a1--20-september-2026--independent-review-two-confirmed-blocker-groups-both-fixed)
++ [ADR-024 Amendment A9](docs/DECISIONS/ADR-024-synchronized-playback-integration.md#amendment-a9--20-september-2026--a-null-timeline-is-not-the-same-fact-as-nothing-to-restore)).
+**Blocker 1**: outbound `STATE_SNAPSHOT`/`STATE_REQUEST` were admission-checked but not
+generation-*bound* to the actual socket write — the same class already fixed once for `VOICE_*`
+(ADR-020 A9) and Playback (ADR-024 A2), reopened because ADR-028's own "alternatives rejected"
+reasoning wrongly concluded the admission proof made a bound writer redundant; fixed by reusing the
+existing mechanism outright. **Blocker 2**: reconnect/resync did not reliably reconstruct authoritative
+playback, for five linked *pre-existing* Phase 5 defects — a leader's own current track did not
+survive a link loss, a normal reconnect's snapshot silently skipped restoration, a
+clock-or-content-not-ready snapshot was dropped instead of held, the outer coordinator couldn't tell
+applied from deferred from rejected, and a leader's track identity could leak past its own ride's end
+— all reachable through Phase 5's own machinery, which Phase 7's new call path was merely the first to
+reliably exercise. No wire change. Both reproduced against unmodified production before fixing, on
+both platforms. Independent review of *this* pass has not yet run. No physical Bluetooth, iPhone,
+battery/thermal, or riding result is claimed. Phase 8 is untouched.
 
 Accepted baseline:
 

@@ -199,6 +199,113 @@ mechanisms — confirmed by direct audit before concluding nothing needed buildi
   unnecessary manifest retransmission"): it would miss a leader's catalogue moving a second time
   mid-ride, between the initial reconnect refresh and a later desync-triggered snapshot.
 - **A `STATE_SNAPSHOT`-specific bound-writer generation record, matching `VOICE_*`/Playback's
-  stricter pattern (ADR-024 Amendment A2 / ADR-020 Amendment A9).** Rejected as unnecessary: the
-  send-time re-proof immediately before admission plays the same role Manifest/AUDIO_STATE's existing
-  pattern already relies on, and rule 24 names both as already covered by a check of their own.
+  stricter pattern (ADR-024 Amendment A2 / ADR-020 Amendment A9).** Rejected as unnecessary at the
+  time of initial implementation — **and that rejection was wrong. See Amendment A1, Blocker 1.**
+
+## Amendment A1 — 20 September 2026 — independent review: two confirmed blocker groups, both fixed
+
+**Status:** Accepted · appended, nothing above rewritten except the one reversed rejection noted
+inline above. An independent review of this ADR's initial implementation found two confirmed,
+reachable blocker groups before physical qualification could even be considered — both reproduced
+against the unmodified pre-fix sources first, per this codebase's standing audit discipline, and both
+fixed on both platforms before this amendment was written.
+
+### Blocker 1 — outbound `STATE_SNAPSHOT`/`STATE_REQUEST` were not generation-bound to the actual write
+
+**The defect.** This ADR's original "alternatives rejected" section reasoned that `STATE_SNAPSHOT`
+didn't need the bound-writer pattern ADR-020 Amendment A9 built for `VOICE_*`, because "the send-time
+re-proof immediately before admission plays the same role Manifest/AUDIO_STATE's existing pattern
+already relies on." That reasoning held for the *admission* proof (`stillCurrent`/`stillCurrentNow`
+before `enqueueOutbound`) but not for what happened after: the outbound dispatch
+(`SyncPlaybackCoordinator.sendFrame`'s `.Resync`/`.resync` case) discarded the `generation` its caller
+already had and called `ResyncRelay.send(message)` — soon Android's `ResyncCoordinator.triggerRequest`
+did the same for the follower's `STATE_REQUEST` — both resolving the authenticated writer *live*, at
+the moment of the write, from an unbound `authenticatedWriter` supplier. Because everything between
+admission and the actual socket write suspends (the outbound queue's single consumer, the write lock,
+the flush), a frame admitted under generation A could be written on generation B's connection if A
+retired and B authenticated in that window — the exact class ADR-020 Amendment A9 fixed for `VOICE_*`
+and ADR-024 Amendment A2 fixed for Playback, reopened here because this ADR's original authors
+(rightly) noted resync's *admission*-time check already existed, and (wrongly) concluded that made a
+bound writer redundant. It does not: admission answers "was this frame's decision current when it was
+made," and the bound writer answers a different question, "is the connection this byte stream is about
+to go out on still owned by the generation that made that decision" — the same distinction ADR-024
+Amendment A2 draws between commit and send-success.
+
+**The fix**, on both platforms: `ResyncRelay.send`/`ResyncChannel.send` now takes the authorising
+`generation` as a parameter and resolves the writer from the same generation-bound supplier
+`VoiceSignalRelay` already uses (Android: `authenticatedWriterFor: (Long) -> AuthenticatedFrameWriter?`
+over the one immutable `AuthenticatedConnection` record; iOS: the equivalent bound-writer resolution
+ADR-020 Amendment A9 built) — refusing and counting on a generation mismatch rather than resolving
+whatever connection happens to be live. `SyncPlaybackCoordinator`'s outbound dispatch and
+`ResyncCoordinator`'s `STATE_REQUEST` send both now pass the generation through instead of discarding
+it. No duplicated socket-ownership logic was added — this reuses the existing mechanism outright.
+
+**Regressions** (both platforms, real `ControlSessionManager` pairs, no sleeps): a `STATE_SNAPSHOT`
+admitted under generation A whose writer resolution is paused until generation B authenticates is
+refused and never reaches B's wire; a queued A item that survives to the outbound consumer after A has
+retired is refused without wedging the queue; a B-authorized item sent afterward succeeds normally.
+The same trio for the follower's outbound `STATE_REQUEST`.
+
+### Blocker 2 — reconnect/resync did not reliably reconstruct authoritative playback
+
+Five linked defects, all in the same reconciliation machinery, found and fixed as one coherent piece
+rather than isolated patches. **All five are Phase 5 defects that predate Phase 7** — this ADR's own
+`onStateSnapshot`/`adoptSnapshot`/`onPeerPlaybackState` reuse is what made Phase 7 the first caller to
+exercise them under the specific conditions (a null `timeline`, a not-yet-ready fresh clock) that a
+reconnect reliably produces and an ordinary wire `PLAYBACK_STATE` rarely does. Recorded here because
+Phase 7's brief is what surfaced them and what an independent review of *this* ADR is what found them,
+but the underlying machinery — `resetForNewSession`, `applyPeerPlaybackState`, `restoreFromPlaybackState`,
+`drainDeferredEvents` — is ADR-024's, so the same fixes are also recorded as **ADR-024 Amendment A9**,
+which is the fuller technical account; this section is the summary from Phase 7's side.
+
+1. **The leader forgot its own current track across a link loss** (`emitStateSnapshot` read the
+   session-clock-scoped `timeline`, which `resetForNewSession` correctly clears, for content
+   identity it should never have needed from there). Fixed with a new ride-segment-scoped
+   `PlaybackIdentity` (trackHash + queueItemId only — position and playing state were always
+   correctly read live from the player) that survives a control-lifetime boundary, the same
+   principle already applied to capture (rule 17) and the shared queue (ADR-024 Amendment A8).
+2. **A normal reconnect's snapshot silently skipped restoration** because the routing decision used
+   the ingress-overflow-specific `playbackDesynchronized` flag alone, and `resetForNewSession` clears
+   that flag and `timeline` together — so a reconnect (which needs exactly the same full restoration
+   an ingress desync does) fell through to the "already synced, just re-anchor" branch and found
+   nothing to re-anchor. Fixed by restoring whenever there is no live anchor to update
+   (`playbackDesynchronized || timeline == null`), not only on the narrower flag.
+3. **A snapshot arriving before the fresh clock (or before locally-available content) was ready
+   silently dropped**, with the desync obligation already cleared by the caller before the drop
+   happened. Fixed by holding it in the same `deferredEvents`/drain machinery already used for
+   commands whose clock isn't ready, extended to also gate on content availability (a real,
+   independently-found gap during content-unavailable testing: iOS's first pass checked clock
+   readiness but let a missing-content case fall through to `applyPlay`'s own unheld transfer
+   request, which retained nothing — a later-arriving transfer had no snapshot left to apply it to).
+   The desync/reconciliation obligation now clears only once restoration genuinely completes.
+4. **The outer coordinator couldn't distinguish applied from deferred from rejected.** A new
+   `StateSnapshotOutcome` (`applied`/`deferredClock`/`deferredContent`/`rejectedStale`/`rejectedRole`)
+   flows from `onStateSnapshot` up to `ResyncCoordinator.handleStateSnapshot`, which now gates
+   `pendingRequestGeneration` clearing, manifest-refresh triggering, and `lastOutcome` on the genuine
+   outcome rather than assuming receipt equals reconciliation.
+5. **A leader's ride-segment `PlaybackIdentity` survived past its own ride's end**, found while
+   building the second-ride regression for this fix: `leaveSynchronizedMode()` did not clear it, so a
+   stale identity from Ride 1 could re-enter Ride 2's own reconnect resync. Fixed by clearing it in
+   `leaveSynchronizedMode()`, before teardown, matching the real End Ride UX order.
+
+**Command-sequence floor (this ADR's own §14 question): investigated, no behavior change.**
+`resetForNewSession` resets `nextSeq`/`lastAppliedSeq` symmetrically on both sides at every control
+boundary; a fresh generation's snapshot truthfully reports a fresh floor. This is safe: ADR-025's
+generation provenance already refuses any frame from a retired generation regardless of the
+`command_seq` it carries, so the two generations' sequence spaces never actually have to agree with
+each other, and both sides reset together, so there is no divergence to produce. Confirmed by a
+regression proving a low post-reconnect `command_seq` is accepted normally rather than rejected as
+stale against the pre-reconnect high-water mark.
+
+**Sections 22/23 (content-unavailable, route-transition non-regression): confirmed, not reworked.**
+A content-unavailable snapshot is a legitimate `deferredContent` outcome, resolved by the existing
+Phase 4 transfer-request path and this amendment's own hold/drain extension — no second transfer
+mechanism, no infinite retry loop. A reconnect's restoration runs through the same single
+`applyPlay`/select-load-seek path regardless of `route_state`, spends no hard-seek budget by itself,
+and adds no second route-state consumer — Phase 6's drift-suppression-during-transition rule is
+unaffected because nothing here bypasses `DriftController`.
+
+**No wire change.** Every fix is local reconciliation-state discipline and outbound-writer binding;
+`protocol/vectors/resync-messages/` is unchanged, because none of these five defects were about what
+crosses the wire — only about what each side truthfully constructs before sending, and honestly does
+after receiving.
