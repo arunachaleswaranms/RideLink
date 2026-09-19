@@ -538,12 +538,15 @@ class SyncPlaybackTwoPeerTest {
                     .none { it is FakeSyncPlayer.Call.Seek && it.positionMs == 9_000L },
                 "Session A's SEEK never reached the follower under Session B",
             )
+            // ADR-024 Amendment A8: the session boundary strands the *stuck outbound SEEK/backlog*
+            // above (never reaching the follower) — it does not wipe either side's already-adopted
+            // revision-1 queue, which survives exactly as ride-segment state must (rules 22/23).
             assertEquals(
-                0L,
+                1L,
                 pair.follower.coordinator.queueState.value.revision,
-                "and Session B began from an empty authoritative queue on both sides",
+                "and Session B inherits both sides' surviving queue, never an empty one",
             )
-            assertEquals(0L, pair.leader.coordinator.queueState.value.revision)
+            assertEquals(1L, pair.leader.coordinator.queueState.value.revision)
         }
 
     /**

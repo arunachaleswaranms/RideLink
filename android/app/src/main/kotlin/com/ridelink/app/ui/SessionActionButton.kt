@@ -1,8 +1,10 @@
 package com.ridelink.app.ui
 
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.material3.Button
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.ui.Modifier
 import com.ridelink.app.session.SessionCoordinator
 import com.ridelink.core.sessionfsm.SessionStatus
 
@@ -30,6 +32,23 @@ fun SessionActionButton(
         }
     }) {
         Text(action.label)
+    }
+}
+
+/**
+ * Phase 7 (ADR-028): the only production entry point into Ride Mode — `RideLinkRoot` switches
+ * screens the instant `SessionFsm` actually reaches `RIDE_ACTIVE`, so this button never mutates
+ * presentation state itself, only the FSM. Lives beside [SessionActionButton] for the same reason
+ * that one lives in its own file: one lifecycle affordance per composable.
+ */
+@Composable
+fun StartRideButton(
+    status: SessionStatus,
+    onStartRide: () -> Unit,
+) {
+    if (status != SessionStatus.CONNECTED) return
+    Button(onClick = onStartRide, modifier = Modifier.fillMaxWidth()) {
+        Text("Start Ride")
     }
 }
 

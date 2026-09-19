@@ -424,6 +424,37 @@ class SyncPlaybackCoordinatorTest {
             assertFalse(coordinator.isSynchronizedModeActive())
         }
 
+    /**
+     * ADR-024 Amendment A8's reproduction: a mere link loss — no reconnect, no peer, nothing on the
+     * wire — must not touch [SyncPlaybackCoordinator.queueState] at all. PROTOCOL §10's "`session_id`
+     * survives a reconnect; that is what distinguishes resuming from starting over" and "the follower
+     * adopts the leader's `command_seq` and `queue_revision` wholesale" both assume the **leader**
+     * still has authoritative state to resume from — but `resetForNewSession` used to wipe it
+     * unconditionally on every [ControlEvent.LinkLost], before any reconnection even has a chance to
+     * happen, with no wire message that could ever tell a leader what its own queue used to contain.
+     */
+    @Test
+    fun `a link loss alone, with no reconnect and no peer, must not wipe a leader's own queue`() =
+        runTest(StandardTestDispatcher()) {
+            build(backgroundScope)
+            connect(this, asLeader = true)
+            coordinator.enqueue(SyncTestValues.hash(1))
+            runCurrent()
+            val queueBeforeLinkLoss = coordinator.queueState.value
+            assertEquals(1, queueBeforeLinkLoss.revision, "sanity: the leader's own queue is populated")
+
+            session.emit(ControlEvent.LinkLost(LinkLossReason.NETWORK))
+            runCurrent()
+
+            assertEquals(
+                queueBeforeLinkLoss,
+                coordinator.queueState.value,
+                "a link loss is ADR-004's 'does not interrupt music' — ride-segment queue state outlives " +
+                    "a control-lifetime boundary exactly as capture/voice consent already do (rule 22/23), " +
+                    "and nothing on the wire can ever restore what a leader loses here",
+            )
+        }
+
     @Test
     fun `a scheduled start belonging to a superseded epoch never fires`() =
         runTest(StandardTestDispatcher()) {

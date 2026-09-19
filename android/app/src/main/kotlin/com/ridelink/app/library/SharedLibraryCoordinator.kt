@@ -213,6 +213,17 @@ class SharedLibraryCoordinator(
     private var catalogueRevision = 0L
     private var lastServedEntries: List<ManifestEntry>? = null
 
+    /**
+     * PROTOCOL §10 (Phase 7): the value a `STATE_SNAPSHOT` this device sends as leader reports in
+     * `manifest_revision` — this device's own catalogue revision, never the peer's. A difference the
+     * follower observes there is what should trigger a fresh `MANIFEST_REQUEST` (§8.1); in this
+     * implementation that request is already unconditional on every [ControlEvent.Connected]
+     * ([requestCatalogue], called from [init]'s own event collector), which is strictly more
+     * conservative than "only when the revision differs" and needs no second trigger from here
+     * (ADR-028).
+     */
+    val currentCatalogueRevision: Long get() = catalogueRevision
+
     private val transferFence = OperationFence()
 
     init {

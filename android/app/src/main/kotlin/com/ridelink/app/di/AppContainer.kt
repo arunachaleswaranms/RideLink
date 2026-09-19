@@ -10,6 +10,9 @@ import com.ridelink.app.library.LocalContentResolverAdapter
 import com.ridelink.app.library.SharedLibraryCoordinator
 import com.ridelink.app.music.IntercomMusicCoexistenceCoordinator
 import com.ridelink.app.music.MusicCoordinator
+import com.ridelink.app.resync.ResyncCoordinator
+import com.ridelink.app.resync.ResyncRelayAdapter
+import com.ridelink.app.resync.ResyncSessionManagerAdapter
 import com.ridelink.app.service.RideCommand
 import com.ridelink.app.service.RideCommandBus
 import com.ridelink.app.service.RideForegroundService
@@ -260,6 +263,27 @@ class AppContainer(
                     sessionCoordinator.peerAudioState.value?.routeState == RouteState.TRANSITIONING
             },
             nextQueueItemId = { Ulid.generate() },
+            // PROTOCOL §10 (Phase 7, ADR-028): the same relay `resyncCoordinator` below reads from,
+            // so `emitStateSnapshot`'s admission onto this coordinator's own ordered outbound queue
+            // and `QUEUE_SNAPSHOT`/`PLAYBACK_STATE`'s admission share the one underlying writer.
+            resync = ResyncRelayAdapter(controlSessionManager.resync),
+        )
+
+    /**
+     * PROTOCOL §10 (Phase 7, ADR-028): installed once per process, exactly like
+     * [sharedLibraryCoordinator] and [syncPlaybackCoordinator] above — it self-subscribes to
+     * [controlSessionManager]'s events and its own `resync` relay sink, and deliberately outlives a
+     * control-session boundary (ADR-023 §3 / ADR-025's per-frame generation is what makes that
+     * safe rather than what forbids it).
+     */
+    val resyncCoordinator: ResyncCoordinator =
+        ResyncCoordinator(
+            scope = appScope,
+            session = ResyncSessionManagerAdapter(controlSessionManager),
+            syncPlaybackCoordinator = syncPlaybackCoordinator,
+            currentCatalogueRevision = { sharedLibraryCoordinator.currentCatalogueRevision },
+            requestManifestRefresh = sharedLibraryCoordinator::requestCatalogue,
+            localPeerId = localPeerId,
         )
 
     val sessionCoordinator: SessionCoordinator

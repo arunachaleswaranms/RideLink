@@ -6,10 +6,12 @@ import com.ridelink.core.protocol.AudioStateMessageTypes
 import com.ridelink.core.protocol.ManifestMessageTypes
 import com.ridelink.core.protocol.PlaybackMessageTypes
 import com.ridelink.core.protocol.QueueMessageTypes
+import com.ridelink.core.protocol.ResyncMessageTypes
 import com.ridelink.core.protocol.TransferMessageTypes
 import com.ridelink.core.protocol.VoiceMessageTypes
 import com.ridelink.network.manifest.ManifestRelay
 import com.ridelink.network.playback.PlaybackRelay
+import com.ridelink.network.resync.ResyncRelay
 import com.ridelink.network.transfer.TransferRelay
 import com.ridelink.network.voice.AuthenticatedFrameWriter
 import com.ridelink.network.voice.VoiceSignalRelay
@@ -86,6 +88,14 @@ class ControlRelays internal constructor(
         PlaybackRelay(localPeerId, monotonicNowUs, nextSeq, activeSessionId, authenticatedWriter, currentAuthGeneration)
 
     /**
+     * PROTOCOL §10 (Phase 7). Mirrors [manifest]'s wiring: re-derived per session, gated on
+     * liveness at [deliver] rather than carried on an outbound queue that could outlive one, so it
+     * needs the plain [authenticatedWriter] and [liveGeneration] only.
+     */
+    val resync: ResyncRelay =
+        ResyncRelay(localPeerId, monotonicNowUs, nextSeq, activeSessionId, authenticatedWriter, liveGeneration)
+
+    /**
      * Records that a frame of [type] was refused because the connection had not passed the trust
      * gate. Counted rather than merely dropped: "it never happened" and "it happened and was
      * refused" are different facts on a diagnostics screen, and only the second lets a test prove
@@ -100,6 +110,7 @@ class ControlRelays internal constructor(
             in ManifestMessageTypes.ALL -> manifest.countPreAuthenticationDrop()
             in TransferMessageTypes.ALL -> transfer.countPreAuthenticationDrop()
             in PlaybackMessageTypes.ALL, in QueueMessageTypes.ALL -> playback.countPreAuthenticationDrop()
+            in ResyncMessageTypes.ALL -> resync.countPreAuthenticationDrop()
             else -> return false
         }
         return true
@@ -135,6 +146,7 @@ class ControlRelays internal constructor(
             // accounting A6 exists to produce. The generation it carries is what keeps it harmless.
             in PlaybackMessageTypes.ALL -> playback.deliverPlayback(type, payload, generation)
             in QueueMessageTypes.ALL -> playback.deliverQueue(type, payload, generation)
+            in ResyncMessageTypes.ALL -> resync.deliver(type, payload, generation)
             else -> return false
         }
         return true
@@ -168,5 +180,6 @@ class ControlRelays internal constructor(
         manifest.resetCounters()
         transfer.resetCounters()
         playback.resetCounters()
+        resync.resetCounters()
     }
 }

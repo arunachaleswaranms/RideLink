@@ -66,6 +66,15 @@ class FakeSyncSession : SyncSessionPort {
     /** The authentication generation live at the instant each frame was actually written. */
     val sentGenerations = mutableListOf<Long>()
 
+    /**
+     * Optional, additive: when set, every frame this fake writes is *also* appended here, in the
+     * same call — never instead of [sent]. A test proving wire order across this channel **and**
+     * `FakeResyncSession`'s (ADR-028's `STATE_SNAPSHOT`, which now shares [outbound]'s single
+     * ordered writer with `QUEUE_SNAPSHOT`/`PLAYBACK_STATE`) points both fakes at the same list, so
+     * the combined order it records is the true wire order rather than two separately-ordered ones.
+     */
+    var combinedWireLog: MutableList<Any>? = null
+
     private var forward: FakeSyncSession? = null
 
     override val playback: PlaybackChannelPort =
@@ -101,6 +110,7 @@ class FakeSyncSession : SyncSessionPort {
         if (authorizingGeneration != currentAuthGeneration) return false
         sent.add(message)
         sentGenerations.add(currentAuthGeneration)
+        combinedWireLog?.add(message)
         deliver()
         return true
     }

@@ -441,6 +441,35 @@ class SessionCoordinator(
         applyEvent(SessionEvent.UserEnded)
     }
 
+    /**
+     * ARCHITECTURE §3's `CONNECTED -> RIDE_ACTIVE` (Phase 7, ADR-028): the user's explicit "start
+     * the ride" action, and until now the FSM's one transition with no production emitter
+     * (`docs/STATUS.md`'s "Current phase" note). Legal only from `CONNECTED`; [SessionFsm] rejects
+     * and logs it from anywhere else, so a Ride Mode screen that only renders while
+     * `status == RIDE_ACTIVE` (or `RECONNECTING` returning to it) can never be reached except
+     * through this call.
+     *
+     * Deliberately just an FSM event. Nothing here opens capture, starts voice or touches the
+     * player — `RIDE_ACTIVE` only *permits* those, exactly as `CONNECTED` already does (ARCHITECTURE
+     * §6.4's own readiness gate is what actually opens the microphone, on its own explicit tap).
+     */
+    fun startRide() {
+        applyEvent(SessionEvent.StartRide)
+    }
+
+    /**
+     * ARCHITECTURE §3's `RIDE_ACTIVE -> CONNECTED` (Phase 7, ADR-028) — the mirror of [startRide].
+     * **Not** the ADR-026 `ENDING -> IDLE` teardown: this exits Ride Mode back to the pre-ride/
+     * diagnostics screen while the session, pairing and control connection all stay alive, exactly
+     * as [SessionFsm] already defines the transition. The user's separate "disconnect the whole
+     * session" action remains [endSession], unchanged, and is what actually reaches
+     * [SessionTeardownOwner]'s teardown path. Legal only from `RIDE_ACTIVE`; rejected and logged
+     * from anywhere else.
+     */
+    fun endRide() {
+        applyEvent(SessionEvent.EndRide)
+    }
+
     private fun beginDiscoverySession(
         event: SessionEvent,
         retireHere: Boolean,

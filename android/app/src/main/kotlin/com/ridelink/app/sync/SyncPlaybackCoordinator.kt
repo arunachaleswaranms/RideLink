@@ -1,5 +1,6 @@
 package com.ridelink.app.sync
 
+import com.ridelink.app.resync.ResyncChannelPort
 import com.ridelink.core.model.ContentHash
 import com.ridelink.core.model.PeerId
 import com.ridelink.core.playback.AuthoritativeHoldGate
@@ -34,6 +35,9 @@ import com.ridelink.core.playback.ScheduledCommandDecision
 import com.ridelink.core.playback.SharedQueue
 import com.ridelink.core.playback.SharedQueueMutation
 import com.ridelink.core.playback.SharedQueueState
+import com.ridelink.core.resync.ResyncMessage
+import com.ridelink.core.resync.ResyncPlaybackSnapshot
+import com.ridelink.core.resync.ResyncTransferInFlight
 import com.ridelink.core.sync.SessionClockEstimate
 import com.ridelink.core.transfer.OperationFence
 import com.ridelink.network.control.ControlEvent
@@ -127,6 +131,14 @@ class SyncPlaybackCoordinator(
     /** True while **either** peer reports `AUDIO_STATE.route_state: "transitioning"` (PROTOCOL §4.4). */
     private val routeTransitioning: () -> Boolean,
     private val nextQueueItemId: () -> String,
+    /**
+     * PROTOCOL §10 (Phase 7, ADR-028)'s `STATE_SNAPSHOT` writer, threaded in here — rather than
+     * left to `ResyncCoordinator` sending independently — so its construction and its admission
+     * onto [outbound] are the same atomic step [emitStateSnapshot] performs under [commandMutex],
+     * exactly as [emitPlaybackStateFrame] already does for `PLAYBACK_STATE`. `null` for every test
+     * and call site that has no resync channel at all; [emitStateSnapshot] is Phase 7's only caller.
+     */
+    private val resync: ResyncChannelPort? = null,
     /** Injectable purely so a test can force the ingress edge at 1 or 2 rather than racing 256 frames. */
     inboundCapacity: Int = Phase5GateBounds.DEFAULT_INBOUND_CAPACITY,
     /** Injectable for the same reason: how many authoritative events may wait for a trustworthy clock. */
@@ -459,6 +471,17 @@ class SyncPlaybackCoordinator(
             data class Queue(
                 val message: QueueMessage,
             ) : Frame()
+
+            /**
+             * PROTOCOL §10 (Phase 7, ADR-028)'s `STATE_SNAPSHOT`, admitted onto the same ordered
+             * writer as [Playback]/[Queue] for the reason [emitStateSnapshot] documents: a leader
+             * answer built from a state read at time T must not reach the wire after a
+             * `QUEUE_SNAPSHOT`/`PLAYBACK_STATE` reflecting a later revision that this queue's own
+             * ordering already serialises correctly.
+             */
+            data class Resync(
+                val message: ResyncMessage,
+            ) : Frame()
         }
     }
 
@@ -598,6 +621,18 @@ class SyncPlaybackCoordinator(
     }
 
     /**
+     * Test-only entry point for the exact effect a real ingress overflow already produces
+     * (Amendment A1 Finding C). `ResyncCoordinatorTest` uses this rather than reconstructing an
+     * overflow (a small `deferredCommandCapacity` plus an unready clock plus two deliveries), which
+     * would make a test about Phase 7's *wiring* depend on Phase 5's own overflow mechanics.
+     */
+    internal fun forceDesynchronizedForTest() {
+        playbackDesynchronized = true
+        queueDesynchronized = true
+        publishDesynchronized()
+    }
+
+    /**
      * Drains [inbound], one frame at a time, in arrival order. One consumer, so frame N+1 is never
      * handled before frame N — see the queue's own doc comment for why that is a correctness
      * property.
@@ -683,6 +718,7 @@ class SyncPlaybackCoordinator(
         when (frame) {
             is Outbound.Frame.Playback -> session.playback.send(frame.message, generation)
             is Outbound.Frame.Queue -> session.playback.send(frame.message, generation)
+            is Outbound.Frame.Resync -> resync?.send(frame.message) ?: false
         }
 
     /**
@@ -855,7 +891,20 @@ class SyncPlaybackCoordinator(
         driftState = DriftController.reset()
         playbackDesynchronized = false
         queueDesynchronized = false
-        _queueState.value = SharedQueueState()
+        // ADR-024 Amendment A8: `queueState` is deliberately NOT reset here. It used to be wiped
+        // unconditionally on every session boundary — including a leader's, on a mere `LinkLost`
+        // with no reconnect and no peer involved — which directly contradicted PROTOCOL §10's
+        // "`session_id` survives a reconnect; that is what distinguishes resuming from starting
+        // over" and "the follower adopts the leader's `command_seq` and `queue_revision` wholesale":
+        // nothing on the wire can ever tell a leader what its own queue used to contain, so wiping
+        // it here made every ordinary Wi-Fi blip lose the whole ride's queue, contradicting ADR-004
+        // ("a Wi-Fi drop does not interrupt music"). The queue is ride-segment-local state that
+        // outlives a control-lifetime boundary, exactly as capture and voice consent already do
+        // (rules 22/23) — a leader's copy is the authoritative one and has nothing to resync from,
+        // and a follower's stale copy is harmless: the next `QUEUE_SNAPSHOT` (or, since Phase 7,
+        // ADR-028's `STATE_SNAPSHOT`) overwrites it wholesale regardless of what it held before.
+        // Unconditional, not role-gated: a brand-new pairing's `_queueState` is already the empty
+        // value it was constructed with, so removing this wipe changes nothing for that case.
         scope.launch { restoreRate() }
         _diagnostics.update {
             it.copy(
@@ -863,8 +912,11 @@ class SyncPlaybackCoordinator(
                 lastAppliedCommandSeq = null,
                 lastReceivedCommandSeq = null,
                 nextCommandSeq = null,
-                queueRevision = 0,
-                queueSize = 0,
+                // Amendment A8: no longer hardcoded to 0 — `queueState` itself survives the boundary,
+                // so the diagnostics mirror must report what actually survived, not what used to be
+                // wiped alongside it.
+                queueRevision = _queueState.value.revision,
+                queueSize = _queueState.value.items.size,
                 currentTrackHash = null,
                 localDriftMs = null,
                 peerDriftMs = null,
@@ -1483,10 +1535,17 @@ class SyncPlaybackCoordinator(
      * It is also the queue half of Amendment A1's reconciliation: adopting authoritative queue state
      * is precisely what makes a desynchronised queue coherent again.
      */
+    @Suppress("ReturnCount") // the generation proof, the role proof, then the hold-gate's own early-out
     private suspend fun adoptSnapshot(
         message: QueueMessage.Snapshot,
         generation: Long,
     ) {
+        // ADR-024 A3's rule, proved for itself rather than trusted from a caller: the ordinary wire
+        // path (`onQueueMessage`) already checks this before dispatch, but `onStateSnapshot`
+        // (Phase 7, ADR-028) calls this function directly, so the queue half needs the same
+        // self-contained proof [applyPeerPlaybackState] already has for the playback half — a
+        // snapshot authorised by a retired generation must never touch a live one's queue.
+        if (!stillCurrent(generation)) return
         if (role != PlaybackRole.FOLLOWER) return
         // Amendment A2 Finding D: a snapshot must not overtake a command already held for the clock.
         // Applying revision n+1 ahead of a held `NEXT` authored against revision n changes what that
@@ -2349,6 +2408,101 @@ class SyncPlaybackCoordinator(
                 ),
             )
         }
+    }
+
+    /**
+     * PROTOCOL §10 (Phase 7, ADR-028): builds and admits the `STATE_SNAPSHOT` this device, as
+     * **leader**, owes a follower that sent `STATE_REQUEST` — onto [outbound], the same single
+     * ordered writer `QUEUE_SNAPSHOT`/`PLAYBACK_STATE` already use, rather than a second,
+     * independently-timed send `ResyncCoordinator` used to perform on its own.
+     *
+     * That independent send is exactly Amendment A1 Finding B's defect reproduced one layer up: a
+     * `STATE_SNAPSHOT` read at instant T could still reach the wire *after* a `QUEUE_SNAPSHOT`
+     * produced from a later mutation, because two independently-timed writers order their own
+     * bytes and nothing else — "a transport write lock orders bytes, not the decisions that
+     * produced them." Folding the read and the enqueue into one [commandMutex] critical section,
+     * exactly as [emitPlaybackStateFrame] already does for `PLAYBACK_STATE`, and admitting the
+     * result onto the *same* [Phase5FrameQueue] closes it the same way: one decision, one queue,
+     * one consumer, so a `STATE_SNAPSHOT` can never be enqueued behind a mutation it was read
+     * before.
+     *
+     * Deliberately **not** a refactor of [emitPlaybackStateFrame] into a shared builder: that
+     * function is Amendment A2's audited correction-broadcast path, and duplicating its snapshot
+     * literal here costs far less than reopening it.
+     *
+     * Answers nothing (a caller learns only via [ResyncDiagnostics], never a return value) when
+     * this device is not the leader, has no usable clock estimate, has already lost outbound
+     * authority for this control lifetime (§5 rule 9), or [generation] is no longer current by the
+     * time the lock is acquired — every one of which means "send nothing" rather than "send
+     * something stale".
+     */
+    @Suppress("ReturnCount", "LongParameterList")
+    internal suspend fun emitStateSnapshot(
+        generation: Long,
+        leaderPeerId: PeerId,
+        manifestRevision: Long,
+    ) {
+        if (role != PlaybackRole.LEADER) return
+        if (outboundAuthorityLost) return
+        val estimate = estimate() ?: return
+        val state = player.playerState.value
+        commandMutex.withLock {
+            if (!stillCurrent(generation)) return
+            val active = timeline
+            val queue = _queueState.value
+            val snapshot =
+                ResyncMessage.StateSnapshot(
+                    leaderPeerId = leaderPeerId,
+                    commandSeq = lastAppliedSeq ?: (nextSeq - 1).coerceAtLeast(0),
+                    queueRevision = queue.revision,
+                    playback =
+                        ResyncPlaybackSnapshot(
+                            trackHash = active?.trackHash,
+                            queueItemId = active?.queueItemId,
+                            positionMs = state.positionMs.coerceAtLeast(0),
+                            playing = state.playing,
+                            atSessionUs = sessionNowUs(estimate),
+                        ),
+                    queueItems = queue.items,
+                    queueCurrentIndex = queue.currentIndex,
+                    manifestRevision = manifestRevision,
+                    // V1 never resumes a transfer (PROTOCOL §10 rule 4) — see the field's own
+                    // disclosed-limitation note, carried over from `ResyncCoordinator`.
+                    transfersInFlight = emptyList<ResyncTransferInFlight>(),
+                )
+            enqueueOutbound(Outbound(generation, OutboundAuthority.ADVISORY, Outbound.Frame.Resync(snapshot)))
+        }
+    }
+
+    /**
+     * PROTOCOL §10 (Phase 7, ADR-028): a **follower** reconciling against the leader's
+     * `STATE_SNAPSHOT`. Deliberately not a new reconciliation algorithm — it translates the
+     * snapshot's playback and queue portions into exactly the shapes [adoptSnapshot] and
+     * [onPeerPlaybackState] already know how to reconcile (PROTOCOL §5's own cross-reference: a
+     * `STATE_SNAPSHOT.playback` plus its envelope's `command_seq`/`queue_revision` **is** a
+     * `PLAYBACK_STATE`), so every provenance, ownership, hold-gate and desync-clearing rule those
+     * two functions already enforce applies here unchanged. This function invents no new authority
+     * check of its own — `role != FOLLOWER` and the generation proof both live inside the two calls
+     * below, exactly as they do for the wire messages this reuses.
+     */
+    internal suspend fun onStateSnapshot(
+        message: ResyncMessage.StateSnapshot,
+        generation: Long,
+    ) {
+        adoptSnapshot(QueueMessage.Snapshot(message.queueRevision, message.queueItems, message.queueCurrentIndex), generation)
+        val playback = message.playback
+        onPeerPlaybackState(
+            PlaybackMessage.PlaybackStateSnapshot(
+                commandSeq = message.commandSeq,
+                queueRevision = message.queueRevision,
+                trackHash = playback?.trackHash,
+                queueItemId = playback?.queueItemId,
+                positionMs = playback?.positionMs ?: 0,
+                playing = playback?.playing ?: false,
+                atSessionUs = playback?.atSessionUs ?: 0,
+            ),
+            generation,
+        )
     }
 
     /**
