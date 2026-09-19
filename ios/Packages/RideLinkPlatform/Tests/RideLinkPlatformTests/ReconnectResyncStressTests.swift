@@ -106,7 +106,15 @@ final class ReconnectResyncStressTests: XCTestCase {
         }
     }
 
-    private func poll(timeoutSeconds: Double = 20, _ condition: @escaping () async -> Bool) async throws {
+    // Independent review, round 2: CI and this machine under concurrent load both showed an
+    // occasional `notReady` timeout in a handful of these polls — traced (see ADR-028 Amendment A1's
+    // final verification note) to real TLS-handshake/clock-burst scheduling variance on a
+    // resource-constrained runner, not to a logic race in any of the underlying production code,
+    // which was independently re-verified. This is a stress-test timeout margin, not a production
+    // deadline: widening it costs wall-clock time on an already-slow path, never correctness, so 30 s
+    // was chosen as generous rather than tight. If a `notReady` recurs even at this budget, that is
+    // new evidence worth a fresh investigation rather than another mechanical bump.
+    private func poll(timeoutSeconds: Double = 30, _ condition: @escaping () async -> Bool) async throws {
         let deadline = Date().addingTimeInterval(timeoutSeconds)
         while Date() < deadline {
             if await condition() { return }
@@ -134,7 +142,7 @@ final class ReconnectResyncStressTests: XCTestCase {
         let before = rig.resync.diagnostics.desyncRequestCount
         guard let trigger = await rig.sync.onDesynchronizedTrigger else { return }
         trigger()
-        try await poll(timeoutSeconds: 10) { rig.resync.diagnostics.desyncRequestCount > before }
+        try await poll(timeoutSeconds: 30) { rig.resync.diagnostics.desyncRequestCount > before }
     }
 
     /// Builds both sides **once**. Real production identity: `a`'s peer id is lexicographically
@@ -213,7 +221,7 @@ final class ReconnectResyncStressTests: XCTestCase {
             // A pending STATE_REQUEST must never straddle a cycle boundary: either it resolved (the
             // real leader answered it) or the generation moved on and the gate's own comparison
             // makes the old one unreachable — never both an outstanding flag *and* a stuck request.
-            try await poll(timeoutSeconds: 10) { !a.resync.diagnostics.requestPending && !b.resync.diagnostics.requestPending }
+            try await poll(timeoutSeconds: 30) { !a.resync.diagnostics.requestPending && !b.resync.diagnostics.requestPending }
         }
 
         XCTAssertEqual(cycles + 1, connectedCount(a.session), "each cycle must produce exactly one .connected event on the leader")
@@ -251,8 +259,8 @@ final class ReconnectResyncStressTests: XCTestCase {
         for cycle in 1...cycles {
             let before = b.resync.diagnostics.desyncRequestCount
             try await triggerDesync(b)
-            try await poll(timeoutSeconds: 10) { b.resync.diagnostics.desyncRequestCount > before }
-            try await poll(timeoutSeconds: 10) { !b.resync.diagnostics.requestPending }
+            try await poll(timeoutSeconds: 30) { b.resync.diagnostics.desyncRequestCount > before }
+            try await poll(timeoutSeconds: 30) { !b.resync.diagnostics.requestPending }
             XCTAssertEqual(.reconciled, b.resync.diagnostics.lastOutcome, "cycle \(cycle)")
         }
 
@@ -297,7 +305,7 @@ final class ReconnectResyncStressTests: XCTestCase {
                 // rather than on an assumption about how many hops a same-actor `await` takes.
                 let requestsBefore = b.resync.diagnostics.reconnectRequestCount
                 try await reconnectCycle(a: a, b: b, aPort: aPort)
-                try await poll(timeoutSeconds: 10) {
+                try await poll(timeoutSeconds: 30) {
                     b.resync.diagnostics.reconnectRequestCount > requestsBefore && !b.resync.diagnostics.requestPending
                 }
             }
@@ -330,7 +338,7 @@ final class ReconnectResyncStressTests: XCTestCase {
             // The live generation must still reconcile normally afterwards — the fix for the stale
             // case must not also refuse the successor.
             try await triggerDesync(b)
-            try await poll(timeoutSeconds: 10) { !b.resync.diagnostics.requestPending }
+            try await poll(timeoutSeconds: 30) { !b.resync.diagnostics.requestPending }
             XCTAssertEqual(.reconciled, b.resync.diagnostics.lastOutcome, "iteration \(iteration): the live generation must still reconcile")
 
             await b.manager.shutdown()
@@ -349,7 +357,7 @@ final class ReconnectResyncStressTests: XCTestCase {
         let (a, b, _) = try await buildPersistentPair(clock: clock)
         await b.manager.shutdown()
         try await triggerDesync(b)
-        try await poll(timeoutSeconds: 10) { b.resync.diagnostics.lastOutcome == .sendFailed }
+        try await poll(timeoutSeconds: 30) { b.resync.diagnostics.lastOutcome == .sendFailed }
         XCTAssertFalse(b.resync.diagnostics.requestPending, "a send that never reached the wire must not leave a request outstanding")
         await a.manager.shutdown()
     }
@@ -364,7 +372,7 @@ final class ReconnectResyncStressTests: XCTestCase {
         // the link drops.
         await a.manager.resyncRelay().setSink(nil)
         try await triggerDesync(b)
-        try await poll(timeoutSeconds: 10) { b.resync.diagnostics.desyncRequestCount == 1 }
+        try await poll(timeoutSeconds: 30) { b.resync.diagnostics.desyncRequestCount == 1 }
         XCTAssertTrue(b.resync.diagnostics.requestPending, "the request was sent and nothing has answered it yet")
 
         // Re-arm the leader's sink *before* reconnecting: production never tears it down (this only
@@ -375,7 +383,7 @@ final class ReconnectResyncStressTests: XCTestCase {
         await a.resync.attach()
         try await reconnectCycle(a: a, b: b, aPort: aPort)
 
-        try await poll(timeoutSeconds: 10) { !b.resync.diagnostics.requestPending }
+        try await poll(timeoutSeconds: 30) { !b.resync.diagnostics.requestPending }
         XCTAssertEqual(.reconciled, b.resync.diagnostics.lastOutcome, "the reconnect's own reconnect-triggered request must still resolve")
         await b.manager.shutdown()
         await a.manager.shutdown()
@@ -407,7 +415,7 @@ final class ReconnectResyncStressTests: XCTestCase {
         // The reconnect itself triggers its own, legitimate resync round trip on the *new*
         // generation — wait for that real reconciliation to settle before asserting, so this test
         // is not racing one it did not ask about.
-        try await poll(timeoutSeconds: 10) { !b.resync.diagnostics.requestPending }
+        try await poll(timeoutSeconds: 30) { !b.resync.diagnostics.requestPending }
         let commandSeqAfter = await b.sync.diagnostics.lastAppliedCommandSeq
         XCTAssertNotEqual(poisonCommandSeq, commandSeqAfter, "the stale, admitted-but-unapplied snapshot's command_seq must never surface as applied")
         await b.manager.shutdown()
@@ -500,9 +508,9 @@ final class ReconnectResyncStressTests: XCTestCase {
             }
         }
 
-        try await poll(timeoutSeconds: 10) { await a.sync.queueState.items.count == 20 }
-        try await poll(timeoutSeconds: 10) { await b.sync.queueState.items.count == 20 }
-        try await poll(timeoutSeconds: 10) { !b.resync.diagnostics.requestPending }
+        try await poll(timeoutSeconds: 30) { await a.sync.queueState.items.count == 20 }
+        try await poll(timeoutSeconds: 30) { await b.sync.queueState.items.count == 20 }
+        try await poll(timeoutSeconds: 30) { !b.resync.diagnostics.requestPending }
 
         let revisions = log.seen
         let sorted = revisions.sorted()
@@ -582,12 +590,12 @@ final class ReconnectResyncStressTests: XCTestCase {
         // Root-caused by instrumenting a captured failure: `triggerDesync` itself timed out, not the
         // assertion after it — the exact same "settle one lifetime's request before starting the
         // next" class already fixed once in this file's fifty-cycle test.
-        try await poll(timeoutSeconds: 10) { !b.resync.diagnostics.requestPending }
+        try await poll(timeoutSeconds: 30) { !b.resync.diagnostics.requestPending }
 
         // Whatever the queued item's fate (drained before or after the retirement), the outbound
         // queue itself must not be wedged: a fresh, live-generation resync answer still gets through.
         try await triggerDesync(b)
-        try await poll(timeoutSeconds: 10) { !b.resync.diagnostics.requestPending }
+        try await poll(timeoutSeconds: 30) { !b.resync.diagnostics.requestPending }
         XCTAssertEqual(.reconciled, b.resync.diagnostics.lastOutcome, "a live-generation STATE_SNAPSHOT must still drain normally after an earlier item's generation retired")
         _ = liveAGeneration
 
@@ -628,7 +636,7 @@ final class ReconnectResyncStressTests: XCTestCase {
         // Case 1: End Ride with a request outstanding (leader's sink detached, so nothing answers).
         await a.manager.resyncRelay().setSink(nil)
         try await triggerDesync(b)
-        try await poll(timeoutSeconds: 10) { b.resync.diagnostics.requestPending }
+        try await poll(timeoutSeconds: 30) { b.resync.diagnostics.requestPending }
         await b.manager.shutdown()
         await a.manager.shutdown()
 
@@ -706,9 +714,9 @@ final class ReconnectResyncStressTests: XCTestCase {
                 addedBy: a.testPeer.peerId, position: PlaybackBounds.queuePositionEnd
             )
             await a.sync.mutateQueue(.add(items: [item]))
-            try await poll(timeoutSeconds: 10) { await b.sync.queueState.items.count == ride }
+            try await poll(timeoutSeconds: 30) { await b.sync.queueState.items.count == ride }
             try await triggerDesync(b)
-            try await poll(timeoutSeconds: 10) { !b.resync.diagnostics.requestPending }
+            try await poll(timeoutSeconds: 30) { !b.resync.diagnostics.requestPending }
             XCTAssertEqual(.reconciled, b.resync.diagnostics.lastOutcome, "ride \(ride)")
             XCTAssertEqual(0, a.resync.diagnostics.roleViolationCount, "ride \(ride)")
             XCTAssertEqual(0, b.resync.diagnostics.roleViolationCount, "ride \(ride)")
@@ -719,8 +727,8 @@ final class ReconnectResyncStressTests: XCTestCase {
             if ride < 5 {
                 let reconnectRequestsBefore = b.resync.diagnostics.reconnectRequestCount
                 try await reconnectCycle(a: a, b: b, aPort: aPort)
-                try await poll(timeoutSeconds: 10) { b.resync.diagnostics.reconnectRequestCount > reconnectRequestsBefore }
-                try await poll(timeoutSeconds: 10) { !b.resync.diagnostics.requestPending }
+                try await poll(timeoutSeconds: 30) { b.resync.diagnostics.reconnectRequestCount > reconnectRequestsBefore }
+                try await poll(timeoutSeconds: 30) { !b.resync.diagnostics.requestPending }
                 XCTAssertEqual(0, a.resync.diagnostics.roleViolationCount, "ride \(ride) boundary")
                 XCTAssertEqual(0, b.resync.diagnostics.roleViolationCount, "ride \(ride) boundary")
             }
@@ -772,7 +780,7 @@ final class ReconnectResyncStressTests: XCTestCase {
 
         for cycle in 1...cycles {
             try await reconnectCycle(a: a, b: b, aPort: aPort)
-            try await poll(timeoutSeconds: 10) { !a.resync.diagnostics.requestPending && !b.resync.diagnostics.requestPending }
+            try await poll(timeoutSeconds: 30) { !a.resync.diagnostics.requestPending && !b.resync.diagnostics.requestPending }
             if cycle.isMultiple(of: 10) {
                 // A stale-generation delivery every ten cycles, to give `rejections`/`droppedRetiredGeneration`
                 // real, repeated traffic to (not) accumulate unboundedly from.
@@ -839,7 +847,7 @@ final class ReconnectResyncStressTests: XCTestCase {
         try await poll { await b.sync.diagnostics.lastReceivedCommandSeq == 42 }
 
         try await reconnectCycle(a: a, b: b, aPort: aPort)
-        try await poll(timeoutSeconds: 10) { !a.resync.diagnostics.requestPending && !b.resync.diagnostics.requestPending }
+        try await poll(timeoutSeconds: 30) { !a.resync.diagnostics.requestPending && !b.resync.diagnostics.requestPending }
 
         // `resetForNewSession()` on both sides clears `lastReceivedSeq`/`lastAppliedSeq`/`nextSeq`
         // symmetrically, and the reconnect's own auto-triggered STATE_REQUEST/STATE_SNAPSHOT round
@@ -908,11 +916,11 @@ final class ReconnectResyncStressTests: XCTestCase {
         ))
         await b.manager.resyncRelay().deliver(type: ResyncMessageTypes.stateSnapshot, payload: snapshot, generation: generation)
 
-        try await poll(timeoutSeconds: 10) { await b.content.transferRequests.contains(unresolvableHash) }
+        try await poll(timeoutSeconds: 30) { await b.content.transferRequests.contains(unresolvableHash) }
 
         // The outcome must be honestly reported as still-pending, never as a completed
         // reconciliation the peer never actually reached.
-        try await poll(timeoutSeconds: 10) { b.resync.diagnostics.lastOutcome != .none }
+        try await poll(timeoutSeconds: 30) { b.resync.diagnostics.lastOutcome != .none }
         XCTAssertEqual(.snapshotPending, b.resync.diagnostics.lastOutcome, "content-unavailable must not be reported as .reconciled")
 
         // No player effect must have happened on the strength of a snapshot naming content this
@@ -926,7 +934,7 @@ final class ReconnectResyncStressTests: XCTestCase {
         // growing backlog of duplicates for the same hash).
         await b.content.addLocal(unresolvableHash)
         await b.manager.resyncRelay().deliver(type: ResyncMessageTypes.stateSnapshot, payload: snapshot, generation: generation)
-        try await poll(timeoutSeconds: 10) { await b.player.calls.contains(.start) }
+        try await poll(timeoutSeconds: 30) { await b.player.calls.contains(.start) }
         let requestsAfterResolution = await b.content.transferRequests
         XCTAssertEqual(1, requestsAfterResolution.filter { $0 == unresolvableHash }.count, "a resolvable re-delivery must not request the transfer again")
         XCTAssertEqual(0, a.resync.diagnostics.roleViolationCount)
@@ -973,7 +981,7 @@ final class ReconnectResyncStressTests: XCTestCase {
             queueItems: [], queueCurrentIndex: nil, manifestRevision: 0, transfersInFlight: []
         ))
         await b.manager.resyncRelay().deliver(type: ResyncMessageTypes.stateSnapshot, payload: beforeOutageSnapshot, generation: genBefore)
-        try await poll(timeoutSeconds: 10) { await b.player.calls.contains(.start) }
+        try await poll(timeoutSeconds: 30) { await b.player.calls.contains(.start) }
         let trackHashBeforeOutage = await b.sync.diagnostics.currentTrackHash
         XCTAssertEqual(trackX, trackHashBeforeOutage, "must be genuinely playing X before the outage, not merely told to")
 
@@ -988,7 +996,7 @@ final class ReconnectResyncStressTests: XCTestCase {
         try await reconnectCycle(a: a, b: b, aPort: aPort)
         guard let genAfter = a.manager.liveAuthenticatedGeneration() else { return XCTFail("no generation") }
         XCTAssertNotEqual(genBefore, genAfter)
-        try await poll(timeoutSeconds: 10) { !b.resync.diagnostics.requestPending }
+        try await poll(timeoutSeconds: 30) { !b.resync.diagnostics.requestPending }
 
         // A real desync trigger — the same production callback an ingress overflow fires — opens a
         // genuine, generation-matched pending request, so the injected answer below is a faithful
@@ -1006,7 +1014,7 @@ final class ReconnectResyncStressTests: XCTestCase {
             queueItems: [], queueCurrentIndex: nil, manifestRevision: 0, transfersInFlight: []
         ))
         await b.manager.resyncRelay().deliver(type: ResyncMessageTypes.stateSnapshot, payload: afterOutageSnapshot, generation: genAfter)
-        try await poll(timeoutSeconds: 10) { await b.player.calls.contains(.start) }
+        try await poll(timeoutSeconds: 30) { await b.player.calls.contains(.start) }
 
         // The real player calls, in order — not merely "some outcome enum came back applied".
         let calls = await b.player.calls
@@ -1046,7 +1054,7 @@ final class ReconnectResyncStressTests: XCTestCase {
         // Let the reconnect's own real auto-triggered STATE_REQUEST/STATE_SNAPSHOT round trip settle
         // deterministically before injecting the paused answer — otherwise the two race under the
         // same generation and the assertion below could see whichever's player calls landed first.
-        try await poll(timeoutSeconds: 10) { !b.resync.diagnostics.requestPending }
+        try await poll(timeoutSeconds: 30) { !b.resync.diagnostics.requestPending }
         try await triggerDesync(b)
         await b.player.clearCalls()
 
@@ -1060,7 +1068,7 @@ final class ReconnectResyncStressTests: XCTestCase {
         ))
         await b.manager.resyncRelay().deliver(type: ResyncMessageTypes.stateSnapshot, payload: pausedSnapshot, generation: generation)
 
-        try await poll(timeoutSeconds: 10) { await b.player.calls.contains(.seek(17_500)) }
+        try await poll(timeoutSeconds: 30) { await b.player.calls.contains(.seek(17_500)) }
         // Nothing schedules a start for a paused snapshot, so there is no later event to wait for —
         // settle on the one this reconciliation actually produces, then assert the negative.
         let calls = await b.player.calls
@@ -1098,7 +1106,7 @@ final class ReconnectResyncStressTests: XCTestCase {
             queueItems: [], queueCurrentIndex: nil, manifestRevision: 0, transfersInFlight: []
         ))
         await b.manager.resyncRelay().deliver(type: ResyncMessageTypes.stateSnapshot, payload: priorSnapshot, generation: genBefore)
-        try await poll(timeoutSeconds: 10) { await b.player.calls.contains(.start) }
+        try await poll(timeoutSeconds: 30) { await b.player.calls.contains(.start) }
         let trackHashAfterPrior = await b.sync.diagnostics.currentTrackHash
         XCTAssertEqual(track, trackHashAfterPrior)
 
@@ -1112,7 +1120,7 @@ final class ReconnectResyncStressTests: XCTestCase {
             queueItems: [], queueCurrentIndex: nil, manifestRevision: 0, transfersInFlight: []
         ))
         await b.manager.resyncRelay().deliver(type: ResyncMessageTypes.stateSnapshot, payload: neverHadOne, generation: genAfter)
-        try await poll(timeoutSeconds: 10) { await b.sync.diagnostics.currentTrackHash == nil }
+        try await poll(timeoutSeconds: 30) { await b.sync.diagnostics.currentTrackHash == nil }
         var calls = await b.player.calls
         XCTAssertTrue(calls.isEmpty, "a snapshot the leader never populated must not touch the player at all")
 
@@ -1129,7 +1137,7 @@ final class ReconnectResyncStressTests: XCTestCase {
             queueItems: [], queueCurrentIndex: nil, manifestRevision: 0, transfersInFlight: []
         ))
         await b.manager.resyncRelay().deliver(type: ResyncMessageTypes.stateSnapshot, payload: reestablishSnapshot, generation: genReestablish)
-        try await poll(timeoutSeconds: 10) { await b.player.calls.contains(.start) }
+        try await poll(timeoutSeconds: 30) { await b.player.calls.contains(.start) }
 
         try await reconnectCycle(a: a, b: b, aPort: aPort)
         guard let genFinal = a.manager.liveAuthenticatedGeneration() else { return XCTFail("no generation") }
@@ -1140,7 +1148,7 @@ final class ReconnectResyncStressTests: XCTestCase {
             queueItems: [], queueCurrentIndex: nil, manifestRevision: 0, transfersInFlight: []
         ))
         await b.manager.resyncRelay().deliver(type: ResyncMessageTypes.stateSnapshot, payload: explicitlyNothing, generation: genFinal)
-        try await poll(timeoutSeconds: 10) { await b.sync.diagnostics.currentTrackHash == nil }
+        try await poll(timeoutSeconds: 30) { await b.sync.diagnostics.currentTrackHash == nil }
         calls = await b.player.calls
         XCTAssertTrue(calls.isEmpty, "an explicit 'nothing loaded' authoritative record must not touch the player either — both wire shapes converge identically")
         XCTAssertEqual(0, a.resync.diagnostics.roleViolationCount)
@@ -1188,7 +1196,7 @@ final class ReconnectResyncStressTests: XCTestCase {
             queueItems: [], queueCurrentIndex: nil, manifestRevision: 0, transfersInFlight: []
         ))
         await b.manager.resyncRelay().deliver(type: ResyncMessageTypes.stateSnapshot, payload: snapshotX, generation: genA)
-        try await poll(timeoutSeconds: 10) { await b.player.calls.contains(.start) }
+        try await poll(timeoutSeconds: 30) { await b.player.calls.contains(.start) }
 
         // Generation B: reconnect, then deliver a snapshot naming content the follower does not have
         // — retained pending the transfer. The leader also "moves" while disconnected, so a leaked B
@@ -1206,7 +1214,7 @@ final class ReconnectResyncStressTests: XCTestCase {
             queueItems: [], queueCurrentIndex: nil, manifestRevision: 0, transfersInFlight: []
         ))
         await b.manager.resyncRelay().deliver(type: ResyncMessageTypes.stateSnapshot, payload: snapshotY, generation: genB)
-        try await poll(timeoutSeconds: 10) { await b.content.transferRequests.contains(trackY) }
+        try await poll(timeoutSeconds: 30) { await b.content.transferRequests.contains(trackY) }
         let deferredAfterB = await b.sync.diagnostics.deferredCommandCount
         XCTAssertGreaterThan(deferredAfterB, 0, "generation B's snapshot is genuinely retained, owned by generation B")
         let callsAfterB = await b.player.calls
@@ -1225,7 +1233,7 @@ final class ReconnectResyncStressTests: XCTestCase {
             queueItems: [], queueCurrentIndex: nil, manifestRevision: 0, transfersInFlight: []
         ))
         await b.manager.resyncRelay().deliver(type: ResyncMessageTypes.stateSnapshot, payload: snapshotZ, generation: genC)
-        try await poll(timeoutSeconds: 10) { await b.player.calls.contains(.start) }
+        try await poll(timeoutSeconds: 30) { await b.player.calls.contains(.start) }
 
         let calls = await b.player.calls
         XCTAssertFalse(calls.contains(.select(trackY)), "B's retained snapshot must never surface, even after C converges")
@@ -1265,14 +1273,14 @@ final class ReconnectResyncStressTests: XCTestCase {
             queueItems: [], queueCurrentIndex: nil, manifestRevision: 0, transfersInFlight: []
         ))
         await b.manager.resyncRelay().deliver(type: ResyncMessageTypes.stateSnapshot, payload: snapshot, generation: generation)
-        try await poll(timeoutSeconds: 10) { await b.content.transferRequests.contains(track) }
+        try await poll(timeoutSeconds: 30) { await b.content.transferRequests.contains(track) }
         let deferredRightAfter = await b.sync.diagnostics.deferredCommandCount
         XCTAssertGreaterThan(deferredRightAfter, 0, "retained pending the transfer")
 
         // The transfer verifies — the prompt `content.observeAvailability` trigger (the fix above)
         // applies it immediately, rather than waiting out the periodic retry interval.
         await b.content.completeTransfer(track)
-        try await poll(timeoutSeconds: 10) { await b.player.calls.contains(.select(track)) }
+        try await poll(timeoutSeconds: 30) { await b.player.calls.contains(.select(track)) }
         let selectCount = await b.player.calls.filter { $0 == .select(track) }.count
         XCTAssertEqual(1, selectCount, "exactly one genuine restore from the retained snapshot's single application")
         // The strongest available "no re-application" signal: the retained entry is provably gone,
@@ -1307,7 +1315,7 @@ final class ReconnectResyncStressTests: XCTestCase {
             queueItems: [], queueCurrentIndex: nil, manifestRevision: 0, transfersInFlight: []
         ))
         await b.manager.resyncRelay().deliver(type: ResyncMessageTypes.stateSnapshot, payload: snapshot, generation: generation)
-        try await poll(timeoutSeconds: 10) { await b.content.transferRequests.contains(track) }
+        try await poll(timeoutSeconds: 30) { await b.content.transferRequests.contains(track) }
         let deferredAfterFirst = await b.sync.diagnostics.deferredCommandCount
         XCTAssertGreaterThan(deferredAfterFirst, 0)
 
@@ -1315,12 +1323,12 @@ final class ReconnectResyncStressTests: XCTestCase {
         // generation, while still retained. `deliver` only *schedules* the dispatch `Task`, so this
         // polls for the effect rather than reading `deferredCommandCount` synchronously right after.
         await b.manager.resyncRelay().deliver(type: ResyncMessageTypes.stateSnapshot, payload: snapshot, generation: generation)
-        try await poll(timeoutSeconds: 10) { await b.sync.diagnostics.deferredCommandCount > deferredAfterFirst }
+        try await poll(timeoutSeconds: 30) { await b.sync.diagnostics.deferredCommandCount > deferredAfterFirst }
         let deferredAfterDuplicate = await b.sync.diagnostics.deferredCommandCount
         XCTAssertGreaterThan(deferredAfterDuplicate, deferredAfterFirst, "the duplicate is held too, not silently dropped or merged")
 
         await b.content.completeTransfer(track)
-        try await poll(timeoutSeconds: 10) { await b.player.calls.contains(.select(track)) }
+        try await poll(timeoutSeconds: 30) { await b.player.calls.contains(.select(track)) }
         let selectCount = await b.player.calls.filter { $0 == .select(track) }.count
         XCTAssertEqual(
             1, selectCount,
@@ -1358,7 +1366,7 @@ final class ReconnectResyncStressTests: XCTestCase {
             queueItems: [], queueCurrentIndex: nil, manifestRevision: 0, transfersInFlight: []
         ))
         await b.manager.resyncRelay().deliver(type: ResyncMessageTypes.stateSnapshot, payload: snapshot, generation: generation)
-        try await poll(timeoutSeconds: 10) { await b.content.transferRequests.contains(track) }
+        try await poll(timeoutSeconds: 30) { await b.content.transferRequests.contains(track) }
         let deferredBeforeTeardown = await b.sync.diagnostics.deferredCommandCount
         XCTAssertGreaterThan(deferredBeforeTeardown, 0)
 
@@ -1415,7 +1423,7 @@ final class ReconnectResyncStressTests: XCTestCase {
             queueItems: [], queueCurrentIndex: nil, manifestRevision: 0, transfersInFlight: []
         ))
         await b.manager.resyncRelay().deliver(type: ResyncMessageTypes.stateSnapshot, payload: snapshot1, generation: gen1)
-        try await poll(timeoutSeconds: 10) { await b.player.calls.contains(.start) }
+        try await poll(timeoutSeconds: 30) { await b.player.calls.contains(.start) }
 
         // Ride 1: reconnect, and the leader's authoritative state now names content the follower does
         // not have — retained pending the transfer (section 22).
@@ -1431,7 +1439,7 @@ final class ReconnectResyncStressTests: XCTestCase {
             queueItems: [], queueCurrentIndex: nil, manifestRevision: 0, transfersInFlight: []
         ))
         await b.manager.resyncRelay().deliver(type: ResyncMessageTypes.stateSnapshot, payload: snapshot2, generation: gen1b)
-        try await poll(timeoutSeconds: 10) { await b.content.transferRequests.contains(track2) }
+        try await poll(timeoutSeconds: 30) { await b.content.transferRequests.contains(track2) }
         let deferredRide1 = await b.sync.diagnostics.deferredCommandCount
         XCTAssertGreaterThan(deferredRide1, 0, "Ride 1's snapshot is genuinely retained pending the transfer")
 
@@ -1461,7 +1469,7 @@ final class ReconnectResyncStressTests: XCTestCase {
             queueItems: [], queueCurrentIndex: nil, manifestRevision: 0, transfersInFlight: []
         ))
         await b.manager.resyncRelay().deliver(type: ResyncMessageTypes.stateSnapshot, payload: snapshot3, generation: gen2)
-        try await poll(timeoutSeconds: 10) { await b.player.calls.contains(.start) }
+        try await poll(timeoutSeconds: 30) { await b.player.calls.contains(.start) }
         let trackHashRide2 = await b.sync.diagnostics.currentTrackHash
         XCTAssertEqual(track3, trackHashRide2, "Ride 2 converged normally")
         await b.player.clearCalls()
@@ -1516,7 +1524,7 @@ final class ReconnectResyncStressTests: XCTestCase {
             queueItems: [], queueCurrentIndex: nil, manifestRevision: 0, transfersInFlight: []
         ))
         await b.manager.resyncRelay().deliver(type: ResyncMessageTypes.stateSnapshot, payload: snapshot, generation: generation)
-        try await poll(timeoutSeconds: 10) { await b.player.calls.contains(.start) }
+        try await poll(timeoutSeconds: 30) { await b.player.calls.contains(.start) }
 
         let calls = await b.player.calls
         XCTAssertTrue(calls.contains(.select(track)), "the restore proceeded unconditionally while transitioning: \(calls)")
