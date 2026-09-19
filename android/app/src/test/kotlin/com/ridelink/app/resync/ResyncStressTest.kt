@@ -1,5 +1,7 @@
 package com.ridelink.app.resync
 
+import com.ridelink.app.sync.FakeSyncPlayer
+import com.ridelink.app.sync.SyncCorrection
 import com.ridelink.app.sync.SyncTestValues
 import com.ridelink.core.playback.PlaybackMessage
 import com.ridelink.core.playback.QueueMessage
@@ -9,12 +11,14 @@ import com.ridelink.network.control.ControlEvent
 import com.ridelink.network.control.LinkLossReason
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.test.StandardTestDispatcher
+import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import kotlin.random.Random
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 /**
@@ -24,6 +28,7 @@ import kotlin.test.assertTrue
  * cycle advances through [runCurrent] against the injected [kotlinx.coroutines.test.TestScope]
  * scheduler and, where a real interval matters, the fake monotonic clocks the harness already uses.
  */
+@Suppress("LargeClass") // one shared harness across a growing set of fault/race scenarios; splitting would duplicate the harness
 class ResyncStressTest {
     @Test
     fun `75 reconnect cycles keep counters consistent and never wedge pending state`() =
@@ -210,8 +215,24 @@ class ResyncStressTest {
         runTest(StandardTestDispatcher()) {
             val pair = ResyncTestPair(this)
             pair.connect(generation = 1)
+            // `resolvePendingPlay` (PROTOCOL §5 rule 4) will not even issue the PLAY until the
+            // leader believes both sides can play it -- register it as resolvable on both, matching
+            // how `SyncPlaybackTwoPeerTest` exercises a real Play.
+            pair.leader.content.localHashes
+                .add(SyncTestValues.hash(1).value)
+            pair.leader.content.peerHashes
+                .add(SyncTestValues.hash(1).value)
+            pair.follower.content.localHashes
+                .add(SyncTestValues.hash(1).value)
             pair.leader.sync.playSynchronized(SyncTestValues.hash(1))
             runCurrent()
+            pair.leaderClock.advanceBy(LEAD_US)
+            runCurrent()
+            assertEquals(
+                SyncTestValues.hash(1),
+                pair.leader.sync.diagnostics.value.currentTrackHash,
+                "the leader must actually be playing before this test's reconnect scenario begins",
+            )
 
             pair.dropLink()
             // Reconnect, but the follower's own clock is not ready yet — no fresh window has landed
@@ -231,20 +252,72 @@ class ResyncStressTest {
             pair.follower.resyncSession.emit(ControlEvent.Connected(pair.leader.localPeerId, ResyncTestPair.SESSION_ID, false, 2))
             runCurrent()
 
-            // The round trip itself does not require the follower's clock: PROTOCOL §9's queue
-            // adoption is unconditional, and the reconciliation must not crash or corrupt state
-            // merely because the clock estimator has not produced a window yet.
-            assertEquals(ResyncOutcome.RECONCILED, pair.follower.resync.diagnostics.value.lastOutcome)
+            // Independent-review Blocker 2A/2D: the wire round trip itself does not require the
+            // follower's clock (PROTOCOL §9's queue adoption is unconditional, and the snapshot must
+            // not crash or corrupt state merely because the clock estimator has not produced a
+            // window yet), but genuine reconciliation *does* need it here — this device's own
+            // timeline was cleared by the reconnect, so it needs a full restore, and that must not
+            // be declared complete before it actually happens. Before the fix this asserted
+            // `RECONCILED` immediately, which was itself the bug: a follower whose state never
+            // actually converged reported success regardless.
+            assertEquals(
+                ResyncOutcome.DEFERRED,
+                pair.follower.resync.diagnostics.value.lastOutcome,
+                "reconciliation is genuinely outstanding, not silently skipped, while the clock is not ready",
+            )
+            // `lastSnapshotCommandSeq` is written only by `ResyncCoordinator`'s own APPLIED branch —
+            // never by DEFERRED_CLOCK, and never by the ordinary Phase 5 broadcast channel this
+            // harness's `dropLink()` does not fully isolate — so it is an uncontaminated signal
+            // specifically for *this* reconciliation, unlike `currentTrackHash` (which the follower
+            // may already know from before the outage regardless of what this test does).
+            assertNull(
+                pair.follower.resync.diagnostics.value.lastSnapshotCommandSeq,
+                "this reconciliation has not recorded a completed snapshot yet",
+            )
 
             // The clock becomes ready — a fresh 11-sample window landing, as PROTOCOL §10 requires
-            // after every reconnect — and normal ticking resumes without any wall-clock sleep.
+            // after every reconnect. The deferred-event drain retries on `Phase5GateBounds
+            // .DEFERRED_RETRY_INTERVAL_US`'s own cadence (`startDeferredDrain`), so the fake clock
+            // must advance past it -- the same pattern `SyncPlaybackDeliveryAuditTest` already uses
+            // for a held `Command`'s recovery -- not a real wall-clock sleep.
             pair.follower.syncSession.setClock(SessionClockEstimate(offsetToLeaderUs = 0L, rttP95Us = 8_000, ready = true))
+            pair.followerClock.advanceBy(DEFERRED_RETRY_US)
             runCurrent()
 
             assertEquals(
                 ResyncOutcome.RECONCILED,
                 pair.follower.resync.diagnostics.value.lastOutcome,
-                "still settled once the clock catches up",
+                "settled once the clock catches up -- via the deferred-event drain, never a resend",
+            )
+            // Section 14's own finding, not a bug: `resetForNewSession()` resets `nextSeq`/
+            // `lastAppliedSeq` on *both* sides symmetrically at every session boundary (pre-existing,
+            // unchanged by this phase), so a snapshot built before any new command is issued in the
+            // fresh generation truthfully reports a fresh floor (0) rather than the previous
+            // generation's now-meaningless number. Nothing on the wire ever compares a command_seq
+            // *across* generations — ReadFrameBinding/ADR-025 already scope every frame to the
+            // generation that authorised it — so this is a safe renumbering, not a divergence: this
+            // assertion proves *that a floor was recorded at all* by the deferred-completion path,
+            // not that a specific stale-generation number survived (it correctly does not).
+            assertEquals(
+                0L,
+                pair.follower.resync.diagnostics.value.lastSnapshotCommandSeq,
+                "and this reconciliation genuinely completed and recorded the leader's fresh authoritative floor",
+            )
+            assertEquals(
+                SyncTestValues.hash(1),
+                pair.follower.sync.diagnostics.value.currentTrackHash,
+                "convergence happened, not merely a label change",
+            )
+
+            // Liveness: an ordinary incremental command from the leader is accepted normally
+            // afterward -- recovery restored the follower to a live, unwedged state.
+            pair.leader.sync.playSynchronized(SyncTestValues.hash(1))
+            pair.leaderClock.advanceBy(LEAD_US)
+            runCurrent()
+            assertEquals(
+                SyncTestValues.hash(1),
+                pair.follower.sync.diagnostics.value.currentTrackHash,
+                "an ordinary command after recovery still converges normally",
             )
         }
 
@@ -508,6 +581,712 @@ class ResyncStressTest {
             assertFalse(diag.requestPending)
         }
 
+    // --- Blocker 1: outbound generation binding (Cases B and C) --------------------------------
+
+    /**
+     * Independent-review Blocker 1, Case B. A `STATE_SNAPSHOT` the leader has already admitted onto
+     * its ordered outbound queue (`emitStateSnapshot`'s `enqueueOutbound`) can still be sitting
+     * there when the authorising generation retires — the outbound consumer only reaches it later.
+     * Before the fix, `ResyncRelay.send` resolved the writer live at that later instant, so the
+     * item would have been written through whatever generation happened to be current. Proved here
+     * by gating the resync channel's actual write (`FakeResyncSession.sendGate`, the same shape
+     * `VoiceLifetimeProvenanceTest`/`ResyncLifetimeProvenanceTest` gate a real socket with) so the
+     * item is genuinely still queued, not merely admitted, when the generation moves on.
+     */
+    @Test
+    fun `blocker1 case B -- a queued STATE_SNAPSHOT that outlives its generation is refused, never wedging the queue`() =
+        runTest(StandardTestDispatcher()) {
+            val pair = ResyncTestPair(this)
+            pair.connect(generation = 1)
+
+            val gate = CompletableDeferred<Unit>()
+            pair.leader.resyncSession.sendGate = gate
+            pair.leader.resyncSession.deliver(ResyncMessage.StateRequest, generation = 1)
+            runCurrent()
+            assertTrue(
+                pair.leader.resyncSession.sent
+                    .isEmpty(),
+                "the reply is genuinely queued, not yet written",
+            )
+
+            // Generation 1 retires and generation 2 authenticates while the item is still gated.
+            pair.leader.resyncSession.liveAuthenticatedGeneration = null
+            pair.reconnect(generation = 2)
+
+            gate.complete(Unit)
+            runCurrent()
+
+            // The reconnect itself also triggers the follower's own legitimate generation-2
+            // STATE_REQUEST/STATE_SNAPSHOT round trip, so `sent` may already contain that item by
+            // now -- the assertion that matters is that *nothing* reached the wire under the
+            // retired generation, not that the list is empty.
+            assertTrue(
+                pair.leader.resyncSession.sentGenerations
+                    .all { it == 2L },
+                "no frame authorised by the retired generation 1 was ever written: ${pair.leader.resyncSession.sentGenerations}",
+            )
+
+            // Case C: the stale item must not wedge the queue -- a fresh, generation-2-authorised
+            // request still gets a fresh, generation-2-authorised answer.
+            pair.leader.resyncSession.sent
+                .clear()
+            pair.leader.resyncSession.sentGenerations
+                .clear()
+            pair.leader.resyncSession.deliver(ResyncMessage.StateRequest, generation = 2)
+            runCurrent()
+            assertEquals(
+                1,
+                pair.leader.resyncSession.sent
+                    .filterIsInstance<ResyncMessage.StateSnapshot>()
+                    .size,
+                "a following generation-2 request is answered normally -- the stale item did not wedge the writer",
+            )
+        }
+
+    // --- Blocker 2, sections 17-18: paused reconnect and nothing-loaded, proven rather than argued ---
+
+    /**
+     * Independent-review section 17. `applyPlay`'s own `if (!playing) { markSynced(); return }`
+     * (unchanged by this phase's routing fix) already means a paused snapshot schedules no `Start`
+     * — this test proves that holds through the actual reconnect path this phase changed, so it
+     * stays proven if either function changes later without someone re-deriving the reasoning.
+     */
+    @Test
+    fun `fault -- a paused reconnect leaves the follower paused, never incorrectly starting playback`() =
+        runTest(StandardTestDispatcher()) {
+            val pair = ResyncTestPair(this)
+            pair.connect(generation = 1)
+            pair.leader.content.localHashes
+                .add(SyncTestValues.hash(1).value)
+            pair.leader.content.peerHashes
+                .add(SyncTestValues.hash(1).value)
+            pair.follower.content.localHashes
+                .add(SyncTestValues.hash(1).value)
+            pair.leader.sync.playSynchronized(SyncTestValues.hash(1))
+            runCurrent()
+            pair.leaderClock.advanceBy(LEAD_US)
+            runCurrent()
+            pair.leader.sync.pause()
+            runCurrent()
+            pair.leaderClock.advanceBy(LEAD_US)
+            runCurrent()
+            assertTrue(
+                pair.leader.player.calls
+                    .contains(FakeSyncPlayer.Call.Pause),
+                "the leader genuinely paused first",
+            )
+
+            pair.dropLink()
+            // Isolate the reconciliation's own effects from whatever the ordinary broadcast already
+            // did before the outage.
+            pair.follower.player.calls
+                .clear()
+            pair.reconnect(generation = 2)
+
+            assertEquals(ResyncOutcome.RECONCILED, pair.follower.resync.diagnostics.value.lastOutcome)
+            assertFalse(
+                pair.follower.player.calls
+                    .contains(FakeSyncPlayer.Call.Start),
+                "a paused authoritative snapshot must never start playback: ${pair.follower.player.calls}",
+            )
+        }
+
+    /**
+     * Independent-review section 18. A snapshot whose `track_hash`/`queue_item_id` are genuinely
+     * `null` (the leader really has nothing loaded) must be indistinguishable in outcome from any
+     * other authoritative state — `StateSnapshotOutcome.APPLIED`, not stuck and not deferred — and
+     * must leave the follower with nothing loaded either, never a stale leftover from before.
+     */
+    @Test
+    fun `fault -- a genuinely nothing-loaded snapshot reconciles cleanly, distinct from a merely-reset timeline`() =
+        runTest(StandardTestDispatcher()) {
+            val pair = ResyncTestPair(this)
+            pair.connect(generation = 1)
+            pair.leader.content.localHashes
+                .add(SyncTestValues.hash(1).value)
+            pair.leader.content.peerHashes
+                .add(SyncTestValues.hash(1).value)
+            pair.follower.content.localHashes
+                .add(SyncTestValues.hash(1).value)
+            pair.leader.sync.playSynchronized(SyncTestValues.hash(1))
+            runCurrent()
+            pair.leaderClock.advanceBy(LEAD_US)
+            runCurrent()
+            assertEquals(SyncTestValues.hash(1), pair.follower.sync.diagnostics.value.currentTrackHash)
+
+            // The leader genuinely stops -- nothing loaded is now its own authoritative truth, not
+            // merely a side effect of a session boundary it has not even had yet.
+            pair.leader.sync.leaveSynchronizedMode()
+            runCurrent()
+            assertNull(pair.leader.sync.diagnostics.value.currentTrackHash, "the leader genuinely has nothing loaded now")
+
+            pair.dropLink()
+            pair.reconnect(generation = 2)
+
+            assertEquals(
+                ResyncOutcome.RECONCILED,
+                pair.follower.resync.diagnostics.value.lastOutcome,
+                "a genuinely-nothing-loaded snapshot is APPLIED, never stuck",
+            )
+            assertNull(
+                pair.follower.sync.diagnostics.value.currentTrackHash,
+                "the follower must not keep reporting its stale pre-outage track once told there is nothing loaded",
+            )
+        }
+
+    // --- Blocker 2, section 22: content-unavailable defers, never gets stuck ---------------------
+
+    /**
+     * A snapshot naming a track this device does not have locally: the existing Phase 4
+     * transfer-request path fires (unchanged), the outcome is `DEFERRED_CONTENT` -- not a false
+     * `APPLIED`, and not stuck -- and once the transfer verifies, the *same* deferred-event/drain
+     * machinery `content.observeAvailability` already wires into (§2A/2D's clock-readiness path)
+     * completes the restoration and clears reconciliation. No second transfer/resync loop of this
+     * mechanism's own is created.
+     */
+    @Test
+    fun `fault -- a snapshot naming content the follower lacks defers rather than getting stuck, until the transfer verifies`() =
+        runTest(StandardTestDispatcher()) {
+            val pair = ResyncTestPair(this)
+            pair.connect(generation = 1)
+            for (hash in listOf(SyncTestValues.hash(1), SyncTestValues.hash(2))) {
+                pair.leader.content.localHashes
+                    .add(hash.value)
+                pair.leader.content.peerHashes
+                    .add(hash.value)
+            }
+            pair.follower.content.localHashes
+                .add(SyncTestValues.hash(1).value)
+            // Deliberately absent: pair.follower.content.localHashes for hash(2) -- the follower
+            // does not have the leader's *next* track yet.
+
+            pair.leader.sync.playSynchronized(SyncTestValues.hash(1))
+            runCurrent()
+            pair.leaderClock.advanceBy(LEAD_US)
+            runCurrent()
+
+            pair.dropLink()
+            // `dropLink()` only tears down the resync channel's liveness -- the ordinary
+            // `FakeSyncSession` forwarding this fake models is a separate wire in this harness and
+            // stays connected regardless, so a generation bump alone cannot stop it (both the
+            // sender's write-refusal check and the receiver's admission check read the *same* live
+            // `currentAuthGeneration` at their own, later times, and so always agree with each
+            // other). Sever the ordinary channel directly, the same way a real outage would take
+            // both wires down, so the only way the follower can learn of hash(2) is the resync
+            // round trip this test means to exercise.
+            pair.leader.syncSession.forwardTo(null)
+            pair.leader.sync.playSynchronized(SyncTestValues.hash(2))
+            runCurrent()
+            pair.leaderClock.advanceBy(LEAD_US)
+            runCurrent()
+            assertEquals(
+                SyncTestValues.hash(2),
+                pair.leader.sync.diagnostics.value.currentTrackHash,
+                "the leader moved on during the outage",
+            )
+            assertEquals(
+                SyncTestValues.hash(1),
+                pair.follower.sync.diagnostics.value.currentTrackHash,
+                "the follower never received the leader's mid-outage change over the ordinary channel",
+            )
+            pair.leader.syncSession.forwardTo(pair.follower.syncSession)
+
+            pair.reconnect(generation = 2)
+
+            assertEquals(
+                ResyncOutcome.DEFERRED,
+                pair.follower.resync.diagnostics.value.lastOutcome,
+                "content isn't available locally yet -- deferred, not falsely APPLIED",
+            )
+            assertTrue(
+                pair.follower.content.transferRequests
+                    .contains(SyncTestValues.hash(2)),
+                "the existing Phase 4 transfer-request path fired, unchanged",
+            )
+            assertEquals(
+                SyncTestValues.hash(1),
+                pair.follower.sync.diagnostics.value.currentTrackHash,
+                "nothing has actually converged yet -- still the pre-outage track, not a false convergence",
+            )
+
+            // The transfer verifies -- the same Phase 4 seam `SharedLibraryCoordinator` fires after a
+            // real `TransferCacheRepository.commit`.
+            pair.follower.content.completeTransfer(SyncTestValues.hash(2))
+            runCurrent()
+
+            assertEquals(
+                ResyncOutcome.RECONCILED,
+                pair.follower.resync.diagnostics.value.lastOutcome,
+                "restoration completed and reconciliation cleared once content verified",
+            )
+            assertEquals(
+                SyncTestValues.hash(2),
+                pair.follower.sync.diagnostics.value.currentTrackHash,
+                "genuine convergence, not merely a label change",
+            )
+            // No infinite loop: exactly one transfer request for this track, not one per drain retry.
+            assertEquals(
+                1,
+                pair.follower.content.transferRequests
+                    .count { it == SyncTestValues.hash(2) },
+            )
+        }
+
+    // --- independent-review races 3-7: retained-snapshot ownership under further reconnects/teardown ---
+
+    /**
+     * Race 3. A snapshot retained for generation B's clock (`pendingPlaybackReconciliationGeneration
+     * == 2`) must be provably inert once generation C authenticates, *before* B's clock ever became
+     * ready — not merely superseded in place, but discarded outright, the same
+     * `resetForNewSession`/`deferredEvents.clear()` guarantee rule 23's negotiation-ownership story
+     * gives Phase 2's voice tables, applied here to a reconciliation snapshot instead.
+     */
+    @Test
+    fun `race -- a snapshot retained for generation B is inert once generation C authenticates before B's clock is ready`() =
+        runTest(StandardTestDispatcher()) {
+            val pair = ResyncTestPair(this)
+            pair.connect(generation = 1)
+            pair.leader.content.localHashes
+                .add(SyncTestValues.hash(1).value)
+            pair.leader.content.peerHashes
+                .add(SyncTestValues.hash(1).value)
+            pair.follower.content.localHashes
+                .add(SyncTestValues.hash(1).value)
+            pair.leader.sync.playSynchronized(SyncTestValues.hash(1))
+            runCurrent()
+            pair.leaderClock.advanceBy(LEAD_US)
+            runCurrent()
+
+            // Generation B: reconnect with the follower's clock deliberately not yet ready --
+            // `pair.reconnect` always supplies a ready one, so this is the same manual sequence the
+            // clock-readiness test above uses.
+            pair.dropLink()
+            reconnectWithFollowerClockNotReady(pair, generation = 2)
+            assertEquals(ResyncOutcome.DEFERRED, pair.follower.resync.diagnostics.value.lastOutcome)
+            assertEquals(
+                2L,
+                pair.follower.sync.diagnostics.value.pendingPlaybackReconciliationGeneration,
+                "the snapshot is genuinely retained, owned by generation 2",
+            )
+            assertEquals(1, pair.follower.sync.diagnostics.value.deferredCommandCount)
+            pair.follower.player.calls
+                .clear()
+
+            // Generation C authenticates before B's clock ever becomes ready. The leader also moves
+            // to a different track while disconnected, so a leaked B effect would show up as the
+            // wrong track rather than merely "any track at all".
+            pair.leader.content.localHashes
+                .add(SyncTestValues.hash(2).value)
+            pair.leader.content.peerHashes
+                .add(SyncTestValues.hash(2).value)
+            pair.follower.content.localHashes
+                .add(SyncTestValues.hash(2).value)
+            pair.leader.syncSession.forwardTo(null)
+            pair.leader.sync.playSynchronized(SyncTestValues.hash(2))
+            runCurrent()
+            pair.leaderClock.advanceBy(LEAD_US)
+            runCurrent()
+            pair.leader.syncSession.forwardTo(pair.follower.syncSession)
+
+            pair.dropLink()
+            pair.reconnect(generation = 3)
+
+            assertEquals(
+                ResyncOutcome.RECONCILED,
+                pair.follower.resync.diagnostics.value.lastOutcome,
+                "C's own reconciliation succeeds normally",
+            )
+            assertNull(
+                pair.follower.sync.diagnostics.value.pendingPlaybackReconciliationGeneration,
+                "B's retained generation never lingers once C has its own, resolved obligation",
+            )
+            assertEquals(
+                0,
+                pair.follower.sync.diagnostics.value.deferredCommandCount,
+                "B's held snapshot was discarded, not merely superseded in place",
+            )
+            assertEquals(
+                SyncTestValues.hash(2),
+                pair.follower.sync.diagnostics.value.currentTrackHash,
+                "converged on C's authoritative track, never B's stale one",
+            )
+
+            // Even if B's clock were hypothetically to become ready now, there is nothing left to drain.
+            pair.followerClock.advanceBy(DEFERRED_RETRY_US)
+            runCurrent()
+            assertFalse(
+                pair.follower.player.calls
+                    .contains(FakeSyncPlayer.Call.Start),
+                "no belated player effect from B's retained snapshot ever arrives",
+            )
+        }
+
+    /**
+     * Race 4. A retained snapshot applies exactly once when its clock becomes ready -- one genuine
+     * restore, never one per retry tick.
+     */
+    @Test
+    fun `race -- a retained snapshot applies exactly once when its clock becomes ready, never once per retry tick`() =
+        runTest(StandardTestDispatcher()) {
+            val pair = ResyncTestPair(this)
+            pair.connect(generation = 1)
+            pair.leader.content.localHashes
+                .add(SyncTestValues.hash(1).value)
+            pair.leader.content.peerHashes
+                .add(SyncTestValues.hash(1).value)
+            pair.follower.content.localHashes
+                .add(SyncTestValues.hash(1).value)
+            pair.leader.sync.playSynchronized(SyncTestValues.hash(1))
+            runCurrent()
+            pair.leaderClock.advanceBy(LEAD_US)
+            runCurrent()
+
+            pair.dropLink()
+            reconnectWithFollowerClockNotReady(pair, generation = 2)
+            assertEquals(ResyncOutcome.DEFERRED, pair.follower.resync.diagnostics.value.lastOutcome)
+            pair.follower.player.calls
+                .clear()
+
+            pair.follower.syncSession.setClock(SessionClockEstimate(offsetToLeaderUs = 0L, rttP95Us = 8_000, ready = true))
+            pair.followerClock.advanceBy(DEFERRED_RETRY_US)
+            runCurrent()
+            assertEquals(ResyncOutcome.RECONCILED, pair.follower.resync.diagnostics.value.lastOutcome)
+            // `Start` itself is scheduled at the snapshot's `effectiveAtSessionUs` (ADR-024 A4's
+            // `scheduleAt`) rather than fired inline, and this harness's leader/follower fake clocks
+            // do not share a base instant -- so `Select`, which `applyPlay`'s pre-roll runs
+            // synchronously inside the same restore, is the uncontaminated "did a genuine restore
+            // happen" signal here, exactly the way `restoreFromPlaybackState`'s comment already
+            // treats the scheduled step as a separate concern from resync's own completion.
+            assertEquals(
+                1,
+                pair.follower.player.calls
+                    .count { it == FakeSyncPlayer.Call.Select(SyncTestValues.hash(1)) },
+                "exactly one genuine restore from the retained snapshot's single application",
+            )
+
+            // A further retry tick must find nothing left to drain -- idempotent, not re-applied.
+            pair.followerClock.advanceBy(DEFERRED_RETRY_US)
+            runCurrent()
+            assertEquals(
+                1,
+                pair.follower.player.calls
+                    .count { it == FakeSyncPlayer.Call.Select(SyncTestValues.hash(1)) },
+                "a later retry tick does not re-apply an already-settled snapshot",
+            )
+        }
+
+    /**
+     * Race 5. A duplicate delivery of the same retained snapshot (a retried frame, not a new one)
+     * is held too, never merged or dropped -- but draining both produces exactly one genuine
+     * restore; the duplicate finds `needsFullPlaybackRestore()` already false once the first has
+     * run and takes the harmless incremental re-anchor branch instead, which touches no player call.
+     */
+    @Test
+    fun `race -- a duplicate snapshot arriving while one is already retained causes no duplicate player effects`() =
+        runTest(StandardTestDispatcher()) {
+            val pair = ResyncTestPair(this)
+            pair.connect(generation = 1)
+            pair.leader.content.localHashes
+                .add(SyncTestValues.hash(1).value)
+            pair.leader.content.peerHashes
+                .add(SyncTestValues.hash(1).value)
+            pair.follower.content.localHashes
+                .add(SyncTestValues.hash(1).value)
+            pair.leader.sync.playSynchronized(SyncTestValues.hash(1))
+            runCurrent()
+            pair.leaderClock.advanceBy(LEAD_US)
+            runCurrent()
+
+            pair.dropLink()
+            reconnectWithFollowerClockNotReady(pair, generation = 2)
+            assertEquals(ResyncOutcome.DEFERRED, pair.follower.resync.diagnostics.value.lastOutcome)
+            assertEquals(1, pair.follower.sync.diagnostics.value.deferredCommandCount)
+
+            // The identical snapshot arrives a second time -- a retried frame, still under
+            // generation 2, while still retained. `onStateSnapshot` processes a message's queue half
+            // and playback half independently, and Amendment A1 Finding D's arrival-order
+            // preservation means *both* now hold too, purely because something is already held
+            // (`AuthoritativeHoldGate.decide` holds whenever `deferredEvents` is non-empty, before
+            // either half ever reaches its own clock/content check) -- so one duplicate delivery
+            // grows the queue by two, not one: a `QueueSnapshot` and a second `PlaybackState`.
+            val heldSnapshot =
+                pair.leader.resyncSession
+                    .sentOfType<ResyncMessage.StateSnapshot>()
+                    .last()
+            pair.follower.resyncSession.deliver(heldSnapshot, generation = 2)
+            runCurrent()
+            assertEquals(
+                3,
+                pair.follower.sync.diagnostics.value.deferredCommandCount,
+                "the duplicate is held too, not silently dropped or merged -- both its queue and playback halves",
+            )
+            pair.follower.player.calls
+                .clear()
+
+            pair.follower.syncSession.setClock(SessionClockEstimate(offsetToLeaderUs = 0L, rttP95Us = 8_000, ready = true))
+            pair.followerClock.advanceBy(DEFERRED_RETRY_US)
+            runCurrent()
+
+            assertEquals(ResyncOutcome.RECONCILED, pair.follower.resync.diagnostics.value.lastOutcome)
+            // See the previous test's comment: `Select` is the synchronous, uncontaminated "a
+            // genuine restore happened" signal here, not the separately-scheduled `Start`.
+            assertEquals(
+                1,
+                pair.follower.player.calls
+                    .count { it == FakeSyncPlayer.Call.Select(SyncTestValues.hash(1)) },
+                "all three held entries drain, but only the first playback entry is a genuine restore -- " +
+                    "the duplicate queue snapshot is a no-op re-adoption and the duplicate playback entry " +
+                    "becomes a harmless incremental re-anchor, neither calling into the player again",
+            )
+            assertEquals(0, pair.follower.sync.diagnostics.value.deferredCommandCount)
+        }
+
+    /**
+     * Race 6. Modelling exactly as much of "End Ride" as this JVM-only two-coordinator harness can
+     * reach -- see the disclosed caveat on `5 complete ride cycles leave no trace of an earlier ride
+     * in the next one` above for what a real `SessionCoordinator`/`SessionTeardownOwner` teardown
+     * adds beyond this (`RideForegroundService`, `ControlSessionManager.shutdown()`). At this layer,
+     * `onSessionLost` already runs `resetForNewSession()` synchronously — clearing `deferredEvents`
+     * and cancelling (never merely detaching) `deferredDrainJob` — and `applyPeerPlaybackState`'s own
+     * `stillCurrent` re-proof inside its lock is what stops a drain continuation that had already
+     * resumed past that cancellation from mutating anything: cancellation is defence one, the
+     * re-proof is the correctness boundary (Amendment A3's lesson, applied here).
+     */
+    @Test
+    fun `race -- ending the ride while a snapshot is retained leaves no later player mutation`() =
+        runTest(StandardTestDispatcher()) {
+            val pair = ResyncTestPair(this)
+            pair.connect(generation = 1)
+            pair.leader.content.localHashes
+                .add(SyncTestValues.hash(1).value)
+            pair.leader.content.peerHashes
+                .add(SyncTestValues.hash(1).value)
+            pair.follower.content.localHashes
+                .add(SyncTestValues.hash(1).value)
+            pair.leader.sync.playSynchronized(SyncTestValues.hash(1))
+            runCurrent()
+            pair.leaderClock.advanceBy(LEAD_US)
+            runCurrent()
+
+            pair.dropLink()
+            reconnectWithFollowerClockNotReady(pair, generation = 2)
+            assertEquals(ResyncOutcome.DEFERRED, pair.follower.resync.diagnostics.value.lastOutcome)
+            assertEquals(1, pair.follower.sync.diagnostics.value.deferredCommandCount)
+            pair.follower.player.calls
+                .clear()
+
+            // End Ride: the control lifetime ends with no successor authenticated yet.
+            pair.follower.resyncSession.liveAuthenticatedGeneration = null
+            pair.follower.resyncSession.emit(ControlEvent.LinkLost(LinkLossReason.BYE))
+            pair.follower.syncSession.emit(ControlEvent.LinkLost(LinkLossReason.BYE))
+            runCurrent()
+
+            assertEquals(0, pair.follower.sync.diagnostics.value.deferredCommandCount, "teardown clears the retained snapshot outright")
+            assertNull(pair.follower.sync.diagnostics.value.pendingPlaybackReconciliationGeneration)
+
+            // Even if the drain job's own cancellation were merely a request rather than already
+            // effective, nothing left in the queue and no live role means a retry tick can do nothing.
+            pair.follower.syncSession.setClock(SessionClockEstimate(offsetToLeaderUs = 0L, rttP95Us = 8_000, ready = true))
+            pair.followerClock.advanceBy(DEFERRED_RETRY_US)
+            runCurrent()
+
+            // `resetForNewSession()` itself fires a fire-and-forget `restoreRate()` on every session
+            // loss regardless of what was retained (a pre-existing, unrelated rate-normalisation
+            // safety action, not a restore) -- so the assertion that matters is that nothing
+            // resembling the retained snapshot's own restore (select/load/start) ever runs, not that
+            // the call list is empty.
+            assertTrue(
+                pair.follower.player.calls.none {
+                    it is FakeSyncPlayer.Call.Select || it is FakeSyncPlayer.Call.Load || it == FakeSyncPlayer.Call.Start
+                },
+                "no later restore effect from the retained snapshot after teardown: ${pair.follower.player.calls}",
+            )
+        }
+
+    /**
+     * Race 7. Ride 1 defers on missing content (section 22's own mechanism) and is torn down before
+     * that transfer ever verifies; Ride 2 starts, converges on its own track, and *then* Ride 1's
+     * transfer verifies late. `content.observeAvailability`'s callback is registered once for the
+     * coordinator's whole lifetime (never re-registered per ride), so this is the one retained-state
+     * mechanism that can genuinely fire a late callback across a ride boundary — unlike the
+     * clock-drain job, which `resetForNewSession` cancels outright. Safety here is structural rather
+     * than a generation comparison: `resetForNewSession` already emptied `deferredEvents` and
+     * cleared `pendingPlay`, so the late callback's `drainDeferredEvents`/`resolvePendingPlay` calls
+     * find nothing left to act on.
+     */
+    @Test
+    fun `race -- a Ride-1 retained snapshot's late content-readiness callback cannot touch Ride 2 after a full teardown and restart`() =
+        runTest(StandardTestDispatcher()) {
+            val pair = ResyncTestPair(this)
+            pair.connect(generation = 1)
+            for (hash in listOf(SyncTestValues.hash(1), SyncTestValues.hash(2), SyncTestValues.hash(3))) {
+                pair.leader.content.localHashes
+                    .add(hash.value)
+                pair.leader.content.peerHashes
+                    .add(hash.value)
+            }
+            pair.follower.content.localHashes
+                .add(SyncTestValues.hash(1).value)
+            // Deliberately absent: hash(2) -- Ride 1's content the follower never receives in time.
+
+            pair.leader.sync.playSynchronized(SyncTestValues.hash(1))
+            runCurrent()
+            pair.leaderClock.advanceBy(LEAD_US)
+            runCurrent()
+
+            pair.dropLink()
+            pair.leader.syncSession.forwardTo(null)
+            pair.leader.sync.playSynchronized(SyncTestValues.hash(2))
+            runCurrent()
+            pair.leaderClock.advanceBy(LEAD_US)
+            runCurrent()
+            pair.leader.syncSession.forwardTo(pair.follower.syncSession)
+
+            pair.reconnect(generation = 2)
+            assertEquals(ResyncOutcome.DEFERRED, pair.follower.resync.diagnostics.value.lastOutcome, "Ride 1: content isn't here yet")
+            assertTrue(
+                pair.follower.content.transferRequests
+                    .contains(SyncTestValues.hash(2)),
+            )
+
+            // "End Ride" genuinely stops the leader's own authoritative playback before the control
+            // lifetime tears down (the real UX order) -- so the leader's own `currentPlaybackIdentity`
+            // is `null`, not a stale hash(2), by the time Ride 2's own reconnect-triggered resync
+            // round trip fires below. Without this, that round trip would re-report the still-missing
+            // hash(2) under generation 3 and legitimately hold Ride 2's own `playSynchronized(hash(3))`
+            // behind it (Amendment A1 Finding D's arrival-order preservation) -- a real, separate
+            // interaction this test does not mean to exercise.
+            pair.leader.sync.leaveSynchronizedMode()
+            runCurrent()
+
+            // Ride 1 ends -- torn down before hash(2) ever verifies.
+            pair.follower.resyncSession.liveAuthenticatedGeneration = null
+            pair.follower.resyncSession.emit(ControlEvent.LinkLost(LinkLossReason.BYE))
+            pair.follower.syncSession.emit(ControlEvent.LinkLost(LinkLossReason.BYE))
+            pair.leader.resyncSession.liveAuthenticatedGeneration = null
+            pair.leader.resyncSession.emit(ControlEvent.LinkLost(LinkLossReason.BYE))
+            pair.leader.syncSession.emit(ControlEvent.LinkLost(LinkLossReason.BYE))
+            runCurrent()
+
+            // Ride 2: a fresh generation, a fresh track, converging normally.
+            pair.follower.content.localHashes
+                .add(SyncTestValues.hash(3).value)
+            pair.connect(generation = 3)
+            pair.leader.sync.playSynchronized(SyncTestValues.hash(3))
+            runCurrent()
+            pair.leaderClock.advanceBy(LEAD_US)
+            runCurrent()
+            assertEquals(SyncTestValues.hash(3), pair.follower.sync.diagnostics.value.currentTrackHash, "Ride 2 converged normally")
+            pair.follower.player.calls
+                .clear()
+
+            // Ride 1's transfer verifies late.
+            pair.follower.content.completeTransfer(SyncTestValues.hash(2))
+            runCurrent()
+
+            assertEquals(
+                SyncTestValues.hash(3),
+                pair.follower.sync.diagnostics.value.currentTrackHash,
+                "Ride 1's late callback must not touch Ride 2's converged state",
+            )
+            assertTrue(
+                pair.follower.player.calls
+                    .isEmpty(),
+                "Ride 1's late content-readiness callback produces no Ride 2 player effect: ${pair.follower.player.calls}",
+            )
+        }
+
+    // --- independent-review section 23: route-transition/coexistence non-regression -------------
+
+    /**
+     * Independent-review section 23. A reconnect snapshot's restoration runs through
+     * `restoreFromPlaybackState`/`applyPlay` — the ride-segment full-restore path this phase added —
+     * never through `DriftController`'s ordinary per-tick correction ladder (`applyCorrection`,
+     * reached only from the position-report tick, ARCHITECTURE §7.3 tier four). `route_state ==
+     * transitioning` is a `DriftController` input (`DriftInput.routeTransitioning`) that suppresses
+     * *that* ladder's own hard-seek tier so a transient Bluetooth reroute never spends the seek
+     * budget rules already give it — it has nothing to do with resync's restore, which is not a
+     * "correction" at all and must neither consult it nor be gated by it: there is exactly one
+     * route-state system (`routeTransitioning`, read only by the tick loop), and this phase adds no
+     * second one. This test proves the restoration side of that boundary: a full restore proceeds
+     * unconditionally while `route_state == transitioning`, and spends none of `hardSeekCount`'s
+     * budget doing it, because it was never drawn from in the first place.
+     */
+    @Test
+    fun `fault -- a reconnect restoration while route_state is transitioning still restores, and spends no hard-seek budget`() =
+        runTest(StandardTestDispatcher()) {
+            val pair = ResyncTestPair(this)
+            pair.connect(generation = 1)
+            pair.leader.content.localHashes
+                .add(SyncTestValues.hash(1).value)
+            pair.leader.content.peerHashes
+                .add(SyncTestValues.hash(1).value)
+            pair.follower.content.localHashes
+                .add(SyncTestValues.hash(1).value)
+            pair.leader.sync.playSynchronized(SyncTestValues.hash(1))
+            runCurrent()
+            pair.leaderClock.advanceBy(LEAD_US)
+            runCurrent()
+            assertEquals(0, pair.follower.sync.diagnostics.value.hardSeekCount, "no correction has run yet")
+
+            // The follower's Bluetooth route is mid-transition when the reconnect's restoration
+            // needs to run -- exactly the ARCHITECTURE §6's "opening the mic forces most Bluetooth
+            // endpoints onto the duplex profile" moment this flag exists for.
+            pair.follower.routeTransitioning.transitioning = true
+            pair.follower.player.calls
+                .clear()
+
+            pair.dropLink()
+            pair.reconnect(generation = 2)
+
+            assertEquals(
+                ResyncOutcome.RECONCILED,
+                pair.follower.resync.diagnostics.value.lastOutcome,
+                "a route transition never blocks or defers a reconnect's own restoration -- it is not a second gate",
+            )
+            assertEquals(
+                1,
+                pair.follower.player.calls
+                    .count { it == FakeSyncPlayer.Call.Select(SyncTestValues.hash(1)) },
+                "the restore proceeded unconditionally while transitioning: ${pair.follower.player.calls}",
+            )
+            assertEquals(
+                0,
+                pair.follower.sync.diagnostics.value.hardSeekCount,
+                "the restore is not a DriftController correction, so it never draws on the hard-seek budget rules reserve for it",
+            )
+            assertEquals(
+                SyncCorrection.NONE,
+                pair.follower.sync.diagnostics.value.lastCorrection,
+                "no second route-state system exists -- resync's own restore never reports through DriftController's label either",
+            )
+        }
+
+    /**
+     * The manual reconnect sequence the clock-readiness fault test above pioneered, extracted so
+     * races 3-6 can reuse it exactly rather than re-typing eight lines of generation plumbing each:
+     * `pair.reconnect` always supplies a ready clock, and these tests specifically need one that
+     * is not, on the follower side only.
+     */
+    private suspend fun TestScope.reconnectWithFollowerClockNotReady(
+        pair: ResyncTestPair,
+        generation: Long,
+    ) {
+        pair.follower.syncSession.currentAuthGeneration = generation
+        pair.follower.syncSession.setClock(null)
+        pair.leader.syncSession.currentAuthGeneration = generation
+        pair.leader.syncSession.setClock(SessionClockEstimate(offsetToLeaderUs = 0L, rttP95Us = 8_000, ready = true))
+        pair.leader.resyncSession.currentAuthGeneration = generation
+        pair.follower.resyncSession.currentAuthGeneration = generation
+        pair.leader.resyncSession.liveAuthenticatedGeneration = generation
+        pair.follower.resyncSession.liveAuthenticatedGeneration = generation
+        pair.leader.syncSession.emit(ControlEvent.Connected(pair.follower.localPeerId, ResyncTestPair.SESSION_ID, true, generation))
+        pair.follower.syncSession.emit(ControlEvent.Connected(pair.leader.localPeerId, ResyncTestPair.SESSION_ID, false, generation))
+        pair.leader.resyncSession.emit(ControlEvent.Connected(pair.follower.localPeerId, ResyncTestPair.SESSION_ID, true, generation))
+        pair.follower.resyncSession.emit(ControlEvent.Connected(pair.leader.localPeerId, ResyncTestPair.SESSION_ID, false, generation))
+        runCurrent()
+    }
+
     private companion object {
         const val RIDE_CYCLES = 5
         const val BOUNDED_AUDIT_CYCLES = 100
@@ -515,5 +1294,11 @@ class ResyncStressTest {
         const val RECONCILIATION_CYCLES = 75
         const val OWNERSHIP_RACE_ITERATIONS = 50
         const val RANDOM_SEED = 20260919L
+
+        /** [com.ridelink.core.playback.Phase5GateBounds.DEFERRED_RETRY_INTERVAL_US]. */
+        const val DEFERRED_RETRY_US = 100_000L
+
+        /** Comfortably past `LEAD = max(120 ms, 4 x rtt_p95)` for these tests' 8 ms p95. */
+        const val LEAD_US = 200_000L
     }
 }

@@ -20,7 +20,15 @@ import kotlinx.coroutines.flow.SharedFlow
 interface ResyncChannelPort {
     var sink: ResyncSink?
 
-    suspend fun send(message: ResyncMessage): Boolean
+    /**
+     * @param generation the control lifetime authorising this send (independent-review Blocker
+     *   1) — checked against the surviving connection's own generation at the actual write, never
+     *   merely at the moment this call is made. See [com.ridelink.network.resync.ResyncRelay.send].
+     */
+    suspend fun send(
+        message: ResyncMessage,
+        generation: Long,
+    ): Boolean
 }
 
 /** [ResyncCoordinator]'s exact call surface on [ControlSessionManager]. */
@@ -43,7 +51,10 @@ internal class ResyncRelayAdapter(
             delegate.sink = value
         }
 
-    override suspend fun send(message: ResyncMessage): Boolean = delegate.send(message)
+    override suspend fun send(
+        message: ResyncMessage,
+        generation: Long,
+    ): Boolean = delegate.send(message, generation)
 }
 
 /** Zero-behaviour-change wrapper — `AppContainer`'s production call site. */

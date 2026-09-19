@@ -43,4 +43,5 @@ private fun resyncOutcomeLabel(outcome: ResyncOutcome): String =
         ResyncOutcome.REQUESTED -> "Requested — awaiting the leader's answer"
         ResyncOutcome.RECONCILED -> "Reconciled"
         ResyncOutcome.SEND_FAILED -> "Send failed — will retry on the next trigger"
+        ResyncOutcome.DEFERRED -> "Snapshot received — reconciliation pending a trustworthy clock"
     }

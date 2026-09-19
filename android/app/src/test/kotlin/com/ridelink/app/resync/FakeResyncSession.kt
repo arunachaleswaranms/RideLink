@@ -17,6 +17,17 @@ class FakeResyncSession : ResyncSessionPort {
 
     var sendResult: Boolean = true
 
+    /**
+     * Independent-review Blocker 1's regression seam: parks the send **inside** the write, so a
+     * test can land a session boundary strictly between the upstream `stillCurrent` proof and the
+     * actual generation-bound write — the same shape `FakeSyncSession.sendGate` already models for
+     * Phase 5's own frames.
+     */
+    var sendGate: kotlinx.coroutines.CompletableDeferred<Unit>? = null
+
+    /** The authentication generation live at the instant each frame was actually written. */
+    val sentGenerations = mutableListOf<Long>()
+
     /** See `FakeSyncSession.combinedWireLog` — same purpose, the resync-channel half of it. */
     var combinedWireLog: MutableList<Any>? = null
 
@@ -26,9 +37,23 @@ class FakeResyncSession : ResyncSessionPort {
         object : ResyncChannelPort {
             override var sink: ResyncSink? = null
 
-            override suspend fun send(message: ResyncMessage): Boolean {
+            /**
+             * `ResyncRelay.send`, modelled exactly: park where the socket would, then refuse the
+             * frame unless the generation that authorised it is still the live one
+             * (independent-review Blocker 1). A real relay resolves the writer from the one
+             * immutable `AuthenticatedConnection` record for that generation; refusing here is the
+             * same guarantee expressed the way a fake can.
+             */
+            @Suppress("ReturnCount") // the gate, the scripted result and the generation check
+            override suspend fun send(
+                message: ResyncMessage,
+                generation: Long,
+            ): Boolean {
+                sendGate?.await()
                 if (!sendResult) return false
+                if (generation != currentAuthGeneration) return false
                 sent.add(message)
+                sentGenerations.add(currentAuthGeneration)
                 combinedWireLog?.add(message)
                 forward?.deliver(message, currentAuthGeneration)
                 return true

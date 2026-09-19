@@ -24,6 +24,7 @@ import com.ridelink.core.playback.Phase5FrameKind
 import com.ridelink.core.playback.Phase5GateBounds
 import com.ridelink.core.playback.PlaybackBounds
 import com.ridelink.core.playback.PlaybackCommandHeader
+import com.ridelink.core.playback.PlaybackIdentity
 import com.ridelink.core.playback.PlaybackMessage
 import com.ridelink.core.playback.PlaybackRole
 import com.ridelink.core.playback.PlaybackTimeline
@@ -200,6 +201,15 @@ class SyncPlaybackCoordinator(
     private var lastAppliedSeq: Long? = null
     private var nextSeq: Long = PlaybackBounds.FIRST_COMMAND_SEQ
     private var timeline: PlaybackTimeline? = null
+
+    /**
+     * Independent-review Blocker 2B: [PlaybackIdentity] is ride-segment truth (see its own doc
+     * comment) and, unlike [timeline], is **not** cleared by [resetForNewSession] — a leader must
+     * still be able to report what it is actually playing in a `STATE_SNAPSHOT` built moments after
+     * an ordinary reconnect, before any new command has been issued in the fresh generation. Kept
+     * in lockstep with every place [timeline] gains or loses a real track.
+     */
+    private var currentPlaybackIdentity: PlaybackIdentity? = null
     private var driftState: DriftState = DriftController.reset()
     private var tickJob: Job? = null
 
@@ -381,7 +391,18 @@ class SyncPlaybackCoordinator(
             PlaybackSink { message, generation -> enqueue(Inbound.Playback(message, generation)) }
         session.playback.queueSink =
             QueueSink { message, generation -> enqueue(Inbound.Queue(message, generation)) }
-        content.observeAvailability { scope.launch { resolvePendingPlay() } }
+        content.observeAvailability {
+            scope.launch {
+                resolvePendingPlay()
+                // Independent-review Blocker 2, section 22: a `STATE_SNAPSHOT` restoration deferred
+                // for missing content (`DeferredEvent.PlaybackState` held by `onPeerPlaybackState`)
+                // is a different obligation from `pendingPlay`'s local-intent one, and content
+                // becoming available is exactly the event that can unblock it -- the same drain
+                // `startDeferredDrain`'s own retry cadence already re-attempts, triggered promptly
+                // instead of waiting out the interval.
+                drainDeferredEvents()
+            }
+        }
         scope.launch { drainInbound() }
         scope.launch { drainOutbound() }
         scope.launch {
@@ -483,6 +504,42 @@ class SyncPlaybackCoordinator(
                 val message: ResyncMessage,
             ) : Frame()
         }
+    }
+
+    /**
+     * Independent-review Blocker 2E: what actually happened to an inbound `PLAYBACK_STATE`/
+     * `STATE_SNAPSHOT` reconciliation attempt — receiving a valid frame off the wire is not the
+     * same as authoritative state actually converging. [ResyncCoordinator] uses this to decide
+     * whether its own wire-round-trip bookkeeping (`pendingRequestGeneration`, manifest refresh)
+     * may treat reconciliation as genuinely complete, rather than assuming it the moment a snapshot
+     * merely arrives.
+     */
+    internal enum class StateSnapshotOutcome {
+        /** Authoritative state was actually applied (or correctly found to need no change). */
+        APPLIED,
+
+        /**
+         * A generation-owned reconciliation is genuinely needed but the fresh clock is not yet
+         * trustworthy — the snapshot is retained in [DeferredEvent.PlaybackState] and will be
+         * re-attempted once the estimator recovers, never discarded and never a stale offset.
+         */
+        DEFERRED_CLOCK,
+
+        /**
+         * Independent-review Blocker 2, section 22: the snapshot names a track this device does not
+         * have locally. PROTOCOL §5 rule 4's existing Phase 4 transfer-request path already fires
+         * (unchanged); the snapshot is retained in [DeferredEvent.PlaybackState] the same way a
+         * clock-not-ready one is, and [SyncContentPort.observeAvailability]'s existing callback is
+         * what re-attempts it once content verifies — never a second, independently-timed
+         * transfer/resync loop of this type's own.
+         */
+        DEFERRED_CONTENT,
+
+        /** The frame's authorising generation is no longer the live one. */
+        REJECTED_STALE,
+
+        /** This device is not a follower — PROTOCOL §5/§9's role asymmetry (ADR-010). */
+        REJECTED_ROLE,
     }
 
     /**
@@ -718,7 +775,7 @@ class SyncPlaybackCoordinator(
         when (frame) {
             is Outbound.Frame.Playback -> session.playback.send(frame.message, generation)
             is Outbound.Frame.Queue -> session.playback.send(frame.message, generation)
-            is Outbound.Frame.Resync -> resync?.send(frame.message) ?: false
+            is Outbound.Frame.Resync -> resync?.send(frame.message, generation) ?: false
         }
 
     /**
@@ -917,7 +974,10 @@ class SyncPlaybackCoordinator(
                 // wiped alongside it.
                 queueRevision = _queueState.value.revision,
                 queueSize = _queueState.value.items.size,
-                currentTrackHash = null,
+                // Blocker 2B, the diagnostics mirror: `currentPlaybackIdentity` survives this reset
+                // (unlike `timeline`) precisely so the leader still has a truthful track to report —
+                // the developer diagnostics screen should say the same thing the wire does.
+                currentTrackHash = currentPlaybackIdentity?.trackHash,
                 localDriftMs = null,
                 peerDriftMs = null,
                 lastCorrection = SyncCorrection.NONE,
@@ -927,6 +987,9 @@ class SyncPlaybackCoordinator(
                 correctionTickCount = 0,
                 deferredCommandCount = 0,
                 ingressDesynchronized = false,
+                // Blocker 2E: a fresh generation's own reconciliation, if any, hasn't been triggered
+                // yet — nothing genuinely outstanding survives a session boundary to report here.
+                pendingPlaybackReconciliationGeneration = null,
                 outboundAuthorityLost = false,
                 cancelledPendingPlayCount = it.cancelledPendingPlayCount + cancelled,
                 sessionGeneration = session.currentAuthGeneration,
@@ -1457,11 +1520,20 @@ class SyncPlaybackCoordinator(
         deferredDrainJob?.cancel()
         deferredDrainJob = null
         timeline = null
+        // Leaving synchronised mode is the user genuinely ending authoritative playback, not a
+        // control-lifetime blip -- unlike `resetForNewSession`, this is a legitimate place for
+        // ride-segment identity to clear too.
+        currentPlaybackIdentity = null
         driftState = DriftController.reset()
         scope.launch { restoreRate() }
         _diagnostics.update {
             it.copy(
                 syncState = SyncState.INACTIVE,
+                // The diagnostics mirror must match what actually just cleared above --
+                // `currentPlaybackIdentity`'s own clearing is the truth, and this field is one more
+                // place that must agree with it, the same discipline `resetForNewSession`'s own
+                // mirror already follows (Blocker 2B).
+                currentTrackHash = currentPlaybackIdentity?.trackHash,
                 localDriftMs = null,
                 peerDriftMs = null,
                 deferredCommandCount = 0,
@@ -1539,19 +1611,22 @@ class SyncPlaybackCoordinator(
     private suspend fun adoptSnapshot(
         message: QueueMessage.Snapshot,
         generation: Long,
-    ) {
+    ): StateSnapshotOutcome {
         // ADR-024 A3's rule, proved for itself rather than trusted from a caller: the ordinary wire
         // path (`onQueueMessage`) already checks this before dispatch, but `onStateSnapshot`
         // (Phase 7, ADR-028) calls this function directly, so the queue half needs the same
         // self-contained proof [applyPeerPlaybackState] already has for the playback half — a
         // snapshot authorised by a retired generation must never touch a live one's queue.
-        if (!stillCurrent(generation)) return
-        if (role != PlaybackRole.FOLLOWER) return
+        if (!stillCurrent(generation)) return StateSnapshotOutcome.REJECTED_STALE
+        if (role != PlaybackRole.FOLLOWER) return StateSnapshotOutcome.REJECTED_ROLE
         // Amendment A2 Finding D: a snapshot must not overtake a command already held for the clock.
         // Applying revision n+1 ahead of a held `NEXT` authored against revision n changes what that
-        // `NEXT` means, and no later check can recover the intent it destroyed.
-        if (holdIfOvertaking({ gen -> DeferredEvent.QueueSnapshot(message, gen) }, generation)) return
+        // `NEXT` means, and no later check can recover the intent it destroyed. Queue adoption
+        // itself needs no clock (PROTOCOL §9 is unconditional), so the only reason to hold it is
+        // this ordering rule, never clock readiness.
+        if (holdIfOvertaking({ gen -> DeferredEvent.QueueSnapshot(message, gen) }, generation)) return StateSnapshotOutcome.DEFERRED_CLOCK
         applyQueueSnapshot(message)
+        return StateSnapshotOutcome.APPLIED
     }
 
     /** [adoptSnapshot] with the hold gate already answered — the drain's entry point too. */
@@ -1834,6 +1909,17 @@ class SyncPlaybackCoordinator(
                     applyQueueSnapshot(held.message)
                 }
                 is DeferredEvent.PlaybackState -> {
+                    // Independent-review Blocker 2A/2D (clock) and section 22 (content): mirrors the
+                    // `Command` branch above exactly — proved *before* removal, so a still-not-ready
+                    // precondition leaves the item queued for the next drain attempt (this cadence,
+                    // or content.observeAvailability's prompt trigger) rather than popping and
+                    // silently dropping it a second time, the way this branch used to for the clock
+                    // alone. Checking here, rather than only inside `applyPlay`, is what makes this
+                    // loop terminate instead of popping and immediately re-queuing the same item.
+                    val estimate = estimate()
+                    if (estimate == null || !estimate.ready) return
+                    val heldTrackHash = held.message.trackHash
+                    if (heldTrackHash != null && content.resolve(heldTrackHash) == null) return
                     deferredEvents.removeFirst()
                     _diagnostics.update {
                         it.copy(
@@ -1971,6 +2057,13 @@ class SyncPlaybackCoordinator(
         // that only *starts* after a boundary does no work, and again below because the resolve
         // suspends.
         if (!stillCurrent(generation)) return
+        // Independent-review Blocker 2B: this is the authoritative track identity the instant this
+        // PLAY is accepted, regardless of whether content resolves locally right now -- PROTOCOL §5
+        // rule 4 already treats a content-pending PLAY as the authoritative state to report
+        // (`WAITING_FOR_CONTENT`'s own `currentTrackHash` write below does exactly this), so
+        // `currentPlaybackIdentity` must not wait on local content availability either, or a leader
+        // whose own transfer is still pending would falsely report "nothing loaded".
+        currentPlaybackIdentity = PlaybackIdentity(trackHash, queueItemId)
         val playable = content.resolve(trackHash)
         if (!stillCurrent(generation)) return
         if (playable == null) {
@@ -2089,6 +2182,9 @@ class SyncPlaybackCoordinator(
             val token = playbackFence.begin()
             currentEpochToken = token
             timeline = null
+            // Stepping past the end of the queue is genuinely "nothing selected" -- ride-segment
+            // identity clears with the timeline here, not only the queue selection.
+            currentPlaybackIdentity = null
             // Amendment A4 Finding C: `stop` used to mean "stop the player **and** clear the local
             // queue", composed inside `MusicCoordinator` after the player call. Two steps, two
             // proofs, so a retired stop can never clear the live session's selection.
@@ -2448,7 +2544,12 @@ class SyncPlaybackCoordinator(
         val state = player.playerState.value
         commandMutex.withLock {
             if (!stillCurrent(generation)) return
-            val active = timeline
+            // Blocker 2B: identity comes from `currentPlaybackIdentity`, not `timeline` --
+            // `timeline` is cleared by every session boundary (its anchor is session-clock-relative
+            // and genuinely must not survive one), but the leader's ride-segment truth about what
+            // is actually loaded must, or a snapshot built moments after an ordinary reconnect
+            // would falsely report "nothing loaded" while the local player keeps audibly playing.
+            val identity = currentPlaybackIdentity
             val queue = _queueState.value
             val snapshot =
                 ResyncMessage.StateSnapshot(
@@ -2457,8 +2558,8 @@ class SyncPlaybackCoordinator(
                     queueRevision = queue.revision,
                     playback =
                         ResyncPlaybackSnapshot(
-                            trackHash = active?.trackHash,
-                            queueItemId = active?.queueItemId,
+                            trackHash = identity?.trackHash,
+                            queueItemId = identity?.queueItemId,
                             positionMs = state.positionMs.coerceAtLeast(0),
                             playing = state.playing,
                             atSessionUs = sessionNowUs(estimate),
@@ -2488,22 +2589,39 @@ class SyncPlaybackCoordinator(
     internal suspend fun onStateSnapshot(
         message: ResyncMessage.StateSnapshot,
         generation: Long,
-    ) {
-        adoptSnapshot(QueueMessage.Snapshot(message.queueRevision, message.queueItems, message.queueCurrentIndex), generation)
+    ): StateSnapshotOutcome {
+        val queueOutcome =
+            adoptSnapshot(QueueMessage.Snapshot(message.queueRevision, message.queueItems, message.queueCurrentIndex), generation)
         val playback = message.playback
-        onPeerPlaybackState(
-            PlaybackMessage.PlaybackStateSnapshot(
-                commandSeq = message.commandSeq,
-                queueRevision = message.queueRevision,
-                trackHash = playback?.trackHash,
-                queueItemId = playback?.queueItemId,
-                positionMs = playback?.positionMs ?: 0,
-                playing = playback?.playing ?: false,
-                atSessionUs = playback?.atSessionUs ?: 0,
-            ),
-            generation,
-        )
+        val playbackOutcome =
+            onPeerPlaybackState(
+                PlaybackMessage.PlaybackStateSnapshot(
+                    commandSeq = message.commandSeq,
+                    queueRevision = message.queueRevision,
+                    trackHash = playback?.trackHash,
+                    queueItemId = playback?.queueItemId,
+                    positionMs = playback?.positionMs ?: 0,
+                    playing = playback?.playing ?: false,
+                    atSessionUs = playback?.atSessionUs ?: 0,
+                ),
+                generation,
+            )
+        // Both halves prove the same generation/role independently and will therefore always agree
+        // on a rejection; the only way they can differ is the playback half needing to defer for
+        // the clock, so a non-`APPLIED` queue outcome (a rejection) always wins, and otherwise the
+        // playback half's own answer — including `DEFERRED_CLOCK` — is the honest overall one.
+        return if (queueOutcome != StateSnapshotOutcome.APPLIED) queueOutcome else playbackOutcome
     }
+
+    /**
+     * Independent-review Blocker 2C: whether a reconciliation anchor needs **full** restoration —
+     * either because this device is genuinely desynchronised, or because there is simply no live
+     * [timeline] to incrementally update against, which is exactly the state an ordinary reconnect
+     * leaves things in (`resetForNewSession` clears both together). Both are the same underlying
+     * fact — "nothing to anchor against yet" — so both take the same path; a `wasDesynchronized`-only
+     * check silently skipped restoration whenever a normal reconnect's snapshot arrived.
+     */
+    private fun needsFullPlaybackRestore(): Boolean = playbackDesynchronized || timeline == null
 
     /**
      * The peer's `POSITION_REPORT`. Bound to the current playback epoch by **both** its
@@ -2545,17 +2663,43 @@ class SyncPlaybackCoordinator(
      * §5 rule 2's "apply immediately and count the lateness" is what happens rather than any reuse
      * of an expired instant as if it were still ahead.
      */
+    @Suppress("ReturnCount") // the role check, the hold gate, then the clock-readiness defer
     private suspend fun onPeerPlaybackState(
         snapshot: PlaybackMessage.PlaybackStateSnapshot,
         generation: Long,
-    ) {
-        if (role != PlaybackRole.FOLLOWER) return
+    ): StateSnapshotOutcome {
+        if (role != PlaybackRole.FOLLOWER) return StateSnapshotOutcome.REJECTED_ROLE
         // Amendment A2 Finding D: the reconciliation anchor is authoritative state, so it waits its
         // turn behind held commands exactly as a queue snapshot does. Its supersede rule below then
         // runs against whatever is *still* held at that point, which is the honest reading of "the
         // authoritative state is strictly newer than the command that produced it".
-        if (holdIfOvertaking({ gen -> DeferredEvent.PlaybackState(snapshot, gen) }, generation)) return
-        applyPeerPlaybackState(snapshot, generation)
+        if (holdIfOvertaking({ gen -> DeferredEvent.PlaybackState(snapshot, gen) }, generation)) return StateSnapshotOutcome.DEFERRED_CLOCK
+        // Independent-review Blocker 2A/2D (clock) and section 22 (content): an anchor that will
+        // need full restoration must not sail through to `applyPeerPlaybackState` only to be
+        // silently dropped there because the fresh clock is not ready, or attempted and left to
+        // `applyPlay`'s own transfer-request path with nothing ever re-attempting it — held here,
+        // through the *same* deferred-event/drain machinery `holdIfOvertaking` above already uses
+        // for queue congestion, never a second mechanism, for either precondition.
+        if (needsFullPlaybackRestore()) {
+            val clockReady = estimate()?.ready == true
+            val trackHash = snapshot.trackHash
+            // A `null` `trackHash` ("nothing loaded") needs no content and is never held for it.
+            val contentReady = trackHash == null || content.resolve(trackHash) != null
+            if (!clockReady || !contentReady) {
+                // This anchor never reaches `applyPlay`, so its own `WAITING_FOR_CONTENT` transfer
+                // request below never fires either -- the same PROTOCOL §5 rule 4 request has to be
+                // raised from here instead, or a content-blocked reconnect would defer forever with
+                // nothing ever asking Phase 4 to fetch the track that would unblock it.
+                if (!contentReady && trackHash != null) content.requestTransfer(trackHash)
+                deferredEvents.addLast(DeferredEvent.PlaybackState(snapshot, generation))
+                _diagnostics.update {
+                    it.copy(deferredCommandCount = deferredEvents.size, pendingPlaybackReconciliationGeneration = generation)
+                }
+                startDeferredDrain(generation)
+                return if (!clockReady) StateSnapshotOutcome.DEFERRED_CLOCK else StateSnapshotOutcome.DEFERRED_CONTENT
+            }
+        }
+        return applyPeerPlaybackState(snapshot, generation)
     }
 
     /** [onPeerPlaybackState] with the hold gate already answered — the drain's entry point too. */
@@ -2563,13 +2707,13 @@ class SyncPlaybackCoordinator(
     private suspend fun applyPeerPlaybackState(
         snapshot: PlaybackMessage.PlaybackStateSnapshot,
         generation: Long,
-    ) {
+    ): StateSnapshotOutcome {
         commandMutex.withLock {
             // Amendment A3 Finding B: acquiring the lock is a suspension, and everything below it
             // writes live state — the received/applied sequence numbers, the held stream, the
             // timeline. Re-proved here rather than trusting the dispatch-time check in
             // `onPlaybackMessage`.
-            if (!stillCurrent(generation)) return
+            if (!stillCurrent(generation)) return StateSnapshotOutcome.REJECTED_STALE
             val current = lastReceivedSeq
             if (current == null || snapshot.commandSeq > current) {
                 lastReceivedSeq = snapshot.commandSeq
@@ -2588,15 +2732,23 @@ class SyncPlaybackCoordinator(
                 deferredCommandCount = deferredEvents.size,
             )
         }
-        val wasDesynchronized = playbackDesynchronized
-        playbackDesynchronized = false
-        publishDesynchronized()
-        if (wasDesynchronized) {
-            restoreFromPlaybackState(snapshot, generation)
-            return
+        if (needsFullPlaybackRestore()) {
+            val outcome = restoreFromPlaybackState(snapshot, generation)
+            // Independent-review Blocker 2A/2D: the desync obligation clears only once restoration
+            // genuinely *succeeded*, never merely attempted — a clock-not-ready deferral must leave
+            // it exactly as it found it, so the deferred-event drain still recognises it as owed.
+            if (outcome == StateSnapshotOutcome.APPLIED) {
+                playbackDesynchronized = false
+                publishDesynchronized()
+                // The precise completion signal [ResyncCoordinator] watches for (Blocker 2E) —
+                // published even when `playbackDesynchronized` was already false, e.g. the
+                // ordinary-reconnect case where only `timeline == null` triggered the restore.
+                _diagnostics.update { it.copy(pendingPlaybackReconciliationGeneration = null) }
+            }
+            return outcome
         }
-        val active = timeline ?: return
-        if (snapshot.trackHash != active.trackHash) return
+        val active = timeline ?: return StateSnapshotOutcome.APPLIED
+        if (snapshot.trackHash != active.trackHash) return StateSnapshotOutcome.APPLIED
         timeline =
             active.copy(
                 anchorPositionMs = snapshot.positionMs,
@@ -2604,6 +2756,7 @@ class SyncPlaybackCoordinator(
                 playing = snapshot.playing,
             )
         driftState = DriftController.reset()
+        return StateSnapshotOutcome.APPLIED
     }
 
     /** The playback half of Amendment A1's reconciliation. See [onPeerPlaybackState]. */
@@ -2611,23 +2764,31 @@ class SyncPlaybackCoordinator(
     private suspend fun restoreFromPlaybackState(
         snapshot: PlaybackMessage.PlaybackStateSnapshot,
         generation: Long,
-    ) {
+    ): StateSnapshotOutcome {
         // Amendment A3 Finding B: the null-track branch below supersedes the playback epoch and
         // clears the timeline, so this needs the same pre-mutation proof `applyStep` needs — it is
         // reached through two suspensions (the lock above, and the drain that may call it).
-        if (!stillCurrent(generation)) return
+        if (!stillCurrent(generation)) return StateSnapshotOutcome.REJECTED_STALE
         val trackHash = snapshot.trackHash
         val queueItemId = snapshot.queueItemId
         if (trackHash == null || queueItemId == null) {
             // "Nothing is loaded" is a representable authoritative state (ADR-024 §4). Every
             // scheduled effect from the epoch we lost track of is superseded, and nothing replaces it.
+            // This is the leader's own truthful report (Blocker 2B): a `null`/`null` snapshot means
+            // the leader genuinely has nothing loaded, not merely that our own timeline was cleared
+            // by a reconnect -- so ride-segment identity clears here too, honestly.
             playbackFence.supersede()
             timeline = null
+            currentPlaybackIdentity = null
             _diagnostics.update { it.copy(currentTrackHash = null) }
             markSynced()
-            return
+            return StateSnapshotOutcome.APPLIED
         }
-        val estimate = readyEstimate() ?: return
+        // Independent-review Blocker 2A/2D: this residual check stays as defence in depth even
+        // though `onPeerPlaybackState` already gates on clock readiness before ever reaching here —
+        // a route transition or similar could invalidate the estimate in the narrow suspension
+        // window between that check and this one, and this must fail safe rather than silently.
+        val estimate = readyEstimate() ?: return StateSnapshotOutcome.DEFERRED_CLOCK
         val header =
             PlaybackCommandHeader(snapshot.commandSeq, snapshot.atSessionUs, localPeerId, snapshot.queueRevision)
         applyPlay(
@@ -2639,6 +2800,11 @@ class SyncPlaybackCoordinator(
             estimate,
             playing = snapshot.playing,
         )
+        // `applyPlay`'s own content-unavailable branch is Phase 5's existing deferred-transfer path
+        // (PROTOCOL §5 rule 4) — resync's job, handing over authoritative state, is done the instant
+        // it is handed off; whether the player can start immediately is `SyncState.WAITING_FOR_CONTENT`,
+        // a separate, already-tracked diagnostic, not a second desync obligation invented here.
+        return StateSnapshotOutcome.APPLIED
     }
 
     private fun publishQueue() {

@@ -44,7 +44,22 @@ class ResyncRelay internal constructor(
     private val monotonicNowUs: () -> Long,
     private val nextSeq: () -> Long,
     private val activeSessionId: () -> SessionId,
-    private val authenticatedWriter: () -> AuthenticatedFrameWriter?,
+    /**
+     * Yields a writer for the surviving connection **only while the generation asked for is the
+     * one that owns it** (independent-review Blocker 1, mirroring
+     * [com.ridelink.network.voice.VoiceSignalRelay.send]'s `authenticatedWriterFor`/ADR-020
+     * Amendment A9 exactly).
+     *
+     * `STATE_SNAPSHOT`/`STATE_REQUEST` now travel through `Phase5FrameQueue` — the same single
+     * ordered outbound path `QUEUE_SNAPSHOT`/`PLAYBACK_STATE` use — so the same reasoning ADR-024
+     * Amendment A2 and ADR-020 Amendment A9 already established applies unchanged: a frame's
+     * authorising generation and its dispatch are separated by a real suspension (the queue's own
+     * consumer, a write lock, a flush), so "the authenticated writer, now" is not necessarily the
+     * connection the frame was authorised for. A supplier bound to one immutable
+     * `AuthenticatedConnection` record — never a live socket plus a separately-read generation —
+     * is what closes that window rather than merely narrowing it.
+     */
+    private val authenticatedWriterFor: (Long) -> AuthenticatedFrameWriter?,
     /**
      * ADR-025's liveness half: the generation owning the connection that is an authenticated
      * session **right now**, or null when none is. A frame's own authorising generation is
@@ -66,10 +81,33 @@ class ResyncRelay internal constructor(
     var droppedRetiredGeneration: Int = 0
         private set
 
+    /**
+     * How many **outbound** resync frames were refused because the control lifetime that
+     * authorised them no longer owns the surviving connection (mirrors
+     * [com.ridelink.network.voice.VoiceSignalRelay.droppedRetiredGenerationOutbound], ADR-020
+     * Amendment A9).
+     */
+    @Volatile
+    var droppedRetiredGenerationOutbound: Int = 0
+        private set
+
     val rejectionCounts: Map<ResyncMessageRejection, Int> get() = rejections.toMap()
 
-    suspend fun send(message: ResyncMessage): Boolean {
-        val write = authenticatedWriter() ?: return false
+    /**
+     * **A frame authorised by one control lifetime may be written only to that lifetime's
+     * connection** (independent-review Blocker 1). One lookup, one refusal: a generation that no
+     * longer owns the surviving connection is refused before any write is attempted, and counted
+     * rather than silent.
+     */
+    suspend fun send(
+        message: ResyncMessage,
+        generation: Long,
+    ): Boolean {
+        val write = authenticatedWriterFor(generation)
+        if (write == null) {
+            droppedRetiredGenerationOutbound += 1
+            return false
+        }
         return runCatching {
             write.write(
                 ControlMessages.raw(
@@ -114,5 +152,6 @@ class ResyncRelay internal constructor(
         rejections.clear()
         droppedPreAuthentication = 0
         droppedRetiredGeneration = 0
+        droppedRetiredGenerationOutbound = 0
     }
 }

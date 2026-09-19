@@ -183,6 +183,19 @@ data class SyncPlaybackDiagnostics(
      */
     val ingressDesynchronized: Boolean = false,
     /**
+     * Independent-review Blocker 2E: the generation a full playback reconciliation is genuinely
+     * outstanding for — set the instant one is deferred for the clock ([onPeerPlaybackState]) and
+     * cleared the instant a full restore actually succeeds ([applyPeerPlaybackState]), regardless of
+     * [ingressDesynchronized]'s own value. Kept separate from that flag because a reconnect can need
+     * full restoration (`timeline == null`) without [ingressDesynchronized] ever having been set —
+     * an ordinary reconnect's own reset clears it alongside the timeline — so a consumer watching
+     * only [ingressDesynchronized] would see nothing transition when this obligation resolves.
+     * [ResyncCoordinator] is the one consumer: it compares this against its own generation-owned
+     * `deferredReconciliationGeneration` to know precisely when a snapshot it deferred has actually
+     * converged, never by inferring it from a flag that can legitimately never have moved.
+     */
+    val pendingPlaybackReconciliationGeneration: Long? = null,
+    /**
      * The highest `command_seq` this device has taken *responsibility* for — applied, or accepted
      * and still held pending a trustworthy clock. Distinct from [lastAppliedCommandSeq], and the
      * distinction is ADR-024 Amendment A1 Finding D: recording an accepted command as *applied*

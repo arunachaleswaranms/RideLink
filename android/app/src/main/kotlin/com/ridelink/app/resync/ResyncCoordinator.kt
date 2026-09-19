@@ -1,6 +1,7 @@
 package com.ridelink.app.resync
 
 import com.ridelink.app.sync.SyncPlaybackCoordinator
+import com.ridelink.app.sync.SyncPlaybackCoordinator.StateSnapshotOutcome
 import com.ridelink.core.model.PeerId
 import com.ridelink.core.resync.ResyncMessage
 import com.ridelink.core.resync.StateResyncGate
@@ -13,8 +14,16 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 
-/** The outcome of the most recent `STATE_REQUEST`/`STATE_SNAPSHOT` round trip, for FR-023. */
-enum class ResyncOutcome { NONE, REQUESTED, RECONCILED, SEND_FAILED }
+/**
+ * The outcome of the most recent `STATE_REQUEST`/`STATE_SNAPSHOT` round trip, for FR-023.
+ *
+ * [DEFERRED] (independent-review Blocker 2E) is deliberately distinct from [RECONCILED]: a valid,
+ * generation-matching snapshot satisfies the *wire* round trip (no resend needed) without
+ * necessarily satisfying the *reconciliation* obligation, when the fresh clock is not ready yet.
+ * [RECONCILED] is reserved for genuine convergence — either immediately, or once
+ * [deferredReconciliationGeneration]'s later application succeeds.
+ */
+enum class ResyncOutcome { NONE, REQUESTED, RECONCILED, SEND_FAILED, DEFERRED }
 
 data class ResyncDiagnostics(
     val requestPending: Boolean = false,
@@ -95,6 +104,32 @@ class ResyncCoordinator(
     @Volatile
     private var pendingRequestGeneration: Long? = null
 
+    /**
+     * Independent-review Blocker 2E: the generation and **message** a **reconciliation** (as
+     * opposed to the wire round trip [pendingRequestGeneration] tracks) is still genuinely
+     * outstanding for — set when [SyncPlaybackCoordinator.onStateSnapshot] answers
+     * [StateSnapshotOutcome.DEFERRED_CLOCK], cleared the instant [SyncPlaybackCoordinator]'s own
+     * `pendingPlaybackReconciliationGeneration` diagnostic confirms it actually converged, or a
+     * newer generation supersedes it (its own [ControlEvent.Connected] would set this field to that
+     * newer generation instead, via a fresh trigger, so a stale value here can never be mistaken for
+     * a live obligation).
+     *
+     * The **message** itself is retained, not only its generation: the deferred-then-later-applied
+     * transition is observed asynchronously, well after [handleStateSnapshot]'s own stack frame is
+     * gone, so [completeReconciliation] needs the original snapshot's `command_seq`/
+     * `manifest_revision` to finish the same bookkeeping the immediate path does — without this, a
+     * deferred reconciliation's eventual [ResyncOutcome.RECONCILED] would report a stale or absent
+     * `lastSnapshotCommandSeq`/`lastSnapshotManifestRevision` and would never trigger a genuinely
+     * needed manifest refresh.
+     */
+    private data class DeferredReconciliation(
+        val generation: Long,
+        val message: ResyncMessage.StateSnapshot,
+    )
+
+    @Volatile
+    private var deferredReconciliation: DeferredReconciliation? = null
+
     init {
         session.resync.sink =
             ResyncSink { message, generation -> scope.launch { handle(message, generation) } }
@@ -110,6 +145,19 @@ class ResyncCoordinator(
             syncPlaybackCoordinator.diagnostics.collect { diag ->
                 if (diag.ingressDesynchronized && isLocalLeader == false) {
                     triggerRequest(session.currentAuthGeneration, desync = true)
+                }
+                // Blocker 2E's deferred-then-later-applied transition: `drainDeferredEvents` applies
+                // a held reconciliation without ever going through `handleStateSnapshot` again, so
+                // this is the one place that later completion is observed. Compared against this
+                // coordinator's own generation, not merely "did the flag change" — a newer session's
+                // diagnostics could otherwise be misread as this one's obligation resolving.
+                val deferred = deferredReconciliation
+                if (deferred != null &&
+                    diag.pendingPlaybackReconciliationGeneration == null &&
+                    diag.sessionGeneration == deferred.generation
+                ) {
+                    deferredReconciliation = null
+                    completeReconciliation(deferred.message)
                 }
             }
         }
@@ -144,7 +192,7 @@ class ResyncCoordinator(
             )
         }
         scope.launch {
-            val sent = session.resync.send(ResyncMessage.StateRequest)
+            val sent = session.resync.send(ResyncMessage.StateRequest, generation)
             if (!sent) {
                 pendingRequestGeneration = StateResyncGate.onSnapshotObserved(pendingRequestGeneration, generation)
                 _diagnostics.update { it.copy(requestPending = pendingRequestGeneration != null, lastOutcome = ResyncOutcome.SEND_FAILED) }
@@ -183,28 +231,60 @@ class ResyncCoordinator(
     }
 
     /**
-     * A follower's reconciliation. [pendingRequestGeneration] is cleared **before** the reconcile
-     * call so a snapshot that itself provokes another trigger (it cannot, today, but a future
-     * caller must not find a stale "still pending" flag) never wedges the gate shut.
+     * A follower's reconciliation, gated on what
+     * [SyncPlaybackCoordinator.onStateSnapshot] actually answers (independent-review Blocker 2E) —
+     * receiving a valid frame off the wire is not the same as authoritative state converging.
      *
-     * The playback/queue portion is reconciled unconditionally by delegating to
-     * [SyncPlaybackCoordinator.onStateSnapshot] — that call's own role/generation checks are what
-     * decide whether **this device** may actually apply it (a foreign-generation or non-follower
-     * delivery is a safe no-op there, never partial). The manifest portion is reconciled here,
-     * gated on an actual revision difference (§20/§21): the first snapshot's revision is recorded
-     * but never triggers a refresh of its own — [SharedLibraryCoordinator.requestCatalogue] already
-     * ran unconditionally from the same [ControlEvent.Connected] that caused this snapshot to be
-     * requested in the first place ([onConnected]), so a second request here would be redundant.
-     * A **later** snapshot (a mid-ride desync resync, not the reconnect one) whose revision has
-     * moved since is the case this exists for: nothing else would notice that change until the next
-     * full session boundary.
+     * [pendingRequestGeneration] (the wire round trip) and [deferredReconciliationGeneration] (the
+     * reconciliation obligation itself) are cleared/set independently, per outcome:
+     *
+     * - [StateSnapshotOutcome.APPLIED]: both the wire round trip and reconciliation are satisfied —
+     *   manifest bookkeeping updates (§20/§21, gated on an actual revision difference so a second
+     *   snapshot in the same session doesn't redundantly retrigger
+     *   [SharedLibraryCoordinator.requestCatalogue], which the reconnect's own
+     *   [ControlEvent.Connected] already ran unconditionally), and [ResyncOutcome.RECONCILED].
+     * - [StateSnapshotOutcome.DEFERRED_CLOCK]: the wire round trip is satisfied (no resend), but
+     *   reconciliation is not — [deferredReconciliationGeneration] records the obligation, and the
+     *   [init] block's diagnostics collector is what later observes it actually converging via
+     *   `drainDeferredEvents`, which never comes back through this function.
+     * - [StateSnapshotOutcome.REJECTED_STALE] / [StateSnapshotOutcome.REJECTED_ROLE]: neither the
+     *   wire bookkeeping nor manifest bookkeeping may change — a rejected snapshot must not falsely
+     *   complete a request it was never a valid answer to (§20/§21).
      */
     private suspend fun handleStateSnapshot(
         message: ResyncMessage.StateSnapshot,
         generation: Long,
     ) {
-        pendingRequestGeneration = StateResyncGate.onSnapshotObserved(pendingRequestGeneration, generation)
-        syncPlaybackCoordinator.onStateSnapshot(message, generation)
+        when (syncPlaybackCoordinator.onStateSnapshot(message, generation)) {
+            StateSnapshotOutcome.APPLIED -> {
+                pendingRequestGeneration = StateResyncGate.onSnapshotObserved(pendingRequestGeneration, generation)
+                deferredReconciliation = null
+                completeReconciliation(message)
+            }
+            // `DEFERRED_CONTENT` (section 22) gets identical treatment to `DEFERRED_CLOCK`: the wire
+            // round trip is satisfied either way, and the same `pendingPlaybackReconciliationGeneration`
+            // diagnostic the [init] collector watches clears on either precondition resolving, so
+            // one branch correctly serves both.
+            StateSnapshotOutcome.DEFERRED_CLOCK, StateSnapshotOutcome.DEFERRED_CONTENT -> {
+                pendingRequestGeneration = StateResyncGate.onSnapshotObserved(pendingRequestGeneration, generation)
+                deferredReconciliation = DeferredReconciliation(generation, message)
+                _diagnostics.update {
+                    it.copy(requestPending = pendingRequestGeneration != null, lastOutcome = ResyncOutcome.DEFERRED)
+                }
+            }
+            StateSnapshotOutcome.REJECTED_STALE -> Unit
+            StateSnapshotOutcome.REJECTED_ROLE -> _diagnostics.update { it.copy(roleViolationCount = it.roleViolationCount + 1) }
+        }
+    }
+
+    /**
+     * The completion bookkeeping shared by both routes to [ResyncOutcome.RECONCILED]:
+     * [handleStateSnapshot]'s own immediate [StateSnapshotOutcome.APPLIED] branch, and the [init]
+     * block's diagnostics collector observing a deferred reconciliation's later success. Manifest
+     * bookkeeping only ever runs here, so a snapshot that never genuinely reconciles — rejected, or
+     * still deferred — can never trigger a refresh or move [lastKnownManifestRevision] (§20/§21).
+     */
+    private fun completeReconciliation(message: ResyncMessage.StateSnapshot) {
         val previousManifestRevision = lastKnownManifestRevision
         lastKnownManifestRevision = message.manifestRevision
         if (previousManifestRevision != null && previousManifestRevision != message.manifestRevision) {

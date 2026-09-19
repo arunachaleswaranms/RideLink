@@ -29,7 +29,15 @@ import kotlinx.coroutines.test.runCurrent
  * **What it does not prove.** No TLS, no socket, no real clock — the codec's own shared vectors
  * (`resync-messages/`) and the gate's own unit tests cover those. This proves only the wiring
  * between them: when a request is sent, who answers it, and whose state a snapshot may touch.
+ *
+ * [RouteTransitionFlag], below, is this file's one addition to that shape: a settable box for
+ * [SyncPlaybackCoordinator]'s `routeTransitioning` lambda parameter, since a plain `var` cannot be
+ * captured by reference across [ResyncTestPair.build]'s construction order.
  */
+internal class RouteTransitionFlag {
+    var transitioning: Boolean = false
+}
+
 internal class ResyncPeer(
     val localPeerId: PeerId,
     val syncSession: FakeSyncSession,
@@ -37,6 +45,12 @@ internal class ResyncPeer(
     val sync: SyncPlaybackCoordinator,
     val resync: ResyncCoordinator,
     val manifestRefreshCalls: MutableList<Unit>,
+    /** Exposed so a test can register a track as locally/peer-resolvable before playing it. */
+    val content: FakeSyncContent,
+    /** Exposed so a test can inspect the exact player calls a reconciliation produced. */
+    val player: FakeSyncPlayer,
+    /** Exposed so a test can simulate `route_state == transitioning` during a reconciliation. */
+    val routeTransitioning: RouteTransitionFlag,
 )
 
 internal class ResyncTestPair(
@@ -92,16 +106,19 @@ internal class ResyncTestPair(
         catalogueRevision: () -> Long,
     ): ResyncPeer {
         var seed = idBase
+        val content = FakeSyncContent()
+        val player = FakeSyncPlayer()
+        val routeTransitioning = RouteTransitionFlag()
         val sync =
             SyncPlaybackCoordinator(
                 scope = scope.backgroundScope,
                 monotonicNowUs = { clock.nowUs() },
                 localPeerId = peerId,
                 session = syncSession,
-                player = FakeSyncPlayer(),
-                content = FakeSyncContent(),
+                player = player,
+                content = content,
                 sleeper = clock.sleeper,
-                routeTransitioning = { false },
+                routeTransitioning = { routeTransitioning.transitioning },
                 nextQueueItemId = { SyncTestValues.ulid(seed++) },
                 // ADR-028: `emitStateSnapshot` admits `STATE_SNAPSHOT` onto this coordinator's own
                 // ordered outbound queue and writes it through the same resync channel
@@ -118,7 +135,7 @@ internal class ResyncTestPair(
                 requestManifestRefresh = { manifestRefreshCalls.add(Unit) },
                 localPeerId = peerId,
             )
-        return ResyncPeer(peerId, syncSession, resyncSession, sync, resync, manifestRefreshCalls)
+        return ResyncPeer(peerId, syncSession, resyncSession, sync, resync, manifestRefreshCalls, content, player, routeTransitioning)
     }
 
     /** Establishes the **first** session — nothing worth keeping is sent yet, so `sent` is cleared after. */

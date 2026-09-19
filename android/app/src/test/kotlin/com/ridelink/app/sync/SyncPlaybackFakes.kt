@@ -140,8 +140,12 @@ class FakeSyncSession : SyncSessionPort {
      * Joins this peer's outbound wire to [other]'s inbound one — the in-process stand-in for the
      * control connection in the two-peer test. Delivery is immediate and ordered, which is what a
      * TCP control connection gives; what it deliberately does not model is TLS, framing or loss.
+     *
+     * `null` models the ordinary Phase 5 broadcast channel being physically down — unlike
+     * [currentAuthGeneration], which this fake's [write] only ever uses to refuse a frame the
+     * *caller* authored under a stale generation, never to model "no wire exists right now".
      */
-    fun forwardTo(other: FakeSyncSession) {
+    fun forwardTo(other: FakeSyncSession?) {
         forward = other
     }
 
