@@ -92,6 +92,13 @@ object QueueCodec {
             else -> Result.Rejected(QueueMessageRejection.UNKNOWN_TYPE)
         }
 
+    /**
+     * [parseSnapshot], exposed for [ResyncCodec]: PROTOCOL §10 states `STATE_SNAPSHOT.queue` is the
+     * literal `QUEUE_SNAPSHOT` shape, so `STATE_SNAPSHOT`'s nested `queue` object is parsed by this
+     * exact function rather than a second, possibly-diverging copy of it (ADR-028).
+     */
+    internal fun parseSnapshotPayload(payload: JsonObject): Result = parseSnapshot(payload)
+
     fun wireType(message: QueueMessage): String =
         when (message) {
             is QueueMessage.Add -> QueueMessageTypes.ADD

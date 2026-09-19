@@ -106,6 +106,10 @@ public actor SyncPlaybackCoordinator {
     var lastAppliedSeq: Int64?
     var nextSeq: Int64 = PlaybackBounds.firstCommandSeq
     var timeline: PlaybackTimeline?
+    /// Ride-segment playback identity (independent review, Blocker 2B) — see `PlaybackIdentity`'s
+    /// own doc comment. Updated everywhere `timeline`'s track/queue-item identity changes; **not**
+    /// cleared by `resetForNewSession()`, unlike `timeline` itself.
+    var currentPlaybackIdentity: PlaybackIdentity?
     var driftState = DriftController.reset()
     private var tickTask: Task<Void, Never>?
 
@@ -236,6 +240,33 @@ public actor SyncPlaybackCoordinator {
     public var onDiagnosticsChanged: (@Sendable (SyncPlaybackDiagnostics) -> Void)?
     public var onQueueChanged: (@Sendable (SharedQueueState) -> Void)?
 
+    /// Phase 7 (ADR-028): fired whenever an ingress overflow latches
+    /// `playbackDesynchronized`/`queueDesynchronized` on a **follower** — the trigger
+    /// `ResyncCoordinator` turns into a `STATE_REQUEST` (PROTOCOL §10). A dedicated slot,
+    /// deliberately separate from `onDiagnosticsChanged` (which `SyncPlaybackPresenter` already owns
+    /// for the UI): two owners of one concern each, not one slot serving two. Carries no generation —
+    /// `ResyncCoordinator` reads the live one at the instant it reacts, exactly as Android's
+    /// `ResyncCoordinator.init`'s diagnostics collector reads `session.currentAuthGeneration` rather
+    /// than a frame-bound value, because this is a "current state" trigger, not frame provenance.
+    public var onDesynchronizedTrigger: (@Sendable () -> Void)?
+
+    /// Independent review, Blocker 2E: fired with the authorising `generation` whenever a full
+    /// playback restoration actually **completes** — including one that was first deferred for the
+    /// clock and only applied later, from `drainDeferredEvents`. `ResyncCoordinator` is the one
+    /// consumer: it compares the generation against its own `pendingRequestGeneration` before
+    /// reacting, the same generation-keyed matching `StateResyncGate` already does for the
+    /// synchronous case, so a signal belonging to an unrelated (e.g. ordinary wire `PLAYBACK_STATE`,
+    /// or a retired generation's) restoration is simply ignored rather than mismatched. Never fired
+    /// for the ordinary "already synced, just re-anchor" path, which is always synchronous and
+    /// already answered directly by `onStateSnapshot`'s return value.
+    public var onReconciliationApplied: (@Sendable (Int64) -> Void)?
+
+    /// Phase 7 (ADR-028 Amendment): where a `.resync` outbound frame is actually written.
+    /// `ResyncCoordinator.attach()` installs this once, mirroring `onDesynchronizedTrigger` — a
+    /// second late-bound collaborator, not a constructor dependency, so Phase 5 does not need to
+    /// know Phase 7 exists at `init` time.
+    private var resyncChannel: (any ResyncChannel)?
+
     public init(
         monotonicNowUs: @escaping @Sendable () -> Int64,
         localPeerId: PeerId,
@@ -290,7 +321,16 @@ public actor SyncPlaybackCoordinator {
         let queue = inbound
         await content.observeAvailability { [weak self] in
             _ = queue
-            Task { await self?.resolvePendingPlay() }
+            Task {
+                await self?.resolvePendingPlay()
+                // Independent review, Race 7: a `STATE_SNAPSHOT` restoration held for missing content
+                // (`DeferredEvent.playbackState`, held by `applyPeerPlaybackState`) is a different
+                // obligation from `pendingPlay`'s local-intent one, and content becoming available is
+                // exactly the event that can unblock it — the same drain `startDeferredDrain`'s own
+                // retry cadence already re-attempts, triggered promptly instead of waiting out the
+                // interval.
+                await self?.drainDeferredEvents()
+            }
         }
     }
 
@@ -323,6 +363,25 @@ public actor SyncPlaybackCoordinator {
 
     public func setQueueObserver(_ observer: (@Sendable (SharedQueueState) -> Void)?) {
         onQueueChanged = observer
+    }
+
+    /// Phase 7 (ADR-028): installs the desync trigger. A method rather than direct property
+    /// assignment, matching `setDiagnosticsObserver`/`setQueueObserver` exactly — external callback
+    /// registration on an actor-isolated property goes through a method on this platform.
+    public func setDesynchronizedTrigger(_ trigger: (@Sendable () -> Void)?) {
+        onDesynchronizedTrigger = trigger
+    }
+
+    /// Independent review, Blocker 2E: installs where a deferred-then-later-applied reconciliation
+    /// is reported, mirroring `setDesynchronizedTrigger` exactly.
+    public func setReconciliationAppliedTrigger(_ trigger: (@Sendable (Int64) -> Void)?) {
+        onReconciliationApplied = trigger
+    }
+
+    /// Phase 7 (ADR-028 Amendment): installs where a `.resync` outbound frame is written. See
+    /// `resyncChannel`'s doc comment.
+    public func setResyncChannel(_ channel: (any ResyncChannel)?) {
+        resyncChannel = channel
     }
 
     // MARK: - Session lifecycle
@@ -386,16 +445,33 @@ public actor SyncPlaybackCoordinator {
         lastAppliedSeq = nil
         nextSeq = PlaybackBounds.firstCommandSeq
         timeline = nil
+        // Independent review, Blocker 2B: `currentPlaybackIdentity` is deliberately **not** reset
+        // here, unlike `timeline` — it is ride-segment truth (which track, which queue item), not
+        // the session-clock-relative scheduling apparatus `timeline` carries. Before this fix, a
+        // leader whose control link merely blipped reported `track_hash: nil, queue_item_id: nil` in
+        // its next STATE_SNAPSHOT even while still audibly playing something, because the snapshot
+        // read `timeline?.trackHash`/`timeline?.queueItemId` — both wiped here — instead of anything
+        // that survives a link loss the way ADR-004 says local playback itself does.
         driftState = DriftController.reset()
         playbackDesynchronized = false
         queueDesynchronized = false
-        queueState = SharedQueueState()
+        // ADR-024 Amendment A8: `queueState` is deliberately **not** reset here. Everything above it
+        // is session-bound coordination state (sequence numbering, chains, epoch, timeline, drift) —
+        // scoped to the authentication generation that is ending, correctly retired with it. The
+        // queue is not: it is ride-segment-local state PROTOCOL §10 assumes survives a link loss
+        // ("session_id survives a reconnect… the follower adopts the leader's command_seq and
+        // queue_revision wholesale" presumes the leader still *has* authoritative state to resume
+        // from), and this repo's brief rule 7 requires it, the same principle already applied to
+        // capture/voice consent surviving a control-lifetime boundary. Before this fix, an ordinary
+        // link loss unconditionally wiped it via `queueState = SharedQueueState()` here, with no
+        // leader/follower distinction and nothing downstream that ever repopulated a leader's copy —
+        // reachable with no peer at all, see `testALeadersQueueSurvivesAnOrdinaryLinkLoss`.
         diagnostics.syncState = .inactive
         diagnostics.lastAppliedCommandSeq = nil
         diagnostics.lastReceivedCommandSeq = nil
         diagnostics.nextCommandSeq = nil
-        diagnostics.queueRevision = 0
-        diagnostics.queueSize = 0
+        diagnostics.queueRevision = queueState.revision
+        diagnostics.queueSize = queueState.items.count
         diagnostics.currentTrackHash = nil
         diagnostics.localDriftMs = nil
         diagnostics.peerDriftMs = nil
@@ -618,6 +694,12 @@ public actor SyncPlaybackCoordinator {
         switch frame {
         case .playback(let message): return await session.channel.send(message, authorizingGeneration: generation)
         case .queue(let message): return await session.channel.send(message, authorizingGeneration: generation)
+        // Independent review, Blocker 1 (fixed): `ResyncRelay` now takes `authorizingGeneration` and
+        // is bound to the one immutable `AuthenticatedConnection` record, exactly like Playback/Voice
+        // — `outboundUsable(generation)`'s upstream proof alone left a window between that proof and
+        // the actual write (the queue consumer, the actor hop, the write lock all suspend), which is
+        // the same class ADR-020 Amendment A9 already closed for `VOICE_*`.
+        case .resync(let message): return await resyncChannel?.send(message, generation: generation) ?? false
         }
     }
 
@@ -977,10 +1059,18 @@ public actor SyncPlaybackCoordinator {
         deferredDrainTask?.cancel()
         deferredDrainTask = nil
         timeline = nil
+        // Independent review, Race 7 (mirroring Android's identical finding): leaving synchronised
+        // mode is the user genuinely ending authoritative playback, not a control-lifetime blip —
+        // unlike `resetForNewSession`, which deliberately preserves `currentPlaybackIdentity` across
+        // a reconnect (Blocker 2B), this is a legitimate place for ride-segment identity to clear
+        // too. Without this, a stale track hash from an already-ended synchronised session would
+        // still be reported by the next `enqueueStateSnapshotReply` as if still authoritative.
+        currentPlaybackIdentity = nil
         driftState = DriftController.reset()
         // Amendment A6 Finding B, swept: the identical post-`restoreRate` write shape, in the second
         // of that call's three callers. Every write first, the unfenced player effect last.
         diagnostics.syncState = .inactive
+        diagnostics.currentTrackHash = nil
         diagnostics.localDriftMs = nil
         diagnostics.peerDriftMs = nil
         diagnostics.deferredCommandCount = 0
@@ -1052,6 +1142,11 @@ struct Phase5Outbound: Sendable {
     enum Frame: Sendable {
         case playback(PlaybackMessage)
         case queue(QueueMessage)
+        /// PROTOCOL §10 (Phase 7, ADR-028 Amendment): a `STATE_SNAPSHOT` answering a `STATE_REQUEST`.
+        /// Folded into this same enum, not a second outbound path, so it can never be written out of
+        /// order relative to a `QUEUE_SNAPSHOT`/`PLAYBACK_STATE` decided around the same time — the
+        /// exact hazard ADR-024 Amendment A1 Finding B closed for every other Phase 5 broadcast.
+        case resync(ResyncMessage)
     }
 
     let generation: Int64
@@ -1090,6 +1185,32 @@ enum DeferredEvent: Sendable {
         case .playbackState(_, let generation): return generation
         }
     }
+}
+
+/// What actually happened to a `STATE_SNAPSHOT`'s playback portion (independent review, Blocker 2E)
+/// — a snapshot *received* is not a snapshot *applied*, and `ResyncCoordinator` needs to tell the two
+/// apart rather than assuming reconciliation completed the instant `onStateSnapshot` returns.
+enum StateSnapshotOutcome: Sendable, Equatable {
+    /// Reconciliation genuinely completed — the follower now conforms to the leader's authoritative
+    /// playback state (or the leader authoritatively has nothing loaded).
+    case applied
+    /// A trustworthy clock was not available. The snapshot is retained, generation-owned, in
+    /// `deferredEvents` and will be applied automatically once the clock recovers (or discarded if
+    /// this generation retires first) — this is not a failure to retry by resending `STATE_REQUEST`.
+    case deferredClock
+    /// Independent review §22: the clock was ready and the snapshot's queue/manifest/identity
+    /// portions were accepted, but the authoritative track itself is not locally playable —
+    /// `applyPlay` already requested the transfer through the existing Phase 4 mechanism (PROTOCOL
+    /// §5 rule 4: only the leader may reschedule, so nothing here retries on its own; the leader's
+    /// next authoritative frame — a fresh `PLAY` once both sides verify the content, exactly as an
+    /// ordinary wire `PLAY` for missing content already behaves — is what completes this). Distinct
+    /// from `.deferredClock`: nothing is enqueued into `deferredEvents`, because a content transfer
+    /// completing is not a clock-readiness event the drain loop polls for.
+    case deferredContent
+    /// The snapshot's generation is no longer live — refused, nothing mutated.
+    case rejectedStale
+    /// This device is not a follower — refused, nothing mutated.
+    case rejectedRole
 }
 
 /// `PLAYBACK_STATE`'s seven payload fields as one value, so a held snapshot is one case rather than

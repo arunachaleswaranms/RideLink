@@ -1856,3 +1856,184 @@ Every figure in this amendment is a software figure produced by unit tests on a 
 product target and the <50 ms stretch target remain unmeasured, no alignment figure exists, no audio
 has reached a speaker or a Bluetooth endpoint, and TEST_PLAN §5.2's S-01…S-12 remain the only things
 that will change that.
+
+## Amendment A8 — 19 September 2026 — a leader's own queue must survive a link it did not choose to lose
+
+**Status:** Accepted · appended, nothing above rewritten. Amendments A1–A7 are unchanged.
+
+Found by Phase 7's reconnect-cycle and second-ride-restart stress tests (`docs/DECISIONS/ADR-028`),
+not by an audit of this ADR's own text — the first time in this phase's history that the *next*
+phase's testing, rather than a dedicated closure pass, found a defect in an already-accepted one.
+Reproduced first against unmodified production on both platforms, independently, before either fix
+landed.
+
+**The defect.** `SyncPlaybackCoordinator.resetForNewSession()` — Android `SyncPlaybackCoordinator.kt`,
+iOS `SyncPlaybackCoordinator.swift`, called from both `onSessionEstablished`/`handleConnected` (every
+`Connected`, including an ordinary reconnect) and `onSessionLost`/`handleLinkLost` (every link loss)
+— unconditionally reset `queueState`/`_queueState` to empty, with no leader/follower distinction and
+no distinction between a session actually starting over and one merely resuming. A **leader's** queue
+is the authoritative copy; nothing on the wire can ever repopulate it, because the leader is what a
+follower's `QUEUE_SNAPSHOT`/(Phase 7) `STATE_SNAPSHOT` adoption resyncs *from*. So the reset fired at
+the moment of link loss — before any reconnection attempt, before any peer is even reachable again —
+erased a ride's entire queue on an ordinary Wi-Fi blip, for the one role that had no way to get it
+back.
+
+This directly contradicted two things this ADR and PROTOCOL §10 already state. §10: *"`session_id`
+survives a reconnect; that is what distinguishes resuming from starting over"* and *"the follower
+adopts the leader's `command_seq` and `queue_revision` wholesale"* — both assume the leader still
+*has* authoritative state to resume from and hand wholesale. And ADR-004's own framing, quoted
+verbatim in `resetForNewSession`'s own doc comment on both platforms: *"A Wi-Fi drop does **not**
+interrupt music. Both phones keep playing; only synchronisation pauses."* A wiped queue is not "only
+synchronisation pauses" — it is the ride's whole track list gone.
+
+**Confirmed pre-existing, not introduced by Phase 7.** `git log -S` on iOS traces the unconditional
+reset to `bea0a5c`, the original Phase 5 integration commit (2026-09-08), eleven days and seven
+closure audits before Phase 7 began. It survived every one of A1–A7 because none of those audits
+exercised a *second* session with a *populated* queue at the moment of link loss — the same class of
+blind spot ADR-026's history already names: "assume the same of anything else whose failure needs a
+second session to observe."
+
+**No other source of truth exists.** Checked on both platforms before writing the fix: `MusicCoordinator`
+(Android `MusicCoordinator.kt`, iOS `MusicCoordinator.swift`) holds a separate Phase 3 local-queue
+type, explicitly documented as not copied into `SyncPlaybackCoordinator.queueState`; `SharedLibraryCoordinator`
+holds the manifest/catalogue, unrelated to the playback queue; no persistence or replay of the shared
+queue exists anywhere in either app layer.
+
+**The fix.** `queueState`/`_queueState` is no longer touched by `resetForNewSession()`, on either
+platform. Every other reset in that function is unchanged: sequence numbers, the apply/scheduled
+chains, the playback epoch, drift state, the desync flags, the tick job — everything genuinely scoped
+to *this authenticated session's coordination lifetime* — still retires exactly as A1–A7 established.
+Only the queue's *content*, which is ride-segment-local state exactly like the capture device
+(rule 17) and voice consent (Amendment A10 to ADR-020) that already survive a control-lifetime
+boundary, now does the same. No role gate was needed: a follower's stale queue is harmless regardless
+— the next `QUEUE_SNAPSHOT`, or Phase 7's `STATE_SNAPSHOT`, overwrites it wholesale, per §10 rule 1's
+"no merge algorithm" — and a brand-new pairing already starts with an empty queue by construction, so
+nothing changes for that case.
+
+**Regression coverage.** Both platforms added a single-coordinator, no-peer test — `handleConnected`
+as leader, populate the queue, `handleLinkLost()`, assert the queue survives — reproducible against
+unmodified production before the fix and green after it. Three existing tests per platform had baked
+the old wipe in as an assumed invariant (Android: `SyncPlaybackDeliveryAuditTest.kt` ×2,
+`SyncPlaybackTwoPeerTest.kt` ×1; iOS: `SyncPlaybackDeliveryAuditTests` ×2,
+`SyncPlaybackIngressLifetimeAuditTests` ×1) and were updated to assert the correct surviving value
+rather than zero — each re-verified to still test its original, distinct intent (session-boundary
+write-safety, held-event discarding, stranded-operation isolation) once the assertion was corrected.
+
+**What this amendment does not do.** It does not add a vector — this is coroutine/actor lifecycle,
+the same reason A3–A7 add none. It does not touch `Phase5FrameQueue`, `command_seq`/`queue_revision`
+allocation, or anything wire-facing; the fix is entirely local-state retention inside one function.
+It does not claim a physical measurement — this is a software-only finding and fix, verified by unit
+tests on both platforms, nothing more.
+
+## Amendment A9 — 20 September 2026 — a null timeline is not the same fact as "nothing to restore"
+
+**Status:** Accepted · appended, nothing above rewritten. Amendments A1–A8 are unchanged.
+
+Found by an independent review of Phase 7 ([ADR-028](ADR-028-ride-mode-and-state-resynchronization.md)
+Amendment A1, "Blocker 2"), not by a dedicated audit of this ADR — the second time this phase's work
+found a defect in already-accepted Phase 5 machinery rather than in its own new code (the first was
+Amendment A8's queue wipe). All five findings below are reachable through `onPeerPlaybackState`, which
+handles both the ordinary wire `PLAYBACK_STATE` message and, since Phase 7, `STATE_SNAPSHOT`'s
+translated playback half — but a reconnect is what reliably produces the specific precondition (a
+freshly-nulled `timeline`, a not-yet-ready clock) that exposes them, which is why closing the Phase 5
+gap `STATE_REQUEST` was supposed to fill (Amendment A1 Finding C) is what finally found them.
+
+### Finding A — the leader's own current track did not survive a link loss
+
+`emitStateSnapshot`/`enqueueStateSnapshotReply` read `timeline?.trackHash`/`timeline?.queueItemId` for
+a `STATE_SNAPSHOT`'s playback identity. `timeline`'s `anchorSessionUs`/`anchorPositionMs` are correctly
+session-clock-relative and correctly cleared by `resetForNewSession` (Amendment A3's own reasoning
+about what is control-generation-scoped) — but its `trackHash`/`queueItemId` are not clock-relative at
+all, and clearing them along with the anchor meant a leader answering a `STATE_REQUEST` immediately
+after an ordinary reconnect, before issuing any new command in the fresh generation, truthfully
+reported "nothing loaded" while its own player was still audibly playing something. `PlayerState`'s
+local content identifier (`LocalEntryId` on Android, its iOS equivalent) cannot substitute — PROTOCOL
+§10's identity fields need `ContentHash`, the one authoritative cross-device identity (rule 6), which
+Phase 3's local-player state was never designed to carry.
+
+**Fixed** by separating ride-segment identity from control-generation scheduling state: a new
+`PlaybackIdentity` (trackHash + queueItemId only) is set wherever `timeline` legitimately gains or
+loses a real track, and — unlike `timeline` — is **not** cleared by `resetForNewSession`. Position and
+`playing` were always read live from the player and needed no equivalent change.
+
+### Finding B — a normal reconnect's snapshot silently skipped restoration
+
+`applyPeerPlaybackState`'s routing decision was `if (wasDesynchronized) { restoreFromPlaybackState() }
+else { val active = timeline ?: return; ...re-anchor... }`. Amendment A1 Finding C added the
+`wasDesynchronized` branch specifically for the ingress-overflow case; it was never revisited for the
+fact that `resetForNewSession` clears `playbackDesynchronized` and `timeline` **together**, at every
+control boundary, not only at an ingress overflow. So an ordinary reconnect's snapshot arrived with
+`wasDesynchronized == false` (correctly — no overflow occurred) and fell into the re-anchor branch,
+which requires a `timeline` that reconnect had just cleared — and returned immediately, having already
+updated `lastReceivedSeq`/`lastAppliedSeq` bookkeeping but touched nothing about what is actually
+playing. **This is the specific mechanism behind Phase 7's original brief's own complaint** ("the
+current implementation does not reliably achieve" reconnect convergence) — not a Phase 7 defect in the
+narrow sense, but the reason adding `STATE_REQUEST` alone was never going to be sufficient.
+
+**Fixed**: `needsFullPlaybackRestore()` is `playbackDesynchronized || timeline == null` — both are the
+same underlying fact ("nothing to anchor against yet"), so both take the restoration path. A
+null-timeline snapshot that itself reports nothing loaded still resolves safely through
+`restoreFromPlaybackState`'s existing nil-track branch.
+
+### Finding C — a snapshot needing the fresh clock (or missing content) was dropped, not held
+
+`restoreFromPlaybackState` called `readyEstimate() ?: return` (Android) / checked clock readiness and
+returned (iOS) when the clock was not yet trustworthy — but its caller had **already** cleared
+`playbackDesynchronized` before calling it, so the "still need to restore" fact was destroyed by the
+same operation that failed to restore anything. Separately, the existing hold-admission decision
+(`holdIfOvertaking`/equivalent) only holds an incoming reconciliation event when something else is
+*already* held — it does not proactively hold merely because the clock is not ready and the deferred
+queue happens to be empty, so the common case (first snapshot after a reconnect, nothing else
+outstanding) sailed straight through to the silent drop above. And even a genuinely-held
+`PlaybackState` event's drain branch popped-then-applied unconditionally, unlike the adjacent
+`Command` branch's explicit `if (estimate == null || !estimate.ready) return` **before** popping —
+so a still-not-ready clock at drain time discarded the held snapshot a second time rather than leaving
+it queued.
+
+**Fixed**, reusing the existing `deferredEvents`/drain mechanism rather than inventing a second one:
+the admission decision now also holds when the clock (or, per Finding E, content) is not ready; the
+drain's `PlaybackState` branch now checks readiness before popping, mirroring `Command`'s own pattern
+exactly; the obligation-tracking flag no longer clears until restoration genuinely completes.
+
+### Finding D — the outer coordinator could not tell applied from deferred from rejected
+
+`onStateSnapshot`/`onPeerPlaybackState` returned nothing, so `ResyncCoordinator.handleStateSnapshot`
+(Phase 7's own new code, but consuming this Phase 5 function) had no way to know whether a snapshot
+had actually converged the follower's state or merely arrived. A stale, wrong-role, or
+clock/content-deferred snapshot was indistinguishable from a genuinely applied one from the outside.
+
+**Fixed**: `StateSnapshotOutcome` (`applied` / `deferredClock` / `deferredContent` / `rejectedStale` /
+`rejectedRole`) is now returned through the whole chain. This is Phase 7's addition (`ResyncCoordinator`
+is what needed to consume it), but the *source* of truth — whether `applyPeerPlaybackState`/
+`restoreFromPlaybackState` actually did anything — is this ADR's own machinery, which had never before
+needed to report an outcome to anyone because the only prior caller (`onPlaybackMessage`) had no
+caller of its own that cared.
+
+### Finding E — a missing local copy of the authoritative track had nowhere to be retried
+
+Found only on iOS, while building the regression for Finding C's content case: `applyPlay`'s existing
+content-unavailable branch correctly requests the transfer (PROTOCOL §5 rule 4, unchanged) but returned
+`false` with **nothing retained** — so a transfer that verified afterward had no snapshot left to apply
+it to, and the follower stayed on `.waitingForContent` until an unrelated future leader command
+happened to arrive. Android's admission gate already checked clock **and** content readiness together
+before Finding C's fix reached iOS; iOS's had only checked the clock. Fixed by mirroring Android's
+structure: content readiness is now checked at the same admission point as clock readiness, and a
+miss on either holds the snapshot in the same `deferredEvents`/drain machinery, with the existing
+`content.observeAvailability` callback (already used to resume a pending `PLAY`) now also draining
+held reconciliation events. A `nil`-track ("nothing loaded") snapshot needs neither check and is
+carved out explicitly, since it depends on no external resource at all.
+
+### Finding F — a ride-segment identity outlived its own ride
+
+Found while building the second-ride regression for Finding A's fix: `leaveSynchronizedMode()` did not
+clear the new `PlaybackIdentity`, so a leader's Ride 1 track identity could survive into Ride 2's own
+reconnect resync — a live instance of exactly the class ADR-026 and this ADR's own Amendment A3 exist
+to prevent, reintroduced by the very fix (Finding A) meant to prevent a *different* loss. Fixed by
+clearing it in `leaveSynchronizedMode()`, before teardown, alongside the other ride-segment state that
+function already retires.
+
+**What this amendment does not do.** No wire change; `protocol/vectors/` is untouched — every finding
+here is about what a device truthfully constructs or honestly reports about its own local state, never
+about a new field or a changed encoding. No new player, queue, or timeline authority; `applyPlay`
+remains the one path an authoritative restoration goes through. No physical measurement is claimed —
+software-only, verified by unit and integration tests on both platforms.

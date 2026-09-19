@@ -368,6 +368,7 @@ class SyncPlaybackDeliveryAuditTest {
             runCurrent()
             coordinator.enqueue(HASH_B) // a QUEUE_SNAPSHOT authorised by generation 1
             runCurrent()
+            val revisionAfterEnqueue = coordinator.queueState.value.revision
 
             session.emit(ControlEvent.LinkLost(LinkLossReason.NETWORK))
             runCurrent()
@@ -378,7 +379,13 @@ class SyncPlaybackDeliveryAuditTest {
 
             assertTrue(session.sentOfType<QueueMessage.Snapshot>().isEmpty(), "no Session A snapshot under Session B")
             assertEquals(sentBefore, coordinator.diagnostics.value.outboundSentCount, "and nothing new was counted as sent")
-            assertEquals(0, coordinator.queueState.value.revision, "and Session B started from an empty authoritative queue")
+            // ADR-024 Amendment A8: the local admission that bumped this revision is not undone by
+            // the boundary — only the *stuck outbound write* above is what session B must never see.
+            assertEquals(
+                revisionAfterEnqueue,
+                coordinator.queueState.value.revision,
+                "Session B inherits the leader's own surviving queue, never a wipe back to empty",
+            )
         }
 
     // --- Finding C: the transport's answer is the only definition of "sent" ----------------------
@@ -592,8 +599,12 @@ class SyncPlaybackDeliveryAuditTest {
             session.emit(ControlEvent.LinkLost(LinkLossReason.NETWORK))
             runCurrent()
             player.calls.clear()
-            assertEquals(0, coordinator.diagnostics.value.deferredCommandCount)
-            assertEquals(0, coordinator.queueState.value.revision, "the old session's queue went with it")
+            assertEquals(0, coordinator.diagnostics.value.deferredCommandCount, "the held, never-applied revision-6 snapshot is discarded")
+            // ADR-024 Amendment A8: the queue does NOT go with the old session — only the *held,
+            // never-applied* revision-6 snapshot above is discarded. Revision 5 was already applied
+            // (adopted wholesale, §9) before the boundary, so it survives exactly as ride-segment
+            // state must (rules 22/23).
+            assertEquals(5, coordinator.queueState.value.revision, "the already-applied revision survives the boundary")
 
             session.currentAuthGeneration = 2
             connect(this, asLeader = false)
@@ -602,7 +613,11 @@ class SyncPlaybackDeliveryAuditTest {
             runCurrent()
 
             assertTrue(player.calls.isEmpty(), "not one held event of the old session touched the new one's player")
-            assertEquals(0, coordinator.queueState.value.revision, "and no old snapshot reached the new session's queue")
+            assertEquals(
+                5,
+                coordinator.queueState.value.revision,
+                "and no discarded old snapshot (revision 6) reached the new session's queue either",
+            )
             assertNull(coordinator.diagnostics.value.lastAppliedCommandSeq)
         }
 

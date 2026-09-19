@@ -188,6 +188,11 @@ public final class SharedLibraryCoordinator {
     private var catalogueRevision: Int64 = 0
     private var lastServedEntries: [ManifestEntry]?
 
+    /// Phase 7 (ADR-028): `ResyncCoordinator`'s narrow read of the same counter, so `STATE_SNAPSHOT`
+    /// carries the true current revision rather than a value threaded through a constructor
+    /// argument. Mirrors Android's `SharedLibraryCoordinator.currentCatalogueRevision` exactly.
+    public var currentCatalogueRevision: Int64 { catalogueRevision }
+
     private let transferFence = OperationFence()
 
     /// Bumped on every session boundary. Since ADR-025 §1 this is **no longer** the inbound-dispatch

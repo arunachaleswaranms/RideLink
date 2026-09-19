@@ -26,6 +26,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import com.ridelink.app.library.SharedLibraryCoordinator
 import com.ridelink.app.music.MusicCoordinator
+import com.ridelink.app.resync.ResyncCoordinator
 import com.ridelink.app.session.SessionCoordinator
 import com.ridelink.app.sync.SyncPlaybackCoordinator
 import com.ridelink.core.library.LibraryEntry
@@ -55,6 +56,7 @@ fun MainScreen(
     musicCoordinator: MusicCoordinator,
     sharedLibraryCoordinator: SharedLibraryCoordinator,
     syncPlaybackCoordinator: SyncPlaybackCoordinator,
+    resyncCoordinator: ResyncCoordinator,
     deviceDescription: String,
     /**
      * Routed through the Activity on purpose. ARCHITECTURE §6.4 steps 4–6: the microphone foreground
@@ -88,6 +90,7 @@ fun MainScreen(
     val downloadStates by sharedLibraryCoordinator.downloadStates.collectAsState()
     val cachedHashes by sharedLibraryCoordinator.cachedHashes.collectAsState()
     val localEntries by musicCoordinator.libraryEntries.collectAsState()
+    val resyncDiagnostics by resyncCoordinator.diagnostics.collectAsState()
 
     Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
         Column(
@@ -107,6 +110,7 @@ fun MainScreen(
             Text(connectionLabel(state.status), style = MaterialTheme.typography.bodyLarge)
 
             SessionActionButton(status = state.status, coordinator = coordinator)
+            StartRideButton(status = state.status, onStartRide = coordinator::startRide)
 
             TransportBanner(diagnostics.transportLabel)
 
@@ -121,31 +125,21 @@ fun MainScreen(
             // PROTOCOL §7.1 in the UI: voice controls exist only once the trust gate has passed.
             // A disabled button would still be a button; an absent card cannot be pressed.
             if (state.status == SessionStatus.CONNECTED || state.status == SessionStatus.RIDE_ACTIVE) {
-                VoiceCard(
+                AuthenticatedSections(
+                    coordinator = coordinator,
+                    sharedLibraryCoordinator = sharedLibraryCoordinator,
+                    syncPlaybackCoordinator = syncPlaybackCoordinator,
                     voice = voice,
                     coexistence = coexistence,
                     policy = policy,
                     peerAudioState = peerAudioState,
-                    refusal = intercomRefusal,
-                    onStartIntercom = onStartIntercom,
-                    onStopIntercom = onStopIntercom,
-                    // The user's own Mute latch, not the wire's `mic_muted` — under PTT the latter is
-                    // true whenever the button is not held, and toggling from it would be a coin flip.
-                    onToggleMute = { coordinator.setMicrophoneMuted(!voice.userMuted) },
-                    onPushToTalkHeld = coordinator::setPushToTalkHeld,
-                    onSelectPolicy = coordinator::selectIntercomPolicy,
-                )
-
-                // PROTOCOL §8's catalogue plane and PROTOCOL §5/§9's synchronisation plane, both
-                // gated the same way voice is: brief §22 and ADR-024 §8 — an unpaired peer must
-                // never receive the shared library and can never move this phone's music.
-                SharedLibraryAndSyncSections(
-                    sharedLibraryCoordinator = sharedLibraryCoordinator,
-                    syncPlaybackCoordinator = syncPlaybackCoordinator,
+                    intercomRefusal = intercomRefusal,
                     remoteEntries = remoteEntries,
                     localEntries = localEntries,
                     downloadStates = downloadStates,
                     cachedHashes = cachedHashes,
+                    onStartIntercom = onStartIntercom,
+                    onStopIntercom = onStopIntercom,
                     onPlaySharedTrackLocally = onPlaySharedTrackLocally,
                 )
             }
@@ -156,6 +150,8 @@ fun MainScreen(
                 discoveryCount = discoveryCount,
                 localIdentityPrefix = coordinator.localIdentityPrefix,
             )
+
+            ResyncDiagnosticsCard(resyncDiagnostics)
 
             // Deliberately independent of `state.status` — this phase's brief §28/§30: local music
             // must be fully usable in airplane mode, with no peer, regardless of session state.

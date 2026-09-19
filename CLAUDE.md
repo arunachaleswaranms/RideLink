@@ -213,17 +213,54 @@ resume are deferred, but the chunk and page framing keep both possible.
 
 ## Current phase
 
-**Phase 6 — intercom/music coexistence. Software closure is implemented on the feature branch;
-physical qualification is explicitly deferred.** `IntercomMusicCoexistence` is the one mirrored,
-vector-pinned decision seam. It applies multiplicative 25%/35% ramps through the existing player,
-uses exact-track local suppression for Mode D, leaves Mode E unaffected, preserves user volume and
-Phase 5 authority, and isolates voice/music failures. Every effect is generation-bound and terminal
+**Phase 7 — Ride Mode and resilience. Software closure is implemented on the feature branch;
+physical ride qualification is explicitly deferred — hardware not available.** `STATE_REQUEST`/
+`STATE_SNAPSHOT` close the previously-recorded gap (STATUS.md problem 42) exactly per PROTOCOL §10's
+existing spec — no field invented, `STATE_SNAPSHOT.playback`'s `queue_item_id` derived from §5's own
+cross-reference. `StateResyncGate` is the one new pure, generation-keyed decision table; reconciliation
+reuses Phase 5's existing role/generation-checked apply path wholesale, never a second one. Ride Mode
+is real production `SessionFsm` traffic (`startRide()`/`endRide()`), with a simplified riding UI on
+both platforms whose visibility is a pure projection of FSM status — never a second navigation
+authority. Automatic reconnect, fresh clock sync after reconnect, and voice/coexistence continuation
+across reconnect were all audited and confirmed already correct before this phase; nothing needed
+building there. **This phase's own reconnect/second-ride stress testing found and fixed two real,
+pre-existing defects before closure**: a leader's own queue was being wiped on every ordinary link
+loss since the original Phase 5 integration ([ADR-024 Amendment A8](docs/DECISIONS/ADR-024-synchronized-playback-integration.md#amendment-a8--19-september-2026--a-leaders-own-queue-must-survive-a-link-it-did-not-choose-to-lose)),
+and `STATE_SNAPSHOT` could reach the wire out of order relative to `QUEUE_SNAPSHOT`/`PLAYBACK_STATE`
+because it bypassed the single ordered outbound writer ([ADR-028](docs/DECISIONS/ADR-028-ride-mode-and-state-resynchronization.md)).
+A third, iOS-only defect — Ride Mode's visibility gate dropping the rider back to the main screen the
+instant an ordinary reconnect began — was found by direct review and fixed. All three reproduced
+against unmodified production before fixing.
+
+**An independent review of that pass then found two more confirmed blocker groups, both fixed**
+([ADR-028 Amendment A1](docs/DECISIONS/ADR-028-ride-mode-and-state-resynchronization.md#amendment-a1--20-september-2026--independent-review-two-confirmed-blocker-groups-both-fixed)
++ [ADR-024 Amendment A9](docs/DECISIONS/ADR-024-synchronized-playback-integration.md#amendment-a9--20-september-2026--a-null-timeline-is-not-the-same-fact-as-nothing-to-restore)).
+**Blocker 1**: outbound `STATE_SNAPSHOT`/`STATE_REQUEST` were admission-checked but not
+generation-*bound* to the actual socket write — the same class already fixed once for `VOICE_*`
+(ADR-020 A9) and Playback (ADR-024 A2), reopened because ADR-028's own "alternatives rejected"
+reasoning wrongly concluded the admission proof made a bound writer redundant; fixed by reusing the
+existing mechanism outright. **Blocker 2**: reconnect/resync did not reliably reconstruct authoritative
+playback, for five linked *pre-existing* Phase 5 defects — a leader's own current track did not
+survive a link loss, a normal reconnect's snapshot silently skipped restoration, a
+clock-or-content-not-ready snapshot was dropped instead of held, the outer coordinator couldn't tell
+applied from deferred from rejected, and a leader's track identity could leak past its own ride's end
+— all reachable through Phase 5's own machinery, which Phase 7's new call path was merely the first to
+reliably exercise. No wire change. Both reproduced against unmodified production before fixing, on
+both platforms. Independent review of *this* pass has not yet run. No physical Bluetooth, iPhone,
+battery/thermal, or riding result is claimed. Phase 8 is untouched.
+
+Accepted baseline:
+
+**Phase 6 — intercom/music coexistence. Software closure is implemented on the feature branch,
+independently reviewed once with two confirmed blockers fixed** ([ADR-027 Amendment A1](docs/DECISIONS/ADR-027-intercom-music-coexistence-ownership.md#amendment-a1--18-sep-2026-independent-review-two-confirmed-blockers)),
+**and physical qualification remains explicitly deferred.** `IntercomMusicCoexistence` is the one
+mirrored, vector-pinned decision seam. It applies multiplicative 25%/35% ramps through the existing
+player, uses exact-track local suppression for Mode D, leaves Mode E unaffected, preserves user volume
+and Phase 5 authority, and isolates voice/music failures. Every effect is generation-bound and terminal
 teardown joins restoration. One coordinator owns the process-global iOS audio session. VOX policy is
 fully testable with synthetic levels, but production remains **PENDING REAL AUDIO INPUT / LATER
 HARDENING** because the pinned public WebRTC APIs expose no suitably fast level source. No physical
-Bluetooth, iPhone, audible-quality, screen-lock, or riding result is claimed. Phase 7 is untouched.
-
-Accepted baseline:
+Bluetooth, iPhone, audible-quality, screen-lock, or riding result is claimed.
 
 **Phase 5 — synchronized playback. Software closure is CLAIMED as of the thirty-fifth session
 (`docs/STATUS.md` §2al) and re-affirmed after an independent review of that pass (§2am); real-device
