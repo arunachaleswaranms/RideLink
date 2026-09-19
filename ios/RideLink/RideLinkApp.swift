@@ -75,6 +75,10 @@ struct RideLinkApp: App {
                 isActive: { [weak presenter] in presenter?.isSynchronizedModeActive ?? false },
                 role: { [weak presenter] in presenter?.role }
             )
+            // Phase 7 (ADR-028): after Phase 5, since resync reconciles through the one
+            // `SyncPlaybackCoordinator` and refreshes the manifest through the one
+            // `SharedLibraryCoordinator` — both must already exist.
+            coordinator.attachResync()
         }
     }
 

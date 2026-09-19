@@ -236,6 +236,22 @@ public actor SyncPlaybackCoordinator {
     public var onDiagnosticsChanged: (@Sendable (SyncPlaybackDiagnostics) -> Void)?
     public var onQueueChanged: (@Sendable (SharedQueueState) -> Void)?
 
+    /// Phase 7 (ADR-028): fired whenever an ingress overflow latches
+    /// `playbackDesynchronized`/`queueDesynchronized` on a **follower** — the trigger
+    /// `ResyncCoordinator` turns into a `STATE_REQUEST` (PROTOCOL §10). A dedicated slot,
+    /// deliberately separate from `onDiagnosticsChanged` (which `SyncPlaybackPresenter` already owns
+    /// for the UI): two owners of one concern each, not one slot serving two. Carries no generation —
+    /// `ResyncCoordinator` reads the live one at the instant it reacts, exactly as Android's
+    /// `ResyncCoordinator.init`'s diagnostics collector reads `session.currentAuthGeneration` rather
+    /// than a frame-bound value, because this is a "current state" trigger, not frame provenance.
+    public var onDesynchronizedTrigger: (@Sendable () -> Void)?
+
+    /// Phase 7 (ADR-028 Amendment): where a `.resync` outbound frame is actually written.
+    /// `ResyncCoordinator.attach()` installs this once, mirroring `onDesynchronizedTrigger` — a
+    /// second late-bound collaborator, not a constructor dependency, so Phase 5 does not need to
+    /// know Phase 7 exists at `init` time.
+    private var resyncChannel: (any ResyncChannel)?
+
     public init(
         monotonicNowUs: @escaping @Sendable () -> Int64,
         localPeerId: PeerId,
@@ -325,6 +341,19 @@ public actor SyncPlaybackCoordinator {
         onQueueChanged = observer
     }
 
+    /// Phase 7 (ADR-028): installs the desync trigger. A method rather than direct property
+    /// assignment, matching `setDiagnosticsObserver`/`setQueueObserver` exactly — external callback
+    /// registration on an actor-isolated property goes through a method on this platform.
+    public func setDesynchronizedTrigger(_ trigger: (@Sendable () -> Void)?) {
+        onDesynchronizedTrigger = trigger
+    }
+
+    /// Phase 7 (ADR-028 Amendment): installs where a `.resync` outbound frame is written. See
+    /// `resyncChannel`'s doc comment.
+    public func setResyncChannel(_ channel: (any ResyncChannel)?) {
+        resyncChannel = channel
+    }
+
     // MARK: - Session lifecycle
 
     /// ADR-019: `.connected` means the trust gate passed, so this is the first instant a Phase 5
@@ -389,13 +418,23 @@ public actor SyncPlaybackCoordinator {
         driftState = DriftController.reset()
         playbackDesynchronized = false
         queueDesynchronized = false
-        queueState = SharedQueueState()
+        // ADR-024 Amendment A8: `queueState` is deliberately **not** reset here. Everything above it
+        // is session-bound coordination state (sequence numbering, chains, epoch, timeline, drift) —
+        // scoped to the authentication generation that is ending, correctly retired with it. The
+        // queue is not: it is ride-segment-local state PROTOCOL §10 assumes survives a link loss
+        // ("session_id survives a reconnect… the follower adopts the leader's command_seq and
+        // queue_revision wholesale" presumes the leader still *has* authoritative state to resume
+        // from), and this repo's brief rule 7 requires it, the same principle already applied to
+        // capture/voice consent surviving a control-lifetime boundary. Before this fix, an ordinary
+        // link loss unconditionally wiped it via `queueState = SharedQueueState()` here, with no
+        // leader/follower distinction and nothing downstream that ever repopulated a leader's copy —
+        // reachable with no peer at all, see `testALeadersQueueSurvivesAnOrdinaryLinkLoss`.
         diagnostics.syncState = .inactive
         diagnostics.lastAppliedCommandSeq = nil
         diagnostics.lastReceivedCommandSeq = nil
         diagnostics.nextCommandSeq = nil
-        diagnostics.queueRevision = 0
-        diagnostics.queueSize = 0
+        diagnostics.queueRevision = queueState.revision
+        diagnostics.queueSize = queueState.items.count
         diagnostics.currentTrackHash = nil
         diagnostics.localDriftMs = nil
         diagnostics.peerDriftMs = nil
@@ -618,6 +657,13 @@ public actor SyncPlaybackCoordinator {
         switch frame {
         case .playback(let message): return await session.channel.send(message, authorizingGeneration: generation)
         case .queue(let message): return await session.channel.send(message, authorizingGeneration: generation)
+        // Phase 7's channel has no `authorizingGeneration` parameter of its own (ResyncRelay mirrors
+        // Manifest/AudioState's plain-`authenticatedWriter` pattern, not Playback/Voice's bound-writer
+        // one — see `ResyncRelay`'s doc comment) — but that is no longer where this frame's ordering
+        // safety comes from. `outboundUsable(generation)` above has already re-proved `stillCurrent`
+        // immediately before this call, on the one consumer that also does the writing, which is
+        // exactly the guarantee `authorizingGeneration` gives the other two cases by a different route.
+        case .resync(let message): return await resyncChannel?.send(message) ?? false
         }
     }
 
@@ -1052,6 +1098,11 @@ struct Phase5Outbound: Sendable {
     enum Frame: Sendable {
         case playback(PlaybackMessage)
         case queue(QueueMessage)
+        /// PROTOCOL §10 (Phase 7, ADR-028 Amendment): a `STATE_SNAPSHOT` answering a `STATE_REQUEST`.
+        /// Folded into this same enum, not a second outbound path, so it can never be written out of
+        /// order relative to a `QUEUE_SNAPSHOT`/`PLAYBACK_STATE` decided around the same time — the
+        /// exact hazard ADR-024 Amendment A1 Finding B closed for every other Phase 5 broadcast.
+        case resync(ResyncMessage)
     }
 
     let generation: Int64

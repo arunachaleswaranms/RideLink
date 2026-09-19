@@ -254,6 +254,87 @@ extension SyncPlaybackCoordinator {
         await resolvePendingPlay()
     }
 
+    // MARK: - Phase 7 resync (PROTOCOL §10, ADR-028)
+
+    /// PROTOCOL §10 (Phase 7, ADR-028 Amendment): the **leader**'s answer to a `STATE_REQUEST`,
+    /// constructed and handed to the ordered outbound path in **one step** — the same "read current
+    /// state, enqueue it with no `await` in between" discipline every other Phase 5 broadcast already
+    /// follows (ADR-024 Amendment A1 Finding B), extended to this phase's new frame type.
+    ///
+    /// Before this, `ResyncCoordinator` read this same state and sent it over a **second**,
+    /// independent channel — so a `QUEUE_SNAPSHOT`/`PLAYBACK_STATE` decided in between could reach the
+    /// wire on either side of it, and `adoptSnapshot`'s "wholesale, no merge algorithm" rule meant a
+    /// `STATE_SNAPSHOT` naming an **older** revision than one the follower had already adopted could
+    /// silently regress it. Folding this into `Phase5Outbound.Frame` closes the gap: whichever was
+    /// decided first is now guaranteed to be *written* first, on the one consumer that writes all
+    /// three frame kinds.
+    ///
+    /// `outboundAuthorityLost` is deliberately not re-checked here — `outboundUsable` checks it on
+    /// the one consumer immediately before the write, which is PROTOCOL §5 rule 9's "no further
+    /// `PLAYBACK_STATE`" applied to this frame too, without a second copy of the same guard.
+    func enqueueStateSnapshotReply(
+        generation: Int64,
+        leaderPeerId: PeerId,
+        manifestRevision: Int64,
+        transfersInFlight: [ResyncTransferInFlight]
+    ) async {
+        guard role == .leader else { return }
+        let estimate = await estimate()
+        let state = await player.playerState()
+        guard await stillCurrent(generation) else { return }
+        // No `await` between this proof and the enqueue below (Amendment A1/A5's pattern).
+        guard stillCurrentNow(generation) else { return }
+        let playback = estimate.map { est in
+            ResyncPlaybackSnapshot(
+                trackHash: timeline?.trackHash,
+                queueItemId: timeline?.queueItemId,
+                positionMs: max(state.positionMs, 0),
+                playing: state.playing,
+                atSessionUs: est.sessionUs(localMonoUs: monotonicNowUs())
+            )
+        }
+        let message = ResyncMessage.stateSnapshot(
+            leaderPeerId: leaderPeerId,
+            commandSeq: lastAppliedSeq ?? max(nextSeq - 1, 0),
+            queueRevision: queueState.revision,
+            playback: playback,
+            queueItems: queueState.items,
+            queueCurrentIndex: queueState.currentIndex,
+            manifestRevision: manifestRevision,
+            transfersInFlight: transfersInFlight
+        )
+        enqueueOutbound(Phase5Outbound(generation: generation, authority: .advisory, frame: .resync(message)))
+    }
+
+    /// PROTOCOL §10 (Phase 7, ADR-028): a **follower** reconciling against the leader's
+    /// `STATE_SNAPSHOT`. Deliberately not a new reconciliation algorithm — it translates the
+    /// snapshot's playback and queue portions into exactly the shapes `adoptSnapshot` and
+    /// `onPeerPlaybackState` already know how to reconcile (PROTOCOL §5's own cross-reference: a
+    /// `STATE_SNAPSHOT.playback` plus its envelope's `command_seq`/`queue_revision` **is** a
+    /// `PLAYBACK_STATE`), so every provenance, ownership, hold-gate and desync-clearing rule those
+    /// two functions already enforce applies here unchanged. This function invents no new authority
+    /// check of its own — `role != .follower` and the generation proof both live inside the two
+    /// calls below, exactly as they do for the wire messages this reuses. Mirrors Android's
+    /// `SyncPlaybackCoordinator.onStateSnapshot` exactly.
+    func onStateSnapshot(_ message: ResyncMessage, generation: Int64) async {
+        guard case .stateSnapshot(_, let commandSeq, let queueRevision, let playback, let queueItems, let queueCurrentIndex, _, _) = message else {
+            return
+        }
+        await adoptSnapshot(revision: queueRevision, items: queueItems, currentIndex: queueCurrentIndex, generation: generation)
+        await onPeerPlaybackState(
+            PlaybackStateSnapshotFields(
+                commandSeq: commandSeq,
+                queueRevision: queueRevision,
+                trackHash: playback?.trackHash,
+                queueItemId: playback?.queueItemId,
+                positionMs: playback?.positionMs ?? 0,
+                playing: playback?.playing ?? false,
+                atSessionUs: playback?.atSessionUs ?? 0
+            ),
+            generation: generation
+        )
+    }
+
     /// A follower's queue intent, arriving at the leader. Ordering and the stale-revision rule
     /// (PROTOCOL §5 rule 3) are applied here; the leader then serialises the mutation exactly as it
     /// would its own user's, which is what makes two simultaneous adds deterministic.
@@ -651,6 +732,7 @@ extension SyncPlaybackCoordinator {
         playbackDesynchronized = true
         queueDesynchronized = true
         publishDesynchronized()
+        onDesynchronizedTrigger?()
     }
 
     /// Publishes the latch. While it is set, `.desynchronized` is what the user sees; once it clears,

@@ -321,6 +321,24 @@ public actor ControlSessionManager {
         liveGeneration: { [weak self] in self?.liveAuthenticatedGeneration() }
     )
 
+    /// The PROTOCOL §10 half of the control plane (Phase 7, ADR-028): `STATE_REQUEST`/
+    /// `STATE_SNAPSHOT`, extracted for the same reason `manifest`/`transfer` are. Both types are
+    /// **absent** from `preAuthenticationFrameTypes`, exactly as `MANIFEST_*` is — an unpaired peer
+    /// never reaches authoritative session state.
+    public func resyncRelay() -> ResyncRelay { resync }
+
+    private lazy var resync: ResyncRelay = ResyncRelay(
+        localPeerId: localPeerId,
+        monotonicNowUs: monotonicNowUs,
+        nextSeq: { [seqCounter] in seqCounter.nextSeq() },
+        activeSessionId: { [weak self] in await self?.currentSessionId() ?? SessionId("n/a") },
+        authenticatedWriter: { [weak self] in await self?.authenticatedWriter() },
+        // ADR-025 §1: synchronous and non-isolated on purpose — a relay's `deliver` must never
+        // `await` into this actor just to ask which session is live. nil when this manager is gone,
+        // which matches no frame.
+        liveGeneration: { [weak self] in self?.liveAuthenticatedGeneration() }
+    )
+
     /// The `TRANSFER_*` half of the control plane (PROTOCOL §8.2) — the small negotiation messages
     /// only; the bulk byte stream itself never touches this class (ADR-023). Extracted for the same
     /// reason as `manifest`.
@@ -941,6 +959,9 @@ public actor ControlSessionManager {
             if ManifestMessageTypes.all.contains(envelope.type) {
                 await manifest.countPreAuthenticationDrop()
             }
+            if ResyncMessageTypes.all.contains(envelope.type) {
+                await resync.countPreAuthenticationDrop()
+            }
             if TransferMessageTypes.all.contains(envelope.type) {
                 await transfer.countPreAuthenticationDrop()
             }
@@ -1015,6 +1036,10 @@ public actor ControlSessionManager {
             ManifestMessageTypes.end, ManifestMessageTypes.abort:
             guard let generation = binding.generation else { return }
             await manifest.deliver(type: envelope.type, payload: envelope.payload, generation: generation)
+        // Reachable only past the guard above, so only for an authenticated peer (PROTOCOL §10).
+        case ResyncMessageTypes.stateRequest, ResyncMessageTypes.stateSnapshot:
+            guard let generation = binding.generation else { return }
+            await resync.deliver(type: envelope.type, payload: envelope.payload, generation: generation)
         // Reachable only past the guard above, so only for an authenticated peer (PROTOCOL §8.2).
         case TransferMessageTypes.request, TransferMessageTypes.offer, TransferMessageTypes.progress,
             TransferMessageTypes.result, TransferMessageTypes.cancel:
@@ -1275,6 +1300,7 @@ public actor ControlSessionManager {
         await voice.resetCounters()
         await audioState.resetCounters()
         await manifest.resetCounters()
+        await resync.resetCounters()
         await transfer.resetCounters()
         await playback.resetCounters()
         pendingActivation = nil

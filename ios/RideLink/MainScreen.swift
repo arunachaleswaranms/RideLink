@@ -53,6 +53,17 @@ struct MainScreen: View {
 
                 TransportBanner(transportLabel: coordinator.controlDiagnostics.transportLabel)
 
+                // FR-018 (Phase 7, ADR-028): the entry point into the simplified riding surface.
+                // Gated on `SessionFsm`'s own legality (`RideModePresentation.canStartRide` mirrors
+                // `.startRide`'s `CONNECTED`-only rule) and on local music actually existing — the
+                // button is never offered for a transition that would be rejected or a screen that
+                // has nothing to show.
+                if RideModePresentation.canStartRide(coordinator.state.status), case .success = music {
+                    Button("Start Ride") { coordinator.startRide() }
+                        .buttonStyle(.borderedProminent)
+                        .controlSize(.large)
+                }
+
                 if let alert = coordinator.securityAlert {
                     SecurityAlertCard(code: alert) { coordinator.dismissSecurityAlert() }
                 }
@@ -104,6 +115,8 @@ struct MainScreen: View {
                     localIdentityPrefix: coordinator.localIdentityPrefix
                 )
 
+                ResyncDiagnosticsCard(diagnostics: coordinator.resyncDiagnostics)
+
                 // Deliberately independent of `coordinator.state.status` — this phase's brief §28/
                 // §30: local music must be fully usable in airplane mode, with no peer, regardless
                 // of session state.
@@ -122,9 +135,35 @@ struct MainScreen: View {
         .onChange(of: scenePhase) { _, phase in
             coordinator.setAppForegroundVisible(phase == .active)
         }
+        // Visibility is *derived* from `SessionFsm`'s own `status`/`returnTo` every time either
+        // changes (`RideModePresentation.nextRideModeVisibility`, mirroring Android's
+        // `nextRideModeVisibility`) — `rideModeVisible` is one bit of memory of the FSM's own past
+        // output, not an independent decision (brief §19: UI state must never become an authority
+        // source). A naive `status == .rideActive` check would drop the rider back to this screen
+        // the instant an ordinary reconnect starts, since `status` becomes `.reconnecting` for up to
+        // PROTOCOL §10's 120 s budget — exactly the setup-screen bounce brief §15 forbids.
+        // `fullScreenCover`'s binding is read-only by construction: the only way out is
+        // `RideModeView`'s End Ride button, which goes through `coordinator.endRide()` and therefore
+        // through `SessionFsm` — never a swipe-to-dismiss short-circuiting the FSM.
+        .onChange(of: coordinator.state.status) { _, status in
+            rideModeVisible = RideModePresentation.nextRideModeVisibility(
+                previous: rideModeVisible, status: status, returnTo: coordinator.state.returnTo
+            )
+        }
+        .onAppear {
+            rideModeVisible = RideModePresentation.nextRideModeVisibility(
+                previous: rideModeVisible, status: coordinator.state.status, returnTo: coordinator.state.returnTo
+            )
+        }
+        .fullScreenCover(isPresented: .constant(rideModeVisible)) {
+            if case .success(let musicCoordinator) = music {
+                RideModeView(coordinator: coordinator, music: musicCoordinator, syncPlayback: syncPlayback)
+            }
+        }
     }
 
     @Environment(\.scenePhase) private var scenePhase
+    @State private var rideModeVisible = false
 
     /// Mirrors Android's `MainActivity.attemptPlaySharedTrackLocally`. Two cases, per closure-audit
     /// Finding G:
@@ -237,6 +276,46 @@ private struct SecurityAlertCard: View {
             "The peer's stated identity did not match its certificate. The connection was refused."
         default:
             "The connection was refused."
+        }
+    }
+}
+
+/// FR-023's Phase 7 half (PROTOCOL §10, ADR-028) — the developer diagnostics view's resync status,
+/// kept separate from `RideModeView`'s own passive indicator (brief §5's "detailed diagnostics
+/// remain in the developer diagnostics view").
+private struct ResyncDiagnosticsCard: View {
+    let diagnostics: ResyncDiagnostics
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Resync (Phase 7)").font(.headline)
+            diagnosticRow("request pending", "\(diagnostics.requestPending)")
+            diagnosticRow("reconnect requests", "\(diagnostics.reconnectRequestCount)")
+            diagnosticRow("desync requests", "\(diagnostics.desyncRequestCount)")
+            diagnosticRow("role violations", "\(diagnostics.roleViolationCount)")
+            diagnosticRow("last outcome", outcomeLabel(diagnostics.lastOutcome))
+            diagnosticRow("last snapshot manifest_revision", diagnostics.lastSnapshotManifestRevision.map(String.init) ?? "—")
+            diagnosticRow("last snapshot command_seq", diagnostics.lastSnapshotCommandSeq.map(String.init) ?? "—")
+        }
+        .padding(16)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.gray.opacity(0.1))
+        .cornerRadius(8)
+    }
+
+    private func outcomeLabel(_ outcome: ResyncOutcome) -> String {
+        switch outcome {
+        case .none: "none"
+        case .requested: "requested"
+        case .reconciled: "reconciled"
+        case .sendFailed: "send failed"
+        }
+    }
+
+    private func diagnosticRow(_ label: String, _ value: String) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(label).font(.caption).foregroundStyle(.secondary)
+            Text(value).font(.body)
         }
     }
 }
