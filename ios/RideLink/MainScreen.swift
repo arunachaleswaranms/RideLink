@@ -307,6 +307,7 @@ private struct ResyncDiagnosticsCard: View {
         switch outcome {
         case .none: "none"
         case .requested: "requested"
+        case .snapshotPending: "snapshot pending (clock/content not ready)"
         case .reconciled: "reconciled"
         case .sendFailed: "send failed"
         }

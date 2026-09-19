@@ -7,7 +7,10 @@ import RideLinkCore
 /// to know a test double exists.
 public protocol ResyncChannel: Sendable {
     func setSink(_ sink: (any ResyncSink)?) async
-    @discardableResult func send(_ message: ResyncMessage) async -> Bool
+    /// - Parameter generation: the authentication generation that authorised this frame
+    ///   (independent review, Blocker 1) — carried to `ResyncRelay.send` unchanged, never re-read
+    ///   live at the point of the write.
+    @discardableResult func send(_ message: ResyncMessage, generation: Int64) async -> Bool
 }
 
 /// `ResyncCoordinator`'s exact call surface on `ControlSessionManager`. Session **lifecycle** is
@@ -32,7 +35,9 @@ public struct ControlSessionResyncChannel: ResyncChannel {
     public func setSink(_ sink: (any ResyncSink)?) async { await manager.resyncRelay().setSink(sink) }
 
     @discardableResult
-    public func send(_ message: ResyncMessage) async -> Bool { await manager.resyncRelay().send(message) }
+    public func send(_ message: ResyncMessage, generation: Int64) async -> Bool {
+        await manager.resyncRelay().send(message, generation: generation)
+    }
 }
 
 /// Zero-behaviour-change wrapper — the app composition root's production call site.

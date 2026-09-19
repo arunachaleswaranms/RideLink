@@ -24,12 +24,21 @@ final class ResyncRelayTests: XCTestCase {
         live: @escaping @Sendable () -> Int64?,
         writer: @escaping @Sendable () async -> AuthenticatedFrameWriter?
     ) -> ResyncRelay {
+        makeRelay(live: live, writerFor: { _ in await writer() })
+    }
+
+    /// The generation-bound form: `writerFor` sees the `generation` `send` was called with, exactly
+    /// as the production `authenticatedWriterFor` supplier does.
+    private func makeRelay(
+        live: @escaping @Sendable () -> Int64?,
+        writerFor: @escaping @Sendable (Int64) async -> AuthenticatedFrameWriter?
+    ) -> ResyncRelay {
         ResyncRelay(
             localPeerId: SyncTestValues.leaderPeerId,
             monotonicNowUs: { 0 },
             nextSeq: { 1 },
             activeSessionId: { SessionId("session") },
-            authenticatedWriter: writer,
+            authenticatedWriterFor: writerFor,
             liveGeneration: live
         )
     }
@@ -88,7 +97,7 @@ final class ResyncRelayTests: XCTestCase {
 
     func testSendReturnsFalseWithNoAuthenticatedWriter() async {
         let relay = makeRelay(live: { 1 }, writer: { nil })
-        let sent = await relay.send(.stateRequest)
+        let sent = await relay.send(.stateRequest, generation: 1)
         XCTAssertFalse(sent)
     }
 
@@ -104,11 +113,45 @@ final class ResyncRelayTests: XCTestCase {
                 return true
             }
         }
-        let sent = await relay.send(.stateRequest)
+        let sent = await relay.send(.stateRequest, generation: 1)
         XCTAssertTrue(sent)
         XCTAssertEqual(1, log.writes.count)
         XCTAssertEqual(ResyncMessageTypes.stateRequest, log.writes.first?.type)
     }
+
+    // MARK: - Blocker 1 (independent review): outbound generation binding
+
+    /// The relay-level unit of the property `ReconnectResyncStressTests` proves end to end: a send
+    /// authorised under generation A must never be written once the writer supplier only answers for
+    /// B — `authenticatedWriterFor` is asked for **the generation `send` names**, not "the current
+    /// one", so a mismatch is a plain refusal with nothing written.
+    func testSendIsRefusedWhenTheWriterSupplierDoesNotRecogniseTheAuthorisingGeneration() async {
+        final class WriteLog: @unchecked Sendable {
+            private(set) var writes: [Envelope] = []
+            func record(_ envelope: Envelope) { writes.append(envelope) }
+        }
+        let log = WriteLog()
+        // The writer supplier answers only for generation 2 (B) — exactly `authenticatedWriterFor`'s
+        // real contract, where a generation mismatch against the one immutable `AuthenticatedConnection`
+        // record yields nil.
+        let relay = makeRelay(live: { 2 }, writerFor: { requested in
+            guard requested == 2 else { return nil }
+            return { envelope in log.record(envelope); return true }
+        })
+        let sentUnderA = await relay.send(.stateRequest, generation: 1)
+        XCTAssertFalse(sentUnderA, "a send authorised under a generation the writer supplier does not recognise must be refused")
+        XCTAssertEqual(0, log.writes.count, "nothing may be written for a refused send")
+        let outboundDrops = await relay.droppedRetiredGenerationOutbound()
+        XCTAssertEqual(1, outboundDrops)
+
+        let sentUnderB = await relay.send(.stateRequest, generation: 2)
+        XCTAssertTrue(sentUnderB, "the live generation's own send must still succeed after a prior refusal")
+        XCTAssertEqual(1, log.writes.count)
+    }
+    // The A→B async-gap race itself (a real AuthenticatedConnection record changing between the
+    // moment a send is authorised and the moment authenticatedWriterFor is actually called) needs a
+    // real ControlSessionManager to suspend across, not a hand-rolled closure at this unit level —
+    // that is ReconnectResyncStressTests' Cases A/B/C.
 
     func testPreAuthenticationDropsAreCountedSeparatelyFromRetiredGenerationDrops() async {
         let relay = makeRelay(live: { nil }, writer: { nil })

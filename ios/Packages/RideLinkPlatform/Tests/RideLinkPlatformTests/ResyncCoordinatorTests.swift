@@ -18,6 +18,10 @@ final class ResyncCoordinatorTests: XCTestCase {
     /// `FakeSyncSession`, because `ResyncCoordinator` does no clock or ordering work of its own.
     private actor FakeResyncSession: ResyncSessionPort {
         private(set) var sent: [ResyncMessage] = []
+        /// The generation each entry of `sent` was actually sent under (independent review,
+        /// Blocker 1) — kept alongside `sent` rather than replacing it, since most existing
+        /// assertions only care about message shape.
+        private(set) var sentGenerations: [Int64] = []
         private var sink: (any ResyncSink)?
         var generation: Int64 = 1
         /// `nonisolated(unsafe)` so `liveAuthenticatedGeneration()` can be `nonisolated` — mirroring
@@ -45,8 +49,13 @@ final class ResyncCoordinatorTests: XCTestCase {
             sink?.submit(message, generation: generation)
         }
 
-        fileprivate func record(_ message: ResyncMessage) -> Bool {
+        /// Mirrors `ResyncRelay.send`'s own generation-bound refusal (independent review, Blocker 1):
+        /// a send whose `generation` no longer matches what's live is refused before it is recorded
+        /// at all, exactly as the real `authenticatedWriterFor` supplier would return nil.
+        fileprivate func record(_ message: ResyncMessage, generation: Int64) -> Bool {
+            guard generation == liveGeneration else { return false }
             sent.append(message)
+            sentGenerations.append(generation)
             return sendResult
         }
 
@@ -54,7 +63,9 @@ final class ResyncCoordinatorTests: XCTestCase {
             let session: FakeResyncSession
             func setSink(_ sink: (any ResyncSink)?) async { await session.setSink(sink) }
             @discardableResult
-            func send(_ message: ResyncMessage) async -> Bool { await session.record(message) }
+            func send(_ message: ResyncMessage, generation: Int64) async -> Bool {
+                await session.record(message, generation: generation)
+            }
         }
     }
 

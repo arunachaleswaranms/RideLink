@@ -325,6 +325,11 @@ public actor ControlSessionManager {
     /// `STATE_SNAPSHOT`, extracted for the same reason `manifest`/`transfer` are. Both types are
     /// **absent** from `preAuthenticationFrameTypes`, exactly as `MANIFEST_*` is — an unpaired peer
     /// never reaches authoritative session state.
+    ///
+    /// Takes `authenticatedWriterFor`, not the unbound `authenticatedWriter` `manifest`/`transfer`
+    /// use (independent review, Blocker 1) — `STATE_SNAPSHOT` travels through the same ordered
+    /// outbound queue `playback` does, so it needs `voice`'s bound-writer treatment, not
+    /// `manifest`'s re-derived-per-session one.
     public func resyncRelay() -> ResyncRelay { resync }
 
     private lazy var resync: ResyncRelay = ResyncRelay(
@@ -332,7 +337,9 @@ public actor ControlSessionManager {
         monotonicNowUs: monotonicNowUs,
         nextSeq: { [seqCounter] in seqCounter.nextSeq() },
         activeSessionId: { [weak self] in await self?.currentSessionId() ?? SessionId("n/a") },
-        authenticatedWriter: { [weak self] in await self?.authenticatedWriter() },
+        authenticatedWriterFor: { [weak self] generation in
+            await self?.authenticatedWriter(for: generation)
+        },
         // ADR-025 §1: synchronous and non-isolated on purpose — a relay's `deliver` must never
         // `await` into this actor just to ask which session is live. nil when this manager is gone,
         // which matches no frame.

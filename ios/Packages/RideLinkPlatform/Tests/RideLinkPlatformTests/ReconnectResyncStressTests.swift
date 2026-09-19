@@ -56,6 +56,7 @@ final class ReconnectResyncStressTests: XCTestCase {
         let player: FakeSyncPlayer
         let content: FakeSyncContent
         let catalogue: FakeCatalogue
+        let routeState: FakeRouteState
 
         init(peer: TestPeer, clock: SharedTestClock) {
             testPeer = peer
@@ -64,6 +65,7 @@ final class ReconnectResyncStressTests: XCTestCase {
             player = FakeSyncPlayer()
             content = FakeSyncContent()
             catalogue = FakeCatalogue()
+            routeState = FakeRouteState()
             sync = SyncPlaybackCoordinator(
                 monotonicNowUs: { clock.next() },
                 localPeerId: peer.peerId,
@@ -71,7 +73,7 @@ final class ReconnectResyncStressTests: XCTestCase {
                 player: player,
                 content: content,
                 sleeper: MonotonicDeadlineSleeper(monotonicNowUs: { clock.next() }),
-                routeState: FakeRouteState(),
+                routeState: routeState,
                 nextQueueItemId: { UUID().uuidString }
             )
             resync = ResyncCoordinator(
@@ -512,6 +514,109 @@ final class ReconnectResyncStressTests: XCTestCase {
         await a.manager.shutdown()
     }
 
+    // MARK: - 3b: Blocker 1 (independent review) — outbound generation binding across a reconnect
+
+    /// Case A/C: a `STATE_SNAPSHOT` authorised under a generation that has since retired must never
+    /// reach the wire, and the live generation's own send must still succeed afterward.
+    ///
+    /// The fix (`ResyncRelay.send(_:generation:)`, bound to `authenticatedWriterFor`) closes the
+    /// window by construction rather than leaving one to race: every call re-resolves the writer
+    /// against the one immutable `AuthenticatedConnection` record at the instant it runs, so a
+    /// generation that has gone stale by *any* point before that call — whether via a genuine
+    /// concurrent suspension or, as here, a real reconnect that has already completed — is refused
+    /// identically. This is the same direct-injection technique this file already uses for the
+    /// inbound half (`resyncRelay().deliver(..., generation: staleGeneration)`), applied outbound.
+    func testAStateSnapshotAuthorisedByARetiredGenerationNeverReachesTheWireAndTheLiveGenerationsOwnSendStillSucceeds() async throws {
+        let clock = SharedTestClock(10_000_000)
+        let (a, b, aPort) = try await buildPersistentPair(clock: clock)
+        guard let staleAGeneration = a.manager.liveAuthenticatedGeneration() else { return XCTFail("no generation") }
+
+        try await reconnectCycle(a: a, b: b, aPort: aPort)
+        guard let liveAGeneration = a.manager.liveAuthenticatedGeneration() else { return XCTFail("no generation") }
+        XCTAssertNotEqual(staleAGeneration, liveAGeneration, "the reconnect must have actually retired the captured generation")
+
+        let staleSnapshot = ResyncMessage.stateSnapshot(
+            leaderPeerId: a.testPeer.peerId, commandSeq: 1, queueRevision: 0, playback: nil,
+            queueItems: [], queueCurrentIndex: nil, manifestRevision: 0, transfersInFlight: []
+        )
+        let sentUnderStaleA = await a.manager.resyncRelay().send(staleSnapshot, generation: staleAGeneration)
+        XCTAssertFalse(sentUnderStaleA, "a STATE_SNAPSHOT authorised under a retired generation must not reach the wire")
+        let outboundDrops = await a.manager.resyncRelay().droppedRetiredGenerationOutbound()
+        XCTAssertGreaterThan(outboundDrops, 0, "the refusal must be counted, not silent")
+
+        let freshSnapshot = ResyncMessage.stateSnapshot(
+            leaderPeerId: a.testPeer.peerId, commandSeq: 2, queueRevision: 0, playback: nil,
+            queueItems: [], queueCurrentIndex: nil, manifestRevision: 0, transfersInFlight: []
+        )
+        let sentUnderLiveA = await a.manager.resyncRelay().send(freshSnapshot, generation: liveAGeneration)
+        XCTAssertTrue(sentUnderLiveA, "the live generation's own send must succeed after a prior refusal — the fix must not also refuse the successor")
+
+        await b.manager.shutdown()
+        await a.manager.shutdown()
+    }
+
+    /// Case B: the same property for an item that was legitimately *admitted* onto the outbound
+    /// queue (passing `SyncPlaybackCoordinator`'s own upstream `stillCurrent` proof) before its
+    /// authorising generation retired — proving the queue is not wedged by the refusal, and a
+    /// following live-generation item still drains normally.
+    func testAQueuedStateSnapshotFromARetiredGenerationIsRefusedAtTheWireWithoutWedgingTheOutboundQueue() async throws {
+        let clock = SharedTestClock(10_500_000)
+        let (a, b, aPort) = try await buildPersistentPair(clock: clock)
+        guard let staleAGeneration = a.manager.liveAuthenticatedGeneration() else { return XCTFail("no generation") }
+
+        // Admitted while `staleAGeneration` was genuinely live — passes `enqueueStateSnapshotReply`'s
+        // own `stillCurrent` proof and reaches the real outbound queue under that generation.
+        await a.sync.enqueueStateSnapshotReply(
+            generation: staleAGeneration, leaderPeerId: a.testPeer.peerId, manifestRevision: 0, transfersInFlight: []
+        )
+
+        try await reconnectCycle(a: a, b: b, aPort: aPort)
+        guard let liveAGeneration = a.manager.liveAuthenticatedGeneration() else { return XCTFail("no generation") }
+        // The reconnect itself already auto-triggers a STATE_REQUEST from `onConnected` (a genuine
+        // round trip against `liveAGeneration`, unrelated to the stale item queued above under
+        // `staleAGeneration`). That request must settle *before* the desync trigger below — otherwise
+        // `StateResyncGate.onTrigger` correctly (and silently, from this test's perspective) dedupes
+        // the desync trigger as `.alreadyPending` against the still-outstanding reconnect request for
+        // the same live generation, and `desyncRequestCount` never increments — `triggerDesync`'s own
+        // poll then spins for the full ten seconds waiting for a trigger that was never going to fire.
+        // Root-caused by instrumenting a captured failure: `triggerDesync` itself timed out, not the
+        // assertion after it — the exact same "settle one lifetime's request before starting the
+        // next" class already fixed once in this file's fifty-cycle test.
+        try await poll(timeoutSeconds: 10) { !b.resync.diagnostics.requestPending }
+
+        // Whatever the queued item's fate (drained before or after the retirement), the outbound
+        // queue itself must not be wedged: a fresh, live-generation resync answer still gets through.
+        try await triggerDesync(b)
+        try await poll(timeoutSeconds: 10) { !b.resync.diagnostics.requestPending }
+        XCTAssertEqual(.reconciled, b.resync.diagnostics.lastOutcome, "a live-generation STATE_SNAPSHOT must still drain normally after an earlier item's generation retired")
+        _ = liveAGeneration
+
+        await b.manager.shutdown()
+        await a.manager.shutdown()
+    }
+
+    /// Case C, the follower-side mirror: the outbound `STATE_REQUEST` gets the identical binding —
+    /// a request authorised under a retired generation must not reach the wire, and the live
+    /// generation's own request still succeeds.
+    func testAStateRequestAuthorisedByARetiredGenerationNeverReachesTheWire() async throws {
+        let clock = SharedTestClock(11_000_000)
+        let (a, b, aPort) = try await buildPersistentPair(clock: clock)
+        guard let staleBGeneration = b.manager.liveAuthenticatedGeneration() else { return XCTFail("no generation") }
+
+        try await reconnectCycle(a: a, b: b, aPort: aPort)
+        guard let liveBGeneration = b.manager.liveAuthenticatedGeneration() else { return XCTFail("no generation") }
+        XCTAssertNotEqual(staleBGeneration, liveBGeneration)
+
+        let sentUnderStaleB = await b.manager.resyncRelay().send(.stateRequest, generation: staleBGeneration)
+        XCTAssertFalse(sentUnderStaleB, "a STATE_REQUEST authorised under a retired generation must not reach the wire")
+
+        let sentUnderLiveB = await b.manager.resyncRelay().send(.stateRequest, generation: liveBGeneration)
+        XCTAssertTrue(sentUnderLiveB, "the live generation's own STATE_REQUEST must still succeed")
+
+        await b.manager.shutdown()
+        await a.manager.shutdown()
+    }
+
     /// End Ride (`shutdown()`) while a `STATE_REQUEST` is outstanding, and separately while a
     /// snapshot has been admitted but not yet applied. Neither may crash, hang or leave a dangling
     /// `Task` that fires after the manager is gone.
@@ -693,6 +798,732 @@ final class ReconnectResyncStressTests: XCTestCase {
         XCTAssertEqual(0, a.resync.diagnostics.roleViolationCount)
         XCTAssertEqual(0, b.resync.diagnostics.roleViolationCount)
         XCTAssertFalse(b.resync.diagnostics.requestPending, "no wedged state after 100 cycles")
+
+        await b.manager.shutdown()
+        await a.manager.shutdown()
+    }
+
+    // MARK: - 6: command-sequence floor across a reconnect (independent review §14)
+
+    /// `resetForNewSession()` resets `lastAppliedSeq`/`nextSeq` on **every** session boundary, on
+    /// both sides symmetrically — so a fresh generation's floor genuinely starts from nothing applied
+    /// yet, not from a residual prior-generation value. The question this test answers empirically:
+    /// does that produce a divergence, or a rejected/misordered command, once a real command is
+    /// issued again after the reset?
+    ///
+    /// It does not, and the reasoning is provenance, not sequence-number bookkeeping:
+    /// `ReadFrameBinding`/ADR-025 already refuses any inbound frame authorised by a retired
+    /// generation regardless of what `command_seq` it carried, so a stale command from the *previous*
+    /// generation can never reach `CommandOrderGate`'s comparison under the new one to be mistaken
+    /// for a duplicate or a reorder — the two generations' sequence spaces never actually meet. The
+    /// leader reports its own truthful post-reset floor in the reconnect's own `STATE_SNAPSHOT`
+    /// (`emitStateSnapshot`/`enqueueStateSnapshotReply`'s `commandSeq: lastAppliedSeq ?? max(nextSeq - 1, 0)`),
+    /// and the follower adopts it wholesale (§10 rule 2) — so both sides agree on the fresh floor by
+    /// construction, not by coincidence.
+    func testCommandSequenceFloorResetsConsistentlyAcrossAReconnectWithNoRejectionOrDivergence() async throws {
+        let clock = SharedTestClock(12_000_000)
+        let (a, b, aPort) = try await buildPersistentPair(clock: clock)
+
+        // A real, generation-bound STATE_SNAPSHOT reporting a non-trivial pre-reconnect
+        // command_seq — resetting from zero would prove nothing. `enqueueStateSnapshotReply` is the
+        // same production path a real STATE_REQUEST answer goes through; only the *source* of the
+        // triggering request is substituted (direct delivery here, a real desync trigger everywhere
+        // else in this file) — deliberately avoiding `playSynchronized`'s own scheduled-deadline and
+        // content-availability machinery, which this property does not depend on.
+        guard let genBefore = a.manager.liveAuthenticatedGeneration() else { return XCTFail("no generation") }
+        let firstSnapshot = ResyncCodec.encode(.stateSnapshot(
+            leaderPeerId: a.testPeer.peerId, commandSeq: 42, queueRevision: 1, playback: nil,
+            queueItems: [], queueCurrentIndex: nil, manifestRevision: 0, transfersInFlight: []
+        ))
+        await b.manager.resyncRelay().deliver(type: ResyncMessageTypes.stateSnapshot, payload: firstSnapshot, generation: genBefore)
+        try await poll { await b.sync.diagnostics.lastReceivedCommandSeq == 42 }
+
+        try await reconnectCycle(a: a, b: b, aPort: aPort)
+        try await poll(timeoutSeconds: 10) { !a.resync.diagnostics.requestPending && !b.resync.diagnostics.requestPending }
+
+        // `resetForNewSession()` on both sides clears `lastReceivedSeq`/`lastAppliedSeq`/`nextSeq`
+        // symmetrically, and the reconnect's own auto-triggered STATE_REQUEST/STATE_SNAPSHOT round
+        // trip already re-agreed on a floor by the time `requestPending` cleared above (the real
+        // leader's `emitStateSnapshot`/`enqueueStateSnapshotReply` truthfully reports its own
+        // post-reset `commandSeq: lastAppliedSeq ?? max(nextSeq - 1, 0)` — 0, since nothing has been
+        // decided yet in the new generation). The follower's `lastReceivedCommandSeq` must reflect
+        // that fresh floor, never the pre-reconnect value of 42 straddling the boundary.
+        let bReceivedAfterReconnect = await b.sync.diagnostics.lastReceivedCommandSeq
+        XCTAssertNotEqual(42, bReceivedAfterReconnect, "the pre-reconnect floor must not survive the reset")
+
+        // A fresh, live-generation STATE_SNAPSHOT reporting a *low* command_seq (1) — exactly what a
+        // real post-reconnect leader with nothing yet decided in the new generation would report —
+        // must be accepted normally, never refused as a stale/duplicate replay of the pre-reconnect
+        // sequence space (which reached 42). This is the crux of §14: the reset does not create a
+        // window where a legitimately fresh, *lower* number gets rejected against a stale, *higher*
+        // one left over from the previous generation.
+        guard let genAfter = a.manager.liveAuthenticatedGeneration() else { return XCTFail("no generation") }
+        XCTAssertNotEqual(genBefore, genAfter, "the reconnect must have actually produced a new generation")
+        let bStaleBefore = await b.sync.diagnostics.staleCommandCount
+        let bDuplicateBefore = await b.sync.diagnostics.duplicateCommandCount
+        let secondSnapshot = ResyncCodec.encode(.stateSnapshot(
+            leaderPeerId: a.testPeer.peerId, commandSeq: 1, queueRevision: 1, playback: nil,
+            queueItems: [], queueCurrentIndex: nil, manifestRevision: 0, transfersInFlight: []
+        ))
+        await b.manager.resyncRelay().deliver(type: ResyncMessageTypes.stateSnapshot, payload: secondSnapshot, generation: genAfter)
+        try await poll { await b.sync.diagnostics.lastReceivedCommandSeq == 1 }
+        let bStaleAfter = await b.sync.diagnostics.staleCommandCount
+        let bDuplicateAfter = await b.sync.diagnostics.duplicateCommandCount
+        XCTAssertEqual(bStaleBefore, bStaleAfter, "a fresh generation's low command_seq must not be refused as stale against the pre-reconnect high-water mark")
+        XCTAssertEqual(bDuplicateBefore, bDuplicateAfter)
+        XCTAssertEqual(0, a.resync.diagnostics.roleViolationCount)
+        XCTAssertEqual(0, b.resync.diagnostics.roleViolationCount)
+
+        await b.manager.shutdown()
+        await a.manager.shutdown()
+    }
+
+    // MARK: - 7: content-unavailable STATE_SNAPSHOT (independent review §22)
+
+    /// A `STATE_SNAPSHOT` naming a track the follower cannot resolve locally must request the
+    /// transfer (PROTOCOL §5 rule 4 — "do not start, request the transfer, let the leader
+    /// reschedule") and must **not** be reported as reconciled: `restoreFromPlaybackState` used to
+    /// call `applyPlay` (which already, correctly, called `content.requestTransfer`) and then
+    /// unconditionally return `.applied` regardless of whether `applyPlay` actually started
+    /// anything — so a content-unavailable snapshot cleared `pendingRequestGeneration` and reported
+    /// `.reconciled` up through `ResyncCoordinator`, exactly the class of bug Android's fork found
+    /// independently on its side (a resync-deferral path that under-reported its own outcome). Fixed
+    /// by giving `applyPlay` an honest `Bool` return and adding `.deferredContent` to
+    /// `StateSnapshotOutcome`.
+    func testAStateSnapshotNamingUnresolvableContentRequestsTheTransferAndIsNeverFalselyReportedAsReconciled() async throws {
+        let clock = SharedTestClock(14_000_000)
+        let (a, b, _) = try await buildPersistentPair(clock: clock)
+        guard let generation = a.manager.liveAuthenticatedGeneration() else { return XCTFail("no generation") }
+
+        // Deliberately never added to `b.content` via `addLocal` — this is the "follower does not
+        // have it yet" case PROTOCOL §5 rule 4 exists for.
+        let unresolvableHash = SyncTestValues.hash(777)
+        let snapshot = ResyncCodec.encode(.stateSnapshot(
+            leaderPeerId: a.testPeer.peerId, commandSeq: 1, queueRevision: 1,
+            playback: ResyncPlaybackSnapshot(
+                trackHash: unresolvableHash, queueItemId: SyncTestValues.ulid(777), positionMs: 5_000,
+                playing: true, atSessionUs: 0
+            ),
+            queueItems: [], queueCurrentIndex: nil, manifestRevision: 0, transfersInFlight: []
+        ))
+        await b.manager.resyncRelay().deliver(type: ResyncMessageTypes.stateSnapshot, payload: snapshot, generation: generation)
+
+        try await poll(timeoutSeconds: 10) { await b.content.transferRequests.contains(unresolvableHash) }
+
+        // The outcome must be honestly reported as still-pending, never as a completed
+        // reconciliation the peer never actually reached.
+        try await poll(timeoutSeconds: 10) { b.resync.diagnostics.lastOutcome != .none }
+        XCTAssertEqual(.snapshotPending, b.resync.diagnostics.lastOutcome, "content-unavailable must not be reported as .reconciled")
+
+        // No player effect must have happened on the strength of a snapshot naming content this
+        // device cannot yet play.
+        let calls = await b.player.calls
+        XCTAssertFalse(calls.contains(.start), "must never start playback for content the follower cannot resolve")
+        XCTAssertFalse(calls.contains(where: { if case .seek = $0 { return true } else { return false } }), "must never seek before the track is even loadable")
+
+        // Making the content available and re-delivering the identical snapshot must now let it
+        // through normally, with no infinite retry loop (exactly one further transfer request, not a
+        // growing backlog of duplicates for the same hash).
+        await b.content.addLocal(unresolvableHash)
+        await b.manager.resyncRelay().deliver(type: ResyncMessageTypes.stateSnapshot, payload: snapshot, generation: generation)
+        try await poll(timeoutSeconds: 10) { await b.player.calls.contains(.start) }
+        let requestsAfterResolution = await b.content.transferRequests
+        XCTAssertEqual(1, requestsAfterResolution.filter { $0 == unresolvableHash }.count, "a resolvable re-delivery must not request the transfer again")
+        XCTAssertEqual(0, a.resync.diagnostics.roleViolationCount)
+        XCTAssertEqual(0, b.resync.diagnostics.roleViolationCount)
+
+        await b.manager.shutdown()
+        await a.manager.shutdown()
+    }
+
+    // MARK: - 8: end-to-end reconnect reconstruction scenarios (independent review Blocker 2)
+
+    /// A session time guaranteed to already be due by the time `MonotonicDeadlineSleeper` checks
+    /// it: `localMonoUs: 0` maps, through the follower's own offset, to a session instant that is
+    /// always strictly older than `SharedTestClock`'s ever-increasing counter (which starts well
+    /// above zero and only grows) — so a scheduled `.start` fires on the very first check, with no
+    /// dependency on the synthetic clock's rate of advance. Learned the hard way in Section 14: a
+    /// deadline that depends on the sleeper's own iterative convergence is fragile in this harness.
+    private func alreadyDueSessionUs(for rig: RideRig) async -> Int64 {
+        let offset = await rig.manager.sessionClockEstimate()?.offsetToLeaderUs ?? 0
+        return SessionClock.sessionUs(localMonoUs: 0, offsetToLeaderUs: offset)
+    }
+
+    /// The leader's authoritative track changed **during** the outage (this device never saw an
+    /// intermediate command for it — only the reconnect's own `STATE_SNAPSHOT` reports it). Genuine
+    /// convergence, not merely a wire round trip: the real `SyncPlayerPort` calls the follower's
+    /// player actually received, in order, and the diagnostics identity the reconciliation leaves
+    /// behind.
+    func testAReconnectWhoseLeaderChangedTrackDuringTheOutageConvergesTheFollowersRealPlayerCallsToTheNewTrack() async throws {
+        let clock = SharedTestClock(20_000_000)
+        let (a, b, aPort) = try await buildPersistentPair(clock: clock)
+
+        let trackX = SyncTestValues.hash(1)
+        let trackY = SyncTestValues.hash(2)
+        await b.content.addLocal(trackX)
+        await b.content.addLocal(trackY)
+
+        guard let genBefore = a.manager.liveAuthenticatedGeneration() else { return XCTFail("no generation") }
+        let beforeOutageSnapshot = ResyncCodec.encode(.stateSnapshot(
+            leaderPeerId: a.testPeer.peerId, commandSeq: 1, queueRevision: 1,
+            playback: ResyncPlaybackSnapshot(
+                trackHash: trackX, queueItemId: SyncTestValues.ulid(1), positionMs: 1_000,
+                playing: true, atSessionUs: await alreadyDueSessionUs(for: b)
+            ),
+            queueItems: [], queueCurrentIndex: nil, manifestRevision: 0, transfersInFlight: []
+        ))
+        await b.manager.resyncRelay().deliver(type: ResyncMessageTypes.stateSnapshot, payload: beforeOutageSnapshot, generation: genBefore)
+        try await poll(timeoutSeconds: 10) { await b.player.calls.contains(.start) }
+        let trackHashBeforeOutage = await b.sync.diagnostics.currentTrackHash
+        XCTAssertEqual(trackX, trackHashBeforeOutage, "must be genuinely playing X before the outage, not merely told to")
+
+        // The link dies and comes back — `resetForNewSession` clears `timeline`, and the reconnect's
+        // own real auto-triggered STATE_REQUEST/STATE_SNAPSHOT round trip settles first (the real
+        // leader honestly reports nothing loaded, since this harness never plays anything on `a`
+        // itself). Waiting for it to settle **deterministically** — rather than racing a second,
+        // synthetic snapshot against it under the same generation — is what makes the *next* step a
+        // realistic model of "the leader's authoritative state changed mid-ride", not an artifact of
+        // two unsolicited snapshots arriving for one generation (which `pendingRequestGeneration`
+        // correctly does not track, since PROTOCOL §10 never sends an unsolicited one).
+        try await reconnectCycle(a: a, b: b, aPort: aPort)
+        guard let genAfter = a.manager.liveAuthenticatedGeneration() else { return XCTFail("no generation") }
+        XCTAssertNotEqual(genBefore, genAfter)
+        try await poll(timeoutSeconds: 10) { !b.resync.diagnostics.requestPending }
+
+        // A real desync trigger — the same production callback an ingress overflow fires — opens a
+        // genuine, generation-matched pending request, so the injected answer below is a faithful
+        // stand-in for "the leader's real STATE_SNAPSHOT answer now names a different track", not an
+        // unsolicited push.
+        try await triggerDesync(b)
+
+        await b.player.clearCalls()
+        let afterOutageSnapshot = ResyncCodec.encode(.stateSnapshot(
+            leaderPeerId: a.testPeer.peerId, commandSeq: 1, queueRevision: 1,
+            playback: ResyncPlaybackSnapshot(
+                trackHash: trackY, queueItemId: SyncTestValues.ulid(2), positionMs: 42_000,
+                playing: true, atSessionUs: await alreadyDueSessionUs(for: b)
+            ),
+            queueItems: [], queueCurrentIndex: nil, manifestRevision: 0, transfersInFlight: []
+        ))
+        await b.manager.resyncRelay().deliver(type: ResyncMessageTypes.stateSnapshot, payload: afterOutageSnapshot, generation: genAfter)
+        try await poll(timeoutSeconds: 10) { await b.player.calls.contains(.start) }
+
+        // The real player calls, in order — not merely "some outcome enum came back applied".
+        let calls = await b.player.calls
+        XCTAssertEqual(
+            [.select(trackY), .load(trackY), .seek(42_000), .start], calls,
+            "reconciliation onto a changed track must pre-roll and seek the new track exactly, and only then start"
+        )
+        let trackHashAfterConvergence = await b.sync.diagnostics.currentTrackHash
+        XCTAssertEqual(trackY, trackHashAfterConvergence, "diagnostics must report the converged identity, not the pre-outage one")
+
+        // Not asserted here: `ResyncCoordinator.diagnostics.lastOutcome == .reconciled`. This test's
+        // synthetic injected answer races the real leader's own honest (nothing-loaded) answer to
+        // `triggerDesync`'s genuine `STATE_REQUEST` for the same generation — a situation PROTOCOL
+        // §10 never actually produces (exactly one `STATE_SNAPSHOT` answers exactly one
+        // `STATE_REQUEST`), so `pendingRequestGeneration` legitimately tracks whichever answer wins
+        // the race, not necessarily this one. What the review actually asked to strengthen —
+        // genuine convergence of the follower's real player and diagnostics identity — is asserted
+        // above, and it is unaffected by which of the two answers `ResyncCoordinator` credited.
+        XCTAssertEqual(0, a.resync.diagnostics.roleViolationCount)
+        XCTAssertEqual(0, b.resync.diagnostics.roleViolationCount)
+
+        await b.manager.shutdown()
+        await a.manager.shutdown()
+    }
+
+    /// The leader's authoritative state after reconnect is **paused** — the follower must load and
+    /// seek to the authoritative position but must never start playback on the strength of a snapshot
+    /// that says the leader is not playing.
+    func testAReconnectWhoseLeaderIsAuthoritativelyPausedNeverStartsTheFollowersPlayer() async throws {
+        let clock = SharedTestClock(21_000_000)
+        let (a, b, aPort) = try await buildPersistentPair(clock: clock)
+        let track = SyncTestValues.hash(3)
+        await b.content.addLocal(track)
+
+        try await reconnectCycle(a: a, b: b, aPort: aPort)
+        guard let generation = a.manager.liveAuthenticatedGeneration() else { return XCTFail("no generation") }
+        // Let the reconnect's own real auto-triggered STATE_REQUEST/STATE_SNAPSHOT round trip settle
+        // deterministically before injecting the paused answer — otherwise the two race under the
+        // same generation and the assertion below could see whichever's player calls landed first.
+        try await poll(timeoutSeconds: 10) { !b.resync.diagnostics.requestPending }
+        try await triggerDesync(b)
+        await b.player.clearCalls()
+
+        let pausedSnapshot = ResyncCodec.encode(.stateSnapshot(
+            leaderPeerId: a.testPeer.peerId, commandSeq: 1, queueRevision: 1,
+            playback: ResyncPlaybackSnapshot(
+                trackHash: track, queueItemId: SyncTestValues.ulid(3), positionMs: 17_500,
+                playing: false, atSessionUs: await alreadyDueSessionUs(for: b)
+            ),
+            queueItems: [], queueCurrentIndex: nil, manifestRevision: 0, transfersInFlight: []
+        ))
+        await b.manager.resyncRelay().deliver(type: ResyncMessageTypes.stateSnapshot, payload: pausedSnapshot, generation: generation)
+
+        try await poll(timeoutSeconds: 10) { await b.player.calls.contains(.seek(17_500)) }
+        // Nothing schedules a start for a paused snapshot, so there is no later event to wait for —
+        // settle on the one this reconciliation actually produces, then assert the negative.
+        let calls = await b.player.calls
+        XCTAssertEqual([.select(track), .load(track), .seek(17_500)], calls, "a paused reconciliation pre-rolls and seeks, and does nothing else")
+        XCTAssertFalse(calls.contains(.start), "must never start playback the leader has not authorised")
+        let trackHashAfterPause = await b.sync.diagnostics.currentTrackHash
+        XCTAssertEqual(track, trackHashAfterPause)
+
+        await b.manager.shutdown()
+        await a.manager.shutdown()
+    }
+
+    /// The leader's authoritative state names **no track at all** — PROTOCOL §10/ADR-024 §4's
+    /// representable "nothing is loaded". Exercised both ways the wire can say it (`playback: nil`,
+    /// meaning the leader has never had a synchronised timeline this session, and an explicit
+    /// `trackHash: nil` playback record) to confirm both collapse to the identical, correct local
+    /// effect through `onStateSnapshot`'s translation — matching the review's request to distinguish
+    /// "genuinely nothing loaded" from "cleared by the reconnect itself" rather than assuming they
+    /// coincide.
+    func testAReconnectWhoseLeaderHasNothingLoadedNeverStartsOrLeavesAStaleTrackIdentityBehind() async throws {
+        let clock = SharedTestClock(22_000_000)
+        let (a, b, aPort) = try await buildPersistentPair(clock: clock)
+        let track = SyncTestValues.hash(4)
+        await b.content.addLocal(track)
+
+        // Establish a real prior identity first, so "nothing loaded" is a genuine transition away
+        // from something, not merely the untouched default.
+        guard let genBefore = a.manager.liveAuthenticatedGeneration() else { return XCTFail("no generation") }
+        let priorSnapshot = ResyncCodec.encode(.stateSnapshot(
+            leaderPeerId: a.testPeer.peerId, commandSeq: 1, queueRevision: 1,
+            playback: ResyncPlaybackSnapshot(
+                trackHash: track, queueItemId: SyncTestValues.ulid(4), positionMs: 3_000,
+                playing: true, atSessionUs: await alreadyDueSessionUs(for: b)
+            ),
+            queueItems: [], queueCurrentIndex: nil, manifestRevision: 0, transfersInFlight: []
+        ))
+        await b.manager.resyncRelay().deliver(type: ResyncMessageTypes.stateSnapshot, payload: priorSnapshot, generation: genBefore)
+        try await poll(timeoutSeconds: 10) { await b.player.calls.contains(.start) }
+        let trackHashAfterPrior = await b.sync.diagnostics.currentTrackHash
+        XCTAssertEqual(track, trackHashAfterPrior)
+
+        try await reconnectCycle(a: a, b: b, aPort: aPort)
+        guard let genAfter = a.manager.liveAuthenticatedGeneration() else { return XCTFail("no generation") }
+
+        // Case 1: `playback: nil` — the leader has never had a synchronised timeline this session.
+        await b.player.clearCalls()
+        let neverHadOne = ResyncCodec.encode(.stateSnapshot(
+            leaderPeerId: a.testPeer.peerId, commandSeq: 0, queueRevision: 1, playback: nil,
+            queueItems: [], queueCurrentIndex: nil, manifestRevision: 0, transfersInFlight: []
+        ))
+        await b.manager.resyncRelay().deliver(type: ResyncMessageTypes.stateSnapshot, payload: neverHadOne, generation: genAfter)
+        try await poll(timeoutSeconds: 10) { await b.sync.diagnostics.currentTrackHash == nil }
+        var calls = await b.player.calls
+        XCTAssertTrue(calls.isEmpty, "a snapshot the leader never populated must not touch the player at all")
+
+        // Re-establish an identity, then reconnect again and use the second wire shape: an explicit
+        // `trackHash: nil` playback record — the leader *did* have a timeline this session and it
+        // authoritatively says nothing is loaded.
+        guard let genReestablish = a.manager.liveAuthenticatedGeneration() else { return XCTFail("no generation") }
+        let reestablishSnapshot = ResyncCodec.encode(.stateSnapshot(
+            leaderPeerId: a.testPeer.peerId, commandSeq: 1, queueRevision: 1,
+            playback: ResyncPlaybackSnapshot(
+                trackHash: track, queueItemId: SyncTestValues.ulid(4), positionMs: 3_000,
+                playing: true, atSessionUs: await alreadyDueSessionUs(for: b)
+            ),
+            queueItems: [], queueCurrentIndex: nil, manifestRevision: 0, transfersInFlight: []
+        ))
+        await b.manager.resyncRelay().deliver(type: ResyncMessageTypes.stateSnapshot, payload: reestablishSnapshot, generation: genReestablish)
+        try await poll(timeoutSeconds: 10) { await b.player.calls.contains(.start) }
+
+        try await reconnectCycle(a: a, b: b, aPort: aPort)
+        guard let genFinal = a.manager.liveAuthenticatedGeneration() else { return XCTFail("no generation") }
+        await b.player.clearCalls()
+        let explicitlyNothing = ResyncCodec.encode(.stateSnapshot(
+            leaderPeerId: a.testPeer.peerId, commandSeq: 1, queueRevision: 1,
+            playback: ResyncPlaybackSnapshot(trackHash: nil, queueItemId: nil, positionMs: 0, playing: false, atSessionUs: 0),
+            queueItems: [], queueCurrentIndex: nil, manifestRevision: 0, transfersInFlight: []
+        ))
+        await b.manager.resyncRelay().deliver(type: ResyncMessageTypes.stateSnapshot, payload: explicitlyNothing, generation: genFinal)
+        try await poll(timeoutSeconds: 10) { await b.sync.diagnostics.currentTrackHash == nil }
+        calls = await b.player.calls
+        XCTAssertTrue(calls.isEmpty, "an explicit 'nothing loaded' authoritative record must not touch the player either — both wire shapes converge identically")
+        XCTAssertEqual(0, a.resync.diagnostics.roleViolationCount)
+        XCTAssertEqual(0, b.resync.diagnostics.roleViolationCount)
+
+        await b.manager.shutdown()
+        await a.manager.shutdown()
+    }
+
+    // MARK: - 9: independent-review races 3-7 (retained-snapshot ownership under further reconnects/teardown)
+
+    /// **Scoping, disclosed rather than faked.** Races 3-6 below need a `STATE_SNAPSHOT` genuinely
+    /// retained (Section 22's mechanism), and Android's equivalents force that by setting a fake
+    /// clock estimate directly. iOS's `ControlSessionManager`/`SessionClockTracker` pair is real and
+    /// exposes no such seam — its clock becomes ready from a real burst of PING/PONG round trips over
+    /// the real loopback TLS connection, which converges too fast and too unpredictably (confirmed
+    /// empirically: sometimes ready before the very next line of test code runs, sometimes not) to
+    /// use as a deterministic trigger. Content-unavailability is used instead: `applyPeerPlaybackState`
+    /// (the fix above) puts *both* preconditions — clock readiness and content availability — through
+    /// the identical `deferredEvents`/drain machinery, so a track deliberately never added to
+    /// `FakeSyncContent` retains, discards, replays and drains exactly as a clock-not-ready one would.
+    /// The property under test — ownership, exactly-once application, duplicate handling, teardown —
+    /// is about that shared machinery, not about which precondition happened to be missing.
+
+    /// Race 3. A snapshot retained for generation B must be provably inert once generation C
+    /// authenticates — not merely superseded in place, but discarded outright by `resetForNewSession`,
+    /// the same guarantee rule 23's negotiation-ownership story gives Phase 2's voice tables, applied
+    /// here to a reconciliation snapshot instead.
+    func testASnapshotRetainedForGenerationBIsInertOnceGenerationCAuthenticates() async throws {
+        let clock = SharedTestClock(30_000_000)
+        let (a, b, aPort) = try await buildPersistentPair(clock: clock)
+        let trackX = SyncTestValues.hash(100)
+        let trackY = SyncTestValues.hash(101) // deliberately never added — B's retained content
+        let trackZ = SyncTestValues.hash(102)
+        await b.content.addLocal(trackX)
+        await b.content.addLocal(trackZ)
+
+        guard let genA = a.manager.liveAuthenticatedGeneration() else { return XCTFail("no generation") }
+        let snapshotX = ResyncCodec.encode(.stateSnapshot(
+            leaderPeerId: a.testPeer.peerId, commandSeq: 1, queueRevision: 1,
+            playback: ResyncPlaybackSnapshot(
+                trackHash: trackX, queueItemId: SyncTestValues.ulid(100), positionMs: 1_000,
+                playing: true, atSessionUs: await alreadyDueSessionUs(for: b)
+            ),
+            queueItems: [], queueCurrentIndex: nil, manifestRevision: 0, transfersInFlight: []
+        ))
+        await b.manager.resyncRelay().deliver(type: ResyncMessageTypes.stateSnapshot, payload: snapshotX, generation: genA)
+        try await poll(timeoutSeconds: 10) { await b.player.calls.contains(.start) }
+
+        // Generation B: reconnect, then deliver a snapshot naming content the follower does not have
+        // — retained pending the transfer. The leader also "moves" while disconnected, so a leaked B
+        // effect would show up as the wrong track, not merely "any track at all".
+        try await reconnectCycle(a: a, b: b, aPort: aPort)
+        guard let genB = a.manager.liveAuthenticatedGeneration() else { return XCTFail("no generation") }
+        XCTAssertNotEqual(genA, genB)
+        await b.player.clearCalls()
+        let snapshotY = ResyncCodec.encode(.stateSnapshot(
+            leaderPeerId: a.testPeer.peerId, commandSeq: 1, queueRevision: 1,
+            playback: ResyncPlaybackSnapshot(
+                trackHash: trackY, queueItemId: SyncTestValues.ulid(101), positionMs: 2_000,
+                playing: true, atSessionUs: await alreadyDueSessionUs(for: b)
+            ),
+            queueItems: [], queueCurrentIndex: nil, manifestRevision: 0, transfersInFlight: []
+        ))
+        await b.manager.resyncRelay().deliver(type: ResyncMessageTypes.stateSnapshot, payload: snapshotY, generation: genB)
+        try await poll(timeoutSeconds: 10) { await b.content.transferRequests.contains(trackY) }
+        let deferredAfterB = await b.sync.diagnostics.deferredCommandCount
+        XCTAssertGreaterThan(deferredAfterB, 0, "generation B's snapshot is genuinely retained, owned by generation B")
+        let callsAfterB = await b.player.calls
+        XCTAssertFalse(callsAfterB.contains(.start), "must not start on the retained track while it is still unresolvable")
+
+        // Generation C authenticates before B's content ever verifies.
+        try await reconnectCycle(a: a, b: b, aPort: aPort)
+        guard let genC = a.manager.liveAuthenticatedGeneration() else { return XCTFail("no generation") }
+        XCTAssertNotEqual(genB, genC)
+        let snapshotZ = ResyncCodec.encode(.stateSnapshot(
+            leaderPeerId: a.testPeer.peerId, commandSeq: 1, queueRevision: 1,
+            playback: ResyncPlaybackSnapshot(
+                trackHash: trackZ, queueItemId: SyncTestValues.ulid(102), positionMs: 3_000,
+                playing: true, atSessionUs: await alreadyDueSessionUs(for: b)
+            ),
+            queueItems: [], queueCurrentIndex: nil, manifestRevision: 0, transfersInFlight: []
+        ))
+        await b.manager.resyncRelay().deliver(type: ResyncMessageTypes.stateSnapshot, payload: snapshotZ, generation: genC)
+        try await poll(timeoutSeconds: 10) { await b.player.calls.contains(.start) }
+
+        let calls = await b.player.calls
+        XCTAssertFalse(calls.contains(.select(trackY)), "B's retained snapshot must never surface, even after C converges")
+        let trackHashFinal = await b.sync.diagnostics.currentTrackHash
+        XCTAssertEqual(trackZ, trackHashFinal, "converged on C's authoritative track, never B's stale one")
+        let deferredAfterC = await b.sync.diagnostics.deferredCommandCount
+        XCTAssertEqual(0, deferredAfterC, "B's held snapshot was discarded outright by C's resetForNewSession, not merely superseded in place")
+
+        // Even if B's content were hypothetically to verify now, there is nothing left to drain.
+        await b.content.completeTransfer(trackY)
+        try await Task.yield()
+        try await Task.yield()
+        let callsAfterLateResolution = await b.player.calls
+        XCTAssertFalse(callsAfterLateResolution.contains(.select(trackY)), "no belated player effect from B's retained snapshot ever arrives")
+
+        await b.manager.shutdown()
+        await a.manager.shutdown()
+    }
+
+    /// Race 4. A retained snapshot applies exactly once when it becomes resolvable — one genuine
+    /// restore, never one per retry tick.
+    func testARetainedSnapshotAppliesExactlyOnceWhenItBecomesResolvableNeverOncePerRetryTick() async throws {
+        let clock = SharedTestClock(31_000_000)
+        let (a, b, aPort) = try await buildPersistentPair(clock: clock)
+        let track = SyncTestValues.hash(110)
+        // Deliberately not added yet.
+
+        try await reconnectCycle(a: a, b: b, aPort: aPort)
+        guard let generation = a.manager.liveAuthenticatedGeneration() else { return XCTFail("no generation") }
+        await b.player.clearCalls()
+        let snapshot = ResyncCodec.encode(.stateSnapshot(
+            leaderPeerId: a.testPeer.peerId, commandSeq: 1, queueRevision: 1,
+            playback: ResyncPlaybackSnapshot(
+                trackHash: track, queueItemId: SyncTestValues.ulid(110), positionMs: 500,
+                playing: true, atSessionUs: await alreadyDueSessionUs(for: b)
+            ),
+            queueItems: [], queueCurrentIndex: nil, manifestRevision: 0, transfersInFlight: []
+        ))
+        await b.manager.resyncRelay().deliver(type: ResyncMessageTypes.stateSnapshot, payload: snapshot, generation: generation)
+        try await poll(timeoutSeconds: 10) { await b.content.transferRequests.contains(track) }
+        let deferredRightAfter = await b.sync.diagnostics.deferredCommandCount
+        XCTAssertGreaterThan(deferredRightAfter, 0, "retained pending the transfer")
+
+        // The transfer verifies — the prompt `content.observeAvailability` trigger (the fix above)
+        // applies it immediately, rather than waiting out the periodic retry interval.
+        await b.content.completeTransfer(track)
+        try await poll(timeoutSeconds: 10) { await b.player.calls.contains(.select(track)) }
+        let selectCount = await b.player.calls.filter { $0 == .select(track) }.count
+        XCTAssertEqual(1, selectCount, "exactly one genuine restore from the retained snapshot's single application")
+        // The strongest available "no re-application" signal: the retained entry is provably gone,
+        // so no later retry tick has anything left to act on — never merely "we didn't wait long
+        // enough to see a second one" (this file's convention is no wall-clock sleeps for correctness).
+        let deferredFinal = await b.sync.diagnostics.deferredCommandCount
+        XCTAssertEqual(0, deferredFinal, "nothing left to drain — not an already-settled snapshot re-applied")
+
+        await b.manager.shutdown()
+        await a.manager.shutdown()
+    }
+
+    /// Race 5. A duplicate delivery of the same retained snapshot (a retried frame, not a new one) is
+    /// held too, never merged or dropped — but draining both produces exactly one genuine restore; the
+    /// duplicate finds the timeline already set once the first has run and takes the harmless
+    /// incremental re-anchor branch instead, which touches no player call.
+    func testADuplicateSnapshotArrivingWhileOneIsAlreadyRetainedCausesNoDuplicatePlayerEffects() async throws {
+        let clock = SharedTestClock(32_000_000)
+        let (a, b, aPort) = try await buildPersistentPair(clock: clock)
+        let track = SyncTestValues.hash(120)
+        // Deliberately not added yet.
+
+        try await reconnectCycle(a: a, b: b, aPort: aPort)
+        guard let generation = a.manager.liveAuthenticatedGeneration() else { return XCTFail("no generation") }
+        await b.player.clearCalls()
+        let snapshot = ResyncCodec.encode(.stateSnapshot(
+            leaderPeerId: a.testPeer.peerId, commandSeq: 1, queueRevision: 1,
+            playback: ResyncPlaybackSnapshot(
+                trackHash: track, queueItemId: SyncTestValues.ulid(120), positionMs: 700,
+                playing: true, atSessionUs: await alreadyDueSessionUs(for: b)
+            ),
+            queueItems: [], queueCurrentIndex: nil, manifestRevision: 0, transfersInFlight: []
+        ))
+        await b.manager.resyncRelay().deliver(type: ResyncMessageTypes.stateSnapshot, payload: snapshot, generation: generation)
+        try await poll(timeoutSeconds: 10) { await b.content.transferRequests.contains(track) }
+        let deferredAfterFirst = await b.sync.diagnostics.deferredCommandCount
+        XCTAssertGreaterThan(deferredAfterFirst, 0)
+
+        // The identical snapshot arrives a second time — a retried frame, still under the same
+        // generation, while still retained. `deliver` only *schedules* the dispatch `Task`, so this
+        // polls for the effect rather than reading `deferredCommandCount` synchronously right after.
+        await b.manager.resyncRelay().deliver(type: ResyncMessageTypes.stateSnapshot, payload: snapshot, generation: generation)
+        try await poll(timeoutSeconds: 10) { await b.sync.diagnostics.deferredCommandCount > deferredAfterFirst }
+        let deferredAfterDuplicate = await b.sync.diagnostics.deferredCommandCount
+        XCTAssertGreaterThan(deferredAfterDuplicate, deferredAfterFirst, "the duplicate is held too, not silently dropped or merged")
+
+        await b.content.completeTransfer(track)
+        try await poll(timeoutSeconds: 10) { await b.player.calls.contains(.select(track)) }
+        let selectCount = await b.player.calls.filter { $0 == .select(track) }.count
+        XCTAssertEqual(
+            1, selectCount,
+            "all held entries drain, but only the first playback entry is a genuine restore — the duplicate " +
+                "becomes a harmless incremental re-anchor and never calls into the player again"
+        )
+        let deferredFinal = await b.sync.diagnostics.deferredCommandCount
+        XCTAssertEqual(0, deferredFinal)
+
+        await b.manager.shutdown()
+        await a.manager.shutdown()
+    }
+
+    /// Race 6. "End Ride" here means `ControlSessionManager.shutdown()` plus the direct
+    /// `sync.handleLinkLost()` call `SessionCoordinator` would forward in production — this harness's
+    /// own `attach()` only wires `.connected` by hand (its disclosed limitation), so `.linkLost`
+    /// forwarding has to be done the same way here. A transfer that verifies **after** teardown must
+    /// also produce no effect — the same late-callback shape Race 7 below exercises across a full
+    /// restart, checked here across a teardown with no successor at all.
+    func testEndingTheRideWhileASnapshotIsRetainedLeavesNoLaterPlayerMutation() async throws {
+        let clock = SharedTestClock(33_000_000)
+        let (a, b, aPort) = try await buildPersistentPair(clock: clock)
+        let track = SyncTestValues.hash(130)
+        // Deliberately not added yet.
+
+        try await reconnectCycle(a: a, b: b, aPort: aPort)
+        guard let generation = a.manager.liveAuthenticatedGeneration() else { return XCTFail("no generation") }
+        await b.player.clearCalls()
+        let snapshot = ResyncCodec.encode(.stateSnapshot(
+            leaderPeerId: a.testPeer.peerId, commandSeq: 1, queueRevision: 1,
+            playback: ResyncPlaybackSnapshot(
+                trackHash: track, queueItemId: SyncTestValues.ulid(130), positionMs: 900,
+                playing: true, atSessionUs: await alreadyDueSessionUs(for: b)
+            ),
+            queueItems: [], queueCurrentIndex: nil, manifestRevision: 0, transfersInFlight: []
+        ))
+        await b.manager.resyncRelay().deliver(type: ResyncMessageTypes.stateSnapshot, payload: snapshot, generation: generation)
+        try await poll(timeoutSeconds: 10) { await b.content.transferRequests.contains(track) }
+        let deferredBeforeTeardown = await b.sync.diagnostics.deferredCommandCount
+        XCTAssertGreaterThan(deferredBeforeTeardown, 0)
+
+        // End Ride: the control lifetime ends with no successor authenticated yet.
+        await b.manager.shutdown()
+        await b.sync.handleLinkLost()
+
+        let deferredAfterTeardown = await b.sync.diagnostics.deferredCommandCount
+        XCTAssertEqual(0, deferredAfterTeardown, "teardown clears the retained snapshot outright")
+
+        // The transfer verifies only now, after teardown — `content.observeAvailability`'s callback
+        // is process-lifetime and still fires, but `resetForNewSession`'s synchronous
+        // `deferredEvents.removeAll()` already left nothing for it to act on.
+        await b.content.completeTransfer(track)
+        try await Task.yield()
+        try await Task.yield()
+        let calls = await b.player.calls
+        XCTAssertTrue(
+            calls.allSatisfy { call in
+                switch call {
+                case .select, .load, .start: return false
+                default: return true
+                }
+            },
+            "no later restore effect from the retained snapshot after teardown: \(calls)"
+        )
+
+        await a.manager.shutdown()
+    }
+
+    /// Race 7. Ride 1 defers on missing content (section 22's own mechanism, now genuinely retained —
+    /// see the `SyncPlaybackCoordinator+Inbound.swift` fix above) and is torn down before that
+    /// transfer ever verifies; Ride 2 starts, converges on its own track, and *then* Ride 1's transfer
+    /// verifies late. `content.observeAvailability`'s callback is registered once for the
+    /// coordinator's whole lifetime (never re-registered per ride), so this is the one retained-state
+    /// mechanism that can genuinely fire a late callback across a ride boundary — unlike the
+    /// clock-drain task, which `resetForNewSession`/`handleLinkLost` cancel and empty outright.
+    func testARide1RetainedSnapshotsLateContentReadinessCallbackCannotTouchRide2AfterAFullTeardownAndRestart() async throws {
+        let clock = SharedTestClock(34_000_000)
+        let (a, b, aPort) = try await buildPersistentPair(clock: clock)
+        let track1 = SyncTestValues.hash(140)
+        let track2 = SyncTestValues.hash(141) // Ride 1's content the follower never receives in time
+        let track3 = SyncTestValues.hash(142) // Ride 2's own track
+        await b.content.addLocal(track1)
+        // Deliberately absent: track2.
+
+        guard let gen1 = a.manager.liveAuthenticatedGeneration() else { return XCTFail("no generation") }
+        let snapshot1 = ResyncCodec.encode(.stateSnapshot(
+            leaderPeerId: a.testPeer.peerId, commandSeq: 1, queueRevision: 1,
+            playback: ResyncPlaybackSnapshot(
+                trackHash: track1, queueItemId: SyncTestValues.ulid(140), positionMs: 1_000,
+                playing: true, atSessionUs: await alreadyDueSessionUs(for: b)
+            ),
+            queueItems: [], queueCurrentIndex: nil, manifestRevision: 0, transfersInFlight: []
+        ))
+        await b.manager.resyncRelay().deliver(type: ResyncMessageTypes.stateSnapshot, payload: snapshot1, generation: gen1)
+        try await poll(timeoutSeconds: 10) { await b.player.calls.contains(.start) }
+
+        // Ride 1: reconnect, and the leader's authoritative state now names content the follower does
+        // not have — retained pending the transfer (section 22).
+        try await reconnectCycle(a: a, b: b, aPort: aPort)
+        guard let gen1b = a.manager.liveAuthenticatedGeneration() else { return XCTFail("no generation") }
+        await b.player.clearCalls()
+        let snapshot2 = ResyncCodec.encode(.stateSnapshot(
+            leaderPeerId: a.testPeer.peerId, commandSeq: 1, queueRevision: 1,
+            playback: ResyncPlaybackSnapshot(
+                trackHash: track2, queueItemId: SyncTestValues.ulid(141), positionMs: 2_000,
+                playing: true, atSessionUs: await alreadyDueSessionUs(for: b)
+            ),
+            queueItems: [], queueCurrentIndex: nil, manifestRevision: 0, transfersInFlight: []
+        ))
+        await b.manager.resyncRelay().deliver(type: ResyncMessageTypes.stateSnapshot, payload: snapshot2, generation: gen1b)
+        try await poll(timeoutSeconds: 10) { await b.content.transferRequests.contains(track2) }
+        let deferredRide1 = await b.sync.diagnostics.deferredCommandCount
+        XCTAssertGreaterThan(deferredRide1, 0, "Ride 1's snapshot is genuinely retained pending the transfer")
+
+        // Ride 1 ends — torn down before track2's transfer ever verifies.
+        let beforeRide2 = connectedCount(a.session)
+        await b.manager.shutdown()
+        await b.sync.handleLinkLost()
+        let deferredAfterTeardown = await b.sync.diagnostics.deferredCommandCount
+        XCTAssertEqual(0, deferredAfterTeardown, "teardown clears Ride 1's retained snapshot outright")
+
+        // Ride 2: a fresh generation, a fresh track, converging normally.
+        await b.content.addLocal(track3)
+        let bPort2 = try await b.manager.startListening(local: b.testPeer.local)
+        await b.manager.connectTo(host: "127.0.0.1", port: aPort, local: b.testPeer.local)
+        await a.manager.connectTo(host: "127.0.0.1", port: bPort2, local: a.testPeer.local)
+        try await poll { self.connectedCount(a.session) > beforeRide2 }
+        try await settleResyncForwarding(a: a, b: b)
+        guard let gen2 = a.manager.liveAuthenticatedGeneration() else { return XCTFail("no generation") }
+
+        await b.player.clearCalls()
+        let snapshot3 = ResyncCodec.encode(.stateSnapshot(
+            leaderPeerId: a.testPeer.peerId, commandSeq: 1, queueRevision: 1,
+            playback: ResyncPlaybackSnapshot(
+                trackHash: track3, queueItemId: SyncTestValues.ulid(142), positionMs: 3_000,
+                playing: true, atSessionUs: await alreadyDueSessionUs(for: b)
+            ),
+            queueItems: [], queueCurrentIndex: nil, manifestRevision: 0, transfersInFlight: []
+        ))
+        await b.manager.resyncRelay().deliver(type: ResyncMessageTypes.stateSnapshot, payload: snapshot3, generation: gen2)
+        try await poll(timeoutSeconds: 10) { await b.player.calls.contains(.start) }
+        let trackHashRide2 = await b.sync.diagnostics.currentTrackHash
+        XCTAssertEqual(track3, trackHashRide2, "Ride 2 converged normally")
+        await b.player.clearCalls()
+
+        // Ride 1's transfer verifies late.
+        await b.content.completeTransfer(track2)
+        // Nothing here should happen — give the availability callback's `Task` a real chance to run
+        // before asserting the negative, the same `Task.yield()` idiom this file already uses above
+        // rather than a wall-clock sleep.
+        try await Task.yield()
+        try await Task.yield()
+
+        let trackHashAfterLateCallback = await b.sync.diagnostics.currentTrackHash
+        XCTAssertEqual(track3, trackHashAfterLateCallback, "Ride 1's late callback must not touch Ride 2's converged state")
+        let callsAfterLateCallback = await b.player.calls
+        XCTAssertTrue(callsAfterLateCallback.isEmpty, "Ride 1's late content-readiness callback produces no Ride 2 player effect: \(callsAfterLateCallback)")
+
+        await b.manager.shutdown()
+        await a.manager.shutdown()
+    }
+
+    // MARK: - 10: independent-review section 23 (route-transition/coexistence non-regression)
+
+    /// A reconnect snapshot's restoration runs through `restoreFromPlaybackState`/`applyPlay` — never
+    /// through `DriftController`'s ordinary per-tick correction ladder. `route_state == transitioning`
+    /// is a `DriftController` input that suppresses *that* ladder's own hard-seek tier so a transient
+    /// Bluetooth reroute never spends the seek budget rules already give it — it has nothing to do
+    /// with resync's restore, which is not a "correction" at all and must neither consult it nor be
+    /// gated by it: there is exactly one route-state system, and this phase adds no second one.
+    func testAReconnectRestorationWhileRouteStateIsTransitioningStillRestoresAndSpendsNoHardSeekBudget() async throws {
+        let clock = SharedTestClock(35_000_000)
+        let (a, b, aPort) = try await buildPersistentPair(clock: clock)
+        let track = SyncTestValues.hash(150)
+        await b.content.addLocal(track)
+        let hardSeekBefore = await b.sync.diagnostics.hardSeekCount
+        XCTAssertEqual(0, hardSeekBefore, "no correction has run yet")
+
+        // The follower's Bluetooth route is mid-transition when the reconnect's restoration needs to
+        // run — exactly the ARCHITECTURE §6 "opening the mic forces most Bluetooth endpoints onto the
+        // duplex profile" moment this flag exists for.
+        await b.routeState.set(true)
+
+        try await reconnectCycle(a: a, b: b, aPort: aPort)
+        guard let generation = a.manager.liveAuthenticatedGeneration() else { return XCTFail("no generation") }
+        await b.player.clearCalls()
+        let snapshot = ResyncCodec.encode(.stateSnapshot(
+            leaderPeerId: a.testPeer.peerId, commandSeq: 1, queueRevision: 1,
+            playback: ResyncPlaybackSnapshot(
+                trackHash: track, queueItemId: SyncTestValues.ulid(150), positionMs: 1_500,
+                playing: true, atSessionUs: await alreadyDueSessionUs(for: b)
+            ),
+            queueItems: [], queueCurrentIndex: nil, manifestRevision: 0, transfersInFlight: []
+        ))
+        await b.manager.resyncRelay().deliver(type: ResyncMessageTypes.stateSnapshot, payload: snapshot, generation: generation)
+        try await poll(timeoutSeconds: 10) { await b.player.calls.contains(.start) }
+
+        let calls = await b.player.calls
+        XCTAssertTrue(calls.contains(.select(track)), "the restore proceeded unconditionally while transitioning: \(calls)")
+        let hardSeekAfter = await b.sync.diagnostics.hardSeekCount
+        XCTAssertEqual(0, hardSeekAfter, "the restore is not a DriftController correction, so it never draws on the hard-seek budget rules reserve for it")
+        let lastCorrection = await b.sync.diagnostics.lastCorrection
+        XCTAssertEqual(.none, lastCorrection, "no second route-state system exists — resync's own restore never reports through DriftController's label either")
 
         await b.manager.shutdown()
         await a.manager.shutdown()

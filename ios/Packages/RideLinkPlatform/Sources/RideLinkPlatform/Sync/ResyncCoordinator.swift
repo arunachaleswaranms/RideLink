@@ -2,8 +2,15 @@ import Foundation
 import RideLinkCore
 
 /// The outcome of the most recent `STATE_REQUEST`/`STATE_SNAPSHOT` round trip, for FR-023.
+///
+/// `.snapshotPending` (independent review, Blocker 2E) is a genuinely different state from
+/// `.requested`: `.requested` means "the wire round trip is still outstanding", while
+/// `.snapshotPending` means "a valid `STATE_SNAPSHOT` for the live generation arrived — the wire
+/// round trip is done — but the fresh clock was not yet trustworthy, so reconciliation itself is
+/// still pending" (`SyncPlaybackCoordinator`'s own generation-owned deferral, not a reason to resend
+/// `STATE_REQUEST`).
 public enum ResyncOutcome: Sendable, Equatable {
-    case none, requested, reconciled, sendFailed
+    case none, requested, snapshotPending, reconciled, sendFailed
 }
 
 public struct ResyncDiagnostics: Sendable, Equatable {
@@ -104,10 +111,29 @@ public final class ResyncCoordinator {
             guard let self else { return }
             Task { @MainActor in await self.onDesyncTrigger() }
         }
+        // Independent review, Blocker 2E: a snapshot first deferred for the clock (`.snapshotPending`
+        // below) only becomes genuinely reconciled later, from `drainDeferredEvents` — this is how
+        // that later completion is reported back, mirroring `setDesynchronizedTrigger`'s wiring.
+        await syncPlaybackCoordinator.setReconciliationAppliedTrigger { [weak self] generation in
+            guard let self else { return }
+            Task { @MainActor in self.onReconciliationApplied(generation: generation) }
+        }
         // ADR-028 Amendment: outbound STATE_SNAPSHOT now travels through SyncPlaybackCoordinator's
         // own ordered outbound path — see `enqueueStateSnapshotReply` — so it can never be written
         // out of order relative to a QUEUE_SNAPSHOT/PLAYBACK_STATE decided around the same time.
         await syncPlaybackCoordinator.setResyncChannel(session.channel)
+    }
+
+    /// A previously-deferred reconciliation has now genuinely applied (Blocker 2E). Generation-keyed
+    /// matching against `pendingRequestGeneration` — the same comparison `StateResyncGate` already
+    /// does for the synchronous case — means a signal for an unrelated restoration (an ordinary wire
+    /// `PLAYBACK_STATE`, or a retired generation's) is simply ignored rather than mismatched.
+    private func onReconciliationApplied(generation: Int64) {
+        guard generation == pendingRequestGeneration else { return }
+        pendingRequestGeneration = nil
+        diagnostics.requestPending = false
+        diagnostics.lastOutcome = .reconciled
+        publishDiagnostics()
     }
 
     /// Forwarded from `ControlEvent.connected` by `SessionCoordinator` — the counterpart of
@@ -140,7 +166,10 @@ public final class ResyncCoordinator {
             diagnostics.reconnectRequestCount += 1
         }
         publishDiagnostics()
-        let sent = await session.channel.send(.stateRequest)
+        // Independent review, Blocker 1: the follower's own outbound STATE_REQUEST needs the same
+        // generation-bound write STATE_SNAPSHOT now gets — `generation` is this function's own
+        // parameter, captured at decision time, never re-read live at send time.
+        let sent = await session.channel.send(.stateRequest, generation: generation)
         if !sent {
             pendingRequestGeneration = StateResyncGate.onSnapshotObserved(
                 pendingGeneration: pendingRequestGeneration, snapshotGeneration: generation
@@ -182,25 +211,43 @@ public final class ResyncCoordinator {
         )
     }
 
-    /// A follower's reconciliation. `pendingRequestGeneration` is cleared **before** the reconcile
-    /// call so a snapshot that itself provokes another trigger (it cannot, today, but a future
-    /// caller must not find a stale "still pending" flag) never wedges the gate shut.
+    /// A follower's reconciliation (independent review, Blocker 2E/§20/§21). Unlike before, this no
+    /// longer assumes a snapshot *received* is a snapshot *applied* — `onStateSnapshot`'s own return
+    /// value says which, and only a genuine acceptance may clear the outstanding-request bookkeeping
+    /// or touch manifest bookkeeping.
     private func handleStateSnapshot(_ message: ResyncMessage, generation: Int64) async {
         guard case .stateSnapshot(_, let commandSeq, _, _, _, _, let manifestRevision, _) = message else { return }
-        pendingRequestGeneration = StateResyncGate.onSnapshotObserved(
-            pendingGeneration: pendingRequestGeneration, snapshotGeneration: generation
-        )
-        await syncPlaybackCoordinator.onStateSnapshot(message, generation: generation)
-        let previousManifestRevision = lastKnownManifestRevision
-        lastKnownManifestRevision = manifestRevision
-        if let previousManifestRevision, previousManifestRevision != manifestRevision {
-            requestManifestRefresh()
+        let outcome = await syncPlaybackCoordinator.onStateSnapshot(message, generation: generation)
+        switch outcome {
+        case .applied, .deferredClock, .deferredContent:
+            // §21: the *wire* round trip is satisfied either way — a snapshot for the live generation
+            // arrived, so there is nothing left to request — even though `.deferredClock`/
+            // `.deferredContent` mean reconciliation itself is not yet complete (that is
+            // `.snapshotPending` below). `.deferredContent` resolves through the leader's next
+            // authoritative `PLAY` once both sides verify the transferred content (§22), not through
+            // `onReconciliationApplied` — there is nothing enqueued for that callback to fire for.
+            pendingRequestGeneration = StateResyncGate.onSnapshotObserved(
+                pendingGeneration: pendingRequestGeneration, snapshotGeneration: generation
+            )
+            // §20: manifest bookkeeping follows acceptance, not full playback application — the
+            // queue/manifest portions of a snapshot have no clock dependency, so a `.deferredClock`
+            // snapshot (playback alone waiting on the clock) still legitimately reports a real
+            // manifest_revision worth acting on.
+            let previousManifestRevision = lastKnownManifestRevision
+            lastKnownManifestRevision = manifestRevision
+            if let previousManifestRevision, previousManifestRevision != manifestRevision {
+                requestManifestRefresh()
+            }
+            diagnostics.requestPending = pendingRequestGeneration != nil
+            diagnostics.lastOutcome = outcome == .applied ? .reconciled : .snapshotPending
+            diagnostics.lastSnapshotManifestRevision = manifestRevision
+            diagnostics.lastSnapshotCommandSeq = commandSeq
+            publishDiagnostics()
+        case .rejectedStale, .rejectedRole:
+            // §21: a rejected snapshot must not falsely complete the request, and §20: must not
+            // mutate manifest bookkeeping either. Nothing here to update.
+            break
         }
-        diagnostics.requestPending = pendingRequestGeneration != nil
-        diagnostics.lastOutcome = .reconciled
-        diagnostics.lastSnapshotManifestRevision = manifestRevision
-        diagnostics.lastSnapshotCommandSeq = commandSeq
-        publishDiagnostics()
     }
 
     private func publishDiagnostics() {

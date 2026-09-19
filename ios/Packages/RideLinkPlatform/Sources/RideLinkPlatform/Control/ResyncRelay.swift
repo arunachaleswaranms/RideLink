@@ -30,7 +30,20 @@ public actor ResyncRelay {
     private let monotonicNowUs: @Sendable () -> Int64
     private let nextSeq: @Sendable () -> Int64
     private let activeSessionId: @Sendable () async -> SessionId
-    private let authenticatedWriter: @Sendable () async -> AuthenticatedFrameWriter?
+
+    /// **Bound to one control lifetime** (independent review, Blocker 1; ADR-020 Amendment A9's
+    /// pattern applied here). A `STATE_SNAPSHOT`/`STATE_REQUEST` is constructed and admitted onto
+    /// the outbound queue under a proven generation, but the actual write happens later — the
+    /// mailbox/queue consumer, the actor hop, the write lock all suspend between the two — so "the
+    /// authenticated writer, now" is not necessarily the connection the frame was authorised for.
+    /// Resolved from the one immutable `AuthenticatedConnection` record, exactly as `voice` already
+    /// is: no ordering in which a successor's connection can be handed out under a predecessor's
+    /// generation. Before this fix `ResyncRelay` used the unbound `authenticatedWriter()` pattern
+    /// (mirroring Manifest/AudioState) on the reasoning that resync work was "re-derived per session,
+    /// not carried on an outbound queue that could outlive one" — true when that reasoning was
+    /// written, false since `STATE_SNAPSHOT` started travelling through the same ordered outbound
+    /// queue `QUEUE_SNAPSHOT`/`PLAYBACK_STATE` do.
+    private let authenticatedWriterFor: @Sendable (Int64) async -> AuthenticatedFrameWriter?
 
     /// ADR-025's liveness half: the generation owning the connection that is an authenticated
     /// session **right now**, or nil when none is. A frame's own authorising generation is
@@ -41,20 +54,21 @@ public actor ResyncRelay {
     private var rejections: [ResyncMessageRejection: Int] = [:]
     private var preAuthenticationDrops = 0
     private var retiredGenerationDrops = 0
+    private var outboundRetiredGenerationDrops = 0
 
     public init(
         localPeerId: PeerId,
         monotonicNowUs: @escaping @Sendable () -> Int64,
         nextSeq: @escaping @Sendable () -> Int64,
         activeSessionId: @escaping @Sendable () async -> SessionId,
-        authenticatedWriter: @escaping @Sendable () async -> AuthenticatedFrameWriter?,
+        authenticatedWriterFor: @escaping @Sendable (Int64) async -> AuthenticatedFrameWriter?,
         liveGeneration: @escaping @Sendable () -> Int64?
     ) {
         self.localPeerId = localPeerId
         self.monotonicNowUs = monotonicNowUs
         self.nextSeq = nextSeq
         self.activeSessionId = activeSessionId
-        self.authenticatedWriter = authenticatedWriter
+        self.authenticatedWriterFor = authenticatedWriterFor
         self.liveGeneration = liveGeneration
     }
 
@@ -70,10 +84,23 @@ public actor ResyncRelay {
 
     public func droppedRetiredGeneration() -> Int { retiredGenerationDrops }
 
-    /// - Returns: true if the message was handed to a live authenticated control connection.
+    /// See `VoiceSignalRelay.droppedRetiredGenerationOutbound()`: the mirror in the outbound
+    /// direction — a frame authorised by a lifetime that no longer owns the surviving connection.
+    public func droppedRetiredGenerationOutbound() -> Int { outboundRetiredGenerationDrops }
+
+    /// **A frame authorised by one control lifetime may be written only to that lifetime's
+    /// connection** (independent review, Blocker 1). See `authenticatedWriterFor`'s doc comment.
+    ///
+    /// - Parameter generation: the authentication generation that authorised this frame — captured
+    ///   when the frame was constructed/admitted, never re-read live at send time.
+    /// - Returns: true if the message was handed to and written on the connection that generation
+    ///   still owns.
     @discardableResult
-    public func send(_ message: ResyncMessage) async -> Bool {
-        guard let write = await authenticatedWriter() else { return false }
+    public func send(_ message: ResyncMessage, generation: Int64) async -> Bool {
+        guard let write = await authenticatedWriterFor(generation) else {
+            outboundRetiredGenerationDrops += 1
+            return false
+        }
         let envelope = ControlMessages.raw(
             localPeerId: localPeerId,
             type: ResyncCodec.wireType(message),
