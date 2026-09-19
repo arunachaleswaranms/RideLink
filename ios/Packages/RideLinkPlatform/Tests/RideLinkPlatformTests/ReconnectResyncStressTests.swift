@@ -280,16 +280,24 @@ final class ReconnectResyncStressTests: XCTestCase {
             let staleGeneration = b.manager.liveAuthenticatedGeneration()
             let extraReconnects = Int.random(in: 1...3)
             for _ in 0..<extraReconnects {
+                // Captured *before* the cycle, not after: `reconnectCycle`'s own `settleResyncForwarding`
+                // proves `resync.isLocalLeader` was set (the first line of `onConnected`), but proves
+                // nothing about whether `onConnected`'s later, still-`async` call into `triggerRequest` —
+                // and therefore this cycle's own `reconnectRequestCount` increment and `STATE_REQUEST`
+                // round trip — has actually run yet. Polling only `!requestPending` here is ambiguous
+                // between "this cycle's request already resolved" and "it has not started yet" (both
+                // read as `requestPending == false`), and a CI run under different scheduling caught
+                // exactly that ambiguity: a later cycle's own legitimate request completing its async
+                // hop *after* this loop had already moved on to the stale-delivery assertion below,
+                // which then attributed an unrelated `.requested` transition to the stale delivery.
+                // Waiting for `reconnectRequestCount` to have actually moved past this cycle's own
+                // starting value removes the ambiguity outright, on real Swift concurrency scheduling
+                // rather than on an assumption about how many hops a same-actor `await` takes.
+                let requestsBefore = b.resync.diagnostics.reconnectRequestCount
                 try await reconnectCycle(a: a, b: b, aPort: aPort)
-                // Each reconnect's *own* legitimate resync round trip must settle before the next
-                // cycle starts — `reconnectCycle` only waits for the manager-level `.connected`
-                // event, not for the `Task`-wrapped `resync.onConnected` forwarding it schedules.
-                // Starting a second reconnect while an earlier cycle's forwarding `Task` is still
-                // queued lets that stale-generation `Task` run *after* `pendingRequestGeneration` has
-                // already moved on, overwriting it with its own now-retired generation — a genuine
-                // race in this test's own harness, not in production, and exactly the shape this
-                // repo's standing lesson warns about: settle one lifetime before starting the next.
-                try await poll(timeoutSeconds: 10) { !b.resync.diagnostics.requestPending }
+                try await poll(timeoutSeconds: 10) {
+                    b.resync.diagnostics.reconnectRequestCount > requestsBefore && !b.resync.diagnostics.requestPending
+                }
             }
             let liveGeneration = b.manager.liveAuthenticatedGeneration()
             XCTAssertNotEqual(staleGeneration, liveGeneration, "iteration \(iteration)")
