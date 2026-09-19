@@ -1856,3 +1856,71 @@ Every figure in this amendment is a software figure produced by unit tests on a 
 product target and the <50 ms stretch target remain unmeasured, no alignment figure exists, no audio
 has reached a speaker or a Bluetooth endpoint, and TEST_PLAN §5.2's S-01…S-12 remain the only things
 that will change that.
+
+## Amendment A8 — 19 September 2026 — a leader's own queue must survive a link it did not choose to lose
+
+**Status:** Accepted · appended, nothing above rewritten. Amendments A1–A7 are unchanged.
+
+Found by Phase 7's reconnect-cycle and second-ride-restart stress tests (`docs/DECISIONS/ADR-028`),
+not by an audit of this ADR's own text — the first time in this phase's history that the *next*
+phase's testing, rather than a dedicated closure pass, found a defect in an already-accepted one.
+Reproduced first against unmodified production on both platforms, independently, before either fix
+landed.
+
+**The defect.** `SyncPlaybackCoordinator.resetForNewSession()` — Android `SyncPlaybackCoordinator.kt`,
+iOS `SyncPlaybackCoordinator.swift`, called from both `onSessionEstablished`/`handleConnected` (every
+`Connected`, including an ordinary reconnect) and `onSessionLost`/`handleLinkLost` (every link loss)
+— unconditionally reset `queueState`/`_queueState` to empty, with no leader/follower distinction and
+no distinction between a session actually starting over and one merely resuming. A **leader's** queue
+is the authoritative copy; nothing on the wire can ever repopulate it, because the leader is what a
+follower's `QUEUE_SNAPSHOT`/(Phase 7) `STATE_SNAPSHOT` adoption resyncs *from*. So the reset fired at
+the moment of link loss — before any reconnection attempt, before any peer is even reachable again —
+erased a ride's entire queue on an ordinary Wi-Fi blip, for the one role that had no way to get it
+back.
+
+This directly contradicted two things this ADR and PROTOCOL §10 already state. §10: *"`session_id`
+survives a reconnect; that is what distinguishes resuming from starting over"* and *"the follower
+adopts the leader's `command_seq` and `queue_revision` wholesale"* — both assume the leader still
+*has* authoritative state to resume from and hand wholesale. And ADR-004's own framing, quoted
+verbatim in `resetForNewSession`'s own doc comment on both platforms: *"A Wi-Fi drop does **not**
+interrupt music. Both phones keep playing; only synchronisation pauses."* A wiped queue is not "only
+synchronisation pauses" — it is the ride's whole track list gone.
+
+**Confirmed pre-existing, not introduced by Phase 7.** `git log -S` on iOS traces the unconditional
+reset to `bea0a5c`, the original Phase 5 integration commit (2026-09-08), eleven days and seven
+closure audits before Phase 7 began. It survived every one of A1–A7 because none of those audits
+exercised a *second* session with a *populated* queue at the moment of link loss — the same class of
+blind spot ADR-026's history already names: "assume the same of anything else whose failure needs a
+second session to observe."
+
+**No other source of truth exists.** Checked on both platforms before writing the fix: `MusicCoordinator`
+(Android `MusicCoordinator.kt`, iOS `MusicCoordinator.swift`) holds a separate Phase 3 local-queue
+type, explicitly documented as not copied into `SyncPlaybackCoordinator.queueState`; `SharedLibraryCoordinator`
+holds the manifest/catalogue, unrelated to the playback queue; no persistence or replay of the shared
+queue exists anywhere in either app layer.
+
+**The fix.** `queueState`/`_queueState` is no longer touched by `resetForNewSession()`, on either
+platform. Every other reset in that function is unchanged: sequence numbers, the apply/scheduled
+chains, the playback epoch, drift state, the desync flags, the tick job — everything genuinely scoped
+to *this authenticated session's coordination lifetime* — still retires exactly as A1–A7 established.
+Only the queue's *content*, which is ride-segment-local state exactly like the capture device
+(rule 17) and voice consent (Amendment A10 to ADR-020) that already survive a control-lifetime
+boundary, now does the same. No role gate was needed: a follower's stale queue is harmless regardless
+— the next `QUEUE_SNAPSHOT`, or Phase 7's `STATE_SNAPSHOT`, overwrites it wholesale, per §10 rule 1's
+"no merge algorithm" — and a brand-new pairing already starts with an empty queue by construction, so
+nothing changes for that case.
+
+**Regression coverage.** Both platforms added a single-coordinator, no-peer test — `handleConnected`
+as leader, populate the queue, `handleLinkLost()`, assert the queue survives — reproducible against
+unmodified production before the fix and green after it. Three existing tests per platform had baked
+the old wipe in as an assumed invariant (Android: `SyncPlaybackDeliveryAuditTest.kt` ×2,
+`SyncPlaybackTwoPeerTest.kt` ×1; iOS: `SyncPlaybackDeliveryAuditTests` ×2,
+`SyncPlaybackIngressLifetimeAuditTests` ×1) and were updated to assert the correct surviving value
+rather than zero — each re-verified to still test its original, distinct intent (session-boundary
+write-safety, held-event discarding, stranded-operation isolation) once the assertion was corrected.
+
+**What this amendment does not do.** It does not add a vector — this is coroutine/actor lifecycle,
+the same reason A3–A7 add none. It does not touch `Phase5FrameQueue`, `command_seq`/`queue_revision`
+allocation, or anything wire-facing; the fix is entirely local-state retention inside one function.
+It does not claim a physical measurement — this is a software-only finding and fix, verified by unit
+tests on both platforms, nothing more.
