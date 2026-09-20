@@ -187,7 +187,164 @@ final class RideSegmentLifecycleTests: XCTestCase {
 
         let afterStaleCleanup = await sync.diagnostics.currentTrackHash
         XCTAssertEqual(trackX, afterStaleCleanup, "ride 1's late cleanup cleared ride 2's playback identity")
+        let staleIdentity = await sync.currentPlaybackIdentity
+        XCTAssertEqual(trackX, staleIdentity?.trackHash, "…including the identity a STATE_SNAPSHOT would report")
+        // Independent-review round 4: refused by the *coordinator*, which is the only place that can
+        // see that ride 2 owns live authority. `RideSegmentLifecycle` no longer decides this — it
+        // counts the answer, which is what keeps this assertion meaningful.
         XCTAssertEqual(1, lifecycle.supersededEndRideCount, "…and said so, rather than silently")
+    }
+
+    // MARK: - Independent-review round 4, Blocker 1
+
+    /// **The defect round 3 left open, and the exact scenario §6 asks for.**
+    ///
+    /// Round 3 refused a superseded End Ride cleanup outright, which protects ride 2 (Property A) and
+    /// breaks Property B in the same statement: `startRide` deliberately establishes nothing, so a
+    /// Start Ride pressed before ride 1's cleanup ran made that cleanup "stale" while leaving ride 1's
+    /// `currentPlaybackIdentity` standing as the only thing ride 2 had to report.
+    ///
+    /// Deterministic by construction, with no sleeps and no barrier needed: the production ordering is
+    /// *exactly* "both epochs are assigned synchronously, in order, and the async work then runs in
+    /// the other order", because `SessionCoordinator.endRide()`/`startRide()` each take their epoch on
+    /// the main actor and then hand the call to `launchInSession`. Taking the two epochs and running
+    /// the two effects in the opposite order reproduces the parked cleanup precisely.
+    ///
+    /// Deliberately **no Play Y**: ride 2 establishing nothing is the whole point. A version of this
+    /// test that played first would pass against the pre-fix code for the wrong reason, because the
+    /// Play would have overwritten X on its own.
+    func testASupersededEndRideStillClearsRideOneWhenRideTwoHasEstablishedNothing() async {
+        await build()
+        let trackX = SyncTestValues.hash(50)
+        let trackY = SyncTestValues.hash(51)
+
+        await startRide()
+        await playAsLeader(trackX)
+        let established = await sync.diagnostics.currentTrackHash
+        XCTAssertEqual(trackX, established, "ride 1 established authoritative track X")
+
+        // End Ride is accepted and takes epoch 2 — and then, before its cleanup runs, Start Ride 2
+        // takes epoch 3 and runs. This is the parked-cleanup ordering, stated rather than raced.
+        let endRideEpoch = lifecycle.nextRideEpoch()
+        let startRideEpoch = lifecycle.nextRideEpoch()
+        await lifecycle.startRide(epoch: startRideEpoch)
+        await settle()
+
+        // Release the parked End Ride work.
+        await lifecycle.endRide(epoch: endRideEpoch)
+        await settle()
+
+        let afterRelease = await sync.currentPlaybackIdentity
+        XCTAssertNil(afterRelease, "ride 2 inherited ride 1's playback identity: \(String(describing: afterRelease))")
+        let afterReleaseHash = await sync.diagnostics.currentTrackHash
+        XCTAssertNil(afterReleaseHash)
+        XCTAssertEqual(0, lifecycle.supersededEndRideCount, "this boundary owned ride 1's state and had to clear it")
+
+        // An ordinary reconnect inside ride 2, and the leader's STATE_SNAPSHOT must not report X.
+        await sync.handleLinkLost()
+        await sync.handleConnected(isLocalLeader: true)
+        await session.setClock(SessionClockEstimate(offsetToLeaderUs: 0, rttP95Us: 8_000, ready: true))
+        await resyncChannel.clear()
+        await sync.enqueueStateSnapshotReply(
+            generation: await session.currentAuthGeneration(),
+            leaderPeerId: SyncTestValues.leaderPeerId,
+            manifestRevision: 0,
+            transfersInFlight: []
+        )
+        await settle()
+        let snapshots = await resyncChannel.sent
+        guard case .stateSnapshot(_, _, _, let playback, _, _, _, _) = snapshots.last else {
+            return XCTFail("the leader answered no STATE_SNAPSHOT")
+        }
+        // §6 asks "preferably `playback == nil`". Production's existing shape is a `playback` object
+        // whose `track_hash`/`queue_item_id` are nil — PROTOCOL §10's "nothing loaded" — which is the
+        // same claim and is what the round-3 tests already pin. What must hold is that it is not X.
+        XCTAssertNil(playback?.trackHash, "ride 2's snapshot reported ride 1's track: \(String(describing: playback))")
+        XCTAssertNil(playback?.queueItemId)
+
+        // …and ride 2's own authority works normally afterwards, and survives a reconnect.
+        await playAsLeader(trackY)
+        let rideTwoIdentity = await sync.currentPlaybackIdentity
+        XCTAssertEqual(trackY, rideTwoIdentity?.trackHash)
+        await sync.handleLinkLost()
+        await sync.handleConnected(isLocalLeader: true)
+        await session.setClock(SessionClockEstimate(offsetToLeaderUs: 0, rttP95Us: 8_000, ready: true))
+        await resyncChannel.clear()
+        await sync.enqueueStateSnapshotReply(
+            generation: await session.currentAuthGeneration(),
+            leaderPeerId: SyncTestValues.leaderPeerId,
+            manifestRevision: 0,
+            transfersInFlight: []
+        )
+        await settle()
+        let laterSnapshots = await resyncChannel.sent
+        guard case .stateSnapshot(_, _, _, let laterPlayback, _, _, _, _) = laterSnapshots.last else {
+            return XCTFail("the leader answered no second STATE_SNAPSHOT")
+        }
+        XCTAssertEqual(trackY, laterPlayback?.trackHash, "ride 2 reports its own track once it has one")
+    }
+
+    /// Property A, at the same seam and in the same parked-cleanup ordering as the test above — the
+    /// two must both hold, and neither may be bought by weakening the other. Here ride 2 *does*
+    /// establish Y before the parked ride 1 cleanup is released.
+    func testASupersededEndRideReleasedAfterRideTwoEstablishedItsOwnTrackClearsNothing() async {
+        await build()
+        let trackX = SyncTestValues.hash(52)
+        let trackY = SyncTestValues.hash(53)
+
+        await startRide()
+        await playAsLeader(trackX)
+
+        let endRideEpoch = lifecycle.nextRideEpoch()
+        let startRideEpoch = lifecycle.nextRideEpoch()
+        await lifecycle.startRide(epoch: startRideEpoch)
+        // Ride 2 establishes its own authority while ride 1's cleanup is still parked.
+        await playAsLeader(trackY)
+        let beforeRelease = await sync.currentPlaybackIdentity
+        XCTAssertEqual(trackY, beforeRelease?.trackHash)
+
+        await lifecycle.endRide(epoch: endRideEpoch)
+        await settle()
+
+        let afterRelease = await sync.currentPlaybackIdentity
+        XCTAssertEqual(trackY, afterRelease?.trackHash, "ride 1's late cleanup cleared ride 2's track")
+        let afterReleaseHash = await sync.diagnostics.currentTrackHash
+        XCTAssertEqual(trackY, afterReleaseHash)
+        XCTAssertEqual(1, lifecycle.supersededEndRideCount, "…and said so, rather than silently")
+        let liveTimeline = await sync.timeline
+        XCTAssertNotNil(liveTimeline, "ride 2's synchronised timeline was retired by ride 1's boundary")
+    }
+
+    /// §24 item 5, on the ordering Blocker 1 is about: fifty End/Start races with the cleanup parked
+    /// across the successor's start, alternating whether ride 2 establishes anything of its own.
+    /// Both properties are asserted every cycle, on a fresh harness.
+    func testFiftySupersededEndRideCyclesSatisfyBothRideBoundaryProperties() async {
+        for cycle in 0 ..< 50 {
+            await build()
+            let trackX = SyncTestValues.hash(60)
+            let trackY = SyncTestValues.hash(61)
+            let rideTwoEstablishes = cycle.isMultiple(of: 2)
+
+            await startRide()
+            await playAsLeader(trackX)
+
+            let endRideEpoch = lifecycle.nextRideEpoch()
+            let startRideEpoch = lifecycle.nextRideEpoch()
+            await lifecycle.startRide(epoch: startRideEpoch)
+            if rideTwoEstablishes { await playAsLeader(trackY) }
+
+            await lifecycle.endRide(epoch: endRideEpoch)
+            await settle()
+
+            let identity = await sync.currentPlaybackIdentity
+            if rideTwoEstablishes {
+                XCTAssertEqual(trackY, identity?.trackHash, "cycle \(cycle): Property A — ride 2's own track was cleared")
+                XCTAssertEqual(1, lifecycle.supersededEndRideCount, "cycle \(cycle)")
+            } else {
+                XCTAssertNil(identity, "cycle \(cycle): Property B — ride 2 inherited ride 1's track")
+                XCTAssertEqual(0, lifecycle.supersededEndRideCount, "cycle \(cycle)")
+            }
+        }
     }
 
     /// The coordinator re-proves the epoch for itself across the actor hop, rather than trusting the
@@ -247,6 +404,141 @@ final class RideSegmentLifecycleTests: XCTestCase {
             let rideTwo = await sync.diagnostics.currentTrackHash
             XCTAssertEqual(trackY, rideTwo, "cycle \(cycle): ride 2's own track must still work")
         }
+    }
+
+    // MARK: - Independent-review round 4, §17's audit of the ride-lifetime proof
+
+    /// **The §17 audit's own finding, and the one that could stop the music.**
+    ///
+    /// Round 3 closed the "authorised before End Ride, resumes after" class in `applyPlay` alone.
+    /// `applyStep` had **no** ride proof at all, and `stillCurrent` suspends — so a `NEXT` that runs
+    /// off the end of the queue could take its `selected == nil` branch after an End Ride, call
+    /// `epoch.begin()` (minting a *fresh, live* playback epoch over the one `leaveSynchronizedMode`
+    /// had just superseded) and schedule `[.stop, .clearSelection]`, which the new token makes owned.
+    /// End Ride's whole contract is that local music keeps playing (FR-025); this stopped it, and
+    /// cleared the local selection with it.
+    ///
+    /// Deterministic, and the parked suspension is pinned **by construction rather than by
+    /// counting**. `applyAuthoritative` is the production capture point — it is where the ride
+    /// lifetime is taken, on the real coordinator — so the test enters there and arms the generation
+    /// gate with no skips: the very first generation read that follows is that function's own
+    /// `stillCurrent`, immediately after the capture. Driving this through `onPlaybackMessage`
+    /// instead would make the test depend on how many generation reads the admission path happens to
+    /// take first, which is exactly the "counting calls does not pin it" mistake this suite's own
+    /// `applyPlay` regression records.
+    func testAStepRunningOffTheQueueParkedAcrossEndRideCannotStopLocalPlayback() async {
+        await build()
+        let trackX = SyncTestValues.hash(90)
+        await startRide()
+        await playAsLeader(trackX)
+
+        // Become a follower of a peer whose NEXT will run off the end of the shared queue.
+        await sync.handleLinkLost()
+        await sync.handleConnected(isLocalLeader: false)
+        await session.setClock(SessionClockEstimate(offsetToLeaderUs: 0, rttP95Us: 8_000, ready: true))
+        await sync.onQueueMessage(
+            .snapshot(queueRevision: 1, items: [], currentIndex: nil),
+            generation: await session.currentAuthGeneration()
+        )
+        await settle()
+        await player.clearCalls()
+
+        let generation = await session.currentAuthGeneration()
+        let estimate = SessionClockEstimate(offsetToLeaderUs: 0, rttP95Us: 8_000, ready: true)
+        // Armed immediately before the call, so the first generation read it takes — which is
+        // `applyAuthoritative`'s own `stillCurrent`, one statement after the ride-lifetime capture —
+        // is the one that parks.
+        await session.armGenerationGate()
+        let apply = Task {
+            await self.sync.applyAuthoritative(
+                .next(header: PlaybackCommandHeader(
+                    commandSeq: 1, effectiveAtSessionUs: 0, issuedBy: SyncTestValues.leaderPeerId, queueRevision: 1
+                )),
+                generation: generation,
+                estimate: estimate
+            )
+        }
+        var parked = false
+        for _ in 0 ..< 500 where !parked {
+            parked = await session.isGenerationGateParked
+            await Task.yield()
+        }
+        XCTAssertTrue(parked, "the apply never reached a generation-read suspension")
+        let callsWhileParked = await player.calls
+        XCTAssertFalse(callsWhileParked.contains(.stop), "parked after the player was stopped — too late to be applyStep")
+
+        await endRide()
+        await session.releaseGenerationGate()
+        _ = await apply.value
+        await settle()
+
+        let calls = await player.calls
+        XCTAssertFalse(calls.contains(.stop), "a NEXT authorised before End Ride stopped local playback afterwards: \(calls)")
+        XCTAssertFalse(calls.contains(.clearSelection), "…and cleared the local selection: \(calls)")
+        let timeline = await sync.timeline
+        XCTAssertNil(timeline, "End Ride's retired timeline was replaced by a retired step")
+    }
+
+    /// **The §17 audit's second finding.** `applyPlay` reached *through* `applyStep` or
+    /// `restoreFromPlaybackState` used to capture the ride lifetime at its **own** entry — which, when
+    /// the End Ride had already landed during the outer operation's suspension, was already the
+    /// post-End-Ride value, so its guard compared the new value with itself and passed. It then
+    /// re-established `currentPlaybackIdentity`, the timeline and a fresh playback epoch for a ride
+    /// that was over: round 3's own defect, reached one function further along.
+    func testAStepSelectingATrackParkedAcrossEndRideCannotReestablishPlayback() async {
+        await build()
+        let trackX = SyncTestValues.hash(91)
+        let trackY = SyncTestValues.hash(92)
+        await content.addLocal(trackY)
+        await content.addPeer(trackY)
+        await startRide()
+        await playAsLeader(trackX)
+
+        await sync.handleLinkLost()
+        await sync.handleConnected(isLocalLeader: false)
+        await session.setClock(SessionClockEstimate(offsetToLeaderUs: 0, rttP95Us: 8_000, ready: true))
+        let itemId = SyncTestValues.ulid(92)
+        await sync.onQueueMessage(
+            .snapshot(
+                queueRevision: 1,
+                items: [SharedQueueItem(queueItemId: itemId, trackHash: trackY, addedBy: SyncTestValues.leaderPeerId, order: 0)],
+                currentIndex: nil
+            ),
+            generation: await session.currentAuthGeneration()
+        )
+        await settle()
+        await player.clearCalls()
+
+        let generation = await session.currentAuthGeneration()
+        let estimate = SessionClockEstimate(offsetToLeaderUs: 0, rttP95Us: 8_000, ready: true)
+        await session.armGenerationGate()
+        let apply = Task {
+            await self.sync.applyAuthoritative(
+                .next(header: PlaybackCommandHeader(
+                    commandSeq: 1, effectiveAtSessionUs: 0, issuedBy: SyncTestValues.leaderPeerId, queueRevision: 1
+                )),
+                generation: generation,
+                estimate: estimate
+            )
+        }
+        var parked = false
+        for _ in 0 ..< 500 where !parked {
+            parked = await session.isGenerationGateParked
+            await Task.yield()
+        }
+        XCTAssertTrue(parked, "the apply never reached a generation-read suspension")
+
+        await endRide()
+        await session.releaseGenerationGate()
+        _ = await apply.value
+        await settle()
+
+        let identity = await sync.currentPlaybackIdentity
+        XCTAssertNil(identity, "a step authorised before End Ride re-established ride playback identity: \(String(describing: identity))")
+        let timeline = await sync.timeline
+        XCTAssertNil(timeline, "…and a synchronised timeline the ride no longer has")
+        let calls = await player.calls
+        XCTAssertFalse(calls.contains(.select(trackY)), "…and reached the player: \(calls)")
     }
 
     /// **The defect CI found in this suite's own 50-cycle run.** `applyPlay` proves the *control*

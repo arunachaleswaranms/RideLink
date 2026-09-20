@@ -9,8 +9,15 @@ import RideLinkCore
 /// round trip is done — but the fresh clock was not yet trustworthy, so reconciliation itself is
 /// still pending" (`SyncPlaybackCoordinator`'s own generation-owned deferral, not a reason to resend
 /// `STATE_REQUEST`).
+/// `.cancelled` (independent-review round 4, Blocker 2) is the fourth terminal state a reconciliation
+/// can reach, and it exists because the other three could not express it. A retained reconciliation
+/// is **discarded** — not applied, not rejected, not still pending — whenever the ride segment or the
+/// control lifetime that owns it ends: End Ride, "Play locally", a link loss, a fail-closed outbound
+/// path. Reporting that as `.none` would be indistinguishable from "nothing has ever been asked", and
+/// reporting it as `.reconciled` is the defect. Only `.reconciled` means authoritative state actually
+/// converged; local state only, no wire change.
 public enum ResyncOutcome: Sendable, Equatable {
-    case none, requested, snapshotPending, reconciled, sendFailed
+    case none, requested, snapshotPending, reconciled, cancelled, sendFailed
 }
 
 public struct ResyncDiagnostics: Sendable, Equatable {
@@ -104,13 +111,36 @@ public final class ResyncCoordinator {
     /// The **message** is retained alongside the generation because the later completion is observed
     /// well after `handleStateSnapshot`'s stack frame is gone, and `.reconciled` must report the same
     /// `command_seq`/`manifest_revision` the immediate path reports.
+    ///
+    /// **Independent-review round 4, Blocker 2: the generation is not a unique owner, and `id` is.**
+    /// End Ride deliberately does *not* move the authenticated control generation — the connection,
+    /// the pairing and the session all stay alive on purpose — so two reconciliation obligations can
+    /// exist one after another under a single generation: S1 accepted and deferred in ride 1,
+    /// discarded when the user ends that ride, then S2 accepted in ride 2 under the very same
+    /// generation. A generation-keyed completion could not tell them apart, so S2's success completed
+    /// **S1**, publishing ride 1's `command_seq`/`manifest_revision` as a reconciliation that never
+    /// happened. `id` is minted here, immutably, once per accepted snapshot; it travels into the
+    /// retained anchor inside `SyncPlaybackCoordinator` and comes back out with the terminal result.
+    /// Both halves are compared, and neither is ever re-derived from live state.
     private struct DeferredReconciliation {
+        let id: Int64
         let generation: Int64
         let commandSeq: Int64
         let manifestRevision: Int64
     }
 
     private var deferredReconciliation: DeferredReconciliation?
+
+    /// Mints `DeferredReconciliation.id`. Strictly increasing, process-local, never on the wire, and
+    /// deliberately **not** derived from any live value — a live value is exactly what cannot
+    /// identify an obligation whose lifetime has already ended. Starts at 1 so no valid id is the
+    /// default-initialised zero of anything downstream.
+    private var nextObligationId: Int64 = 1
+
+    /// `@testable`-only view of the obligation currently recorded, so a regression can name the exact
+    /// id a late terminal signal must not be able to complete, rather than assuming what it is.
+    /// Never read by production code.
+    var pendingObligationIdForTest: Int64? { deferredReconciliation?.id }
 
     public private(set) var diagnostics = ResyncDiagnostics()
     public var onDiagnosticsChanged: (@Sendable (ResyncDiagnostics) -> Void)?
@@ -144,9 +174,20 @@ public final class ResyncCoordinator {
         // Independent review, Blocker 2E: a snapshot first deferred for the clock (`.snapshotPending`
         // below) only becomes genuinely reconciled later, from `drainDeferredEvents` — this is how
         // that later completion is reported back, mirroring `setDesynchronizedTrigger`'s wiring.
-        await syncPlaybackCoordinator.setReconciliationAppliedTrigger { [weak self] generation in
+        await syncPlaybackCoordinator.setReconciliationAppliedTrigger { [weak self] obligation, generation in
             guard let self else { return }
-            Task { @MainActor in self.onReconciliationApplied(generation: generation) }
+            Task { @MainActor in self.onReconciliationApplied(obligation: obligation, generation: generation) }
+        }
+        // Independent-review round 4, Blocker 2: the other terminal result. End Ride discards the
+        // retained reconciliation inside `SyncPlaybackCoordinator` (`leaveSynchronizedMode` clears
+        // `deferredEvents` outright, which is correct — the ride that asked for it is over), and the
+        // obligation recorded *here* had no way to learn that. Since End Ride does not move the
+        // control generation, the next genuine reconciliation under the same generation then
+        // completed the discarded one and published ride 1's `command_seq`/`manifest_revision` as
+        // `RECONCILED`.
+        await syncPlaybackCoordinator.setReconciliationCancelledTrigger { [weak self] obligation, generation in
+            guard let self else { return }
+            Task { @MainActor in self.onReconciliationCancelled(obligation: obligation, generation: generation) }
         }
         // ADR-028 Amendment: outbound STATE_SNAPSHOT now travels through SyncPlaybackCoordinator's
         // own ordered outbound path — see `enqueueStateSnapshotReply` — so it can never be written
@@ -163,10 +204,34 @@ public final class ResyncCoordinator {
     /// `PLAYBACK_STATE` reconciling a plain reconnect, or a generation whose obligation has since
     /// been superseded) finds no matching owner and is inert, which is the point: ownership is
     /// compared, not reconstructed.
-    private func onReconciliationApplied(generation: Int64) {
-        guard let deferred = deferredReconciliation, deferred.generation == generation else { return }
+    ///
+    /// Independent-review round 4, Blocker 2: matched on the obligation's **id and** generation.
+    /// Matching on the generation alone is not ownership when End Ride leaves the generation
+    /// untouched, which it deliberately does.
+    private func onReconciliationApplied(obligation: Int64, generation: Int64) {
+        guard let deferred = deferredReconciliation, deferred.id == obligation, deferred.generation == generation else { return }
         deferredReconciliation = nil
         completeReconciliation(commandSeq: deferred.commandSeq, manifestRevision: deferred.manifestRevision)
+    }
+
+    /// The retained reconciliation this obligation owned was **discarded** rather than applied
+    /// (independent-review round 4, Blocker 2).
+    ///
+    /// Raised by `SyncPlaybackCoordinator` from the one place it throws the held authoritative stream
+    /// away, which is reached by End Ride / "Play locally" (`leaveSynchronizedMode`), a control
+    /// lifetime boundary (`resetForNewSession`, including a terminal teardown's link loss), a
+    /// fail-closed outbound path, and a drain that finds its own generation retired.
+    ///
+    /// Matched exactly as the applied signal is, and it may **never** produce `.reconciled`: that is
+    /// reserved for authoritative state genuinely converging. Nothing here is inferred from an
+    /// absence — round 3 already had to remove one inference of that shape, and this is the rule it
+    /// established, applied to the obligation rather than to the flag.
+    private func onReconciliationCancelled(obligation: Int64, generation: Int64) {
+        guard let deferred = deferredReconciliation, deferred.id == obligation, deferred.generation == generation else { return }
+        deferredReconciliation = nil
+        diagnostics.requestPending = pendingRequestGeneration != nil
+        diagnostics.lastOutcome = .cancelled
+        publishDiagnostics()
     }
 
     /// The completion bookkeeping shared by both routes to `.reconciled`: `handleStateSnapshot`'s own
@@ -261,7 +326,32 @@ public final class ResyncCoordinator {
     /// or touch manifest bookkeeping.
     private func handleStateSnapshot(_ message: ResyncMessage, generation: Int64) async {
         guard case .stateSnapshot(_, let commandSeq, _, _, _, _, let manifestRevision, _) = message else { return }
-        let outcome = await syncPlaybackCoordinator.onStateSnapshot(message, generation: generation)
+        // Independent-review round 4, Blocker 2. The obligation is minted **and recorded** before the
+        // `await` below, and that ordering is load-bearing in both directions:
+        //
+        // - `onStateSnapshot` suspends. A cancellation raised inside that window — an End Ride, a
+        //   link loss — must find something to cancel, or it would be raised against an obligation
+        //   this function records a moment later and the discarded snapshot would stay alive.
+        // - The cancellation callback hops to this actor, so it can equally arrive *after* this
+        //   function resumes. Recording up front makes both orders converge on the same answer: the
+        //   cancel clears the record whenever it lands, and every branch below acts only if its own
+        //   id is still the recorded one.
+        //
+        // Recording early also replaces round 3's `supersededByNewer` generation comparison outright.
+        // Ids are minted in arrival order on this actor, so a snapshot whose outcome comes back after
+        // a newer one has been recorded simply fails its own identity check — which is the same
+        // protection, by comparison of two recorded owners rather than of two generations, and it now
+        // covers two obligations that share a generation as well.
+        let obligation = nextObligationId
+        nextObligationId += 1
+        deferredReconciliation = DeferredReconciliation(
+            id: obligation, generation: generation, commandSeq: commandSeq, manifestRevision: manifestRevision
+        )
+        let outcome = await syncPlaybackCoordinator.onStateSnapshot(message, generation: generation, reconciliation: obligation)
+        // Whether this obligation is still the one being tracked. A cancellation or a newer snapshot
+        // during the `await` above means it is not, and this call must then publish nothing at all:
+        // its result belongs to a lifetime that has already been answered.
+        guard deferredReconciliation?.id == obligation else { return }
         switch outcome {
         case .applied, .deferredClock, .deferredContent:
             // §21: the *wire* round trip is satisfied either way — a snapshot for the live generation
@@ -272,25 +362,11 @@ public final class ResyncCoordinator {
             // Independent-review round 3, Blocker B: **both** deferrals are retained obligations.
             // Since Blocker 2A/Race 7, `applyPeerPlaybackState` holds the snapshot in `deferredEvents`
             // for a missing transfer exactly as it does for an untrustworthy clock, and the drain
-            // fires `onReconciliationApplied` for whichever precondition resolves — so the earlier
-            // comment here ("`.deferredContent` resolves through the leader's next authoritative
-            // `PLAY` … there is nothing enqueued for that callback to fire for") described the code
-            // as it was *before* that fix, and no second snapshot is needed for either.
+            // fires `onReconciliationApplied` for whichever precondition resolves — so no second
+            // snapshot is needed for either.
             pendingRequestGeneration = StateResyncGate.onSnapshotObserved(
                 pendingGeneration: pendingRequestGeneration, snapshotGeneration: generation
             )
-            // Independent-review round 3's own fresh-fix audit (§17). `onStateSnapshot` above
-            // **suspends**, and a successor generation's `.connected` can be reduced inside that
-            // window — so this snapshot's own outcome may arrive after a newer obligation has been
-            // recorded. Writing either branch unconditionally would let an older generation's result
-            // overwrite a newer generation's obligation, and the newer one could then never complete
-            // (its completion callback would find the wrong owner). The obligation is therefore
-            // **monotonic**: an older generation may never displace a newer one. This is a comparison
-            // of two recorded owners, never a re-derivation from whatever is live (CLAUDE.md rule 20).
-            let supersededByNewer = (deferredReconciliation?.generation ?? generation) > generation
-            if supersededByNewer {
-                break
-            }
             // §20: manifest bookkeeping follows acceptance, not full playback application — the
             // queue/manifest portions of a snapshot have no clock dependency, so a `.deferredClock`
             // snapshot (playback alone waiting on the clock) still legitimately reports a real
@@ -301,14 +377,11 @@ public final class ResyncCoordinator {
                 requestManifestRefresh()
             }
             if outcome == .applied {
-                // A snapshot that applied immediately supersedes any obligation still recorded for an
-                // earlier one: reconciliation is complete, so nothing is left outstanding to watch for.
+                // Reconciliation is complete, so nothing is left outstanding to watch for. The
+                // obligation recorded up front was this snapshot's own, and it is discharged here.
                 deferredReconciliation = nil
                 completeReconciliation(commandSeq: commandSeq, manifestRevision: manifestRevision)
             } else {
-                deferredReconciliation = DeferredReconciliation(
-                    generation: generation, commandSeq: commandSeq, manifestRevision: manifestRevision
-                )
                 diagnostics.requestPending = pendingRequestGeneration != nil
                 diagnostics.lastOutcome = .snapshotPending
                 diagnostics.lastSnapshotManifestRevision = manifestRevision
@@ -317,8 +390,9 @@ public final class ResyncCoordinator {
             }
         case .rejectedStale, .rejectedRole:
             // §21: a rejected snapshot must not falsely complete the request, and §20: must not
-            // mutate manifest bookkeeping either. Nothing here to update.
-            break
+            // mutate manifest bookkeeping either. The obligation this call recorded up front is
+            // released — nothing was retained for it, so nothing will ever report on it.
+            deferredReconciliation = nil
         }
     }
 

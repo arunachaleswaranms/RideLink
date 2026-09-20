@@ -145,6 +145,14 @@ internal class ResyncTestPair(
         follower.resyncSession.sent.clear()
     }
 
+    /**
+     * Severs the **resync** control lifetime. Deliberately does *not* emit `LinkLost` on the sync
+     * session: several scenarios here model a resync outage across which Phase 5 keeps its session,
+     * and every other caller follows this immediately with [reconnect], whose `Connected` reaches
+     * `resetForNewSession` anyway. A test that needs the full production boundary — both planes told,
+     * with no reconnect afterwards — emits the sync half itself; see
+     * `ResyncRecoveryTest`'s terminal-teardown regression.
+     */
     suspend fun dropLink() {
         leader.resyncSession.liveAuthenticatedGeneration = null
         follower.resyncSession.liveAuthenticatedGeneration = null

@@ -103,8 +103,29 @@ interface RideSegmentOwner {
     /** `CONNECTED -> RIDE_ACTIVE`. Records the epoch; deliberately changes nothing else. */
     fun beginRideSegment(rideEpoch: Long)
 
-    /** `RIDE_ACTIVE -> CONNECTED`. Ends ride-segment synchronisation authority, not the session. */
-    fun endRideSegment(rideEpoch: Long)
+    /**
+     * `RIDE_ACTIVE -> CONNECTED`. Ends ride-segment synchronisation authority, not the session.
+     *
+     * Returns what the boundary actually did (independent-review round 4, Blocker 1). Only the owner
+     * of ride-scoped authority can say whether a strictly newer ride has established authority of its
+     * own — "a newer ride exists" is not that fact, because a Start Ride establishes nothing.
+     */
+    fun endRideSegment(rideEpoch: Long): RideBoundaryOutcome
+}
+
+/**
+ * What an End Ride boundary did when it reached the one owner of ride-segment playback authority
+ * (independent-review round 4, Blocker 1). Mirrors iOS's `RideBoundaryOutcome` exactly.
+ */
+enum class RideBoundaryOutcome {
+    /** The boundary owned what was standing and retired it. */
+    CLEARED,
+
+    /**
+     * A strictly newer ride had already established synchronisation authority of its own, so this
+     * boundary belongs to a ride that is over and touched nothing.
+     */
+    SUPERSEDED_BY_LIVE_RIDE_AUTHORITY,
 }
 
 /**
@@ -509,8 +530,23 @@ class SessionCoordinator(
         // on this same thread, with no suspension between the two. Android needs no post-suspension
         // ownership proof here for that reason — `endRideSegment`'s epoch check is the mirror of the
         // one iOS genuinely needs, where the call has to cross an actor boundary.
-        rideSegment?.endRideSegment(++rideEpoch)
+        //
+        // Independent-review round 4, Blocker 1: the outcome is counted rather than discarded, so the
+        // "a newer ride already owned live authority" case is observable here too. In production on
+        // this platform it cannot occur — this call is synchronous and the epoch was assigned one
+        // statement ago — and [supersededEndRideCount] staying zero is what says so, rather than an
+        // assumption that it must.
+        val outcome = rideSegment?.endRideSegment(++rideEpoch)
+        if (outcome == RideBoundaryOutcome.SUPERSEDED_BY_LIVE_RIDE_AUTHORITY) supersededEndRideCount += 1
     }
+
+    /**
+     * How many End Ride boundaries the ride-segment owner refused because a strictly newer ride had
+     * already established synchronisation authority of its own (independent-review round 4,
+     * Blocker 1). The mirror of iOS's `RideSegmentLifecycle.supersededEndRideCount`.
+     */
+    var supersededEndRideCount: Int = 0
+        private set
 
     /**
      * The strictly-increasing ride-segment epoch (independent-review round 3, Blocker C). Bumped on

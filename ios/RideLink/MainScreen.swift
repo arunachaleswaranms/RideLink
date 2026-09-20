@@ -309,6 +309,7 @@ private struct ResyncDiagnosticsCard: View {
         case .requested: "requested"
         case .snapshotPending: "snapshot pending (clock/content not ready)"
         case .reconciled: "reconciled"
+        case .cancelled: "cancelled (the ride or session it belonged to ended)"
         case .sendFailed: "send failed"
         }
     }

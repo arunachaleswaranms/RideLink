@@ -22,8 +22,15 @@ import kotlinx.coroutines.launch
  * necessarily satisfying the *reconciliation* obligation, when the fresh clock is not ready yet.
  * [RECONCILED] is reserved for genuine convergence — either immediately, or once the retained
  * snapshot `deferredReconciliation` owns is genuinely applied.
+ *
+ * [CANCELLED] (independent-review round 4, Blocker 2) is the fourth terminal state a reconciliation
+ * can reach, and it exists because the other three could not express it. A retained reconciliation is
+ * **discarded** — not applied, not rejected, not still pending — whenever the ride segment or the
+ * control lifetime that owns it ends: End Ride, "Play locally", a link loss, a fail-closed outbound
+ * path. Reporting that as [NONE] would be indistinguishable from "nothing has ever been asked", and
+ * reporting it as [RECONCILED] is the defect. Local state only; no wire change.
  */
-enum class ResyncOutcome { NONE, REQUESTED, RECONCILED, SEND_FAILED, DEFERRED }
+enum class ResyncOutcome { NONE, REQUESTED, RECONCILED, SEND_FAILED, DEFERRED, CANCELLED }
 
 data class ResyncDiagnostics(
     val requestPending: Boolean = false,
@@ -117,7 +124,8 @@ class ResyncCoordinator(
      * distinguish "the obligation converged" from "the obligation was **discarded**" —
      * [SyncPlaybackCoordinator.leaveSynchronizedMode] legitimately does the second. The explicit
      * signal answers the question asked rather than a correlated one, and makes both platforms the
-     * same shape. It is also **monotonic**: see [supersededByNewerObligation].
+     * same shape. Ownership is [DeferredReconciliation.id] **and** the generation, and the record is
+     * taken before the suspending apply so a cancellation cannot miss it — see [handleStateSnapshot].
      *
      * The **message** itself is retained, not only its generation: the deferred-then-later-applied
      * transition is observed asynchronously, well after [handleStateSnapshot]'s own stack frame is
@@ -128,12 +136,31 @@ class ResyncCoordinator(
      * needed manifest refresh.
      */
     private data class DeferredReconciliation(
+        val id: Long,
         val generation: Long,
         val message: ResyncMessage.StateSnapshot,
     )
 
     @Volatile
     private var deferredReconciliation: DeferredReconciliation? = null
+
+    /**
+     * Mints [DeferredReconciliation.id] (independent-review round 4, Blocker 2).
+     *
+     * **The generation is not a unique owner, and this is.** End Ride deliberately does *not* move
+     * the authenticated control generation — the connection, the pairing and the session all stay
+     * alive on purpose — so two reconciliation obligations can exist one after another under a single
+     * generation: S1 accepted and deferred in ride 1, discarded when the user ends that ride, then S2
+     * accepted in ride 2 under the very same generation. A generation-keyed completion could not tell
+     * them apart, so S2's success completed **S1**, publishing ride 1's
+     * `command_seq`/`manifest_revision` as a reconciliation that never happened.
+     *
+     * Strictly increasing, process-local, never on the wire, and deliberately not derived from any
+     * live value — a live value is exactly what cannot identify an obligation whose lifetime has
+     * already ended. Starts at 1 so no valid id is the default-initialised zero of anything
+     * downstream.
+     */
+    private var nextObligationId: Long = 1
 
     init {
         session.resync.sink =
@@ -157,11 +184,30 @@ class ResyncCoordinator(
         // reconciliation that never happened as `RECONCILED`. An explicit signal, raised only where
         // the apply actually succeeds and carrying the generation that authorised it, answers the
         // question asked rather than a correlated one. It also makes both platforms the same shape.
-        syncPlaybackCoordinator.onReconciliationApplied = { generation ->
+        //
+        // Independent-review round 4, Blocker 2: matched on the obligation's **id and** generation.
+        // The generation alone is not ownership when End Ride leaves the generation untouched, which
+        // it deliberately does — two obligations can then exist sequentially under one generation,
+        // and the second one's success completed the first.
+        syncPlaybackCoordinator.onReconciliationApplied = { obligation, generation ->
             val deferred = deferredReconciliation
-            if (deferred != null && deferred.generation == generation) {
+            if (deferred != null && deferred.id == obligation && deferred.generation == generation) {
                 deferredReconciliation = null
                 completeReconciliation(deferred.message)
+            }
+        }
+        // Independent-review round 4, Blocker 2: the other terminal result. End Ride discards the
+        // retained reconciliation inside [SyncPlaybackCoordinator] (`leaveSynchronizedMode` clears
+        // `deferredEvents` outright, which is correct — the ride that asked for it is over), and the
+        // obligation recorded *here* had no way to learn that. It may **never** produce
+        // [ResyncOutcome.RECONCILED]: that is reserved for authoritative state genuinely converging.
+        syncPlaybackCoordinator.onReconciliationCancelled = { obligation, generation ->
+            val deferred = deferredReconciliation
+            if (deferred != null && deferred.id == obligation && deferred.generation == generation) {
+                deferredReconciliation = null
+                _diagnostics.update {
+                    it.copy(requestPending = pendingRequestGeneration != null, lastOutcome = ResyncOutcome.CANCELLED)
+                }
             }
         }
         // The **edge**, not the level (independent-review round 3, found by CI). This used to collect
@@ -267,11 +313,33 @@ class ResyncCoordinator(
         message: ResyncMessage.StateSnapshot,
         generation: Long,
     ) {
-        val outcome = syncPlaybackCoordinator.onStateSnapshot(message, generation)
+        // Independent-review round 4, Blocker 2. The obligation is minted **and recorded** before the
+        // suspending call below, and that ordering is load-bearing in both directions:
+        //
+        // - [SyncPlaybackCoordinator.onStateSnapshot] suspends. A cancellation raised inside that
+        //   window — an End Ride, a link loss — must find something to cancel, or it would be raised
+        //   against an obligation this function records a moment later, and the discarded snapshot
+        //   would stay alive.
+        // - The cancellation may equally arrive *after* this function resumes. Recording up front
+        //   makes both orders converge: the cancel clears the record whenever it lands, and every
+        //   branch below acts only if its own id is still the recorded one.
+        //
+        // Recording early also replaces round 3's `supersededByNewerObligation` generation comparison
+        // outright. Ids are minted in arrival order, so a snapshot whose outcome comes back after a
+        // newer one has been recorded simply fails its own identity check — the same protection, by
+        // comparison of two recorded owners rather than of two generations, and it now covers two
+        // obligations that share a generation as well.
+        val obligation = nextObligationId
+        nextObligationId += 1
+        deferredReconciliation = DeferredReconciliation(obligation, generation, message)
+        val outcome = syncPlaybackCoordinator.onStateSnapshot(message, generation, obligation)
+        // Whether this obligation is still the one being tracked. A cancellation or a newer snapshot
+        // during the call above means it is not, and this call must then publish nothing at all: its
+        // result belongs to a lifetime that has already been answered.
+        if (deferredReconciliation?.id != obligation) return
         when (outcome) {
             StateSnapshotOutcome.APPLIED -> {
                 pendingRequestGeneration = StateResyncGate.onSnapshotObserved(pendingRequestGeneration, generation)
-                if (supersededByNewerObligation(generation)) return
                 deferredReconciliation = null
                 completeReconciliation(message)
             }
@@ -281,30 +349,20 @@ class ResyncCoordinator(
             // precondition resolves, so one branch correctly serves both.
             StateSnapshotOutcome.DEFERRED_CLOCK, StateSnapshotOutcome.DEFERRED_CONTENT -> {
                 pendingRequestGeneration = StateResyncGate.onSnapshotObserved(pendingRequestGeneration, generation)
-                if (supersededByNewerObligation(generation)) return
-                deferredReconciliation = DeferredReconciliation(generation, message)
                 _diagnostics.update {
                     it.copy(requestPending = pendingRequestGeneration != null, lastOutcome = ResyncOutcome.DEFERRED)
                 }
             }
-            StateSnapshotOutcome.REJECTED_STALE -> Unit
-            StateSnapshotOutcome.REJECTED_ROLE -> _diagnostics.update { it.copy(roleViolationCount = it.roleViolationCount + 1) }
+            // A rejected snapshot must not falsely complete the request (§21) or mutate manifest
+            // bookkeeping (§20). The obligation recorded up front is released: nothing was retained
+            // for it, so nothing will ever report on it.
+            StateSnapshotOutcome.REJECTED_STALE -> deferredReconciliation = null
+            StateSnapshotOutcome.REJECTED_ROLE -> {
+                deferredReconciliation = null
+                _diagnostics.update { it.copy(roleViolationCount = it.roleViolationCount + 1) }
+            }
         }
     }
-
-    /**
-     * Whether a **newer** reconciliation obligation has already been recorded, making this
-     * snapshot's outcome too old to act on (independent-review round 3's own fresh-fix audit, §17).
-     *
-     * [SyncPlaybackCoordinator.onStateSnapshot] suspends, and a successor generation's
-     * [ControlEvent.Connected] can be collected inside that window — so this snapshot's own outcome
-     * may arrive after a newer obligation exists. Writing either branch unconditionally would let an
-     * older generation's result overwrite a newer generation's obligation, and the newer one could
-     * then never complete (its completion signal would find the wrong owner). The obligation is
-     * therefore **monotonic**. This compares two recorded owners; it never re-derives one from
-     * whatever generation is live now (CLAUDE.md rule 20).
-     */
-    private fun supersededByNewerObligation(generation: Long): Boolean = (deferredReconciliation?.generation ?: generation) > generation
 
     /**
      * The completion bookkeeping shared by both routes to [ResyncOutcome.RECONCILED]:

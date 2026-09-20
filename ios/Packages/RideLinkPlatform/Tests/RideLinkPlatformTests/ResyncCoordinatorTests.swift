@@ -79,6 +79,9 @@ final class ResyncCoordinatorTests: XCTestCase {
     private var manifestRevision = 0
     private var refreshCount = 0
     private var coordinator: ResyncCoordinator!
+    /// Independent-review round 4: the real production ride-segment seam, so an End Ride in these
+    /// tests is the same two statements `SessionCoordinator.endRide()` performs.
+    private var lifecycle: RideSegmentLifecycle!
 
     private func build() async {
         session = FakeResyncSession()
@@ -109,6 +112,19 @@ final class ResyncCoordinatorTests: XCTestCase {
             localPeerId: SyncTestValues.leaderPeerId
         )
         await coordinator.attach()
+        lifecycle = RideSegmentLifecycle(syncPlayback: syncCoordinator)
+    }
+
+    /// The two statements `SessionCoordinator.startRide()` performs after its FSM transition.
+    private func startRide() async {
+        let epoch = lifecycle.nextRideEpoch()
+        await lifecycle.startRide(epoch: epoch)
+    }
+
+    /// The two statements `SessionCoordinator.endRide()` performs after its FSM transition.
+    private func endRide() async {
+        let epoch = lifecycle.nextRideEpoch()
+        await lifecycle.endRide(epoch: epoch)
     }
 
     private func expect(_ description: String, _ condition: @escaping () async -> Bool) async {
@@ -468,6 +484,240 @@ final class ResyncCoordinatorTests: XCTestCase {
         await expect("C reconciled") { self.coordinator.diagnostics.lastOutcome == .reconciled }
         let convergedC = await syncCoordinator.diagnostics.currentTrackHash
         XCTAssertEqual(trackC, convergedC)
+    }
+
+    // MARK: - Independent-review round 4, Blocker 2: the obligation's own identity
+
+    /// **§15.** S1 is accepted and deferred for the clock, the user ends the ride, and the fresh clock
+    /// then becomes ready. The obligation was **discarded**, not applied, and nothing about the clock
+    /// recovering may resurrect it.
+    ///
+    /// Before this fix, `leaveSynchronizedMode` cleared the inner retained snapshot and the outer
+    /// obligation survived, waiting. End Ride deliberately does not move the control generation, so
+    /// the next completion signal under that generation would have completed ride 1's snapshot.
+    func testEndRideWhileClockDeferredCancelsTheObligationAndAReadyClockCannotResurrectIt() async {
+        await desynchronizedFollower(clockReady: false)
+        await startRide()
+        let track = SyncTestValues.hash(70)
+        await content.addLocal(track)
+
+        await session.deliver(playbackSnapshot(trackHash: track, queueItemId: SyncTestValues.ulid(70)), generation: 1)
+        await expect("S1 deferred for the clock") { self.coordinator.diagnostics.lastOutcome == .snapshotPending }
+        let heldBefore = await syncCoordinator.diagnostics.deferredCommandCount
+        XCTAssertEqual(1, heldBefore, "the outer obligation is backed by a retained inner snapshot")
+        XCTAssertNotNil(coordinator.pendingObligationIdForTest, "the outer obligation exists")
+        await player.clearCalls()
+
+        await endRide()
+        await expect("the obligation was explicitly cancelled") { self.coordinator.diagnostics.lastOutcome == .cancelled }
+        XCTAssertNil(coordinator.pendingObligationIdForTest, "the outer obligation was released")
+        let heldAfter = await syncCoordinator.diagnostics.deferredCommandCount
+        XCTAssertEqual(0, heldAfter, "the inner retained snapshot was discarded by End Ride")
+
+        // The precondition resolves. Nothing may happen.
+        await syncSession.setClock(SessionClockEstimate(offsetToLeaderUs: 0, rttP95Us: 8_000, ready: true))
+        clock.advance(to: clock.now() + Phase5GateBounds.deferredRetryIntervalUs * 4)
+        for _ in 0 ..< 50 { await Task.yield() }
+
+        XCTAssertEqual(.cancelled, coordinator.diagnostics.lastOutcome, "a discarded reconciliation reported success")
+        let calls = await player.calls
+        XCTAssertFalse(calls.contains(.select(track)), "a cancelled reconciliation reached the player: \(calls)")
+        let identity = await syncCoordinator.currentPlaybackIdentity
+        XCTAssertNil(identity, "a cancelled reconciliation restored ride 1's identity")
+        XCTAssertEqual(0, refreshCount, "a cancelled reconciliation triggered a manifest refresh")
+    }
+
+    /// **§16.** The same, for the other precondition: S1 deferred for content, End Ride, then the
+    /// transfer completes. Phase 4's own cache behaviour is untouched — only the synchronisation
+    /// obligation is cancelled — so the completion callback still fires and must simply find nothing.
+    func testEndRideWhileContentDeferredCancelsTheObligationAndACompletedTransferCannotResurrectIt() async {
+        await desynchronizedFollower(clockReady: true)
+        await startRide()
+        let track = SyncTestValues.hash(71)
+        // Deliberately absent from the local cache.
+
+        await session.deliver(playbackSnapshot(trackHash: track, queueItemId: SyncTestValues.ulid(71)), generation: 1)
+        await expect("S1 deferred for content") { self.coordinator.diagnostics.lastOutcome == .snapshotPending }
+        let requested = await content.transferRequests
+        XCTAssertEqual(1, requested.filter { $0 == track }.count, "PROTOCOL §5 rule 4's transfer was requested")
+        await player.clearCalls()
+
+        await endRide()
+        await expect("the obligation was explicitly cancelled") { self.coordinator.diagnostics.lastOutcome == .cancelled }
+        let heldAfter = await syncCoordinator.diagnostics.deferredCommandCount
+        XCTAssertEqual(0, heldAfter)
+
+        // Phase 4 finishes the transfer it was legitimately asked for. That is the cache's business;
+        // it must not restart synchronised playback the ride no longer has.
+        await content.completeTransfer(track)
+        for _ in 0 ..< 50 { await Task.yield() }
+
+        XCTAssertEqual(.cancelled, coordinator.diagnostics.lastOutcome, "a discarded reconciliation reported success")
+        let calls = await player.calls
+        XCTAssertFalse(calls.contains(.select(track)), "a cancelled reconciliation reached the player: \(calls)")
+        let identity = await syncCoordinator.currentPlaybackIdentity
+        XCTAssertNil(identity, "a cancelled reconciliation restored ride 1's identity")
+        let resolvable = await content.resolve(track)
+        XCTAssertNotNil(resolvable, "Phase 4's own cache behaviour must be untouched")
+    }
+
+    /// **§13/§14: the case the existing B→C tests cannot reach.** S1 and S2 share control generation
+    /// B, because End Ride deliberately does not move it. S1 is cancelled by the End Ride; S2 is
+    /// accepted in ride 2, deferred, and later applies. Only S2 may ever be reported reconciled, and
+    /// the values published must be S2's.
+    func testTwoObligationsUnderOneGenerationCompleteOnlyThemselves() async {
+        await desynchronizedFollower(clockReady: false)
+        await startRide()
+        let trackOne = SyncTestValues.hash(72)
+        let trackTwo = SyncTestValues.hash(73)
+        await content.addLocal(trackOne)
+        await content.addLocal(trackTwo)
+
+        await session.deliver(
+            playbackSnapshot(trackHash: trackOne, queueItemId: SyncTestValues.ulid(72), commandSeq: 41, manifestRevision: 3),
+            generation: 1
+        )
+        await expect("S1 deferred") { self.coordinator.diagnostics.lastOutcome == .snapshotPending }
+        let s1 = coordinator.pendingObligationIdForTest
+        XCTAssertNotNil(s1)
+
+        await endRide()
+        await expect("S1 cancelled") { self.coordinator.diagnostics.lastOutcome == .cancelled }
+
+        // Ride 2, under the **same** control generation — nothing about the link changed.
+        await startRide()
+        let generationNow = await session.currentAuthGeneration()
+        XCTAssertEqual(1, generationNow, "the control generation must be unchanged across End Ride")
+        // A ride needs a follower role again: End Ride left synchronised mode, and Phase 5's own
+        // `handleConnected` is what a fresh ride's first authoritative frame arrives under.
+        await syncCoordinator.handleConnected(isLocalLeader: false)
+        await syncSession.setClock(SessionClockEstimate(offsetToLeaderUs: 0, rttP95Us: 8_000, ready: false))
+        await syncCoordinator.forceDesynchronizedForTest()
+
+        await session.deliver(
+            playbackSnapshot(
+                trackHash: trackTwo, queueItemId: SyncTestValues.ulid(73), commandSeq: 42, queueRevision: 2, manifestRevision: 3
+            ),
+            generation: 1
+        )
+        await expect("S2 deferred") { self.coordinator.diagnostics.lastOutcome == .snapshotPending }
+        let s2 = coordinator.pendingObligationIdForTest
+        XCTAssertNotNil(s2)
+        XCTAssertNotEqual(s1, s2, "two obligations under one generation must not share an identity")
+
+        await syncSession.setClock(SessionClockEstimate(offsetToLeaderUs: 0, rttP95Us: 8_000, ready: true))
+        clock.advance(to: clock.now() + Phase5GateBounds.deferredRetryIntervalUs * 2)
+        await expect("S2 reconciled") { self.coordinator.diagnostics.lastOutcome == .reconciled }
+        XCTAssertEqual(42, coordinator.diagnostics.lastSnapshotCommandSeq, "S1's command_seq was published as S2's reconciliation")
+        let converged = await syncCoordinator.currentPlaybackIdentity
+        XCTAssertEqual(trackTwo, converged?.trackHash, "ride 2 converged on ride 1's track")
+        XCTAssertNil(coordinator.pendingObligationIdForTest, "S2's obligation was discharged")
+    }
+
+    /// **§23's fresh-fix audit.** With S1 cancelled and S2 live under the same generation, a late
+    /// terminal signal naming S1 — applied *or* cancelled — may not alter S2. Both are fired directly
+    /// at the production callbacks, which is exactly what a delayed drain or a delayed discard would
+    /// do, and the obligation id is read from the coordinator rather than assumed.
+    func testALateTerminalSignalForACancelledObligationCannotAlterTheLiveOne() async {
+        await desynchronizedFollower(clockReady: false)
+        await startRide()
+        let trackOne = SyncTestValues.hash(74)
+        let trackTwo = SyncTestValues.hash(75)
+        await content.addLocal(trackOne)
+        await content.addLocal(trackTwo)
+
+        await session.deliver(playbackSnapshot(trackHash: trackOne, queueItemId: SyncTestValues.ulid(74), commandSeq: 51), generation: 1)
+        await expect("S1 deferred") { self.coordinator.diagnostics.lastOutcome == .snapshotPending }
+        guard let s1 = coordinator.pendingObligationIdForTest else { return XCTFail("S1 has no obligation id") }
+
+        await endRide()
+        await expect("S1 cancelled") { self.coordinator.diagnostics.lastOutcome == .cancelled }
+
+        await startRide()
+        await syncCoordinator.handleConnected(isLocalLeader: false)
+        await syncSession.setClock(SessionClockEstimate(offsetToLeaderUs: 0, rttP95Us: 8_000, ready: false))
+        await syncCoordinator.forceDesynchronizedForTest()
+        await session.deliver(
+            playbackSnapshot(trackHash: trackTwo, queueItemId: SyncTestValues.ulid(75), commandSeq: 52, queueRevision: 2),
+            generation: 1
+        )
+        await expect("S2 deferred") { self.coordinator.diagnostics.lastOutcome == .snapshotPending }
+        let s2 = coordinator.pendingObligationIdForTest
+
+        // Late S1 applied, then late S1 cancelled. Neither names S2.
+        let applied = await syncCoordinator.onReconciliationApplied
+        applied?(s1, 1)
+        let cancelled = await syncCoordinator.onReconciliationCancelled
+        cancelled?(s1, 1)
+        for _ in 0 ..< 50 { await Task.yield() }
+
+        XCTAssertEqual(s2, coordinator.pendingObligationIdForTest, "a late S1 signal altered S2's obligation")
+        XCTAssertEqual(.snapshotPending, coordinator.diagnostics.lastOutcome, "a late S1 signal changed S2's reported outcome")
+        XCTAssertEqual(52, coordinator.diagnostics.lastSnapshotCommandSeq, "S2's own pending values must stand")
+
+        // …and S2 still completes normally afterwards.
+        await syncSession.setClock(SessionClockEstimate(offsetToLeaderUs: 0, rttP95Us: 8_000, ready: true))
+        clock.advance(to: clock.now() + Phase5GateBounds.deferredRetryIntervalUs * 2)
+        await expect("S2 reconciled") { self.coordinator.diagnostics.lastOutcome == .reconciled }
+        XCTAssertEqual(52, coordinator.diagnostics.lastSnapshotCommandSeq)
+    }
+
+    /// **§24 item 10.** A terminal teardown with an obligation outstanding cancels it — the control
+    /// lifetime that authorised it has ended — and no late completion may follow.
+    func testATerminalTeardownWithAPendingObligationProducesNoLateCompletion() async {
+        await desynchronizedFollower(clockReady: false)
+        let track = SyncTestValues.hash(76)
+        await content.addLocal(track)
+        await session.deliver(playbackSnapshot(trackHash: track, queueItemId: SyncTestValues.ulid(76)), generation: 1)
+        await expect("deferred") { self.coordinator.diagnostics.lastOutcome == .snapshotPending }
+
+        // The session ends and does not come back: `SessionCoordinator` forwards `.linkLost`, whose
+        // `resetForNewSession` discards the retained stream.
+        await syncCoordinator.handleLinkLost()
+        await expect("cancelled by the lifetime boundary") { self.coordinator.diagnostics.lastOutcome == .cancelled }
+        XCTAssertNil(coordinator.pendingObligationIdForTest)
+
+        await syncSession.setClock(SessionClockEstimate(offsetToLeaderUs: 0, rttP95Us: 8_000, ready: true))
+        clock.advance(to: clock.now() + Phase5GateBounds.deferredRetryIntervalUs * 4)
+        for _ in 0 ..< 50 { await Task.yield() }
+        XCTAssertEqual(.cancelled, coordinator.diagnostics.lastOutcome, "a torn-down obligation completed late")
+    }
+
+    /// **§24 item 11.** Fifty same-generation cancel/apply cycles on a fresh harness each time: S1
+    /// deferred and cancelled by End Ride, S2 deferred and applied in ride 2 under the same control
+    /// generation. Only S2 may ever reconcile, and it must report its own `command_seq`.
+    func testFiftySameGenerationCancelThenApplyCyclesCompleteOnlyTheLiveObligation() async {
+        for cycle in 0 ..< 50 {
+            await desynchronizedFollower(clockReady: false)
+            await startRide()
+            let trackOne = SyncTestValues.hash(80)
+            let trackTwo = SyncTestValues.hash(81)
+            await content.addLocal(trackOne)
+            await content.addLocal(trackTwo)
+
+            await session.deliver(
+                playbackSnapshot(trackHash: trackOne, queueItemId: SyncTestValues.ulid(80), commandSeq: 61), generation: 1
+            )
+            await expect("cycle \(cycle): S1 deferred") { self.coordinator.diagnostics.lastOutcome == .snapshotPending }
+            await endRide()
+            await expect("cycle \(cycle): S1 cancelled") { self.coordinator.diagnostics.lastOutcome == .cancelled }
+
+            await startRide()
+            await syncCoordinator.handleConnected(isLocalLeader: false)
+            await syncSession.setClock(SessionClockEstimate(offsetToLeaderUs: 0, rttP95Us: 8_000, ready: false))
+            await syncCoordinator.forceDesynchronizedForTest()
+            await session.deliver(
+                playbackSnapshot(trackHash: trackTwo, queueItemId: SyncTestValues.ulid(81), commandSeq: 62, queueRevision: 2),
+                generation: 1
+            )
+            await expect("cycle \(cycle): S2 deferred") { self.coordinator.diagnostics.lastOutcome == .snapshotPending }
+            await syncSession.setClock(SessionClockEstimate(offsetToLeaderUs: 0, rttP95Us: 8_000, ready: true))
+            clock.advance(to: clock.now() + Phase5GateBounds.deferredRetryIntervalUs * 2)
+            await expect("cycle \(cycle): S2 reconciled") { self.coordinator.diagnostics.lastOutcome == .reconciled }
+            XCTAssertEqual(62, coordinator.diagnostics.lastSnapshotCommandSeq, "cycle \(cycle): S1's values were published")
+            let converged = await syncCoordinator.currentPlaybackIdentity
+            XCTAssertEqual(trackTwo, converged?.trackHash, "cycle \(cycle)")
+        }
     }
 
     /// The two Blocker A recovery scenarios, fifty times each, on a fresh harness per iteration.

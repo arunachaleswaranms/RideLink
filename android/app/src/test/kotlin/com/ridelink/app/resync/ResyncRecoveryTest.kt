@@ -26,6 +26,7 @@ import com.ridelink.core.sync.SessionClockEstimate
 import com.ridelink.core.voice.AudioProcessingConfig
 import com.ridelink.network.control.ControlEvent
 import com.ridelink.network.control.ControlSessionManager
+import com.ridelink.network.control.LinkLossReason
 import com.ridelink.network.control.LocalHandshakeIdentity
 import com.ridelink.network.voice.VoiceController
 import kotlinx.coroutines.CompletableDeferred
@@ -65,7 +66,7 @@ import kotlin.test.assertTrue
  * No wall-clock sleeps: every cadence advance is `runCurrent()` plus the harness's fake monotonic
  * clocks, exactly as [ResyncStressTest] already works.
  */
-@Suppress("LongMethod") // each regression is one end-to-end recovery narrative; splitting one would hide the ordering it proves
+@Suppress("LongMethod", "LargeClass") // one regression = one end-to-end narrative; round 4's audit belongs beside round 3's fixes
 class ResyncRecoveryTest {
     // --- Blocker A -------------------------------------------------------------------------------
 
@@ -485,6 +486,457 @@ class ResyncRecoveryTest {
             )
         }
 
+    // --- Independent-review round 4, Blocker 1 ----------------------------------------------------
+
+    /**
+     * **Blocker 1, Android half.** Android's real `endRide()` runs its cleanup synchronously, so the
+     * parked-cleanup *window* is iOS's — but the **rule** round 3 got wrong is shared, and this proves
+     * the corrected rule is load-bearing here too by presenting the coordinator with exactly the call
+     * a reordered iOS hop would make: ride 1's End Ride epoch, applied after ride 2 has begun and
+     * before ride 2 has established anything of its own.
+     *
+     * Round 3 refused that call because "a newer ride-lifecycle decision has been taken", which left
+     * ride 1's `currentPlaybackIdentity` standing as the only thing a ride-2 `STATE_SNAPSHOT` had to
+     * report — Property B, broken by the same statement that bought Property A.
+     */
+    @Test
+    fun `an End Ride cleanup applied after Ride 2 has begun still clears Ride 1 when Ride 2 owns nothing`() =
+        runTest(StandardTestDispatcher()) {
+            val pair = ResyncTestPair(this)
+            pair.connect(generation = 1)
+            seedPlayable(pair, listOf(SyncTestValues.hash(1), SyncTestValues.hash(2)))
+            val session = rideSession(this, pair.leader.sync)
+
+            session.startRide()
+            pair.leader.sync.playSynchronized(SyncTestValues.hash(1))
+            runCurrent()
+            pair.leaderClock.advanceBy(LEAD_US)
+            runCurrent()
+            assertEquals(SyncTestValues.hash(1), pair.leader.sync.diagnostics.value.currentTrackHash)
+
+            // Ride 1's End Ride took epoch 2; ride 2's Start Ride then took 3 with nothing established.
+            session.endRide()
+            runCurrent()
+            session.startRide()
+            runCurrent()
+
+            val staleBefore = pair.leader.sync.diagnostics.value.staleRideLifecycleCount
+            pair.leader.sync.endRideSegment(rideEpoch = 2)
+            runCurrent()
+
+            assertNull(
+                pair.leader.sync.diagnostics.value.currentTrackHash,
+                "Ride 2 inherited Ride 1's playback identity",
+            )
+            assertEquals(
+                staleBefore,
+                pair.leader.sync.diagnostics.value.staleRideLifecycleCount,
+                "a boundary that owned Ride 1's state must act, not be refused as stale",
+            )
+
+            // …and an ordinary reconnect in Ride 2 reports nothing loaded, then Ride 2's own track.
+            pair.dropLink()
+            pair.reconnect(generation = 2)
+            assertNull(
+                pair.leader.resyncSession
+                    .sentOfType<ResyncMessage.StateSnapshot>()
+                    .last()
+                    .playback
+                    ?.trackHash,
+                "Ride 2's snapshot reported Ride 1's track",
+            )
+            pair.leader.sync.playSynchronized(SyncTestValues.hash(2))
+            runCurrent()
+            pair.leaderClock.advanceBy(LEAD_US)
+            runCurrent()
+            assertEquals(SyncTestValues.hash(2), pair.follower.sync.diagnostics.value.currentTrackHash)
+        }
+
+    /**
+     * Property A at the same seam, so neither property is bought by weakening the other: with ride 2
+     * having established its own track, the identical stale boundary must touch nothing. Together with
+     * the test above, this is the whole of Blocker 1's rule on this platform.
+     */
+    @Test
+    fun `an End Ride cleanup applied after Ride 2 established its own track clears nothing`() =
+        runTest(StandardTestDispatcher()) {
+            val pair = ResyncTestPair(this)
+            pair.connect(generation = 1)
+            seedPlayable(pair, listOf(SyncTestValues.hash(1), SyncTestValues.hash(2)))
+            val session = rideSession(this, pair.leader.sync)
+
+            session.startRide()
+            pair.leader.sync.playSynchronized(SyncTestValues.hash(1))
+            runCurrent()
+            pair.leaderClock.advanceBy(LEAD_US)
+            runCurrent()
+            session.endRide()
+            runCurrent()
+            session.startRide()
+            runCurrent()
+
+            pair.leader.sync.playSynchronized(SyncTestValues.hash(2))
+            runCurrent()
+            pair.leaderClock.advanceBy(LEAD_US)
+            runCurrent()
+            assertEquals(SyncTestValues.hash(2), pair.leader.sync.diagnostics.value.currentTrackHash)
+
+            val staleBefore = pair.leader.sync.diagnostics.value.staleRideLifecycleCount
+            pair.leader.sync.endRideSegment(rideEpoch = 2)
+            runCurrent()
+
+            assertEquals(
+                SyncTestValues.hash(2),
+                pair.leader.sync.diagnostics.value.currentTrackHash,
+                "Ride 1's late cleanup cleared Ride 2's own track",
+            )
+            assertEquals(
+                staleBefore + 1,
+                pair.leader.sync.diagnostics.value.staleRideLifecycleCount,
+                "…and said so, rather than silently",
+            )
+        }
+
+    // --- Independent-review round 4, Blocker 2 ----------------------------------------------------
+
+    /**
+     * **§15.** A reconciliation deferred for the clock, then End Ride, then the clock becoming ready.
+     * The obligation was **discarded**, not applied, so nothing about the precondition resolving may
+     * resurrect it — and because End Ride deliberately leaves the authenticated control generation
+     * alone, a generation-keyed completion could not tell the difference.
+     */
+    @Test
+    fun `End Ride while clock-deferred cancels the obligation and a ready clock cannot resurrect it`() =
+        runTest(StandardTestDispatcher()) {
+            val pair = ResyncTestPair(this)
+            pair.connect(generation = 1)
+            seedPlayable(pair, listOf(SyncTestValues.hash(1), SyncTestValues.hash(2)))
+            val followerSession = rideSession(this, pair.follower.sync)
+            followerSession.startRide()
+
+            pair.leader.sync.playSynchronized(SyncTestValues.hash(1))
+            runCurrent()
+            pair.leaderClock.advanceBy(LEAD_US)
+            runCurrent()
+
+            pair.follower.syncSession.setClock(null)
+            pair.follower.sync.forceDesynchronizedForTest()
+            runCurrent()
+            assertEquals(ResyncOutcome.DEFERRED, pair.follower.resync.diagnostics.value.lastOutcome)
+            assertEquals(1, pair.follower.sync.diagnostics.value.deferredCommandCount, "the obligation is backed by a retained snapshot")
+            pair.follower.player.calls
+                .clear()
+
+            followerSession.endRide()
+            runCurrent()
+
+            assertEquals(
+                ResyncOutcome.CANCELLED,
+                pair.follower.resync.diagnostics.value.lastOutcome,
+                "the outer obligation never learned its retained snapshot was discarded",
+            )
+            assertEquals(0, pair.follower.sync.diagnostics.value.deferredCommandCount, "End Ride discarded the retained snapshot")
+
+            // The precondition resolves. Nothing may happen.
+            pair.follower.syncSession.setClock(READY_CLOCK)
+            pair.followerClock.advanceBy(DEFERRED_RETRY_US * 4)
+            runCurrent()
+
+            assertEquals(
+                ResyncOutcome.CANCELLED,
+                pair.follower.resync.diagnostics.value.lastOutcome,
+                "a discarded reconciliation reported success",
+            )
+            // `leaveSynchronizedMode`'s own `restoreRate()` is ADR-024 Amendment A4 §D's one
+            // deliberately unfenced player call and is End Ride's, not the reconciliation's. What must
+            // not appear is a *restoration* effect — materialising or loading the snapshot's track.
+            assertTrue(
+                pair.follower.player.calls
+                    .none { it is FakeSyncPlayer.Call.Select },
+                "a cancelled reconciliation reached the player: ${pair.follower.player.calls}",
+            )
+            assertNull(pair.follower.sync.diagnostics.value.currentTrackHash, "a cancelled reconciliation restored Ride 1's identity")
+            assertTrue(pair.follower.manifestRefreshCalls.isEmpty(), "a cancelled reconciliation triggered a manifest refresh")
+        }
+
+    /**
+     * **§16.** The same for the other precondition: deferred for content, End Ride, then the transfer
+     * completes. Phase 4's own cache behaviour is deliberately untouched — the track really does
+     * become resolvable — and only the synchronisation obligation is cancelled.
+     */
+    @Test
+    fun `End Ride while content-deferred cancels the obligation and a completed transfer cannot resurrect it`() =
+        runTest(StandardTestDispatcher()) {
+            val pair = ResyncTestPair(this)
+            pair.connect(generation = 1)
+            seedPlayable(pair, listOf(SyncTestValues.hash(1)))
+            // Deliberately absent from the follower: hash(2), the track the leader moves to.
+            pair.leader.content.localHashes
+                .add(SyncTestValues.hash(2).value)
+            pair.leader.content.peerHashes
+                .add(SyncTestValues.hash(2).value)
+            val followerSession = rideSession(this, pair.follower.sync)
+            followerSession.startRide()
+
+            // The Phase 5 wire is severed while the leader moves on, exactly as the existing content
+            // regression does, so the follower's only route to hash(2) is the resync round trip and
+            // the transfer request counted below is the reconciliation's own.
+            pair.leader.syncSession.forwardTo(null)
+            pair.leader.sync.playSynchronized(SyncTestValues.hash(2))
+            runCurrent()
+            pair.leaderClock.advanceBy(LEAD_US)
+            runCurrent()
+            pair.leader.syncSession.forwardTo(pair.follower.syncSession)
+            pair.follower.sync.forceDesynchronizedForTest()
+            runCurrent()
+            assertEquals(ResyncOutcome.DEFERRED, pair.follower.resync.diagnostics.value.lastOutcome)
+            assertEquals(
+                1,
+                pair.follower.content.transferRequests
+                    .count { it == SyncTestValues.hash(2) },
+                "PROTOCOL §5 rule 4's transfer was requested",
+            )
+            pair.follower.player.calls
+                .clear()
+
+            followerSession.endRide()
+            runCurrent()
+            assertEquals(ResyncOutcome.CANCELLED, pair.follower.resync.diagnostics.value.lastOutcome)
+            assertEquals(0, pair.follower.sync.diagnostics.value.deferredCommandCount)
+
+            // Phase 4 finishes the transfer it was legitimately asked for.
+            pair.follower.content.completeTransfer(SyncTestValues.hash(2))
+            runCurrent()
+
+            assertEquals(
+                ResyncOutcome.CANCELLED,
+                pair.follower.resync.diagnostics.value.lastOutcome,
+                "a discarded reconciliation reported success",
+            )
+            assertTrue(
+                pair.follower.player.calls
+                    .none { it is FakeSyncPlayer.Call.Select },
+                "a cancelled reconciliation reached the player: ${pair.follower.player.calls}",
+            )
+            assertNull(pair.follower.sync.diagnostics.value.currentTrackHash)
+            assertTrue(
+                pair.follower.content.localHashes
+                    .contains(SyncTestValues.hash(2).value),
+                "Phase 4's own cache behaviour must be untouched",
+            )
+        }
+
+    /**
+     * **§13/§14: the case the existing B→C tests cannot reach.** S1 and S2 share control generation B,
+     * because End Ride deliberately does not move it. S1 is cancelled by End Ride; S2 is accepted in
+     * ride 2 under the same generation and later applies. Only S2 may ever be reported reconciled.
+     */
+    @Test
+    fun `two obligations under one control generation complete only themselves`() =
+        runTest(StandardTestDispatcher()) {
+            val pair = ResyncTestPair(this)
+            pair.connect(generation = 1)
+            seedPlayable(pair, listOf(SyncTestValues.hash(1), SyncTestValues.hash(2)))
+            val followerSession = rideSession(this, pair.follower.sync)
+            followerSession.startRide()
+
+            pair.leader.sync.playSynchronized(SyncTestValues.hash(1))
+            runCurrent()
+            pair.leaderClock.advanceBy(LEAD_US)
+            runCurrent()
+
+            // S1: deferred for the clock, then cancelled by End Ride.
+            pair.follower.syncSession.setClock(null)
+            pair.follower.sync.forceDesynchronizedForTest()
+            runCurrent()
+            assertEquals(ResyncOutcome.DEFERRED, pair.follower.resync.diagnostics.value.lastOutcome)
+            val s1CommandSeq = lastSnapshotCommandSeqOnTheWire(pair)
+            followerSession.endRide()
+            runCurrent()
+            assertEquals(ResyncOutcome.CANCELLED, pair.follower.resync.diagnostics.value.lastOutcome)
+
+            // Ride 2, under the **same** control generation. The leader moves on, and S2 is deferred.
+            followerSession.startRide()
+            pair.leader.sync.playSynchronized(SyncTestValues.hash(2))
+            runCurrent()
+            pair.leaderClock.advanceBy(LEAD_US)
+            runCurrent()
+            pair.follower.sync.forceDesynchronizedForTest()
+            runCurrent()
+            assertEquals(ResyncOutcome.DEFERRED, pair.follower.resync.diagnostics.value.lastOutcome, "S2 is a genuinely new obligation")
+            val s2CommandSeq = lastSnapshotCommandSeqOnTheWire(pair)
+            assertTrue(s2CommandSeq != s1CommandSeq, "S2 must be a different snapshot from S1")
+
+            pair.follower.syncSession.setClock(READY_CLOCK)
+            pair.followerClock.advanceBy(DEFERRED_RETRY_US)
+            runCurrent()
+
+            assertEquals(ResyncOutcome.RECONCILED, pair.follower.resync.diagnostics.value.lastOutcome, "S2 must reconcile")
+            assertEquals(
+                s2CommandSeq,
+                pair.follower.resync.diagnostics.value.lastSnapshotCommandSeq,
+                "S1's command_seq was published as S2's reconciliation",
+            )
+            assertEquals(SyncTestValues.hash(2), pair.follower.sync.diagnostics.value.currentTrackHash)
+        }
+
+    /**
+     * **§23's fresh-fix audit.** With S1 cancelled and S2 live under the same generation, a late
+     * terminal signal naming S1 — applied *or* cancelled — may not alter S2. Both are fired straight at
+     * the production callbacks, which is exactly what a delayed drain or a delayed discard would do.
+     * S1's obligation id is 1 and S2's is 2 by construction: ids are minted one per accepted snapshot,
+     * from 1, in arrival order, and this test delivers exactly two.
+     */
+    @Test
+    fun `a late terminal signal for a cancelled obligation cannot alter the live one`() =
+        runTest(StandardTestDispatcher()) {
+            val pair = ResyncTestPair(this)
+            pair.connect(generation = 1)
+            seedPlayable(pair, listOf(SyncTestValues.hash(1), SyncTestValues.hash(2)))
+            val followerSession = rideSession(this, pair.follower.sync)
+            followerSession.startRide()
+
+            pair.leader.sync.playSynchronized(SyncTestValues.hash(1))
+            runCurrent()
+            pair.leaderClock.advanceBy(LEAD_US)
+            runCurrent()
+            pair.follower.syncSession.setClock(null)
+            pair.follower.sync.forceDesynchronizedForTest()
+            runCurrent()
+            followerSession.endRide()
+            runCurrent()
+            assertEquals(ResyncOutcome.CANCELLED, pair.follower.resync.diagnostics.value.lastOutcome)
+
+            followerSession.startRide()
+            pair.leader.sync.playSynchronized(SyncTestValues.hash(2))
+            runCurrent()
+            pair.leaderClock.advanceBy(LEAD_US)
+            runCurrent()
+            pair.follower.sync.forceDesynchronizedForTest()
+            runCurrent()
+            assertEquals(ResyncOutcome.DEFERRED, pair.follower.resync.diagnostics.value.lastOutcome)
+            val s2CommandSeq = lastSnapshotCommandSeqOnTheWire(pair)
+            val publishedBeforeLateSignals = pair.follower.resync.diagnostics.value.lastSnapshotCommandSeq
+
+            // Late S1 applied, then late S1 cancelled. Neither names S2's obligation.
+            pair.follower.sync.onReconciliationApplied
+                ?.invoke(1L, 1L)
+            pair.follower.sync.onReconciliationCancelled
+                ?.invoke(1L, 1L)
+            runCurrent()
+
+            assertEquals(
+                ResyncOutcome.DEFERRED,
+                pair.follower.resync.diagnostics.value.lastOutcome,
+                "a late S1 signal changed S2's reported outcome",
+            )
+            assertEquals(
+                publishedBeforeLateSignals,
+                pair.follower.resync.diagnostics.value.lastSnapshotCommandSeq,
+                "a late S1 signal published a reconciliation's values",
+            )
+
+            // …and S2 still completes normally afterwards.
+            pair.follower.syncSession.setClock(READY_CLOCK)
+            pair.followerClock.advanceBy(DEFERRED_RETRY_US)
+            runCurrent()
+            assertEquals(ResyncOutcome.RECONCILED, pair.follower.resync.diagnostics.value.lastOutcome)
+            assertEquals(s2CommandSeq, pair.follower.resync.diagnostics.value.lastSnapshotCommandSeq)
+        }
+
+    /**
+     * **§24 item 10.** A terminal teardown with an obligation outstanding cancels it — the control
+     * lifetime that authorised it has ended — and no late completion may follow.
+     */
+    @Test
+    fun `a terminal teardown with a pending obligation produces no late completion`() =
+        runTest(StandardTestDispatcher()) {
+            val pair = ResyncTestPair(this)
+            pair.connect(generation = 1)
+            seedPlayable(pair, listOf(SyncTestValues.hash(1)))
+
+            pair.leader.sync.playSynchronized(SyncTestValues.hash(1))
+            runCurrent()
+            pair.leaderClock.advanceBy(LEAD_US)
+            runCurrent()
+            pair.follower.syncSession.setClock(null)
+            pair.follower.sync.forceDesynchronizedForTest()
+            runCurrent()
+            assertEquals(ResyncOutcome.DEFERRED, pair.follower.resync.diagnostics.value.lastOutcome)
+
+            // The production boundary reaches **both** planes: `SessionCoordinator.applySideEffects`
+            // forwards `ControlEvent.LinkLost` to `SyncPlaybackCoordinator` and to `ResyncCoordinator`
+            // alike. `ResyncTestPair.dropLink` deliberately only severs the resync half (see its own
+            // doc comment), so the sync half is emitted here — and this test, uniquely, never
+            // reconnects afterwards, which is what makes the difference observable.
+            pair.follower.syncSession.emit(ControlEvent.LinkLost(LinkLossReason.NETWORK))
+            pair.dropLink()
+            runCurrent()
+            assertEquals(
+                ResyncOutcome.CANCELLED,
+                pair.follower.resync.diagnostics.value.lastOutcome,
+                "a lifetime boundary must cancel the obligation it authorised",
+            )
+
+            pair.follower.syncSession.setClock(READY_CLOCK)
+            pair.followerClock.advanceBy(DEFERRED_RETRY_US * 4)
+            runCurrent()
+            assertEquals(
+                ResyncOutcome.CANCELLED,
+                pair.follower.resync.diagnostics.value.lastOutcome,
+                "a torn-down obligation completed late",
+            )
+        }
+
+    /**
+     * **§24 item 11.** Fifty same-generation cancel/apply cycles on a fresh harness each time. Only S2
+     * may ever reconcile, and it must report its own `command_seq`.
+     */
+    @Test
+    fun `fifty same-generation cancel-then-apply cycles complete only the live obligation`() =
+        runTest(StandardTestDispatcher()) {
+            repeat(STRESS_CYCLES) { i ->
+                val pair = ResyncTestPair(this)
+                pair.connect(generation = 1)
+                seedPlayable(pair, listOf(SyncTestValues.hash(1), SyncTestValues.hash(2)))
+                val followerSession = rideSession(this, pair.follower.sync)
+                followerSession.startRide()
+
+                pair.leader.sync.playSynchronized(SyncTestValues.hash(1))
+                runCurrent()
+                pair.leaderClock.advanceBy(LEAD_US)
+                runCurrent()
+                pair.follower.syncSession.setClock(null)
+                pair.follower.sync.forceDesynchronizedForTest()
+                runCurrent()
+                assertEquals(ResyncOutcome.DEFERRED, pair.follower.resync.diagnostics.value.lastOutcome, "cycle $i: S1 deferred")
+                followerSession.endRide()
+                runCurrent()
+                assertEquals(ResyncOutcome.CANCELLED, pair.follower.resync.diagnostics.value.lastOutcome, "cycle $i: S1 cancelled")
+
+                followerSession.startRide()
+                pair.leader.sync.playSynchronized(SyncTestValues.hash(2))
+                runCurrent()
+                pair.leaderClock.advanceBy(LEAD_US)
+                runCurrent()
+                pair.follower.sync.forceDesynchronizedForTest()
+                runCurrent()
+                assertEquals(ResyncOutcome.DEFERRED, pair.follower.resync.diagnostics.value.lastOutcome, "cycle $i: S2 deferred")
+                val s2CommandSeq = lastSnapshotCommandSeqOnTheWire(pair)
+
+                pair.follower.syncSession.setClock(READY_CLOCK)
+                pair.followerClock.advanceBy(DEFERRED_RETRY_US)
+                runCurrent()
+                assertEquals(ResyncOutcome.RECONCILED, pair.follower.resync.diagnostics.value.lastOutcome, "cycle $i: S2 reconciled")
+                assertEquals(
+                    s2CommandSeq,
+                    pair.follower.resync.diagnostics.value.lastSnapshotCommandSeq,
+                    "cycle $i: S1's values were published",
+                )
+                assertEquals(SyncTestValues.hash(2), pair.follower.sync.diagnostics.value.currentTrackHash, "cycle $i")
+            }
+        }
+
     // --- repetition ------------------------------------------------------------------------------
 
     /**
@@ -589,6 +1041,20 @@ class ResyncRecoveryTest {
         }
 
     // --- harness ---------------------------------------------------------------------------------
+
+    /**
+     * The `command_seq` of the most recent `STATE_SNAPSHOT` the leader actually put on the wire.
+     *
+     * Read from the wire rather than from `ResyncDiagnostics.lastSnapshotCommandSeq`, because Android
+     * publishes that field only from `completeReconciliation` — a deliberate, pre-existing divergence
+     * from iOS, which also publishes it on the pending branch. Asserting against the wire is the
+     * stronger claim anyway: it is the value a reconciliation *would* report if it completed.
+     */
+    private fun lastSnapshotCommandSeqOnTheWire(pair: ResyncTestPair): Long =
+        pair.leader.resyncSession
+            .sentOfType<ResyncMessage.StateSnapshot>()
+            .last()
+            .commandSeq
 
     private fun seedPlayable(
         pair: ResyncTestPair,
