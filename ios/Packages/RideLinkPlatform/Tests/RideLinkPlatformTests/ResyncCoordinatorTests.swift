@@ -115,10 +115,11 @@ final class ResyncCoordinatorTests: XCTestCase {
         lifecycle = RideSegmentLifecycle(syncPlayback: syncCoordinator)
     }
 
-    /// The two statements `SessionCoordinator.startRide()` performs after its FSM transition.
-    private func startRide() async {
-        let epoch = lifecycle.nextRideEpoch()
-        await lifecycle.startRide(epoch: epoch)
+    /// The one statement `SessionCoordinator.startRide()` performs after its FSM transition
+    /// (independent-review round 5, Blocker 1: the accepted ride epoch is published synchronously
+    /// and Start Ride defers nothing).
+    private func startRide() {
+        _ = lifecycle.nextRideEpoch()
     }
 
     /// The two statements `SessionCoordinator.endRide()` performs after its FSM transition.
@@ -497,7 +498,7 @@ final class ResyncCoordinatorTests: XCTestCase {
     /// the next completion signal under that generation would have completed ride 1's snapshot.
     func testEndRideWhileClockDeferredCancelsTheObligationAndAReadyClockCannotResurrectIt() async {
         await desynchronizedFollower(clockReady: false)
-        await startRide()
+        startRide()
         let track = SyncTestValues.hash(70)
         await content.addLocal(track)
 
@@ -532,7 +533,7 @@ final class ResyncCoordinatorTests: XCTestCase {
     /// obligation is cancelled — so the completion callback still fires and must simply find nothing.
     func testEndRideWhileContentDeferredCancelsTheObligationAndACompletedTransferCannotResurrectIt() async {
         await desynchronizedFollower(clockReady: true)
-        await startRide()
+        startRide()
         let track = SyncTestValues.hash(71)
         // Deliberately absent from the local cache.
 
@@ -567,7 +568,7 @@ final class ResyncCoordinatorTests: XCTestCase {
     /// the values published must be S2's.
     func testTwoObligationsUnderOneGenerationCompleteOnlyThemselves() async {
         await desynchronizedFollower(clockReady: false)
-        await startRide()
+        startRide()
         let trackOne = SyncTestValues.hash(72)
         let trackTwo = SyncTestValues.hash(73)
         await content.addLocal(trackOne)
@@ -585,7 +586,7 @@ final class ResyncCoordinatorTests: XCTestCase {
         await expect("S1 cancelled") { self.coordinator.diagnostics.lastOutcome == .cancelled }
 
         // Ride 2, under the **same** control generation — nothing about the link changed.
-        await startRide()
+        startRide()
         let generationNow = await session.currentAuthGeneration()
         XCTAssertEqual(1, generationNow, "the control generation must be unchanged across End Ride")
         // A ride needs a follower role again: End Ride left synchronised mode, and Phase 5's own
@@ -620,7 +621,7 @@ final class ResyncCoordinatorTests: XCTestCase {
     /// do, and the obligation id is read from the coordinator rather than assumed.
     func testALateTerminalSignalForACancelledObligationCannotAlterTheLiveOne() async {
         await desynchronizedFollower(clockReady: false)
-        await startRide()
+        startRide()
         let trackOne = SyncTestValues.hash(74)
         let trackTwo = SyncTestValues.hash(75)
         await content.addLocal(trackOne)
@@ -633,7 +634,7 @@ final class ResyncCoordinatorTests: XCTestCase {
         await endRide()
         await expect("S1 cancelled") { self.coordinator.diagnostics.lastOutcome == .cancelled }
 
-        await startRide()
+        startRide()
         await syncCoordinator.handleConnected(isLocalLeader: false)
         await syncSession.setClock(SessionClockEstimate(offsetToLeaderUs: 0, rttP95Us: 8_000, ready: false))
         await syncCoordinator.forceDesynchronizedForTest()
@@ -702,7 +703,7 @@ final class ResyncCoordinatorTests: XCTestCase {
     /// ordering by construction is the lesson this suite's own `applyPlay` regression already records.
     func testASnapshotRefusedBecauseTheRideEndedStillClearsTheWireRequest() async {
         await desynchronizedFollower(clockReady: true)
-        await startRide()
+        startRide()
         let track = SyncTestValues.hash(77)
         await content.addLocal(track)
         XCTAssertTrue(coordinator.diagnostics.requestPending, "the desync trigger left a wire request outstanding")
@@ -745,7 +746,7 @@ final class ResyncCoordinatorTests: XCTestCase {
     /// and asserted here so a future reader does not "fix" it.
     func testASnapshotArrivingAfterEndRideIsOrdinaryNewAuthoritativeTrafficAndApplies() async {
         await desynchronizedFollower(clockReady: true)
-        await startRide()
+        startRide()
         let track = SyncTestValues.hash(78)
         await content.addLocal(track)
         await endRide()
@@ -761,7 +762,7 @@ final class ResyncCoordinatorTests: XCTestCase {
     func testFiftySameGenerationCancelThenApplyCyclesCompleteOnlyTheLiveObligation() async {
         for cycle in 0 ..< 50 {
             await desynchronizedFollower(clockReady: false)
-            await startRide()
+            startRide()
             let trackOne = SyncTestValues.hash(80)
             let trackTwo = SyncTestValues.hash(81)
             await content.addLocal(trackOne)
@@ -774,7 +775,7 @@ final class ResyncCoordinatorTests: XCTestCase {
             await endRide()
             await expect("cycle \(cycle): S1 cancelled") { self.coordinator.diagnostics.lastOutcome == .cancelled }
 
-            await startRide()
+            startRide()
             await syncCoordinator.handleConnected(isLocalLeader: false)
             await syncSession.setClock(SessionClockEstimate(offsetToLeaderUs: 0, rttP95Us: 8_000, ready: false))
             await syncCoordinator.forceDesynchronizedForTest()

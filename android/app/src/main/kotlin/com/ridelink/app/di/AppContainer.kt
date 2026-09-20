@@ -329,7 +329,7 @@ class AppContainer(
                 // above is one: `SessionCoordinator` ends a ride without gaining a Phase 5 dependency.
                 rideSegment =
                     object : RideSegmentOwner {
-                        override fun beginRideSegment(rideEpoch: Long) = syncPlaybackCoordinator.beginRideSegment(rideEpoch)
+                        override fun nextRideEpoch(): Long = syncPlaybackCoordinator.rideEpochs.next()
 
                         override fun endRideSegment(rideEpoch: Long) = syncPlaybackCoordinator.endRideSegment(rideEpoch)
                     },

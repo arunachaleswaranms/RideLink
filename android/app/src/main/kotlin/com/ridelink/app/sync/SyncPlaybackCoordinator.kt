@@ -259,16 +259,23 @@ class SyncPlaybackCoordinator(
     /**
      * Independent-review round 3, Blocker C: the ride segment [currentPlaybackIdentity] belongs to.
      *
-     * Strictly increasing, assigned by [SessionCoordinator] — which bumps it on **both** Start Ride
-     * and End Ride — and never derived here. It answers "which ride is current", and it is what
-     * [recordRideAuthority] stamps into [rideAuthorityEpoch] when authority is established.
+     * Strictly increasing, minted **and published in the same step** by [RideEpochBox.next] the
+     * instant `SessionFsm` accepts a Start Ride or an End Ride, and never derived here. It answers
+     * "which ride is current", and it is what [recordRideAuthority] stamps into [rideAuthorityEpoch]
+     * when authority is established.
      *
-     * **Independent-review round 4, Blocker 1: it is deliberately no longer what an End Ride boundary
-     * compares against.** "A newer ride-lifecycle decision has been taken" is not the same fact as "a
-     * newer ride owns something", because [beginRideSegment] establishes nothing — and treating them
-     * as one left ride 1's state standing whenever a Start Ride merely got there first.
+     * **Independent-review round 5, Blocker 1: a published box rather than a field a
+     * `beginRideSegment` call had to travel here to set.** See [RideEpochBox] — on iOS that call
+     * crossed an actor hop, so the accepted ride and the installed ride were two facts with a window
+     * between them; Android never had the window and mirrors the construction anyway, so neither
+     * platform's correctness rests on a dispatcher.
+     *
+     * **Independent-review round 4, Blocker 1: it is deliberately not what an End Ride boundary
+     * compares against.** "A newer ride-lifecycle decision has been taken" is not the same fact as
+     * "a newer ride owns something", because a Start Ride establishes nothing — and treating them as
+     * one left ride 1's state standing whenever a Start Ride merely got there first.
      */
-    private var lastRideLifecycleEpoch: Long = 0
+    val rideEpochs = RideEpochBox()
 
     /**
      * Bumped by **every** exit from synchronised mode — End Ride and "Play locally" alike — and by
@@ -280,7 +287,7 @@ class SyncPlaybackCoordinator(
      * and wrote [currentPlaybackIdentity], [timeline] and a fresh playback epoch back over the state
      * [leaveSynchronizedMode] had just retired — ride 1's track reported as ride 2's truth by a
      * different route than Blocker C's, and "Play locally" resurrecting a synchronised timeline by
-     * the same one. Kept separate from [lastRideLifecycleEpoch] because that one is
+     * the same one. Kept separate from [rideEpochs] because that one is
      * `SessionCoordinator`'s to assign and must stay comparable with it.
      */
     private var synchronizedModeEpoch: Long = 0
@@ -289,9 +296,9 @@ class SyncPlaybackCoordinator(
      * Independent-review round 4, Blocker 1: the ride epoch under which the **live** ride-scoped
      * synchronisation authority was established.
      *
-     * [lastRideLifecycleEpoch] says which ride is nominally current. That is not the question an End
+     * [rideEpochs] says which ride is nominally current. That is not the question an End
      * Ride boundary has to answer, and round 3 answered the wrong one — see [endRideSegment]. This
-     * field is the honest discriminator: stamped with [lastRideLifecycleEpoch] at each of the three
+     * field is the honest discriminator: stamped with `rideEpochs.current` at each of the three
      * places ride-scoped playback authority is *established* (a track becomes authoritative, or is
      * authoritatively replaced by "nothing loaded"), and reset to 0 whenever that authority ends.
      *
@@ -308,9 +315,27 @@ class SyncPlaybackCoordinator(
      * Stamps [rideAuthorityEpoch] for the ride that is current at this instant. Called from the three
      * sites that establish ride-scoped playback authority and from nowhere else; every caller places
      * it adjacent to the write it describes.
+     *
+     * Independent-review round 5, Blocker 1: it reads [RideEpochBox.current], which every accepted
+     * Start Ride and End Ride has already published synchronously, so the ride recorded here is the
+     * ride that genuinely authorised the authority being established.     *
+     * **Why reading a live value here is not the defect this repository keeps finding.** The rule is
+     * "do not re-read a mutable live owner later and use it to label work authorised earlier". This
+     * call does not label earlier work: it labels *this write*, at the instant of the write, and the
+     * question [endRideSegment] asks later is exactly "which ride established what is standing". The
+     * two can only come apart if the ride changed between the operation's authorisation and this
+     * write — and every route from `RIDE_ACTIVE` back to `CONNECTED` (the only state a Start Ride is
+     * legal from) is already proved against, adjacent to this call:
+     *
+     * - `SessionEvent.EndRide` is the one direct transition, and it bumps [synchronizedModeEpoch]
+     *   through [leaveSynchronizedMode] — which every caller of this proves against `rideLifetime`.
+     * - A peer `BYE` or a network loss goes via `RECONNECTING`, which moves the authentication
+     *   generation — which every caller proves with [stillCurrent].
+     * - `ReconnectSucceeded` from a ride returns to `RIDE_ACTIVE`, never to `CONNECTED`
+     *   (ARCHITECTURE §3 rule 1), so it opens no Start Ride at all.
      */
     private fun recordRideAuthority() {
-        rideAuthorityEpoch = lastRideLifecycleEpoch
+        rideAuthorityEpoch = rideEpochs.current
     }
 
     private var driftState: DriftState = DriftController.reset()
@@ -1701,13 +1726,13 @@ class SyncPlaybackCoordinator(
      * reported after ride 2 had begun — a stale identity presented as ride 2's authoritative truth.
      *
      * **Independent-review round 4, Blocker 1: what the guard compares changed.** Round 3 refused a
-     * cleanup whose epoch was no newer than [lastRideLifecycleEpoch] — "a newer ride-lifecycle
+     * cleanup whose epoch was no newer than the current ride epoch — "a newer ride-lifecycle
      * *decision* has been taken". That satisfied only half of what a ride boundary owes:
      *
      * - **Property A** — a late cleanup must never destroy a successor ride's state. Round 3 had
      *   this right.
      * - **Property B** — ride 1's state must never survive into ride 2 merely because its cleanup was
-     *   delayed. Round 3 got this wrong: [beginRideSegment] deliberately establishes nothing, so a
+     *   delayed. Round 3 got this wrong: a Start Ride deliberately establishes nothing, so a
      *   Start Ride that merely bumped the epoch made ride 1's cleanup "stale" while leaving ride 1's
      *   [currentPlaybackIdentity] standing as the only thing a ride-2 `STATE_SNAPSHOT` had to report.
      *
@@ -1724,29 +1749,8 @@ class SyncPlaybackCoordinator(
             _diagnostics.update { it.copy(staleRideLifecycleCount = it.staleRideLifecycleCount + 1) }
             return RideBoundaryOutcome.SUPERSEDED_BY_LIVE_RIDE_AUTHORITY
         }
-        // `max`, not a plain assignment: a successor `beginRideSegment` may already have moved this
-        // forward, and a boundary that is allowed to act must not move the *current ride* backwards.
-        lastRideLifecycleEpoch = maxOf(lastRideLifecycleEpoch, rideEpoch)
         leaveSynchronizedMode()
         return RideBoundaryOutcome.CLEARED
-    }
-
-    /**
-     * ARCHITECTURE §3's `CONNECTED -> RIDE_ACTIVE`. Records the ride segment's epoch and **nothing
-     * else**: a ride starting must not disturb synchronised playback, which is legitimately usable
-     * from `CONNECTED` before any ride begins (`SyncPlaybackCard` is on the main screen).
-     *
-     * **Independent-review round 4, Blocker 1: that "nothing else" is exactly why this cannot be what
-     * makes a predecessor's End Ride stale.** Establishing nothing means a Start Ride carries no claim
-     * on what is playing. What makes a late boundary stale is a newer ride having *established
-     * authority* — [rideAuthorityEpoch] — and this method deliberately does not do that.
-     */
-    fun beginRideSegment(rideEpoch: Long) {
-        if (rideEpoch <= lastRideLifecycleEpoch) {
-            _diagnostics.update { it.copy(staleRideLifecycleCount = it.staleRideLifecycleCount + 1) }
-            return
-        }
-        lastRideLifecycleEpoch = rideEpoch
     }
 
     /**

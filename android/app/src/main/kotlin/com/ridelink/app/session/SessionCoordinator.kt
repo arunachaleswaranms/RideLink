@@ -100,8 +100,16 @@ fun interface ForegroundServiceController {
  * `SyncPlaybackCoordinator` is the production implementation; a test supplies a recorder.
  */
 interface RideSegmentOwner {
-    /** `CONNECTED -> RIDE_ACTIVE`. Records the epoch; deliberately changes nothing else. */
-    fun beginRideSegment(rideEpoch: Long)
+    /**
+     * Mints and **publishes** the next strictly-increasing ride epoch, in one step
+     * (independent-review round 5, Blocker 1; `com.ridelink.app.sync.RideEpochBox`).
+     *
+     * Called once per accepted Start Ride and once per accepted End Ride. `beginRideSegment` is
+     * gone: once the accepted epoch is published there is nothing left for a Start Ride to install,
+     * because a Start Ride establishes no synchronisation authority — and a Start Ride that defers
+     * nothing cannot be overtaken by the authority a successor ride establishes.
+     */
+    fun nextRideEpoch(): Long
 
     /**
      * `RIDE_ACTIVE -> CONNECTED`. Ends ride-segment synchronisation authority, not the session.
@@ -511,7 +519,9 @@ class SessionCoordinator(
      */
     fun startRide() {
         if (!applyEvent(SessionEvent.StartRide)) return
-        rideSegment?.beginRideSegment(++rideEpoch)
+        // Independent-review round 5, Blocker 1: the accepted ride epoch is minted **and published**
+        // in one step, and a Start Ride hands off no work of its own. See `RideEpochBox`.
+        rideSegment?.nextRideEpoch()
     }
 
     /**
@@ -536,7 +546,8 @@ class SessionCoordinator(
         // this platform it cannot occur — this call is synchronous and the epoch was assigned one
         // statement ago — and [supersededEndRideCount] staying zero is what says so, rather than an
         // assumption that it must.
-        val outcome = rideSegment?.endRideSegment(++rideEpoch)
+        val owner = rideSegment ?: return
+        val outcome = owner.endRideSegment(owner.nextRideEpoch())
         if (outcome == RideBoundaryOutcome.SUPERSEDED_BY_LIVE_RIDE_AUTHORITY) supersededEndRideCount += 1
     }
 
@@ -547,13 +558,6 @@ class SessionCoordinator(
      */
     var supersededEndRideCount: Int = 0
         private set
-
-    /**
-     * The strictly-increasing ride-segment epoch (independent-review round 3, Blocker C). Bumped on
-     * **both** [startRide] and [endRide], so "a newer ride-lifecycle decision has been taken" is a
-     * single comparison rather than two flags that could disagree.
-     */
-    private var rideEpoch: Long = 0
 
     private fun beginDiscoverySession(
         event: SessionEvent,

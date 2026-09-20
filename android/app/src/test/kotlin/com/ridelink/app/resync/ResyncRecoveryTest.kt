@@ -1201,7 +1201,7 @@ class ResyncRecoveryTest {
     private class SyncRideSegmentOwner(
         private val sync: SyncPlaybackCoordinator,
     ) : com.ridelink.app.session.RideSegmentOwner {
-        override fun beginRideSegment(rideEpoch: Long) = sync.beginRideSegment(rideEpoch)
+        override fun nextRideEpoch(): Long = sync.rideEpochs.next()
 
         override fun endRideSegment(rideEpoch: Long) = sync.endRideSegment(rideEpoch)
     }

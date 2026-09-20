@@ -36,6 +36,12 @@ import Foundation
 /// invariant applied to the ride, which is a lifetime distinct from both the authenticated control
 /// generation and the playback epoch.
 ///
+/// **Independent-review round 5, Blocker 1: the epoch is published where it is accepted.** See
+/// `nextRideEpoch()` and `RideEpochBox` — round 4's ownership rule was right and the value it read
+/// was stale, because installing the accepted ride was itself asynchronous work a successor could
+/// overtake. `startRide`/`beginRideSegment` are gone; a Start Ride's entire synchronisation-lifetime
+/// effect is the synchronous epoch publication, so this type now owns exactly one boundary.
+///
 /// **Independent-review round 4, Blocker 1: an accepted End Ride establishes the clean boundary, and
 /// a Start Ride that merely got there first does not excuse it from doing so.** Round 3 read the hop
 /// as "ride 2 is current, so ride 1's cleanup is stale" and refused it outright. That is half the
@@ -57,41 +63,32 @@ import Foundation
 public final class RideSegmentLifecycle {
     private let syncPlayback: SyncPlaybackCoordinator
 
-    /// Strictly increasing, bumped on **both** Start Ride and End Ride so that "a newer ride-lifecycle
-    /// decision has been taken" is one comparison rather than two flags that could disagree.
-    private var rideEpoch: Int64 = 0
-
-    /// How many ride-lifecycle effects were refused because a newer ride had already taken over.
-    ///
-    /// Two sources, deliberately counted together because they mean the same thing: a stale
-    /// `startRide` (refused here, since a Start Ride establishes nothing and re-recording an older
-    /// epoch could only move the current ride backwards), and an End Ride the coordinator refused
-    /// because a strictly newer ride had already established synchronisation authority of its own
-    /// (independent-review round 4, Blocker 1). Nonzero means ride 1's work was correctly stopped
-    /// from touching ride 2.
+    /// How many End Ride boundaries the coordinator refused because a strictly newer ride had
+    /// already established synchronisation authority of its own (independent-review round 4,
+    /// Blocker 1). Nonzero means ride 1's cleanup was correctly stopped from touching ride 2.
     public private(set) var supersededEndRideCount = 0
 
     public init(syncPlayback: SyncPlaybackCoordinator) {
         self.syncPlayback = syncPlayback
     }
 
-    /// Assigns and returns this ride-lifecycle decision's epoch. Synchronous and main-actor isolated:
-    /// the caller takes the epoch **before** the scheduling hop that carries the work, so the hop
-    /// cannot change which ride the work belongs to.
+    /// Assigns and **publishes** this ride-lifecycle decision's epoch, in one step.
+    ///
+    /// **Independent-review round 5, Blocker 1: this is now the whole of Start Ride's effect on the
+    /// synchronisation lifetime, and that is the fix.** Round 4 had it mint a private counter here
+    /// and then carry the value to `SyncPlaybackCoordinator.beginRideSegment` across an actor hop,
+    /// so the ride `SessionFsm` had accepted and the ride the coordinator knew about were two facts
+    /// with a window between them — and `recordRideAuthority` stamped ownership from the second.
+    /// Authority ride 2 established inside that window was therefore labelled **ride 1**, and ride
+    /// 1's late `endRideSegment` then cleared it.
+    ///
+    /// `RideEpochBox.next()` mints and publishes under one lock, synchronously, on the main actor,
+    /// before the caller hands anything to a continuation. `beginRideSegment` is gone because there
+    /// is nothing left for it to install: a Start Ride establishes no authority (synchronised
+    /// playback is legitimately usable from `CONNECTED`), so once the epoch is published its
+    /// asynchronous half was empty. A Start Ride that defers nothing cannot be overtaken.
     public func nextRideEpoch() -> Int64 {
-        rideEpoch += 1
-        return rideEpoch
-    }
-
-    /// `CONNECTED -> RIDE_ACTIVE`. Records the epoch and deliberately changes nothing else — a ride
-    /// starting must not disturb synchronised playback, which is legitimately usable from `CONNECTED`
-    /// before any ride begins.
-    public func startRide(epoch: Int64) async {
-        guard epoch == rideEpoch else {
-            supersededEndRideCount += 1
-            return
-        }
-        await syncPlayback.beginRideSegment(rideEpoch: epoch)
+        syncPlayback.rideEpochs.next()
     }
 
     /// `RIDE_ACTIVE -> CONNECTED`. Ends ride-segment synchronisation authority, not the session.

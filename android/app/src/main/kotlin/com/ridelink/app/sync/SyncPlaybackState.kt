@@ -232,9 +232,9 @@ data class SyncPlaybackDiagnostics(
      */
     val refusedHeldCommandCount: Int = 0,
     /**
-     * Independent-review round 3, Blocker C: how many ride-lifecycle calls
-     * ([SyncPlaybackCoordinator.beginRideSegment]/[SyncPlaybackCoordinator.endRideSegment]) were
-     * refused because a newer ride segment had already begun. Nonzero means a late End Ride was
+     * Independent-review round 3, Blocker C: how many [SyncPlaybackCoordinator.endRideSegment]
+     * boundaries were refused because a strictly newer ride had already established
+     * synchronisation authority of its own. Nonzero means a late End Ride was
      * correctly stopped from clearing a successor ride's playback state — the ride-lifetime analogue
      * of ADR-024 Amendment A5's rule.
      */

@@ -385,13 +385,16 @@ public final class SessionCoordinator {
     /// the FSM alone decides whether this is reachable, never a direct state mutation from the view.
     public func startRide() {
         guard applyEvent(.startRide) else { return }
-        guard let rideSegment else { return }
-        // The epoch is taken **synchronously**, on the main actor, before the hop below — so the hop
-        // cannot change which ride this decision belongs to. `launchInSession`, never a bare `Task`:
-        // a continuation the session starts must be cancellable **and joinable** (CLAUDE.md rule 21,
-        // STATUS §4 problem 67), or `.teardownComplete` could be emitted with this in flight.
-        let epoch = rideSegment.nextRideEpoch()
-        launchInSession { _ in await rideSegment.startRide(epoch: epoch) }
+        // Independent-review round 5, Blocker 1: the accepted ride epoch is minted **and published**
+        // here, synchronously on the main actor, and Start Ride hands off no asynchronous work at
+        // all. It used to take the epoch here and carry it to `SyncPlaybackCoordinator` inside
+        // `launchInSession` — so between this line and that hop the FSM had accepted ride 2 while
+        // the one owner of ride-scoped authority still believed ride 1 was current, and authority
+        // ride 2 established in that window was stamped as ride 1's and destroyed by ride 1's late
+        // cleanup. A Start Ride establishes nothing, so once the epoch is published there is
+        // genuinely nothing left to defer; removing the deferral removes the window rather than
+        // widening a comparison. See `RideEpochBox`.
+        _ = rideSegment?.nextRideEpoch()
     }
 
     /// `RIDE_ACTIVE -> CONNECTED` (FR-018's End Ride). **Not** the same as `endSession()`: this
