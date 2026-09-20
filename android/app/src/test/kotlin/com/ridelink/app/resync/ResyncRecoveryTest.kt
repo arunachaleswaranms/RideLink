@@ -1197,6 +1197,142 @@ class ResyncRecoveryTest {
         return coordinator
     }
 
+    // --- Independent-review round 5, Blocker 2 --------------------------------------------------
+
+    /**
+     * **Blocker 2A, Android half.** `restoreFromPlaybackState` discarded [SyncPlaybackCoordinator]'s
+     * `applyPlay` result — which was `Unit` and could not have carried one — and returned
+     * `APPLIED` unconditionally. `applyPlay` legitimately early-returns when the **ride** that
+     * authorised the reconciliation ends inside its `content.resolve`, writing nothing; the
+     * obligation's owner was nevertheless told the state had converged, so ride 1's `command_seq`
+     * and `manifest_revision` were published as [ResyncOutcome.RECONCILED].
+     *
+     * **Where this parks, and why that is the whole test.** The existing ride regressions end the
+     * ride *before* the snapshot arrives, so the refusal lands at [applyPeerPlaybackState]'s own
+     * outer ride guard — a path that already answered `REJECTED_RIDE` correctly. This one parks two
+     * frames deeper, inside `applyPlay`'s **own** resolve, past `onPeerPlaybackState`'s clock and
+     * content pre-checks and past `restoreFromPlaybackState`'s ride guard. The gate's predicate is
+     * what pins it: `lastAppliedCommandSeq == 2` becomes true only once `applyPeerPlaybackState` has
+     * adopted the snapshot's sequence number, which happens after the outer pre-check resolve and
+     * before `applyPlay`'s. Counting resolves alone does not pin it, and a count-based draft of the
+     * ride regression this file already carries passed **vacuously**.
+     */
+    private suspend fun TestScope.rideCancelledMidApplyCycle(cycle: Int) {
+        val pair = ResyncTestPair(this)
+        pair.connect(generation = 1)
+        seedPlayable(pair, listOf(SyncTestValues.hash(1)))
+        // hash(2) and hash(3) resolvable on both sides, so the reconciliations' own content
+        // pre-checks pass and the parked frame below is unambiguously `applyPlay`'s.
+        for (hash in listOf(SyncTestValues.hash(2), SyncTestValues.hash(3))) {
+            pair.leader.content.localHashes
+                .add(hash.value)
+            pair.leader.content.peerHashes
+                .add(hash.value)
+            pair.follower.content.localHashes
+                .add(hash.value)
+        }
+        val followerSession = rideSession(this, pair.follower.sync)
+        followerSession.startRide()
+
+        pair.leader.sync.playSynchronized(SyncTestValues.hash(1))
+        runCurrent()
+        pair.leaderClock.advanceBy(LEAD_US)
+        runCurrent()
+        assertEquals(1L, pair.follower.sync.diagnostics.value.lastAppliedCommandSeq, "cycle $cycle")
+
+        // The leader moves to hash(2) with the Phase 5 wire severed, so the follower's only route to
+        // it is the resync round trip — and its `lastAppliedCommandSeq` is still 1 while the
+        // snapshot's will be 2. That difference is what pins the parked frame.
+        pair.leader.syncSession.forwardTo(null)
+        pair.leader.sync.playSynchronized(SyncTestValues.hash(2))
+        runCurrent()
+        pair.leaderClock.advanceBy(LEAD_US)
+        runCurrent()
+        pair.leader.syncSession.forwardTo(pair.follower.syncSession)
+
+        val gate = CompletableDeferred<Unit>()
+        pair.follower.content.resolveGate = gate
+        pair.follower.content.resolveGateWhen = { pair.follower.sync.diagnostics.value.lastAppliedCommandSeq == 2L }
+        pair.follower.player.calls
+            .clear()
+
+        pair.follower.sync.forceDesynchronizedForTest()
+        runCurrent()
+
+        assertNull(pair.follower.content.resolveGateWhen, "cycle $cycle: never parked inside applyPlay's own resolve")
+        assertTrue(
+            pair.follower.player.calls
+                .none { it is FakeSyncPlayer.Call.Select },
+            "cycle $cycle: parked after the player was touched: ${pair.follower.player.calls}",
+        )
+        val s1CommandSeq = lastSnapshotCommandSeqOnTheWire(pair)
+        assertEquals(2L, s1CommandSeq, "cycle $cycle")
+        assertTrue(pair.follower.resync.diagnostics.value.requestPending, "cycle $cycle: no wire request was outstanding")
+
+        // End Ride while S1 is provably parked, then let it resume.
+        followerSession.endRide()
+        runCurrent()
+        gate.complete(Unit)
+        runCurrent()
+        pair.followerClock.advanceBy(DEFERRED_RETRY_US * 4)
+        runCurrent()
+
+        // S1 mutated nothing, and its terminal result is cancellation.
+        assertEquals(
+            ResyncOutcome.CANCELLED,
+            pair.follower.resync.diagnostics.value.lastOutcome,
+            "cycle $cycle: a reconciliation the ride ended mid-apply reported success",
+        )
+        assertNull(pair.follower.sync.diagnostics.value.currentTrackHash, "cycle $cycle: a ride-expired restore wrote currentTrackHash")
+        assertTrue(
+            pair.follower.player.calls
+                .none { it is FakeSyncPlayer.Call.Select },
+            "cycle $cycle: a ride-expired restore reached the player: ${pair.follower.player.calls}",
+        )
+        assertEquals(
+            0,
+            pair.follower.sync.diagnostics.value.deferredCommandCount,
+            "cycle $cycle: S1 claimed a deferral and retained nothing",
+        )
+        assertFalse(pair.follower.resync.diagnostics.value.requestPending, "cycle $cycle: the wire request was left outstanding")
+        assertFalse(
+            pair.follower.resync.diagnostics.value.lastSnapshotCommandSeq == s1CommandSeq,
+            "cycle $cycle: S1's command_seq was published as reconciled bookkeeping",
+        )
+        assertTrue(pair.follower.manifestRefreshCalls.isEmpty(), "cycle $cycle: a cancelled reconciliation triggered a manifest refresh")
+
+        // Ride 2, under the **same** authenticated control generation — End Ride never moves it.
+        followerSession.startRide()
+        pair.leader.sync.playSynchronized(SyncTestValues.hash(3))
+        runCurrent()
+        pair.leaderClock.advanceBy(LEAD_US)
+        runCurrent()
+        pair.follower.sync.forceDesynchronizedForTest()
+        runCurrent()
+        pair.followerClock.advanceBy(DEFERRED_RETRY_US)
+        runCurrent()
+
+        val s2CommandSeq = lastSnapshotCommandSeqOnTheWire(pair)
+        assertTrue(s2CommandSeq != s1CommandSeq, "cycle $cycle: S2 must be a different snapshot from S1")
+        assertEquals(ResyncOutcome.RECONCILED, pair.follower.resync.diagnostics.value.lastOutcome, "cycle $cycle: S2 must reconcile")
+        assertEquals(
+            s2CommandSeq,
+            pair.follower.resync.diagnostics.value.lastSnapshotCommandSeq,
+            "cycle $cycle: S1's command_seq was published as S2's reconciliation",
+        )
+        assertEquals(SyncTestValues.hash(3), pair.follower.sync.diagnostics.value.currentTrackHash, "cycle $cycle")
+    }
+
+    @Test
+    fun `an End Ride inside applyPlay cancels the obligation rather than reporting APPLIED`() =
+        runTest(StandardTestDispatcher()) { rideCancelledMidApplyCycle(cycle = 0) }
+
+    @Test
+    fun `fifty ride-cancelled-mid-apply cycles complete only the live obligation`() =
+        runTest(StandardTestDispatcher()) {
+            for (cycle in 0 until STRESS_CYCLES) rideCancelledMidApplyCycle(cycle)
+        }
+
     /** The exact adapter `AppContainer` installs — this test must not invent a different one. */
     private class SyncRideSegmentOwner(
         private val sync: SyncPlaybackCoordinator,

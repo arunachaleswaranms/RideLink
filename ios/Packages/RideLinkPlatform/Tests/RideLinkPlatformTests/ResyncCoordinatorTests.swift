@@ -820,4 +820,110 @@ final class ResyncCoordinatorTests: XCTestCase {
             XCTAssertFalse(contentDesynchronized, "cycle \(cycle) (content): latch cleared")
         }
     }
+
+    // MARK: - Independent-review round 5, Blocker 2
+
+    /// Counts `resolve` calls so a predicate can pin the **nested** restoration frame.
+    private final class ResolveCounter: @unchecked Sendable {
+        private let lock = NSLock()
+        private var count = 0
+        func bump() -> Int { lock.lock(); defer { lock.unlock() }; count += 1; return count }
+    }
+
+    /// Runs one S1-cancelled-mid-`applyPlay` / S2-reconciles cycle on a fresh harness.
+    ///
+    /// **Where it parks, and why that is the whole test.** Round 4's existing regression
+    /// (`testASnapshotRefusedBecauseTheRideEndedStillClearsTheWireRequest`) ends the ride *before*
+    /// the snapshot arrives, so the refusal happens at `applyPeerPlaybackState`'s own outer ride
+    /// guard — a path that already answered `.rejectedRide` correctly. This one parks two frames
+    /// deeper, inside `applyPlay`'s **own** `content.resolve`, past `applyPeerPlaybackState`'s ride
+    /// guard, past its clock and content pre-checks, and past `restoreFromPlaybackState`'s ride
+    /// guard. That is the only place the defect lived: `applyPlay` refused correctly (nothing was
+    /// written) and `restoreFromPlaybackState` then translated its `false` into `.deferredContent`,
+    /// which promises retained work that did not exist.
+    ///
+    /// Resolve #1 is `applyPeerPlaybackState`'s content pre-check; resolve #2 is `applyPlay`'s. The
+    /// assertions below prove the landing rather than assuming it: parked, and no player selection.
+    private func runRideCancelledMidApplyCycle(cycle: Int) async {
+        await desynchronizedFollower(clockReady: true)
+        startRide()
+        let trackOne = SyncTestValues.hash(91)
+        let trackTwo = SyncTestValues.hash(92)
+        await content.addLocal(trackOne)
+        await content.addLocal(trackTwo)
+        XCTAssertTrue(coordinator.diagnostics.requestPending, "cycle \(cycle): the desync trigger left a wire request outstanding")
+
+        let counter = ResolveCounter()
+        await content.armResolveGate(when: { counter.bump() == 2 })
+        await session.deliver(
+            playbackSnapshot(trackHash: trackOne, queueItemId: SyncTestValues.ulid(91), commandSeq: 11, manifestRevision: 7),
+            generation: 1
+        )
+        var parked = false
+        for _ in 0 ..< 5_000 where !parked {
+            parked = await content.isResolveGateParked
+            await Task.yield()
+        }
+        XCTAssertTrue(parked, "cycle \(cycle): never parked inside applyPlay's own resolve")
+        let s1 = coordinator.pendingObligationIdForTest
+        XCTAssertNotNil(s1, "cycle \(cycle): no obligation was recorded for S1")
+        let parkedCalls = await player.calls
+        XCTAssertFalse(parkedCalls.contains(.select(trackOne)), "cycle \(cycle): parked after the player was touched: \(parkedCalls)")
+
+        // End Ride while S1 is provably parked, then let it resume.
+        await endRide()
+        await content.releaseResolveGate()
+        for _ in 0 ..< 500 { await Task.yield() }
+
+        // S1 mutated nothing.
+        let identity = await syncCoordinator.currentPlaybackIdentity
+        XCTAssertNil(identity, "cycle \(cycle): a ride-expired restore wrote currentPlaybackIdentity")
+        let timeline = await syncCoordinator.timeline
+        XCTAssertNil(timeline, "cycle \(cycle): a ride-expired restore wrote a timeline")
+        let hash = await syncCoordinator.diagnostics.currentTrackHash
+        XCTAssertNil(hash, "cycle \(cycle): a ride-expired restore wrote currentTrackHash")
+        let afterCalls = await player.calls
+        XCTAssertFalse(afterCalls.contains(.select(trackOne)), "cycle \(cycle): a ride-expired restore reached the player: \(afterCalls)")
+
+        // S1's terminal result is cancellation — never reconciled, and never left pending.
+        XCTAssertEqual(.cancelled, coordinator.diagnostics.lastOutcome, "cycle \(cycle): S1 reported \(coordinator.diagnostics.lastOutcome)")
+        XCTAssertNil(coordinator.pendingObligationIdForTest, "cycle \(cycle): S1 was left permanently deferred with nothing retained")
+        let held = await syncCoordinator.diagnostics.deferredCommandCount
+        XCTAssertEqual(0, held, "cycle \(cycle): S1 claimed a deferral and retained \(held) items")
+        // The snapshot did arrive for the live generation, so the *wire* round trip is satisfied.
+        XCTAssertFalse(coordinator.diagnostics.requestPending, "cycle \(cycle): the wire request was left outstanding")
+        XCTAssertNotEqual(11, coordinator.diagnostics.lastSnapshotCommandSeq, "cycle \(cycle): S1's command_seq was published as reconciled")
+        XCTAssertNotEqual(7, coordinator.diagnostics.lastSnapshotManifestRevision, "cycle \(cycle): S1's manifest_revision was published as reconciled")
+        XCTAssertEqual(0, refreshCount, "cycle \(cycle): a cancelled reconciliation triggered a manifest refresh")
+
+        // Ride 2, under the **same** authenticated control generation — End Ride never moves it.
+        startRide()
+        await session.deliver(
+            playbackSnapshot(trackHash: trackTwo, queueItemId: SyncTestValues.ulid(92), commandSeq: 21, manifestRevision: 9),
+            generation: 1
+        )
+        await expect("cycle \(cycle): S2 reconciled") { self.coordinator.diagnostics.lastOutcome == .reconciled }
+        XCTAssertEqual(21, coordinator.diagnostics.lastSnapshotCommandSeq, "cycle \(cycle): S2 published S1's command_seq")
+        XCTAssertEqual(9, coordinator.diagnostics.lastSnapshotManifestRevision, "cycle \(cycle): S2 published S1's manifest_revision")
+        let rideTwoIdentity = await syncCoordinator.currentPlaybackIdentity
+        XCTAssertEqual(trackTwo, rideTwoIdentity?.trackHash, "cycle \(cycle): ride 2 did not converge on its own track")
+
+        // And S1 can never be completed by anything, including S2's own success arriving late.
+        if let s1 {
+            let applied = await syncCoordinator.onReconciliationApplied
+            applied?(s1, 1)
+            for _ in 0 ..< 50 { await Task.yield() }
+            XCTAssertEqual(.reconciled, coordinator.diagnostics.lastOutcome)
+            XCTAssertEqual(21, coordinator.diagnostics.lastSnapshotCommandSeq, "cycle \(cycle): a late S1 signal republished S1's bookkeeping")
+        }
+    }
+
+    func testAnEndRideInsideApplyPlayCancelsTheObligationRatherThanFakingADeferral() async {
+        await runRideCancelledMidApplyCycle(cycle: 0)
+    }
+
+    /// §24 item 11's cadence at the *nested* park: fifty cycles on a fresh harness each time.
+    func testFiftyRideCancelledMidApplyCyclesCompleteOnlyTheLiveObligation() async {
+        for cycle in 0 ..< 50 { await runRideCancelledMidApplyCycle(cycle: cycle) }
+    }
 }

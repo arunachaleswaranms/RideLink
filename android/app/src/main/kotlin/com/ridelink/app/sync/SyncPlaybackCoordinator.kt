@@ -2432,6 +2432,18 @@ class SyncPlaybackCoordinator(
      * ARCHITECTURE §7.2 steps 1-6: resolve, pre-roll the decoder while there is still time, then
      * start at the deadline. The resolve and the pre-roll are both real suspension points, so the
      * session generation and the epoch token are re-proved after each.
+     *
+     * **Independent-review round 5, Blocker 2: it returns [StateSnapshotOutcome] rather than
+     * `Unit`, and that is the fix.** Every early return below is a *different reason* the
+     * authoritative state was not established, and [restoreFromPlaybackState] — the one caller whose
+     * own caller is an outstanding reconciliation obligation — had no way to tell them apart, so it
+     * returned [StateSnapshotOutcome.APPLIED] unconditionally. A reconciliation whose **ride** ended
+     * inside `content.resolve` was therefore reported to [ResyncCoordinator] as
+     * [ResyncOutcome.RECONCILED][com.ridelink.app.resync.ResyncOutcome.RECONCILED]: ride 1's
+     * `command_seq` and `manifest_revision` published as a convergence that never happened.
+     *
+     * The other two callers ([applyAuthoritative], [applyStep]) legitimately discard the value —
+     * they answer nobody — exactly as they already discarded this call's effect.
      */
     @Suppress("ReturnCount", "LongParameterList") // one early-out per session/epoch re-proof after a suspension
     private suspend fun applyPlay(
@@ -2448,13 +2460,13 @@ class SyncPlaybackCoordinator(
          * (independent-review round 4, §17). See [applyAuthoritative].
          */
         rideLifetime: Long,
-    ) {
+    ): StateSnapshotOutcome {
         // Amendment A3 Finding B: reached from `applyAuthoritative`, from `applyStep` and from
         // `restoreFromPlaybackState`, and `content.resolve` is real I/O. Proved on entry so a Play
         // that only *starts* after a boundary does no work, and again below because the resolve
         // suspends.
-        if (!stillCurrent(generation)) return
-        if (synchronizedModeEpoch != rideLifetime) return
+        if (!stillCurrent(generation)) return StateSnapshotOutcome.REJECTED_STALE
+        if (synchronizedModeEpoch != rideLifetime) return StateSnapshotOutcome.REJECTED_RIDE
         // Independent-review Blocker 2B: this is the authoritative track identity the instant this
         // PLAY is accepted, regardless of whether content resolves locally right now -- PROTOCOL §5
         // rule 4 already treats a content-pending PLAY as the authoritative state to report
@@ -2467,12 +2479,17 @@ class SyncPlaybackCoordinator(
         // boundary tell "ride 2 has taken over" from "ride 2 has not started playing anything yet".
         recordRideAuthority()
         val playable = content.resolve(trackHash)
-        if (!stillCurrent(generation)) return
+        if (!stillCurrent(generation)) return StateSnapshotOutcome.REJECTED_STALE
         if (playable == null) {
             // PROTOCOL §5 rule 4: do not start, request the transfer, let the leader reschedule.
             _diagnostics.update { it.copy(syncState = SyncState.WAITING_FOR_CONTENT, currentTrackHash = trackHash) }
             content.requestTransfer(trackHash)
-            return
+            // Independent-review round 5, Blocker 2: reported, not swallowed. Nothing is retained
+            // *here* — retention belongs to the caller that owns a reconciliation obligation, and
+            // `restoreFromPlaybackState` does it, because "every DEFERRED_* corresponds to actual
+            // retained work carrying the same obligation id" is the invariant this outcome makes a
+            // promise about.
+            return StateSnapshotOutcome.DEFERRED_CONTENT
         }
         // Independent-review round 3, found by CI on this pass's own new ride regression. The proof
         // above is about the **control generation**, which End Ride deliberately does not move — the
@@ -2481,7 +2498,7 @@ class SyncPlaybackCoordinator(
         // put all of them back. Synchronous, adjacent to the writes: ADR-024 Amendment A5's rule
         // applied to the third lifetime. Android writes `currentPlaybackIdentity` above rather than
         // here (a deliberate pre-existing divergence — see its own comment), so it is guarded twice.
-        if (synchronizedModeEpoch != rideLifetime) return
+        if (synchronizedModeEpoch != rideLifetime) return StateSnapshotOutcome.REJECTED_RIDE
         val token = playbackFence.begin()
         currentEpochToken = token
         driftState = DriftController.reset()
@@ -2502,14 +2519,28 @@ class SyncPlaybackCoordinator(
         // proof, so a pre-roll whose session ends inside the load cannot seek the one that
         // replaced it.
         val preRoll = listOf(PlayerStep.Select(playable), PlayerStep.Load(playable), PlayerStep.Seek(positionMs))
-        if (!runOwnedSteps(preRoll, generation, token)) return
+        if (!runOwnedSteps(preRoll, generation, token)) {
+            // `runOwnedSteps` refuses for one of three reasons and only it knows which, so ask the
+            // two lifetimes directly, synchronously, right here. A ride that ended inside the
+            // pre-roll is REJECTED_RIDE for the same reason it is above. The residue — both
+            // lifetimes live, the *playback epoch* superseded by a newer authoritative PLAY — is
+            // reported REJECTED_STALE: it must not become APPLIED, and it is conservative rather
+            // than novel (a REJECTED_STALE leaves the wire request outstanding, which
+            // `StateResyncGate` already dedups and a fresh `Connected` already re-arms).
+            return if (stillCurrent(generation) && synchronizedModeEpoch != rideLifetime) {
+                StateSnapshotOutcome.REJECTED_RIDE
+            } else {
+                StateSnapshotOutcome.REJECTED_STALE
+            }
+        }
         // A snapshot-restored track that the authority says is paused is loaded and left alone:
         // there is no instant to schedule, because nothing is about to become audible.
         if (!playing) {
             markSynced()
-            return
+            return StateSnapshotOutcome.APPLIED
         }
         scheduleAt(header.effectiveAtSessionUs, estimate, generation, token, listOf(PlayerStep.Start))
+        return StateSnapshotOutcome.APPLIED
     }
 
     /**
@@ -3270,21 +3301,44 @@ class SyncPlaybackCoordinator(
             }
         val header =
             PlaybackCommandHeader(snapshot.commandSeq, snapshot.atSessionUs, localPeerId, snapshot.queueRevision)
-        applyPlay(
-            header,
-            trackHash,
-            queueItemId,
-            snapshot.positionMs,
-            generation,
-            estimate,
-            playing = snapshot.playing,
-            rideLifetime = rideLifetime,
-        )
-        // `applyPlay`'s own content-unavailable branch is Phase 5's existing deferred-transfer path
-        // (PROTOCOL §5 rule 4) — resync's job, handing over authoritative state, is done the instant
-        // it is handed off; whether the player can start immediately is `SyncState.WAITING_FOR_CONTENT`,
-        // a separate, already-tracked diagnostic, not a second desync obligation invented here.
-        return StateSnapshotOutcome.APPLIED
+        // Independent-review round 5, Blocker 2A. This used to discard `applyPlay`'s result and
+        // return APPLIED unconditionally, on the reasoning that "resync's job is done the instant
+        // authoritative state is handed off". That is true of the *content* case and false of every
+        // other one: `applyPlay` early-returns when the control generation retires, when the
+        // playback epoch is superseded, and — the reachable one this closes — when the **ride**
+        // that authorised the reconciliation ends inside `content.resolve`. The obligation's owner
+        // was then told RECONCILED for state that was never applied, publishing ride 1's
+        // `command_seq`/`manifest_revision` as a convergence that never happened.
+        val outcome =
+            applyPlay(
+                header,
+                trackHash,
+                queueItemId,
+                snapshot.positionMs,
+                generation,
+                estimate,
+                playing = snapshot.playing,
+                rideLifetime = rideLifetime,
+            )
+        if (outcome != StateSnapshotOutcome.DEFERRED_CONTENT) return outcome
+        // A DEFERRED_* result promises the obligation is **retained** and carries the same
+        // reconciliation id, so retain it here rather than letting `applyPlay`'s own PROTOCOL §5
+        // rule 4 transfer request stand alone. In practice this is defence in depth --
+        // `onPeerPlaybackState` already proved content available before reaching here and holds it
+        // there when it is not -- so this covers only content disappearing inside the narrow window
+        // between those two resolves.
+        //
+        // Both lifetimes are re-proved immediately before the append, with no suspension between:
+        // `applyPlay` returned after `content.resolve`, and a boundary landing in that window would
+        // otherwise let a retired reconciliation into the live session's held stream.
+        if (!stillCurrent(generation)) return StateSnapshotOutcome.REJECTED_STALE
+        if (synchronizedModeEpoch != rideLifetime) return StateSnapshotOutcome.REJECTED_RIDE
+        deferredEvents.addLast(DeferredEvent.PlaybackState(snapshot, generation, reconciliation))
+        _diagnostics.update {
+            it.copy(deferredCommandCount = deferredEvents.size, pendingPlaybackReconciliationGeneration = generation)
+        }
+        startDeferredDrain(generation)
+        return StateSnapshotOutcome.DEFERRED_CONTENT
     }
 
     private fun publishQueue() {

@@ -962,12 +962,20 @@ extension SyncPlaybackCoordinator {
     /// ARCHITECTURE §7.2 steps 1-6: resolve, pre-roll the decoder while there is still time, then
     /// start at the deadline. The resolve and the pre-roll are both real suspension points, so the
     /// session generation and the epoch token are re-proved after each.
-    /// - Returns: `true` if the track was locally resolvable and playback was (or, for a paused
-    ///   snapshot, will be) genuinely established; `false` if content was unavailable and a transfer
-    ///   was requested instead. Independent review §22: `restoreFromPlaybackState` needs this to
-    ///   report `.deferredContent` rather than falsely claiming `.applied` — the other two callers
-    ///   (`applyAuthoritative`, `applyStep`) do not need the distinction and may discard it, exactly
-    ///   as they already discarded this call's effect before it had one to discard.
+    ///
+    /// - Returns: **why** authoritative state was or was not established here.
+    ///
+    ///   **Independent-review round 5, Blocker 2B: this was a `Bool`, and one bit could not carry
+    ///   the distinction its only interested caller needs.** `restoreFromPlaybackState` mapped every
+    ///   `false` to `.deferredContent` — including a `false` produced by the **ride** ending inside
+    ///   `content.resolve`, and a `false` from a retired control generation. `.deferredContent`
+    ///   promises the outer obligation that work is retained and will report later; on this path
+    ///   nothing was retained, so `ResyncCoordinator` held an obligation with no route to either
+    ///   `Applied` or `Cancelled` — outstanding for the rest of the session — while ride 1's
+    ///   `manifest_revision` was published as accepted bookkeeping on the way past.
+    ///
+    ///   The other two callers (`applyAuthoritative`, `applyStep`) answer nobody and may discard it,
+    ///   exactly as they already discarded this call's effect.
     @discardableResult
     private func applyPlay(
         _ header: PlaybackCommandHeader,
@@ -981,25 +989,29 @@ extension SyncPlaybackCoordinator {
         /// captured by its caller before that operation's first suspension — never re-read here
         /// (independent-review round 4, §17). See `applyAuthoritative`.
         rideLifetime: Int64
-    ) async -> Bool {
+    ) async -> StateSnapshotOutcome {
         // Amendment A3 Finding B: reached from `applyAuthoritative`, from `applyStep` and from
         // `restoreFromPlaybackState`, and `content.resolve` is real I/O on another actor. Proved on
         // entry so a Play that only *starts* after a boundary does no work, and again below because
         // the resolve suspends.
-        guard await stillCurrent(generation) else { return false }
-        guard stillCurrentNow(generation) else { return false } // Amendment A5
+        guard await stillCurrent(generation) else { return .rejectedStale }
+        guard stillCurrentNow(generation) else { return .rejectedStale } // Amendment A5
         let playable = await content.resolve(trackHash)
-        guard await stillCurrent(generation) else { return false }
+        guard await stillCurrent(generation) else { return .rejectedStale }
         // Amendment A5: `epoch.begin()` below retires whatever playback epoch is current, which is
         // A3 Finding C's catastrophe — so the proof adjacent to it has to be the synchronous one.
-        guard stillCurrentNow(generation) else { return false }
+        guard stillCurrentNow(generation) else { return .rejectedStale }
         guard let playable else {
             // PROTOCOL §5 rule 4: do not start, request the transfer, let the leader reschedule.
             diagnostics.syncState = .waitingForContent
             diagnostics.currentTrackHash = trackHash
             publishDiagnostics()
             await content.requestTransfer(trackHash)
-            return false
+            // Independent-review round 5, Blocker 2: reported, not swallowed. Nothing is retained
+            // *here* — retention belongs to the caller that owns a reconciliation obligation, and
+            // `restoreFromPlaybackState` does it, because "every `.deferred*` corresponds to actual
+            // retained work carrying the same obligation id" is the promise this case makes.
+            return .deferredContent
         }
         // Independent-review round 3, found by CI on this pass's own new ride regression. The proofs
         // above are all about the **control generation**, which End Ride deliberately does not move —
@@ -1007,7 +1019,7 @@ extension SyncPlaybackCoordinator {
         // the ride ended can resume after `leaveSynchronizedMode` has retired every field written
         // below and put all of them back. Synchronous, adjacent to the writes, with no `await`
         // between: ADR-024 Amendment A5's `stillCurrentNow` pattern applied to the third lifetime.
-        guard synchronizedModeEpoch == rideLifetime else { return false }
+        guard synchronizedModeEpoch == rideLifetime else { return .rejectedRide }
         let token = epoch.begin()
         currentEpochToken = token
         driftState = DriftController.reset()
@@ -1038,16 +1050,26 @@ extension SyncPlaybackCoordinator {
         // whose session ends inside the load can no longer seek the session that replaced it.
         guard await runOwnedSteps(
             [.select(playable), .load(playable), .seek(positionMs)], generation: generation, token: token
-        ) else { return false }
+        ) else {
+            // `runOwnedSteps` refuses for one of three reasons and only it knows which, so ask the
+            // two lifetimes directly, synchronously, right here. A ride that ended inside the
+            // pre-roll is `.rejectedRide` for the same reason it is above. The residue — both
+            // lifetimes live, the *playback epoch* superseded by a newer authoritative PLAY — is
+            // reported `.rejectedStale`: it must not become `.applied`, and it is conservative
+            // rather than novel (a `.rejectedStale` leaves the wire request outstanding, which
+            // `StateResyncGate` already dedups and a fresh `.connected` already re-arms).
+            return stillCurrentNow(generation) && synchronizedModeEpoch != rideLifetime
+                ? .rejectedRide : .rejectedStale
+        }
         // A snapshot-restored track that the authority says is paused is loaded and left alone:
         // there is no instant to schedule, because nothing is about to become audible.
         guard playing else {
             markSynced()
             publishDiagnostics()
-            return true
+            return .applied
         }
         scheduleAt(header.effectiveAtSessionUs, estimate: estimate, generation: generation, token: token, steps: [.start])
-        return true
+        return .applied
     }
 
     /// Amendment A3 Finding B: the ownership proof is the **first** statement, before
@@ -1715,16 +1737,40 @@ extension SyncPlaybackCoordinator {
             commandSeq: fields.commandSeq, effectiveAtSessionUs: fields.atSessionUs, issuedBy: localPeerId,
             queueRevision: fields.queueRevision
         )
-        let started = await applyPlay(header, trackHash: trackHash, queueItemId: queueItemId, positionMs: fields.positionMs,
-                                       generation: generation, estimate: estimate, playing: fields.playing,
-                                       rideLifetime: rideLifetime)
-        // Independent review §22 (the gap Android's fork found the equivalent of): `applyPlay`
-        // already requests the transfer internally when content is unavailable — what was missing
-        // here was reporting that honestly instead of claiming `.applied` regardless. A caller that
-        // trusted `.applied` here (`ResyncCoordinator.handleStateSnapshot`, which would have cleared
-        // `pendingRequestGeneration` and marked `.reconciled`) would have believed reconciliation was
-        // complete while the follower was still silently `.waitingForContent`.
-        return started ? .applied : .deferredContent
+        // Independent-review round 5, Blocker 2B. This used to be `started ? .applied :
+        // .deferredContent` — one bit, three meanings. `applyPlay` returns `false` when content is
+        // unavailable (genuinely deferrable), when the control generation has retired, when the
+        // playback epoch has been superseded, and — the reachable case this closes — when the
+        // **ride** that authorised the reconciliation ended inside `content.resolve`. Reporting the
+        // last three as `.deferredContent` told `ResyncCoordinator` that retained work existed and
+        // would report later, when nothing was retained at all: the obligation stayed outstanding
+        // for the rest of the session, and ride 1's `manifest_revision`/`command_seq` were published
+        // as accepted bookkeeping on the way past. `applyPlay` now says which, and this forwards it.
+        let outcome = await applyPlay(header, trackHash: trackHash, queueItemId: queueItemId, positionMs: fields.positionMs,
+                                      generation: generation, estimate: estimate, playing: fields.playing,
+                                      rideLifetime: rideLifetime)
+        guard outcome == .deferredContent else { return outcome }
+        // A `.deferred*` result promises the obligation is **retained** and carries the same
+        // reconciliation id, so retain it here rather than letting `applyPlay`'s own PROTOCOL §5
+        // rule 4 transfer request stand alone. In practice this is defence in depth —
+        // `applyPeerPlaybackState` already proved content available before reaching here and holds
+        // it there when it is not — so this covers only content disappearing inside the narrow
+        // window between those two resolves.
+        //
+        // Both lifetimes are re-proved before the append, in ADR-024 Amendment A5's exact pattern —
+        // `await stillCurrent` (which asks the session actor), then the synchronous `stillCurrentNow`
+        // mirror, then the ride, then the mutation with no `await` anywhere between the last proof
+        // and the write. `applyPlay` returns from `.deferredContent` immediately after
+        // `content.requestTransfer`, which suspends and carries no proof of its own, so this is the
+        // first proof on that path and it may not be the weaker half of the pair.
+        guard await stillCurrent(generation) else { return .rejectedStale }
+        guard stillCurrentNow(generation) else { return .rejectedStale }
+        guard synchronizedModeEpoch == rideLifetime else { return .rejectedRide }
+        deferredEvents.append(.playbackState(fields, generation: generation, reconciliation: reconciliation))
+        diagnostics.deferredCommandCount = deferredEvents.count
+        publishDiagnostics()
+        startDeferredDrain(generation: generation)
+        return .deferredContent
     }
 
     static let positionReportIntervalUs: Int64 = PlaybackBounds.positionReportIntervalMs * 1_000
