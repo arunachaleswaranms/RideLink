@@ -559,10 +559,17 @@ final class SyncPlaybackClosureAuditTests: XCTestCase {
         await deliverAndAwait(pauseCommand(seq: 11, effectiveAt: clock.now(), positionMs: 4_000))
 
         let diagnostics = await coordinator.diagnostics
-        XCTAssertEqual(diagnostics.deferredCommandCount, 1, "the buffer is bounded and the bound is real")
-        XCTAssertEqual(diagnostics.inboundOverflowCount, 1)
+        XCTAssertEqual(diagnostics.inboundOverflowCount, 1, "the buffer is bounded and the bound is real")
         XCTAssertTrue(diagnostics.ingressDesynchronized, "the refusal halts rather than losing the command quietly")
         XCTAssertEqual(diagnostics.lastReceivedCommandSeq, 10, "the refused command spends no sequence number")
+        // Independent-review round 3, Blocker A: the overflow *latches desynchronisation*, and
+        // ADR-024 Amendment A1 Finding C says an incremental command may not be applied while
+        // incremental state is untrusted. That rule now reaches the command already **held** as well
+        // as the one arriving — it could never have been applied (the drain refuses commands while the
+        // latch is closed), and leaving it at the head of the stream is what blocked the repair
+        // snapshot behind it from ever reaching the drain. Refused, surfaced, never silent.
+        XCTAssertEqual(diagnostics.deferredCommandCount, 0, "a held incremental command is refused with the latch, not kept")
+        XCTAssertEqual(diagnostics.refusedHeldCommandCount, 1, "…and the refusal is counted rather than hidden")
     }
 
     // MARK: - Finding E — one Play request survives a Phase 4 transfer

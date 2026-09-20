@@ -490,9 +490,45 @@ extension SyncPlaybackCoordinator {
     /// we lost track.
     func onHoldOverflow() {
         diagnostics.inboundOverflowCount += 1
+        latchDesynchronized()
+    }
+
+    /// The one place `playbackDesynchronized`/`queueDesynchronized` are set on a follower
+    /// (independent-review round 3, Blocker A). Mirrors Android's `latchDesynchronized` exactly.
+    ///
+    /// Latching the flags and refusing the held incremental stream are **one** decision, not two:
+    /// ADR-024 Amendment A1 Finding C's rule is that while incremental state is untrusted an
+    /// incremental command is refused without spending its sequence number, so the authoritative
+    /// snapshot that reconciles us decides where ordering resumes. That rule was applied only to a
+    /// command *arriving* (`onInboundCommand`); a command already *held* was left at the head of
+    /// `deferredEvents`, where it blocked the repair snapshot queued behind it — and
+    /// `drainDeferredEvents` could not step past it, because stepping past would reorder the
+    /// authoritative stream (Amendment A1 Finding D). Refusing them here is the same rule applied to
+    /// the stream, and it is what makes the drain's per-item desync rule **live** rather than a
+    /// deadlock.
+    ///
+    /// Authoritative state frames already held — a `QUEUE_SNAPSHOT`, a reconciliation
+    /// `PLAYBACK_STATE` — are deliberately kept: they are not incremental, they are precisely the
+    /// repair, and each names its own instant (PROTOCOL §5 rule 2) rather than depending on the
+    /// incremental history this latch has just declared untrustworthy.
+    func latchDesynchronized() {
         playbackDesynchronized = true
         queueDesynchronized = true
+        refuseHeldIncrementalCommands()
         publishDesynchronized()
+    }
+
+    /// See `latchDesynchronized`. Counted, never silently dropped.
+    private func refuseHeldIncrementalCommands() {
+        let before = deferredEvents.count
+        deferredEvents.removeAll { held in
+            if case .command = held { return true }
+            return false
+        }
+        let refused = before - deferredEvents.count
+        guard refused > 0 else { return }
+        diagnostics.deferredCommandCount = deferredEvents.count
+        diagnostics.refusedHeldCommandCount += refused
     }
 
     /// A held command's `queue_revision` did not match the revision the replay had reached by the
@@ -505,9 +541,7 @@ extension SyncPlaybackCoordinator {
     /// posture as every other "we can no longer account for the authority we hold".
     func onHeldRevisionMismatch() {
         diagnostics.staleRevisionCount += 1
-        playbackDesynchronized = true
-        queueDesynchronized = true
-        publishDesynchronized()
+        latchDesynchronized()
     }
 
     /// Amendment A2 Finding D: whether an authoritative **state** frame may be applied now, or must
@@ -570,8 +604,46 @@ extension SyncPlaybackCoordinator {
     /// of A1 Finding D's "received is not applied".
     func drainDeferredEvents() async {
         while !deferredEvents.isEmpty {
-            if playbackDesynchronized || queueDesynchronized { return }
             let held = deferredEvents[0]
+            // Independent-review round 3's own fresh-fix audit (§17): the proofs and reads below all
+            // suspend, and the very next statement after them is an index-based `removeFirst()`. Two
+            // things can legitimately shorten this stream inside those windows, because this function
+            // is reached from the inbound consumer, the retry cadence **and** the content-availability
+            // callback: `applyPeerPlaybackState`'s supersede rule (pre-existing), and — new in this
+            // pass — `latchDesynchronized`'s refusal of held incremental commands. Removing by index
+            // afterwards would take whatever had moved into position 0, a different authoritative
+            // frame. `heldCount` is the cheapest honest witness that nothing moved; Swift enums have
+            // no identity to compare, unlike Android's `===`.
+            //
+            // Ending the pass is safe rather than a wedge: `startDeferredDrain`'s loop and
+            // `content.observeAvailability` both call back in, and the next pass re-reads the real
+            // head and re-proves everything for it.
+            let heldCount = deferredEvents.count
+            // Independent-review round 3, Blocker A. This used to be a blanket
+            // `if playbackDesynchronized || queueDesynchronized { return }`, which created a circular
+            // recovery dependency: `playbackDesynchronized` clears only when the retained
+            // authoritative reconciliation actually applies (`applyPeerPlaybackState`), and that
+            // snapshot could only apply from this drain — which the very same flag stopped. A
+            // follower whose ingress overflowed and whose `STATE_SNAPSHOT` then had to wait for a
+            // fresh clock or a content transfer therefore stayed desynchronised **permanently**, no
+            // matter how promptly the precondition resolved.
+            //
+            // The guard is now per-item, because the two kinds of held work answer the question
+            // differently:
+            //
+            // - an **incremental command** must stay blocked — applying one against state we have
+            //   declared untrustworthy is exactly what the latch exists to prevent (A1 Finding C).
+            //   In practice none is ever here: `latchDesynchronized` refuses the held ones and
+            //   `onInboundCommand` refuses arriving ones, so this branch is fail-closed defence for a
+            //   shape that is unreachable by construction rather than by assumption.
+            // - an **authoritative state frame** — a `QUEUE_SNAPSHOT`, or the reconciliation
+            //   `PLAYBACK_STATE` a `STATE_SNAPSHOT` produced — *is* the repair. Blocking it on the
+            //   condition it exists to clear is the deadlock. It still proves its own generation,
+            //   role, clock readiness, content availability and ordering below and in the apply path;
+            //   nothing is bypassed here except a flag that was never about authoritative state.
+            if playbackDesynchronized || queueDesynchronized {
+                if case .command = held { return }
+            }
             guard await stillCurrent(held.generation) else {
                 deferredEvents.removeAll()
                 diagnostics.deferredCommandCount = 0
@@ -582,13 +654,14 @@ extension SyncPlaybackCoordinator {
             // has already cleared this buffer, so there is nothing of the old session's left to drop —
             // and removing from it below would be indexing state the new session owns.
             guard stillCurrentNow(held.generation) else { return }
+            guard deferredEvents.count == heldCount else { return }
             switch held {
             case .command(let message, let generation):
                 guard let estimate = await estimate(), estimate.ready else { return }
                 // Amendment A5 Finding A's shape one function along: `estimate()` suspends and the
                 // very next statements index, remove from and write the held stream.
                 guard await stillCurrent(generation) else { return }
-                guard stillCurrentNow(generation), !deferredEvents.isEmpty else { return }
+                guard stillCurrentNow(generation), deferredEvents.count == heldCount else { return }
                 let heldHeader = Self.headerOf(message)
                 if let heldHeader, heldHeader.queueRevision != queueState.revision {
                     deferredEvents.removeFirst()
@@ -635,6 +708,7 @@ extension SyncPlaybackCoordinator {
                     guard contentReady else { return }
                     guard await stillCurrent(generation) else { return }
                     guard stillCurrentNow(generation) else { return }
+                    guard deferredEvents.count == heldCount else { return }
                 }
                 deferredEvents.removeFirst()
                 diagnostics.deferredCommandCount = deferredEvents.count
@@ -783,9 +857,16 @@ extension SyncPlaybackCoordinator {
             Task { [weak self] in await self?.rebroadcastAuthoritativeState() }
             return
         }
-        playbackDesynchronized = true
-        queueDesynchronized = true
-        publishDesynchronized()
+        latchDesynchronized()
+        onDesynchronizedTrigger?()
+    }
+
+    /// Test-only entry point for the exact effect a real ingress overflow already produces on a
+    /// follower (Amendment A1 Finding C) — the mirror of Android's `forceDesynchronizedForTest`,
+    /// added for independent-review round 3's Blocker A regressions so a test about Phase 7's
+    /// *recovery* need not reconstruct Phase 5's overflow mechanics to reach the latch.
+    func forceDesynchronizedForTest() {
+        latchDesynchronized()
         onDesynchronizedTrigger?()
     }
 

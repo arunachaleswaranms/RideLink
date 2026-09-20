@@ -157,6 +157,23 @@ public struct SyncPlaybackDiagnostics: Sendable, Equatable {
     public var deferredCommandCount = 0
     /// How many held commands were applied once the clock became trustworthy again.
     public var recoveredCommandCount = 0
+    /// Independent-review round 3, Blocker A: how many *held incremental commands* were refused
+    /// because desynchronisation latched while they were waiting.
+    ///
+    /// ADR-024 Amendment A1 Finding C already refuses an incremental command that **arrives** while
+    /// incremental state is untrusted, without spending its sequence number, so that the authoritative
+    /// snapshot which reconciles us decides where ordering resumes. A command already *held* when the
+    /// latch closes is untrusted for exactly the same reason, and leaving it at the head of the
+    /// deferred stream is what made recovery deadlock: the repair snapshot queued behind it could
+    /// never reach the head, and the desync flag it would have cleared is what stopped the drain.
+    /// Refusing them at the latch is the same rule applied to the stream rather than only to the
+    /// arrival — surfaced here rather than discarded silently.
+    public var refusedHeldCommandCount = 0
+    /// Independent-review round 3, Blocker C: how many ride-lifecycle calls
+    /// (`beginRideSegment`/`endRideSegment`) were refused because a newer ride segment had already
+    /// begun. Nonzero means a late End Ride was correctly stopped from clearing a successor ride's
+    /// playback state — the ride-lifetime analogue of ADR-024 Amendment A5's rule.
+    public var staleRideLifecycleCount = 0
     /// How many outbound Phase 5 frames this device could not hand to its own ordered outbound
     /// queue because that queue was full (Amendment A1 Finding B). Locally produced, so a nonzero
     /// value means the control socket is wedged, never a pathological peer.

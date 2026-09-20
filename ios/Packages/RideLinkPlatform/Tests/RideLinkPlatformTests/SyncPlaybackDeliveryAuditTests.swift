@@ -609,9 +609,15 @@ final class SyncPlaybackDeliveryAuditTests: XCTestCase {
         await deliverAndAwait(.snapshot(queueRevision: 6, items: [], currentIndex: nil))
 
         let diagnostics = await coordinator.diagnostics
-        XCTAssertEqual(diagnostics.deferredCommandCount, 1, "the bound is real")
-        XCTAssertEqual(diagnostics.inboundOverflowCount, 1)
+        XCTAssertEqual(diagnostics.inboundOverflowCount, 1, "the bound is real")
         XCTAssertTrue(diagnostics.ingressDesynchronized, "an overflow halts; it never evicts and never reorders")
+        // Independent-review round 3, Blocker A: the held `NEXT` is refused *with* the latch — see
+        // `SyncPlaybackClosureAuditTests`' identical assertion for the full reasoning. This is not an
+        // eviction to make room (nothing took its place) and it is not a reorder (the overflowing
+        // snapshot still did not apply); it is A1 Finding C's refusal rule reaching the stream as well
+        // as the arrival, so the repair snapshot is not blocked behind it.
+        XCTAssertEqual(diagnostics.deferredCommandCount, 0, "a held incremental command is refused with the latch, not kept")
+        XCTAssertEqual(diagnostics.refusedHeldCommandCount, 1, "…and the refusal is counted rather than hidden")
         let probe28 = await coordinator.queueState.revision
         XCTAssertEqual(probe28, 5, "and the snapshot that overflowed did not apply")
     }

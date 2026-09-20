@@ -637,10 +637,16 @@ class SyncPlaybackDeliveryAuditTest {
             runCurrent()
 
             val diagnostics = coordinator.diagnostics.value
-            assertEquals(1, diagnostics.deferredCommandCount, "the bound is real")
-            assertEquals(1, diagnostics.inboundOverflowCount)
+            assertEquals(1, diagnostics.inboundOverflowCount, "the bound is real")
             assertTrue(diagnostics.ingressDesynchronized, "an overflow halts; it never evicts and never reorders")
             assertEquals(5, coordinator.queueState.value.revision, "and the snapshot that overflowed did not apply")
+            // Independent-review round 3, Blocker A: the held `NEXT` is refused *with* the latch —
+            // see `SyncPlaybackClosureAuditTest`'s identical assertion for the full reasoning. This
+            // is not an eviction to make room (nothing took its place) and it is not a reorder (the
+            // overflowing snapshot still did not apply); it is A1 Finding C's refusal rule reaching
+            // the stream as well as the arrival, so the repair snapshot is not blocked behind it.
+            assertEquals(0, diagnostics.deferredCommandCount, "a held incremental command is refused with the latch, not kept")
+            assertEquals(1, diagnostics.refusedHeldCommandCount, "…and the refusal is counted rather than hidden")
         }
 
     // --- Finding E: a correction's snapshot keeps the correction's own identity --------------------
