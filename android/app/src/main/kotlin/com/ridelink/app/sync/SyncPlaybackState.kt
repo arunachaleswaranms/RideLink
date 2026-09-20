@@ -190,9 +190,12 @@ data class SyncPlaybackDiagnostics(
      * full restoration (`timeline == null`) without [ingressDesynchronized] ever having been set —
      * an ordinary reconnect's own reset clears it alongside the timeline — so a consumer watching
      * only [ingressDesynchronized] would see nothing transition when this obligation resolves.
-     * [ResyncCoordinator] is the one consumer: it compares this against its own generation-owned
-     * `deferredReconciliationGeneration` to know precisely when a snapshot it deferred has actually
-     * converged, never by inferring it from a flag that can legitimately never have moved.
+     * **Independent-review round 3, Blocker B: this is a diagnostic, not a completion signal.**
+     * `ResyncCoordinator` used to infer convergence from this going null, which cannot distinguish
+     * "the obligation converged" from "the obligation was **discarded**" — `leaveSynchronizedMode`
+     * legitimately does the second. Convergence is now reported explicitly by
+     * `SyncPlaybackCoordinator.onReconciliationApplied`, carrying the generation that authorised it.
+     * This field remains what the FR-023 screen shows: whether an obligation is outstanding at all.
      */
     val pendingPlaybackReconciliationGeneration: Long? = null,
     /**

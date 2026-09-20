@@ -20,8 +20,8 @@ import kotlinx.coroutines.launch
  * [DEFERRED] (independent-review Blocker 2E) is deliberately distinct from [RECONCILED]: a valid,
  * generation-matching snapshot satisfies the *wire* round trip (no resend needed) without
  * necessarily satisfying the *reconciliation* obligation, when the fresh clock is not ready yet.
- * [RECONCILED] is reserved for genuine convergence — either immediately, or once
- * [deferredReconciliationGeneration]'s later application succeeds.
+ * [RECONCILED] is reserved for genuine convergence — either immediately, or once the retained
+ * snapshot `deferredReconciliation` owns is genuinely applied.
  */
 enum class ResyncOutcome { NONE, REQUESTED, RECONCILED, SEND_FAILED, DEFERRED }
 
@@ -108,11 +108,16 @@ class ResyncCoordinator(
      * Independent-review Blocker 2E: the generation and **message** a **reconciliation** (as
      * opposed to the wire round trip [pendingRequestGeneration] tracks) is still genuinely
      * outstanding for — set when [SyncPlaybackCoordinator.onStateSnapshot] answers
-     * [StateSnapshotOutcome.DEFERRED_CLOCK], cleared the instant [SyncPlaybackCoordinator]'s own
-     * `pendingPlaybackReconciliationGeneration` diagnostic confirms it actually converged, or a
-     * newer generation supersedes it (its own [ControlEvent.Connected] would set this field to that
-     * newer generation instead, via a fresh trigger, so a stale value here can never be mistaken for
-     * a live obligation).
+     * [StateSnapshotOutcome.DEFERRED_CLOCK] or [StateSnapshotOutcome.DEFERRED_CONTENT], and cleared
+     * when [SyncPlaybackCoordinator.onReconciliationApplied] reports that **this generation's**
+     * retained snapshot genuinely applied, or when a newer generation supersedes it.
+     *
+     * Independent-review round 3, Blocker B: this used to be resolved by watching
+     * `pendingPlaybackReconciliationGeneration` go null in the diagnostics flow, which cannot
+     * distinguish "the obligation converged" from "the obligation was **discarded**" —
+     * [SyncPlaybackCoordinator.leaveSynchronizedMode] legitimately does the second. The explicit
+     * signal answers the question asked rather than a correlated one, and makes both platforms the
+     * same shape. It is also **monotonic**: see [supersededByNewerObligation].
      *
      * The **message** itself is retained, not only its generation: the deferred-then-later-applied
      * transition is observed asynchronously, well after [handleStateSnapshot]'s own stack frame is
@@ -275,28 +280,20 @@ class ResyncCoordinator(
         generation: Long,
     ) {
         val outcome = syncPlaybackCoordinator.onStateSnapshot(message, generation)
-        // Independent-review round 3's own fresh-fix audit (§17). [SyncPlaybackCoordinator
-        // .onStateSnapshot] above **suspends**, and a successor generation's [ControlEvent.Connected]
-        // can be collected inside that window — so this snapshot's own outcome may arrive after a
-        // newer obligation has been recorded. Writing either branch unconditionally would let an
-        // older generation's result overwrite a newer generation's obligation, and the newer one
-        // could then never complete (its completion signal would find the wrong owner). The
-        // obligation is therefore **monotonic**: an older generation may never displace a newer one.
-        // This compares two recorded owners; it never re-derives one from whatever is live now
-        // (CLAUDE.md rule 20).
-        if ((deferredReconciliation?.generation ?: generation) > generation) return
         when (outcome) {
             StateSnapshotOutcome.APPLIED -> {
                 pendingRequestGeneration = StateResyncGate.onSnapshotObserved(pendingRequestGeneration, generation)
+                if (supersededByNewerObligation(generation)) return
                 deferredReconciliation = null
                 completeReconciliation(message)
             }
             // `DEFERRED_CONTENT` (section 22) gets identical treatment to `DEFERRED_CLOCK`: the wire
-            // round trip is satisfied either way, and the same `pendingPlaybackReconciliationGeneration`
-            // diagnostic the [init] collector watches clears on either precondition resolving, so
-            // one branch correctly serves both.
+            // round trip is satisfied either way, and since independent-review round 3's Blocker A
+            // the retained snapshot is drained — and `onReconciliationApplied` raised — for whichever
+            // precondition resolves, so one branch correctly serves both.
             StateSnapshotOutcome.DEFERRED_CLOCK, StateSnapshotOutcome.DEFERRED_CONTENT -> {
                 pendingRequestGeneration = StateResyncGate.onSnapshotObserved(pendingRequestGeneration, generation)
+                if (supersededByNewerObligation(generation)) return
                 deferredReconciliation = DeferredReconciliation(generation, message)
                 _diagnostics.update {
                     it.copy(requestPending = pendingRequestGeneration != null, lastOutcome = ResyncOutcome.DEFERRED)
@@ -308,9 +305,23 @@ class ResyncCoordinator(
     }
 
     /**
+     * Whether a **newer** reconciliation obligation has already been recorded, making this
+     * snapshot's outcome too old to act on (independent-review round 3's own fresh-fix audit, §17).
+     *
+     * [SyncPlaybackCoordinator.onStateSnapshot] suspends, and a successor generation's
+     * [ControlEvent.Connected] can be collected inside that window — so this snapshot's own outcome
+     * may arrive after a newer obligation exists. Writing either branch unconditionally would let an
+     * older generation's result overwrite a newer generation's obligation, and the newer one could
+     * then never complete (its completion signal would find the wrong owner). The obligation is
+     * therefore **monotonic**. This compares two recorded owners; it never re-derives one from
+     * whatever generation is live now (CLAUDE.md rule 20).
+     */
+    private fun supersededByNewerObligation(generation: Long): Boolean = (deferredReconciliation?.generation ?: generation) > generation
+
+    /**
      * The completion bookkeeping shared by both routes to [ResyncOutcome.RECONCILED]:
-     * [handleStateSnapshot]'s own immediate [StateSnapshotOutcome.APPLIED] branch, and the [init]
-     * block's diagnostics collector observing a deferred reconciliation's later success. Manifest
+     * [handleStateSnapshot]'s own immediate [StateSnapshotOutcome.APPLIED] branch, and
+     * [SyncPlaybackCoordinator.onReconciliationApplied] reporting a deferred one's later success. Manifest
      * bookkeeping only ever runs here, so a snapshot that never genuinely reconciles — rejected, or
      * still deferred — can never trigger a refresh or move [lastKnownManifestRevision] (§20/§21).
      */

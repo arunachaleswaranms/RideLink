@@ -290,15 +290,6 @@ public final class ResyncCoordinator {
             pendingRequestGeneration = StateResyncGate.onSnapshotObserved(
                 pendingGeneration: pendingRequestGeneration, snapshotGeneration: generation
             )
-            // §20: manifest bookkeeping follows acceptance, not full playback application — the
-            // queue/manifest portions of a snapshot have no clock dependency, so a `.deferredClock`
-            // snapshot (playback alone waiting on the clock) still legitimately reports a real
-            // manifest_revision worth acting on.
-            let previousManifestRevision = lastKnownManifestRevision
-            lastKnownManifestRevision = manifestRevision
-            if let previousManifestRevision, previousManifestRevision != manifestRevision {
-                requestManifestRefresh()
-            }
             // Independent-review round 3's own fresh-fix audit (§17). `onStateSnapshot` above
             // **suspends**, and a successor generation's `.connected` can be reduced inside that
             // window — so this snapshot's own outcome may arrive after a newer obligation has been
@@ -310,6 +301,15 @@ public final class ResyncCoordinator {
             let supersededByNewer = (deferredReconciliation?.generation ?? generation) > generation
             if supersededByNewer {
                 break
+            }
+            // §20: manifest bookkeeping follows acceptance, not full playback application — the
+            // queue/manifest portions of a snapshot have no clock dependency, so a `.deferredClock`
+            // snapshot (playback alone waiting on the clock) still legitimately reports a real
+            // manifest_revision worth acting on.
+            let previousManifestRevision = lastKnownManifestRevision
+            lastKnownManifestRevision = manifestRevision
+            if let previousManifestRevision, previousManifestRevision != manifestRevision {
+                requestManifestRefresh()
             }
             if outcome == .applied {
                 // A snapshot that applied immediately supersedes any obligation still recorded for an
