@@ -87,6 +87,27 @@ fun interface ForegroundServiceController {
 }
 
 /**
+ * The narrow seam between ARCHITECTURE §3's ride lifecycle and Phase 5's synchronisation authority
+ * (independent-review round 3, Blocker C; ADR-028 Amendment A2).
+ *
+ * Both halves take a **strictly increasing ride epoch**, assigned by [SessionCoordinator] and
+ * compared — never re-derived — by the implementation, so an End Ride authorised by ride 1 can never
+ * clear ride 2's state if it is applied after ride 2 began. That is CLAUDE.md's standing invariant
+ * ("once asynchronous work has an authority/lifetime owner, that owner travels with it or the work
+ * is rejected") applied to the ride, which is a lifetime distinct from both the authenticated control
+ * generation and the playback epoch.
+ *
+ * `SyncPlaybackCoordinator` is the production implementation; a test supplies a recorder.
+ */
+interface RideSegmentOwner {
+    /** `CONNECTED -> RIDE_ACTIVE`. Records the epoch; deliberately changes nothing else. */
+    fun beginRideSegment(rideEpoch: Long)
+
+    /** `RIDE_ACTIVE -> CONNECTED`. Ends ride-segment synchronisation authority, not the session. */
+    fun endRideSegment(rideEpoch: Long)
+}
+
+/**
  * The single owner of session state (CLAUDE.md rule 8 / ARCHITECTURE §3 rule 4). No view model
  * holds connection state of its own; every screen observes [state], [discoveredPeers] and
  * [controlDiagnostics] here.
@@ -132,6 +153,20 @@ class SessionCoordinator(
     private val buildVoiceController: (isLocalLeader: Boolean) -> VoiceController,
     /** Sole owner of temporary intercom/music effects; optional only for narrow legacy tests. */
     private val coexistence: IntercomMusicCoexistenceCoordinator? = null,
+    /**
+     * The one owner of **ride-segment synchronised-playback authority** (independent-review round 3,
+     * Blocker C; ADR-028 Amendment A2). Non-null in production, where the composition root binds it
+     * to `SyncPlaybackCoordinator`; optional only for the narrow legacy tests that predate Ride Mode.
+     *
+     * This is the production wiring that was missing: [endRide] produced `RIDE_ACTIVE -> CONNECTED`
+     * and nothing else, so `SyncPlaybackCoordinator.currentPlaybackIdentity` — which deliberately
+     * survives an ordinary control-link loss — survived the **end of the ride** as well, and a
+     * `STATE_SNAPSHOT` built early in ride 2 reported ride 1's track as ride 2's authoritative truth.
+     *
+     * A narrow port rather than the coordinator itself, for the same reason `foregroundService`
+     * above is one: this class must be able to end a ride without gaining a dependency on Phase 5.
+     */
+    private val rideSegment: RideSegmentOwner? = null,
 ) {
     private val logger = StructuredLogger(logSink, environment.monotonicNowUs)
 
@@ -454,7 +489,8 @@ class SessionCoordinator(
      * §6.4's own readiness gate is what actually opens the microphone, on its own explicit tap).
      */
     fun startRide() {
-        applyEvent(SessionEvent.StartRide)
+        if (!applyEvent(SessionEvent.StartRide)) return
+        rideSegment?.beginRideSegment(++rideEpoch)
     }
 
     /**
@@ -467,8 +503,21 @@ class SessionCoordinator(
      * from anywhere else.
      */
     fun endRide() {
-        applyEvent(SessionEvent.EndRide)
+        if (!applyEvent(SessionEvent.EndRide)) return
+        // The FSM transition is proved **first**, so a rejected End Ride (from `CONNECTED`, say)
+        // cannot clear a ride's playback authority; the ride-segment call then follows synchronously,
+        // on this same thread, with no suspension between the two. Android needs no post-suspension
+        // ownership proof here for that reason — `endRideSegment`'s epoch check is the mirror of the
+        // one iOS genuinely needs, where the call has to cross an actor boundary.
+        rideSegment?.endRideSegment(++rideEpoch)
     }
+
+    /**
+     * The strictly-increasing ride-segment epoch (independent-review round 3, Blocker C). Bumped on
+     * **both** [startRide] and [endRide], so "a newer ride-lifecycle decision has been taken" is a
+     * single comparison rather than two flags that could disagree.
+     */
+    private var rideEpoch: Long = 0
 
     private fun beginDiscoverySession(
         event: SessionEvent,

@@ -251,6 +251,11 @@ public final class SessionCoordinator {
     /// [syncPlayback] is and for the same reason this file's comment above already gives.
     public private(set) var resync: ResyncCoordinator?
 
+    /// Phase 7's ride-segment lifetime owner (independent-review round 3, Blocker C; ADR-028
+    /// Amendment A2). Built alongside [syncPlayback], because it is that coordinator's ride-scoped
+    /// authority it ends. Non-nil from then on.
+    private var rideSegment: RideSegmentLifecycle?
+
     /// Builds and attaches [sharedLibrary]. A no-op if already attached. `SharedLibraryCoordinator`
     /// gets its own `TlsControlChannel` for the bulk plane — a second, independent listener
     /// (ADR-015) — but the **same** [deviceIdentity] as the control connection, which is what the
@@ -293,6 +298,11 @@ public final class SessionCoordinator {
             nextQueueItemId: nextQueueItemId
         )
         syncPlayback = coordinator
+        // Independent-review round 3, Blocker C: the one production owner of the ride-segment
+        // lifetime, built with the coordinator it ends. Every decision it makes lives in
+        // `RideLinkPlatform` (and is therefore testable) precisely because this file is in the app
+        // target, which has no test bundle at all — see `RideSegmentLifecycle`'s own doc comment.
+        rideSegment = RideSegmentLifecycle(syncPlayback: coordinator)
         Task { await coordinator.start() }
         return coordinator
     }
@@ -374,7 +384,14 @@ public final class SessionCoordinator {
     /// only from a session already known-good. Carries no teardown effect, unlike `endSession()`:
     /// the FSM alone decides whether this is reachable, never a direct state mutation from the view.
     public func startRide() {
-        _ = applyEvent(.startRide)
+        guard applyEvent(.startRide) else { return }
+        guard let rideSegment else { return }
+        // The epoch is taken **synchronously**, on the main actor, before the hop below — so the hop
+        // cannot change which ride this decision belongs to. `launchInSession`, never a bare `Task`:
+        // a continuation the session starts must be cancellable **and joinable** (CLAUDE.md rule 21,
+        // STATUS §4 problem 67), or `.teardownComplete` could be emitted with this in flight.
+        let epoch = rideSegment.nextRideEpoch()
+        launchInSession { _ in await rideSegment.startRide(epoch: epoch) }
     }
 
     /// `RIDE_ACTIVE -> CONNECTED` (FR-018's End Ride). **Not** the same as `endSession()`: this
@@ -383,7 +400,15 @@ public final class SessionCoordinator {
     /// budget exhaustion or peer-initiated `BYE` still reaches `ENDING`/`DISCONNECTED` through the
     /// FSM's own `RIDE_ACTIVE` transitions, independent of this call.
     public func endRide() {
-        _ = applyEvent(.endRide)
+        // The FSM transition is proved **first**, so a rejected End Ride cannot end a ride's playback
+        // authority. Ride-segment cleanup then follows, carrying the epoch assigned synchronously
+        // here; `RideSegmentLifecycle.endRide` and `SyncPlaybackCoordinator.endRideSegment` each
+        // re-prove it, because this call crosses a scheduling hop and ride 2 may have started by the
+        // time it resumes (independent-review round 3, Blocker C, and §12's own audit).
+        guard applyEvent(.endRide) else { return }
+        guard let rideSegment else { return }
+        let epoch = rideSegment.nextRideEpoch()
+        launchInSession { _ in await rideSegment.endRide(epoch: epoch) }
     }
 
     private func beginDiscoverySession(_ event: SessionEvent, retireHere: Bool) {

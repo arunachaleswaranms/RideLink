@@ -18,6 +18,7 @@ import com.ridelink.app.service.RideCommandBus
 import com.ridelink.app.service.RideForegroundService
 import com.ridelink.app.service.RideMediaSessionSource
 import com.ridelink.app.session.ForegroundServiceController
+import com.ridelink.app.session.RideSegmentOwner
 import com.ridelink.app.session.SessionCoordinator
 import com.ridelink.app.session.SessionEnvironment
 import com.ridelink.app.sync.MonotonicDeadlineSleeper
@@ -317,6 +318,21 @@ class AppContainer(
                 foregroundService = ForegroundServiceController { RideForegroundService.stopIntercom(context) },
                 buildVoiceController = ::voiceController,
                 coexistence = coexistenceCoordinator,
+                // Independent-review round 3, Blocker C (ADR-028 Amendment A2): the production
+                // wiring that connects ARCHITECTURE §3's `RIDE_ACTIVE -> CONNECTED` to the one owner
+                // of ride-segment synchronised-playback authority. Before this, `endRide()` produced
+                // the FSM transition and nothing else, so ride 1's `currentPlaybackIdentity` — which
+                // deliberately survives an ordinary link loss — survived the *end of the ride* too,
+                // and a `STATE_SNAPSHOT` built early in ride 2 reported ride 1's track.
+                //
+                // An adapter rather than the coordinator itself, exactly as `foregroundService`
+                // above is one: `SessionCoordinator` ends a ride without gaining a Phase 5 dependency.
+                rideSegment =
+                    object : RideSegmentOwner {
+                        override fun beginRideSegment(rideEpoch: Long) = syncPlaybackCoordinator.beginRideSegment(rideEpoch)
+
+                        override fun endRideSegment(rideEpoch: Long) = syncPlaybackCoordinator.endRideSegment(rideEpoch)
+                    },
             )
         installRideNotificationCommands()
         observeMusicActivity()
