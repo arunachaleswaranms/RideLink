@@ -6859,7 +6859,7 @@ effect of a decision the live ride genuinely made — ADR-024 Amendment A4 §C's
 
 ### Verification
 
-iOS `RideLinkCore` 343 tests and `RideLinkPlatform` 625 tests (up from 619), 0 failures, full suite run
+iOS `RideLinkCore` 343 tests and `RideLinkPlatform` 626 tests (up from 619), 0 failures, full suite run
 three times; `ResyncCoordinatorTests` re-run eight further times standalone; both `xcodebuild`
 app-target builds (Debug and Release, `iphonesimulator`) succeed. Android `./gradlew test` across all
 modules plus `ktlintCheck`, `detekt`, `lint` and `assembleDebug` — all clean. Physical qualification is

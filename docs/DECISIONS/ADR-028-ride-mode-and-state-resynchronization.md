@@ -1219,7 +1219,10 @@ declaration, `admitRide()`, `rideStillLive`, or `leaveSynchronizedMode`'s own in
 
 **A drain that meets retired work pops it, cancels its obligation and continues.** Leaving it at the
 head would wedge the stream exactly as round 3's Blocker A did, and a later item may have been
-admitted under a newer, still-live ride. The discard is counted (`retiredRideDeferredCount`), and a
+admitted under a newer, still-live ride. That claim is pinned by a test rather than left in prose:
+changing the rule's `continue` to a `return` fails
+`testARetiredRideEventAtTheHeadDoesNotBlockLiveWorkQueuedBehindIt` with "B never reached the player",
+which is round 3's deadlock reintroduced by a fix rather than by the original code. The discard is counted (`retiredRideDeferredCount`), and a
 reconciliation among them receives `REJECTED_RIDE` → `CANCELLED` — never `RECONCILED`, never silence,
 never an indefinite deferral. Every `DEFERRED_*` still corresponds to actual retained work carrying
 generation, obligation id **and** ride admission.
@@ -1291,7 +1294,7 @@ assertion changed.
 
 ### Full test results
 
-**iOS.** `swift test` for `RideLinkCore` (343 tests) and `RideLinkPlatform` (625 tests, up from 619)
+**iOS.** `swift test` for `RideLinkCore` (343 tests) and `RideLinkPlatform` (626 tests, up from 619)
 — 0 failures, run in full three times. `ResyncCoordinatorTests` (28 tests) additionally re-run eight
 times standalone. Both `xcodebuild` app-target builds (Debug and Release, `iphonesimulator`,
 `CODE_SIGNING_ALLOWED=NO`) succeed. SwiftLint/SwiftFormat are not installed on this machine and are

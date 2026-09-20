@@ -1040,6 +1040,62 @@ final class RideSegmentLifecycleTests: XCTestCase {
         XCTAssertTrue(remaining.isEmpty)
     }
 
+    /// **Round 7's fresh-fix audit, pinning the one liveness claim the drain's retired-ride rule
+    /// makes in prose.** That rule **pops** a dead item and continues rather than returning, because
+    /// the stream is in arrival order and an item behind a dead one may have been admitted under a
+    /// newer, still-live ride. Leaving the dead one at the head would wedge the stream exactly as
+    /// independent-review round 3's Blocker A did — the deadlock this repository has already had to
+    /// remove once, reintroduced by a fix rather than by the original code.
+    ///
+    /// A's ride is retired while A is held; B is then admitted under the live ride and queued behind
+    /// it. Both are real inbound frames through the real ingress.
+    func testARetiredRideEventAtTheHeadDoesNotBlockLiveWorkQueuedBehindIt() async {
+        await build()
+        await deferringFollower()
+        let trackA = SyncTestValues.hash(123)
+        let trackB = SyncTestValues.hash(124)
+        await content.addLocal(trackA)
+        await content.addLocal(trackB)
+
+        startRide()
+        await deliverPlay(trackA, queueItemId: SyncTestValues.ulid(123), commandSeq: 1)
+        await expect("A held under ride 1") { await self.sync.deferredEvents.count == 1 }
+
+        // End Ride 1 accepted (cleanup parked) and Start Ride 2 accepted — A's ride is now retired.
+        let endRideEpoch = lifecycle.nextRideEpoch()
+        _ = lifecycle.nextRideEpoch()
+
+        // B arrives under the live ride and queues *behind* the now-dead A.
+        await deliverPlay(trackB, queueItemId: SyncTestValues.ulid(124), commandSeq: 2)
+        await expect("B queued behind A") { await self.sync.deferredEvents.count == 2 }
+        let held = await sync.deferredEvents
+        XCTAssertEqual(RideAdmission(synchronizedModeEpoch: 0, rideEpoch: 1), held.first?.ride, "A must be the dead one")
+        XCTAssertEqual(RideAdmission(synchronizedModeEpoch: 0, rideEpoch: 3), held.last?.ride, "B must be the live one")
+
+        await session.setClock(SessionClockEstimate(offsetToLeaderUs: 0, rttP95Us: 8_000, ready: true))
+        await sync.drainDeferredEvents()
+        await settle()
+
+        let identity = await sync.currentPlaybackIdentity
+        XCTAssertEqual(trackB, identity?.trackHash, "a retired item at the head wedged the live work behind it")
+        let authority = await sync.rideAuthorityEpoch
+        XCTAssertEqual(3, authority, "B's authority must be stamped with B's own ride")
+        let calls = await player.calls
+        XCTAssertTrue(calls.contains(.select(trackB)), "B never reached the player: \(calls)")
+        XCTAssertFalse(calls.contains(.select(trackA)), "A applied under a ride that had ended: \(calls)")
+        let discarded = await sync.diagnostics.retiredRideDeferredCount
+        XCTAssertEqual(1, discarded, "exactly A should have been discarded as retired")
+        let remaining = await sync.deferredEvents
+        XCTAssertTrue(remaining.isEmpty, "the stream must have fully drained")
+
+        // Ride 1's delayed cleanup now finds ride 2's own authority and leaves it alone.
+        await lifecycle.endRide(epoch: endRideEpoch)
+        await settle()
+        XCTAssertEqual(1, lifecycle.supersededEndRideCount, "ride 1's cleanup did not recognise ride 2's authority")
+        let survives = await sync.currentPlaybackIdentity
+        XCTAssertEqual(trackB, survives?.trackHash, "ride 1's delayed cleanup destroyed ride 2's own authority")
+    }
+
     /// §24 item 5: fifty deterministic cycles alternating Regression 1 (a boundary while the command
     /// is held) and Regression 4 (no boundary at all), on a fresh harness each time — so a fix that
     /// happens to pass once, or one that over-corrects into refusing everything, fails here.
