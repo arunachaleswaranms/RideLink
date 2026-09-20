@@ -128,10 +128,26 @@ final class ResyncCoordinatorTests: XCTestCase {
         await lifecycle.endRide(epoch: epoch)
     }
 
+    /// Waits on a condition, **keeping the virtual clock moving while it waits**.
+    ///
+    /// Independent-review round 7's own test runs found a lost wake-up here — once, under the load of
+    /// a concurrent compile, in `testFiftySameGenerationCancelThenApplyCyclesCompleteOnlyTheLive
+    /// Obligation`. It is a harness defect, not a production one, and it is deterministic rather than
+    /// merely rare: `startDeferredDrain` computes its sleep deadline from `monotonicNowUs()` at the
+    /// moment the drain task *reaches* the sleep, not at the moment it is created. A test that calls
+    /// `clock.advance` once, before that task has been scheduled, therefore leaves the drain waiting
+    /// on a deadline nothing will ever advance to — and the wait then burns its whole wall-clock
+    /// budget. Advancing here, on every poll, removes the ordering dependency entirely: whichever of
+    /// the two happens first, the next poll moves the clock again.
+    ///
+    /// The advance is inert for everything else in this suite — every `effective_at_session_us` here
+    /// is `0` against a zero offset, so `ScheduledCommand` already decides "apply immediately" — and
+    /// no assertion changed. Waiting *longer* is not what fixes it; waiting *correctly* is.
     private func expect(_ description: String, _ condition: @escaping () async -> Bool) async {
         let deadline = Date().addingTimeInterval(5)
         while Date() < deadline {
             if await condition() { return }
+            clock.advance(to: clock.now() + Phase5GateBounds.deferredRetryIntervalUs)
             await Task.yield()
         }
         XCTFail("timed out waiting for: \(description)")
@@ -925,5 +941,219 @@ final class ResyncCoordinatorTests: XCTestCase {
     /// §24 item 11's cadence at the *nested* park: fifty cycles on a fresh harness each time.
     func testFiftyRideCancelledMidApplyCyclesCompleteOnlyTheLiveObligation() async {
         for cycle in 0 ..< 50 { await runRideCancelledMidApplyCycle(cycle: cycle) }
+    }
+
+    // MARK: - Independent-review round 7 (retained work's own ride provenance)
+
+    /// **Round 7, Regression 2 — Bug B.** The existing End Ride tests above all *run* the cleanup, so
+    /// `leaveSynchronizedMode` discards the retained snapshot and the obligation is cancelled there.
+    /// This one never releases that cleanup, which is the reachable production shape:
+    /// `SessionCoordinator.endRide()` publishes the ride epoch synchronously and hands
+    /// `leaveSynchronizedMode` — the only thing that empties `deferredEvents`, and the only thing that
+    /// moves `synchronizedModeEpoch` — to `launchInSession`.
+    ///
+    /// So S1 is still sitting in the held stream, under a ride that has been ended *and* replaced,
+    /// with `synchronizedModeEpoch` still showing ride 1's value. Round 6's `applyPeerPlaybackState`
+    /// captured a fresh `RideAdmission` at replay time and therefore saw two live-looking halves: S1
+    /// reconciled as **ride 2's** authoritative truth, publishing ride 1's `command_seq` and
+    /// `manifest_revision` as a convergence that never happened, and ride 2's own first
+    /// `STATE_SNAPSHOT` would have reported ride 1's track.
+    ///
+    /// Then S2 — a genuinely new obligation, same control generation, current ride — must be the only
+    /// thing that ever reaches `.reconciled`, with its own values.
+    func testADeferredS1CannotReconcileUnderASuccessorRideWhileEndRideCleanupIsStillParked() async {
+        await desynchronizedFollower(clockReady: false)
+        startRide()
+        let trackOne = SyncTestValues.hash(130)
+        let trackTwo = SyncTestValues.hash(131)
+        await content.addLocal(trackOne)
+        await content.addLocal(trackTwo)
+
+        await session.deliver(
+            playbackSnapshot(trackHash: trackOne, queueItemId: SyncTestValues.ulid(130), commandSeq: 61, manifestRevision: 3),
+            generation: 1
+        )
+        await expect("S1 deferred for the clock") { self.coordinator.diagnostics.lastOutcome == .snapshotPending }
+        guard let s1 = coordinator.pendingObligationIdForTest else { return XCTFail("S1 has no obligation id") }
+        let heldBefore = await syncCoordinator.deferredEvents
+        XCTAssertEqual(1, heldBefore.count, "S1's obligation must be backed by exactly one retained event")
+        XCTAssertEqual(
+            RideAdmission(synchronizedModeEpoch: 0, rideEpoch: 1), heldBefore.first?.ride,
+            "the retained reconciliation does not carry the ride that admitted it"
+        )
+        await player.clearCalls()
+
+        // End Ride 1 is accepted and takes its epoch — its cleanup is deliberately **not** released.
+        let endRideEpoch = lifecycle.nextRideEpoch()
+        // Start Ride 2 is accepted before that cleanup ever ran.
+        startRide()
+
+        // The precondition resolves and the drain runs, still ahead of ride 1's cleanup.
+        await syncSession.setClock(SessionClockEstimate(offsetToLeaderUs: 0, rttP95Us: 8_000, ready: true))
+        clock.advance(to: clock.now() + Phase5GateBounds.deferredRetryIntervalUs * 2)
+
+        await expect("S1 reached a terminal cancellation") { self.coordinator.diagnostics.lastOutcome == .cancelled }
+        XCTAssertNil(coordinator.pendingObligationIdForTest, "S1's obligation was neither completed nor released")
+        let heldAfter = await syncCoordinator.deferredEvents
+        XCTAssertTrue(heldAfter.isEmpty, "S1 must not remain deferred forever")
+        let discarded = await syncCoordinator.diagnostics.retiredRideDeferredCount
+        XCTAssertEqual(1, discarded, "the retired-ride discard was not counted")
+        let calls = await player.calls
+        XCTAssertFalse(calls.contains(.select(trackOne)), "S1 reached the player under a successor ride: \(calls)")
+        let identity = await syncCoordinator.currentPlaybackIdentity
+        XCTAssertNil(identity, "S1 established ride 1's track as ride 2's identity")
+        let timeline = await syncCoordinator.timeline
+        XCTAssertNil(timeline, "…and a synchronised timeline for a ride that had ended")
+        XCTAssertEqual(0, refreshCount, "a cancelled reconciliation triggered a manifest refresh")
+
+        // Ride 2's own reconciliation, under the very same authenticated control generation.
+        let generationNow = await session.currentAuthGeneration()
+        XCTAssertEqual(1, generationNow, "the control generation must be unchanged across a ride boundary")
+        await syncCoordinator.handleConnected(isLocalLeader: false)
+        await syncSession.setClock(SessionClockEstimate(offsetToLeaderUs: 0, rttP95Us: 8_000, ready: false))
+        await syncCoordinator.forceDesynchronizedForTest()
+        await session.deliver(
+            playbackSnapshot(
+                trackHash: trackTwo, queueItemId: SyncTestValues.ulid(131), commandSeq: 62, queueRevision: 2,
+                manifestRevision: 3
+            ),
+            generation: 1
+        )
+        await expect("S2 deferred") { self.coordinator.diagnostics.lastOutcome == .snapshotPending }
+        let s2 = coordinator.pendingObligationIdForTest
+        XCTAssertNotNil(s2)
+        XCTAssertNotEqual(s1, s2, "two obligations under one generation must not share an identity")
+
+        await syncSession.setClock(SessionClockEstimate(offsetToLeaderUs: 0, rttP95Us: 8_000, ready: true))
+        clock.advance(to: clock.now() + Phase5GateBounds.deferredRetryIntervalUs * 2)
+        await expect("S2 reconciled") { self.coordinator.diagnostics.lastOutcome == .reconciled }
+        XCTAssertEqual(62, coordinator.diagnostics.lastSnapshotCommandSeq, "S1's command_seq was published as a reconciliation")
+        let converged = await syncCoordinator.currentPlaybackIdentity
+        XCTAssertEqual(trackTwo, converged?.trackHash, "ride 2 converged on ride 1's track")
+
+        // S1 can never be completed afterwards, by S2's success arriving late or by anything else.
+        let applied = await syncCoordinator.onReconciliationApplied
+        applied?(s1, 1)
+        for _ in 0 ..< 50 { await Task.yield() }
+        XCTAssertEqual(.reconciled, coordinator.diagnostics.lastOutcome)
+        XCTAssertEqual(62, coordinator.diagnostics.lastSnapshotCommandSeq, "a late S1 signal republished S1's bookkeeping")
+
+        // Finally, ride 1's own delayed cleanup runs and finds ride 2's live authority (Property A).
+        await lifecycle.endRide(epoch: endRideEpoch)
+        for _ in 0 ..< 50 { await Task.yield() }
+        XCTAssertEqual(1, lifecycle.supersededEndRideCount, "ride 1's cleanup did not recognise ride 2's authority")
+        let survives = await syncCoordinator.currentPlaybackIdentity
+        XCTAssertEqual(trackTwo, survives?.trackHash, "ride 1's delayed cleanup destroyed ride 2's own authority")
+    }
+
+    /// **Round 7, Regression 3 — the append-time race.** S1 is admitted under ride 1 and parks inside
+    /// `applyPeerPlaybackState`'s own full-restore pre-check — specifically inside `content.resolve`,
+    /// which is the first and only resolve this flow takes. While it is provably parked, an End Ride
+    /// and a Start Ride are both accepted; ride 1's cleanup is never released, so it is *not* the
+    /// mechanism that saves the test.
+    ///
+    /// On the round-6 head the resumed continuation re-proved only the control generation and then
+    /// appended S1 into `deferredEvents` **as successor-ride work with no ride provenance at all** —
+    /// which the later drain would have replayed against whatever ride was current then.
+    ///
+    /// The park is proved to be before the append (`deferredEvents` is empty while parked) and after
+    /// the obligation exists (`ResyncCoordinator` records it before its own `await`), so this is the
+    /// exact window and not a stand-in for it.
+    func testARideBoundaryInsideTheSnapshotPreCheckIsNeverRetainedAsSuccessorRideWork() async {
+        await desynchronizedFollower(clockReady: true)
+        startRide()
+        let track = SyncTestValues.hash(132)
+        // Deliberately absent locally: on resume the pre-check's content half is false, which is the
+        // branch that retains.
+        await content.armResolveGate { true }
+        await player.clearCalls()
+
+        await session.deliver(
+            playbackSnapshot(trackHash: track, queueItemId: SyncTestValues.ulid(132), commandSeq: 71, manifestRevision: 4),
+            generation: 1
+        )
+        await expect("S1 parked inside the pre-check's content resolve") { await self.content.isResolveGateParked }
+        let heldWhileParked = await syncCoordinator.deferredEvents
+        XCTAssertTrue(heldWhileParked.isEmpty, "parked after the append — this is not the window under test")
+        XCTAssertNotNil(coordinator.pendingObligationIdForTest, "parked before the obligation existed")
+        // …and provably *after* the provenance capture: `onStateSnapshot` takes its `RideAdmission`
+        // as its first statement and then awaits the queue half, so the queue having been adopted is
+        // structural proof that the capture already happened. Without this the park could in
+        // principle be somewhere earlier and the test would prove a different window.
+        let adoptedWhileParked = await syncCoordinator.queueState.revision
+        XCTAssertEqual(1, adoptedWhileParked, "parked before the queue half ran, so before the ride provenance was captured")
+        guard let s1 = coordinator.pendingObligationIdForTest else { return XCTFail("S1 has no obligation id") }
+
+        // Both ride-boundary epochs are minted while S1 is provably parked.
+        let endRideEpoch = lifecycle.nextRideEpoch()
+        startRide()
+
+        await content.releaseResolveGate()
+        await expect("S1 reached a terminal cancellation") { self.coordinator.diagnostics.lastOutcome == .cancelled }
+
+        let held = await syncCoordinator.deferredEvents
+        XCTAssertTrue(held.isEmpty, "S1 was retained as successor-ride deferred work: \(held)")
+        XCTAssertNil(coordinator.pendingObligationIdForTest, "the obligation is still pending with nothing to report on it")
+        let requested = await content.transferRequests
+        XCTAssertTrue(requested.isEmpty, "a ride that is over asked Phase 4 for a transfer")
+        let calls = await player.calls
+        XCTAssertTrue(calls.isEmpty, "a retired ride's snapshot reached the player: \(calls)")
+        let identity = await syncCoordinator.currentPlaybackIdentity
+        XCTAssertNil(identity)
+        let timeline = await syncCoordinator.timeline
+        XCTAssertNil(timeline)
+        // `.rejectedRide` means the snapshot *did* arrive for the live generation, so the wire round
+        // trip is satisfied and only the reconciliation is cancelled (round 4, §17).
+        XCTAssertFalse(coordinator.diagnostics.requestPending, "a snapshot that arrived left the wire request outstanding")
+        XCTAssertEqual(0, refreshCount, "a cancelled reconciliation triggered a manifest refresh")
+        _ = s1
+
+        // Ride 1's cleanup, released last, confirms it was never what made this test pass.
+        await lifecycle.endRide(epoch: endRideEpoch)
+        for _ in 0 ..< 50 { await Task.yield() }
+        XCTAssertEqual(0, lifecycle.supersededEndRideCount)
+    }
+
+    /// **Round 7, Regression 4 (snapshot half): the fix must not refuse valid retained work.** The same
+    /// two deferrals inside a ride with **no** boundary at all still reconcile from the retained event,
+    /// against the very `RideAdmission` they were admitted under. Liveness, not just safety.
+    func testValidSameRideDeferredSnapshotsStillReconcile() async {
+        for clockCase in [true, false] {
+            await desynchronizedFollower(clockReady: clockCase)
+            startRide()
+            let track = SyncTestValues.hash(clockCase ? 133 : 134)
+            if clockCase {
+                // Deferred for **content**: present nowhere yet.
+            } else {
+                await content.addLocal(track)
+            }
+
+            await session.deliver(
+                playbackSnapshot(trackHash: track, queueItemId: SyncTestValues.ulid(133), commandSeq: 81, manifestRevision: 5),
+                generation: 1
+            )
+            await expect("deferred") { self.coordinator.diagnostics.lastOutcome == .snapshotPending }
+            let held = await syncCoordinator.deferredEvents
+            XCTAssertEqual(1, held.count, "the obligation must be backed by exactly one retained event")
+            XCTAssertEqual(
+                RideAdmission(synchronizedModeEpoch: 0, rideEpoch: 1), held.first?.ride,
+                "the retained reconciliation carries the wrong ride"
+            )
+
+            // The precondition resolves, and nothing about the ride changes.
+            if clockCase {
+                await content.completeTransfer(track)
+            } else {
+                await syncSession.setClock(SessionClockEstimate(offsetToLeaderUs: 0, rttP95Us: 8_000, ready: true))
+                clock.advance(to: clock.now() + Phase5GateBounds.deferredRetryIntervalUs * 2)
+            }
+
+            await expect("the retained snapshot reconciled by itself") { self.coordinator.diagnostics.lastOutcome == .reconciled }
+            XCTAssertEqual(81, coordinator.diagnostics.lastSnapshotCommandSeq)
+            let converged = await syncCoordinator.currentPlaybackIdentity
+            XCTAssertEqual(track, converged?.trackHash, "valid same-ride retained work no longer converges")
+            let discarded = await syncCoordinator.diagnostics.retiredRideDeferredCount
+            XCTAssertEqual(0, discarded, "valid work was discarded as retired")
+        }
     }
 }

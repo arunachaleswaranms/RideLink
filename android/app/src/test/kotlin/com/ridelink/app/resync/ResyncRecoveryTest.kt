@@ -1333,6 +1333,180 @@ class ResyncRecoveryTest {
             for (cycle in 0 until STRESS_CYCLES) rideCancelledMidApplyCycle(cycle)
         }
 
+    // --- Independent-review round 7 (retained work's own ride provenance) -------------------------
+
+    /**
+     * **Round 7's Android half, and the one instance of the class this platform can reach.**
+     *
+     * The iOS blocker has two more orderings than this: a retained event surviving an End Ride that
+     * has been *accepted* but whose cleanup is still parked in `launchInSession`. Android cannot
+     * reach those — `SessionCoordinator.endRide()` calls `endRideSegment` synchronously, on the same
+     * thread, one statement after minting the epoch, so `leaveSynchronizedMode` has already bumped
+     * `synchronizedModeEpoch` and discarded `deferredEvents` before any successor ride can exist.
+     *
+     * What Android *does* reach is the append-time race, and it is the same structural defect: the
+     * full-restore pre-check suspends in `content.resolve` (the only suspension between this
+     * snapshot's admission and its retention — `estimate()` and `readyEstimate()` are synchronous
+     * here), and on the round-6 head the resumed continuation re-proved **neither** lifetime before
+     * appending. So a snapshot admitted under ride 1 was written into the held stream *after* End
+     * Ride had emptied it, carrying no ride provenance at all — and `drainDeferredEvents` then
+     * replayed it against a freshly-read live `synchronizedModeEpoch`, which is a replacement
+     * provenance rather than the admitted one.
+     *
+     * Deterministic: the park is proved (`resolveGateWhen` consumed, nothing yet retained, the wire
+     * request outstanding), both ride boundaries are the **real** `SessionCoordinator` ones, and the
+     * gate is released only afterwards.
+     */
+    @Test
+    fun `a ride boundary inside the snapshot pre-check is never retained as successor-ride work`() =
+        runTest(StandardTestDispatcher()) {
+            val pair = ResyncTestPair(this)
+            pair.connect(generation = 1)
+            seedPlayable(pair, listOf(SyncTestValues.hash(1)))
+            // Deliberately absent from the follower, so the pre-check's content half is false on
+            // resume — that is the branch that retains.
+            pair.leader.content.localHashes
+                .add(SyncTestValues.hash(2).value)
+            pair.leader.content.peerHashes
+                .add(SyncTestValues.hash(2).value)
+            val followerSession = rideSession(this, pair.follower.sync)
+            followerSession.startRide()
+
+            pair.leader.sync.playSynchronized(SyncTestValues.hash(1))
+            runCurrent()
+            pair.leaderClock.advanceBy(LEAD_US)
+            runCurrent()
+
+            // The leader moves on with the Phase 5 wire severed, so the follower's only route to the
+            // truth is the resync round trip below.
+            pair.leader.syncSession.forwardTo(null)
+            pair.leader.sync.playSynchronized(SyncTestValues.hash(2))
+            runCurrent()
+            pair.leaderClock.advanceBy(LEAD_US)
+            runCurrent()
+            pair.leader.syncSession.forwardTo(pair.follower.syncSession)
+
+            // Park the **pre-check's** resolve, which is the first the follower takes for this
+            // snapshot — `resolvePendingPlay` returns before resolving anything (the follower holds
+            // no retained Play; the leader pressed Play), and `applyPlay`'s own resolve is further on.
+            val gate = CompletableDeferred<Unit>()
+            pair.follower.content.resolveGate = gate
+            pair.follower.content.resolveGateWhen = { true }
+            pair.follower.player.calls
+                .clear()
+
+            pair.follower.sync.forceDesynchronizedForTest()
+            runCurrent()
+
+            assertNull(pair.follower.content.resolveGateWhen, "never parked inside the pre-check's resolve")
+            assertEquals(
+                0,
+                pair.follower.sync.diagnostics.value.deferredCommandCount,
+                "parked after the append — this is not the window under test",
+            )
+            assertTrue(pair.follower.resync.diagnostics.value.requestPending, "no wire request was outstanding")
+            // …and provably *after* the provenance capture: `onStateSnapshot` takes its
+            // `RideAdmission` as its first statement and then awaits the queue half, so the queue
+            // having been adopted is structural proof that the capture already happened.
+            assertTrue(
+                pair.follower.sync.queueState.value.items
+                    .any { it.trackHash == SyncTestValues.hash(2) },
+                "parked before the queue half ran, so before the ride provenance was captured",
+            )
+
+            // Both real ride boundaries, while the snapshot is provably parked.
+            followerSession.endRide()
+            runCurrent()
+            followerSession.startRide()
+
+            gate.complete(Unit)
+            runCurrent()
+            pair.followerClock.advanceBy(DEFERRED_RETRY_US * 4)
+            runCurrent()
+
+            assertEquals(
+                0,
+                pair.follower.sync.diagnostics.value.deferredCommandCount,
+                "the snapshot was retained as successor-ride deferred work",
+            )
+            assertEquals(
+                ResyncOutcome.CANCELLED,
+                pair.follower.resync.diagnostics.value.lastOutcome,
+                "a reconciliation whose ride ended must reach a terminal cancellation, never a deferral that outlives it",
+            )
+            assertTrue(
+                pair.follower.content.transferRequests
+                    .none { it == SyncTestValues.hash(2) },
+                "a ride that is over asked Phase 4 for a transfer: ${pair.follower.content.transferRequests}",
+            )
+            assertNull(pair.follower.sync.diagnostics.value.currentTrackHash, "a ride-expired restore wrote currentTrackHash")
+            assertTrue(
+                pair.follower.player.calls
+                    .none { it is FakeSyncPlayer.Call.Select },
+                "a ride-expired restore reached the player: ${pair.follower.player.calls}",
+            )
+            assertFalse(pair.follower.resync.diagnostics.value.requestPending, "the wire request was left outstanding")
+            assertTrue(pair.follower.manifestRefreshCalls.isEmpty(), "a cancelled reconciliation triggered a manifest refresh")
+        }
+
+    /**
+     * Round 7's liveness half on Android: the identical deferral with **no** ride boundary at all
+     * still reconciles from the retained event, against the very admission it was admitted under.
+     * The fix must not be "refuse all retained work".
+     */
+    @Test
+    fun `a valid same-ride deferred snapshot still reconciles when its content arrives`() =
+        runTest(StandardTestDispatcher()) {
+            val pair = ResyncTestPair(this)
+            pair.connect(generation = 1)
+            seedPlayable(pair, listOf(SyncTestValues.hash(1)))
+            pair.leader.content.localHashes
+                .add(SyncTestValues.hash(2).value)
+            pair.leader.content.peerHashes
+                .add(SyncTestValues.hash(2).value)
+            val followerSession = rideSession(this, pair.follower.sync)
+            followerSession.startRide()
+
+            pair.leader.sync.playSynchronized(SyncTestValues.hash(1))
+            runCurrent()
+            pair.leaderClock.advanceBy(LEAD_US)
+            runCurrent()
+
+            pair.leader.syncSession.forwardTo(null)
+            pair.leader.sync.playSynchronized(SyncTestValues.hash(2))
+            runCurrent()
+            pair.leaderClock.advanceBy(LEAD_US)
+            runCurrent()
+            pair.leader.syncSession.forwardTo(pair.follower.syncSession)
+
+            pair.follower.sync.forceDesynchronizedForTest()
+            runCurrent()
+            assertEquals(ResyncOutcome.DEFERRED, pair.follower.resync.diagnostics.value.lastOutcome)
+            assertEquals(
+                1,
+                pair.follower.sync.diagnostics.value.deferredCommandCount,
+                "the obligation must be backed by exactly one retained event",
+            )
+
+            // The precondition resolves, and nothing about the ride changes.
+            pair.follower.content.completeTransfer(SyncTestValues.hash(2))
+            runCurrent()
+            pair.followerClock.advanceBy(DEFERRED_RETRY_US * 2)
+            runCurrent()
+
+            assertEquals(
+                ResyncOutcome.RECONCILED,
+                pair.follower.resync.diagnostics.value.lastOutcome,
+                "valid same-ride retained work no longer reconciles",
+            )
+            assertEquals(SyncTestValues.hash(2), pair.follower.sync.diagnostics.value.currentTrackHash)
+            assertEquals(
+                0,
+                pair.follower.sync.diagnostics.value.retiredRideDeferredCount,
+                "valid work was discarded as retired",
+            )
+        }
+
     /** The exact adapter `AppContainer` installs — this test must not invent a different one. */
     private class SyncRideSegmentOwner(
         private val sync: SyncPlaybackCoordinator,

@@ -240,6 +240,17 @@ data class SyncPlaybackDiagnostics(
      */
     val staleRideLifecycleCount: Int = 0,
     /**
+     * Independent-review round 7: how many **retained** authoritative events were discarded because
+     * the ride lifetime that admitted them had ended before the drain reached them.
+     *
+     * Distinct from [refusedHeldCommandCount] (desynchronisation refused an incremental command) and
+     * from [staleRideLifecycleCount] (an End Ride boundary found a newer ride's authority standing).
+     * This one counts work that was legitimately admitted, legitimately held, and is no longer
+     * authorised by the ride it was admitted under — surfaced rather than dropped silently, and a
+     * reconciliation among them receives its terminal cancellation.
+     */
+    val retiredRideDeferredCount: Int = 0,
+    /**
      * How many outbound Phase 5 frames this device could not hand to its own ordered outbound queue
      * because that queue was full (ADR-024 Amendment A1 Finding B). Locally produced, so a nonzero
      * value means the control socket is wedged, never a pathological peer.

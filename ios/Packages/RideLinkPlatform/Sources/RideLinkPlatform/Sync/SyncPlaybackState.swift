@@ -174,6 +174,15 @@ public struct SyncPlaybackDiagnostics: Sendable, Equatable {
     /// begun. Nonzero means a late End Ride was correctly stopped from clearing a successor ride's
     /// playback state — the ride-lifetime analogue of ADR-024 Amendment A5's rule.
     public var staleRideLifecycleCount = 0
+    /// Independent-review round 7: how many **retained** authoritative events were discarded because
+    /// the ride lifetime that admitted them had ended before the drain reached them.
+    ///
+    /// Distinct from `refusedHeldCommandCount` (desynchronisation refused an incremental command) and
+    /// from `staleRideLifecycleCount` (an End Ride boundary found a newer ride's authority standing).
+    /// This one counts work that was legitimately admitted, legitimately held, and is no longer
+    /// authorised by the ride it was admitted under — surfaced rather than dropped silently, and a
+    /// reconciliation among them receives its terminal cancellation.
+    public var retiredRideDeferredCount = 0
     /// How many outbound Phase 5 frames this device could not hand to its own ordered outbound
     /// queue because that queue was full (Amendment A1 Finding B). Locally produced, so a nonzero
     /// value means the control socket is wedged, never a pathological peer.

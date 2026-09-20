@@ -442,9 +442,12 @@ final class RideSegmentLifecycleTests: XCTestCase {
 
         let generation = await session.currentAuthGeneration()
         let estimate = SessionClockEstimate(offsetToLeaderUs: 0, rttP95Us: 8_000, ready: true)
+        // Independent-review round 7: the ride provenance is captured by the **admission** now, not
+        // by `applyAuthoritative` itself, so the test captures it exactly where
+        // `admitAuthoritativeCommand` does — before the suspension the gate below parks in.
+        let ride = await sync.admitRide()
         // Armed immediately before the call, so the first generation read it takes — which is
-        // `applyAuthoritative`'s own `stillCurrent`, one statement after the ride-lifetime capture —
-        // is the one that parks.
+        // `applyAuthoritative`'s own `stillCurrent` — is the one that parks.
         await session.armGenerationGate()
         let apply = Task {
             await self.sync.applyAuthoritative(
@@ -452,6 +455,7 @@ final class RideSegmentLifecycleTests: XCTestCase {
                     commandSeq: 1, effectiveAtSessionUs: 0, issuedBy: SyncTestValues.leaderPeerId, queueRevision: 1
                 )),
                 generation: generation,
+                ride: ride,
                 estimate: estimate
             )
         }
@@ -508,6 +512,8 @@ final class RideSegmentLifecycleTests: XCTestCase {
 
         let generation = await session.currentAuthGeneration()
         let estimate = SessionClockEstimate(offsetToLeaderUs: 0, rttP95Us: 8_000, ready: true)
+        // Round 7: captured at the admission, as production does.
+        let ride = await sync.admitRide()
         await session.armGenerationGate()
         let apply = Task {
             await self.sync.applyAuthoritative(
@@ -515,6 +521,7 @@ final class RideSegmentLifecycleTests: XCTestCase {
                     commandSeq: 1, effectiveAtSessionUs: 0, issuedBy: SyncTestValues.leaderPeerId, queueRevision: 1
                 )),
                 generation: generation,
+                ride: ride,
                 estimate: estimate
             )
         }
@@ -891,6 +898,184 @@ final class RideSegmentLifecycleTests: XCTestCase {
                 let identity = await sync.currentPlaybackIdentity
                 XCTAssertEqual(trackX, identity?.trackHash, "cycle \(cycle): Regression 2 — genuinely new post-End authority was destroyed")
                 XCTAssertEqual(1, lifecycle.supersededEndRideCount, "cycle \(cycle)")
+            }
+        }
+    }
+
+    // MARK: - Independent-review round 7 (retained work's own ride provenance)
+
+    /// Waits on a condition rather than on a fixed number of yields — the inbound queue, the deferred
+    /// drain and the apply chain are each their own task, and how many hops they take is not fixed.
+    private func expect(_ description: String, _ condition: @escaping () async -> Bool) async {
+        let deadline = Date().addingTimeInterval(5)
+        while Date() < deadline {
+            if await condition() { return }
+            await Task.yield()
+        }
+        XCTFail("timed out waiting for: \(description)")
+    }
+
+    /// Becomes a follower with an untrustworthy clock — the only configuration in which an
+    /// authoritative command is *held* rather than applied (`PendingCommandGate`'s `.defer_`).
+    private func deferringFollower() async {
+        await sync.handleLinkLost()
+        await sync.handleConnected(isLocalLeader: false)
+        await session.setClock(SessionClockEstimate(offsetToLeaderUs: 0, rttP95Us: 8_000, ready: false))
+        // `handleConnected` restores rate 1.0 through the player (ADR-024 Amendment A4 §D's one
+        // unfenced call); every assertion below is about *restoration* effects only.
+        await player.clearCalls()
+    }
+
+    /// The leader's authoritative `PLAY`, arriving on the wire at a follower.
+    private func deliverPlay(_ track: ContentHash, queueItemId: String, commandSeq: Int64 = 1) async {
+        await session.deliver(.play(
+            header: PlaybackCommandHeader(
+                commandSeq: commandSeq, effectiveAtSessionUs: 0, issuedBy: SyncTestValues.leaderPeerId, queueRevision: 0
+            ),
+            trackHash: track,
+            positionMs: 0,
+            queueItemId: queueItemId
+        ))
+    }
+
+    /// **Round 7, Regression 1 — Bug A.** A `PLAY` admitted under ride 1 and *held* for an
+    /// untrustworthy clock used to be replayed by `drainDeferredEvents` into `applyAuthoritative`,
+    /// which captured a **fresh** `RideAdmission` at that moment. Round 6's provenance therefore
+    /// existed only while an operation was directly executing: the instant it became retained work it
+    /// was dropped, and the drain minted a replacement.
+    ///
+    /// The ordering is fully deterministic and needs no sleep. Both ride-boundary epochs are minted —
+    /// an accepted End Ride and then an accepted Start Ride — while the command is provably sitting in
+    /// `deferredEvents`, and ride 1's own cleanup is **not released** until after the drain has run.
+    /// That is the reachable production shape: `SessionCoordinator.endRide()` publishes its epoch
+    /// synchronously and hands `leaveSynchronizedMode` — the only thing that empties this stream — to
+    /// `launchInSession`.
+    ///
+    /// It must fail against the round-6 head, where `DeferredEvent.command` carried no ride at all.
+    func testADeferredRideOneCommandCannotBecomeRideTwosAuthority() async {
+        await build()
+        await deferringFollower()
+        let track = SyncTestValues.hash(120)
+        let itemId = SyncTestValues.ulid(120)
+        await content.addLocal(track)
+
+        startRide()
+        await deliverPlay(track, queueItemId: itemId)
+        await expect("the command was accepted and held") { await self.sync.deferredEvents.count == 1 }
+
+        // It was admitted under ride 1, and the retained event says so itself.
+        let held = await sync.deferredEvents
+        XCTAssertEqual(
+            RideAdmission(synchronizedModeEpoch: 0, rideEpoch: 1), held.first?.ride,
+            "the retained command does not carry the ride that admitted it"
+        )
+        let receivedSeq = await sync.diagnostics.lastReceivedCommandSeq
+        XCTAssertEqual(1, receivedSeq, "the command was not accepted for ordering, so this proves nothing")
+
+        // End Ride 1 is accepted and takes its epoch — its cleanup is deliberately not run yet.
+        let endRideEpoch = lifecycle.nextRideEpoch()
+        // Start Ride 2 is accepted before ride 1's cleanup ever ran.
+        _ = lifecycle.nextRideEpoch()
+
+        // The only thing that changes: the clock becomes trustworthy, and the drain runs — still
+        // before ride 1's delayed cleanup.
+        await session.setClock(SessionClockEstimate(offsetToLeaderUs: 0, rttP95Us: 8_000, ready: true))
+        await sync.drainDeferredEvents()
+        await settle()
+
+        let identity = await sync.currentPlaybackIdentity
+        XCTAssertNil(identity, "ride 1's held command established ride 2's playback identity: \(String(describing: identity))")
+        let timeline = await sync.timeline
+        XCTAssertNil(timeline, "…and a synchronised timeline for a ride that had ended")
+        let hash = await sync.diagnostics.currentTrackHash
+        XCTAssertNil(hash, "…which a STATE_SNAPSHOT would then have reported")
+        let authority = await sync.rideAuthorityEpoch
+        XCTAssertEqual(0, authority, "…and stamped ride-scoped authority for a successor ride")
+        let calls = await player.calls
+        XCTAssertFalse(calls.contains(.select(track)), "a retired ride's held command reached the player: \(calls)")
+        let remaining = await sync.deferredEvents
+        XCTAssertTrue(remaining.isEmpty, "the retired-ride event must be discarded, not left to wedge the stream")
+        let discarded = await sync.diagnostics.retiredRideDeferredCount
+        XCTAssertEqual(1, discarded, "…and counted rather than dropped silently")
+
+        // Only now does ride 1's own delayed cleanup run. It must find nothing newer standing.
+        await lifecycle.endRide(epoch: endRideEpoch)
+        await settle()
+        XCTAssertEqual(0, lifecycle.supersededEndRideCount, "ride 1's cleanup was fooled into standing down")
+        let finalIdentity = await sync.currentPlaybackIdentity
+        XCTAssertNil(finalIdentity, "nothing from the retired ride's held command may survive")
+    }
+
+    /// **Round 7, Regression 4 (command half): the fix must not refuse valid retained work.** The same
+    /// deferral with **no** ride boundary at all — the ordinary "the clock wobbled for 200 ms" case —
+    /// still applies from the drain, against the very same `RideAdmission` it was admitted under.
+    func testAValidSameRideDeferredCommandStillAppliesWhenTheClockRecovers() async {
+        await build()
+        await deferringFollower()
+        let track = SyncTestValues.hash(121)
+        let itemId = SyncTestValues.ulid(121)
+        await content.addLocal(track)
+
+        startRide()
+        await deliverPlay(track, queueItemId: itemId)
+        await expect("the command was accepted and held") { await self.sync.deferredEvents.count == 1 }
+        let admitted = await sync.deferredEvents.first?.ride
+
+        await session.setClock(SessionClockEstimate(offsetToLeaderUs: 0, rttP95Us: 8_000, ready: true))
+        await sync.drainDeferredEvents()
+        await settle()
+
+        let identity = await sync.currentPlaybackIdentity
+        XCTAssertEqual(track, identity?.trackHash, "valid same-ride retained work no longer applies")
+        let timeline = await sync.timeline
+        XCTAssertEqual(track, timeline?.trackHash, "…including its synchronised timeline")
+        let calls = await player.calls
+        XCTAssertTrue(calls.contains(.select(track)), "…and the real player: \(calls)")
+        let authority = await sync.rideAuthorityEpoch
+        XCTAssertEqual(1, authority, "…stamped with the ride that admitted it, not a later one")
+        XCTAssertEqual(RideAdmission(synchronizedModeEpoch: 0, rideEpoch: 1), admitted)
+        let discarded = await sync.diagnostics.retiredRideDeferredCount
+        XCTAssertEqual(0, discarded, "valid work was discarded as retired")
+        let remaining = await sync.deferredEvents
+        XCTAssertTrue(remaining.isEmpty)
+    }
+
+    /// §24 item 5: fifty deterministic cycles alternating Regression 1 (a boundary while the command
+    /// is held) and Regression 4 (no boundary at all), on a fresh harness each time — so a fix that
+    /// happens to pass once, or one that over-corrects into refusing everything, fails here.
+    func testFiftyCyclesOfDeferredCommandProvenance() async {
+        for cycle in 0 ..< 50 {
+            await build()
+            await deferringFollower()
+            let track = SyncTestValues.hash(122)
+            let itemId = SyncTestValues.ulid(122)
+            await content.addLocal(track)
+            let boundaryHappens = cycle.isMultiple(of: 2)
+
+            startRide()
+            await deliverPlay(track, queueItemId: itemId)
+            await expect("cycle \(cycle): held") { await self.sync.deferredEvents.count == 1 }
+
+            var endRideEpoch: Int64?
+            if boundaryHappens {
+                endRideEpoch = lifecycle.nextRideEpoch()
+                _ = lifecycle.nextRideEpoch()
+            }
+
+            await session.setClock(SessionClockEstimate(offsetToLeaderUs: 0, rttP95Us: 8_000, ready: true))
+            await sync.drainDeferredEvents()
+            await settle()
+
+            let identity = await sync.currentPlaybackIdentity
+            if boundaryHappens {
+                XCTAssertNil(identity, "cycle \(cycle): ride 1's held command became ride 2's authority")
+                if let endRideEpoch {
+                    await lifecycle.endRide(epoch: endRideEpoch)
+                    await settle()
+                }
+                XCTAssertEqual(0, lifecycle.supersededEndRideCount, "cycle \(cycle)")
+            } else {
+                XCTAssertEqual(track, identity?.trackHash, "cycle \(cycle): valid same-ride retained work was refused")
             }
         }
     }
