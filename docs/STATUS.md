@@ -6865,16 +6865,19 @@ app-target builds (Debug and Release, `iphonesimulator`) succeed. Android `./gra
 modules plus `ktlintCheck`, `detekt`, `lint` and `assembleDebug` — all clean, and green in CI at the
 exact head. Physical qualification is unchanged: **DEFERRED — HARDWARE NOT AVAILABLE.**
 
-**iOS CI is RED at this head — and red at the *pre-change* head too, proven by experiment.** Two runs
-at `ece2d47` failed `ReconnectResyncStressTests` with `notReady`, a 30 s poll timeout inside the two
-**real-TLS** reconnect loops (50 and 100 cycles) — a different one of the two each run. That test's own
+**iOS CI is RED at this head — and red at the *pre-change* head too, proven by experiment.** Every CI run in
+this window fails **exactly one** `ReconnectResyncStressTests` case with `notReady` — a 30 s poll
+timeout inside a **real-TLS** reconnect loop — and it is a *different* case each run (the 50-cycle
+one, then the 100-cycle one, then the changed-track reconnect). 625 of 626 tests pass. A logic defect
+fails the same test every time; a timing wall moves. That test's own
 comment forbids a mechanical budget bump on recurrence, so the budget was not touched and the
 investigation was done instead.
 
 **The decisive datapoint is an A/B at the same wall-clock time**: re-running the *unchanged*
 `fbbf1e19d88d0b30c0ca9a255ea438c219badda3` — the head the independent review audited, green earlier the
 same day — fails **both** of those tests, at the same poll, on the same Xcode 26.6 / Swift 6.3.3 image,
-in the same window (33.8 s and 30.9 s, against 3.6 s and 5.0 s for the identical commit that morning).
+in the same window — 33.8 s and 30.9 s, against 3.6 s and 5.0 s for the identical commit that
+morning, with the whole class going from 52.7 s to ~80 s.
 A commit containing none of this work reproduces it, so the cause is the runner, not this pass. The iOS
 suite is green **locally**: 626 tests over four full runs, plus those two tests six further standalone
 runs and one full-class run under four saturated cores (1.0 s and 2.1 s). Android is green in CI at

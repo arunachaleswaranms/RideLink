@@ -1304,17 +1304,18 @@ not part of the repository's CI workflow; that is stated rather than implied.
 `ktlintCheck`, `detekt`, `lint` and `assembleDebug` — all clean, and green in CI at the exact head.
 
 **iOS CI is red at this head, and it is red at the *pre-change* head too — proven by experiment, not
-argued.** Two CI runs at `ece2d47` failed `ReconnectResyncStressTests` with `notReady`, a 30 s `poll`
-timeout inside the two **real-TLS** reconnect loops (50 cycles, then 100 cycles) — a different one of
-the two each run. That test's own comment says a recurrence at this budget is "new evidence worth a
+argued.** Every CI run in this window fails **exactly one** `ReconnectResyncStressTests` case with
+`notReady` — a 30 s `poll` timeout inside a **real-TLS** reconnect loop — and it is a *different* case
+each run (the 50-cycle one, then the 100-cycle one, then the changed-track reconnect). 625 of 626
+tests pass. A logic defect fails the same test every time; a timing wall moves. That test's own comment says a recurrence at this budget is "new evidence worth a
 fresh investigation rather than another mechanical bump", so the budget was **not** touched and the
 investigation was done.
 
 **The decisive datapoint is an A/B at the same wall-clock time.** Re-running the *unchanged*
 `fbbf1e19d88d0b30c0ca9a255ea438c219badda3` — the head the independent review audited, whose iOS job
 was green earlier the same day — fails **both** of those tests, at the same `poll`, on the same
-Xcode 26.6 / Swift 6.3.3 image, in the same window (33.8 s and 30.9 s against 3.6 s and 5.0 s in the
-morning run of the identical commit). The regression is therefore in the runner, not in this
+Xcode 26.6 / Swift 6.3.3 image, in the same window — 33.8 s and 30.9 s against 3.6 s and 5.0 s in the
+morning run of the identical commit, with the whole class going from 52.7 s to ~80 s. The regression is therefore in the runner, not in this
 amendment: a commit containing none of this work reproduces it. **The iOS suite is green locally**
 — 626 tests, four full runs, plus those two tests six further standalone runs and one full-class run
 under four saturated cores (1.0 s and 2.1 s).
