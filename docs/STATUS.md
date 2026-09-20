@@ -6862,8 +6862,37 @@ effect of a decision the live ride genuinely made — ADR-024 Amendment A4 §C's
 iOS `RideLinkCore` 343 tests and `RideLinkPlatform` 626 tests (up from 619), 0 failures, full suite run
 three times; `ResyncCoordinatorTests` re-run eight further times standalone; both `xcodebuild`
 app-target builds (Debug and Release, `iphonesimulator`) succeed. Android `./gradlew test` across all
-modules plus `ktlintCheck`, `detekt`, `lint` and `assembleDebug` — all clean. Physical qualification is
-unchanged: **DEFERRED — HARDWARE NOT AVAILABLE.**
+modules plus `ktlintCheck`, `detekt`, `lint` and `assembleDebug` — all clean, and green in CI at the
+exact head. Physical qualification is unchanged: **DEFERRED — HARDWARE NOT AVAILABLE.**
+
+**iOS CI is RED at this head — and red at the *pre-change* head too, proven by experiment.** Two runs
+at `ece2d47` failed `ReconnectResyncStressTests` with `notReady`, a 30 s poll timeout inside the two
+**real-TLS** reconnect loops (50 and 100 cycles) — a different one of the two each run. That test's own
+comment forbids a mechanical budget bump on recurrence, so the budget was not touched and the
+investigation was done instead.
+
+**The decisive datapoint is an A/B at the same wall-clock time**: re-running the *unchanged*
+`fbbf1e19d88d0b30c0ca9a255ea438c219badda3` — the head the independent review audited, green earlier the
+same day — fails **both** of those tests, at the same poll, on the same Xcode 26.6 / Swift 6.3.3 image,
+in the same window (33.8 s and 30.9 s, against 3.6 s and 5.0 s for the identical commit that morning).
+A commit containing none of this work reproduces it, so the cause is the runner, not this pass. The iOS
+suite is green **locally**: 626 tests over four full runs, plus those two tests six further standalone
+runs and one full-class run under four saturated cores (1.0 s and 2.1 s). Android is green in CI at
+both heads. Whether 30 s is simply too small for GitHub's current macOS runners is a real open
+question this pass deliberately does not answer, because answering it by raising the number is exactly
+what that test's comment forbids.
+
+The reasoning below is why that result is unsurprising, not why it may be dismissed. **This pass's
+code is unreachable in that test**: every early return round 7 adds sits inside `if let trackHash
+= fields.trackHash` / `if !contentReady`, and the harness seeds no track and never plays one, so every
+snapshot it exchanges carries `playback: nil`; the remaining new code needs a non-live ride, and that
+test starts none (`rideEpochs.current` and `synchronizedModeEpoch` are 0 throughout). The one failure
+shape worth ruling out explicitly — the new `.rejectedStale` return leaving `requestPending` wedged —
+cannot happen either: `ResyncCoordinator`'s `.rejectedStale` branch never touches
+`pendingRequestGeneration`, and `StateResyncGate.onTrigger` re-arms on any generation change. The
+likelier poll is `reconnectCycle`'s own wait for a real TLS `.connected`, which is the transport-timing
+point the comment already attributes to runner variance. Locally the test passes in ~0.6 s over six
+standalone runs and four full-suite runs. See ADR-028 Amendment A6's verification section.
 
 ## 3. Tests passed / pending
 

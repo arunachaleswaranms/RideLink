@@ -1301,7 +1301,50 @@ times standalone. Both `xcodebuild` app-target builds (Debug and Release, `iphon
 not part of the repository's CI workflow; that is stated rather than implied.
 
 **Android.** `./gradlew test` across all modules, `:app:test`, `:core:test`, `:network:test`,
-`ktlintCheck`, `detekt`, `lint` and `assembleDebug` — all clean.
+`ktlintCheck`, `detekt`, `lint` and `assembleDebug` — all clean, and green in CI at the exact head.
+
+**iOS CI is red at this head, and it is red at the *pre-change* head too — proven by experiment, not
+argued.** Two CI runs at `ece2d47` failed `ReconnectResyncStressTests` with `notReady`, a 30 s `poll`
+timeout inside the two **real-TLS** reconnect loops (50 cycles, then 100 cycles) — a different one of
+the two each run. That test's own comment says a recurrence at this budget is "new evidence worth a
+fresh investigation rather than another mechanical bump", so the budget was **not** touched and the
+investigation was done.
+
+**The decisive datapoint is an A/B at the same wall-clock time.** Re-running the *unchanged*
+`fbbf1e19d88d0b30c0ca9a255ea438c219badda3` — the head the independent review audited, whose iOS job
+was green earlier the same day — fails **both** of those tests, at the same `poll`, on the same
+Xcode 26.6 / Swift 6.3.3 image, in the same window (33.8 s and 30.9 s against 3.6 s and 5.0 s in the
+morning run of the identical commit). The regression is therefore in the runner, not in this
+amendment: a commit containing none of this work reproduces it. **The iOS suite is green locally**
+— 626 tests, four full runs, plus those two tests six further standalone runs and one full-class run
+under four saturated cores (1.0 s and 2.1 s).
+
+That experiment is what settles it; the reasoning below is why the result is unsurprising rather
+than why it can be dismissed:
+
+- **This amendment's code is unreachable in that test.** Every early return round 7 adds to the
+  reconciliation path sits inside `if let trackHash = fields.trackHash` / `if !contentReady`, and
+  the test's harness (`buildPersistentPair`) seeds no track and never plays one — so every
+  `STATE_SNAPSHOT` it exchanges carries `playback: nil`, `fields.trackHash` is nil, and the pre-check
+  branch is never entered. The nil-track path returns `.applied` before reaching any new statement.
+  The remaining new code needs a *non-live* ride, and that test starts no ride: `rideEpochs.current`
+  and `synchronizedModeEpoch` are both 0 throughout, so `rideStillLive` is unconditionally true.
+- **The new `.rejectedStale` return cannot wedge `requestPending` either**, which was the specific
+  failure shape worth ruling out: `ResyncCoordinator`'s `.rejectedStale` branch never touches
+  `pendingRequestGeneration`, and `StateResyncGate.onTrigger` re-arms on any generation change, so a
+  refused snapshot for a dead generation can neither clear nor clobber a successor's request.
+- **The far likelier poll is `reconnectCycle`'s own** `poll { connectedCount(a.session) > beforeA }`
+  — waiting for a real TLS re-authentication to produce `.connected` — which is exactly the
+  transport-timing point the comment already attributes to runner scheduling variance.
+- Locally the same test passes in ~0.6 s, six consecutive standalone runs and four full-suite runs.
+
+It is recorded here rather than dismissed, because "CI-only" is a claim a reviewer should be able to
+check — and the way to check it is the A/B above: re-run `fbbf1e1` and watch an audited, previously
+green commit fail the same two tests. **The red iOS job at this head is not a pass being claimed as a
+fail-free result**: it is reported as red, with the evidence that its cause predates this work.
+Whether the 30 s budget is now simply too small for GitHub's current macOS runners is a real question
+this amendment deliberately does not answer, because answering it by raising the number is exactly
+what that test's comment forbids.
 
 ### Physical qualification
 
