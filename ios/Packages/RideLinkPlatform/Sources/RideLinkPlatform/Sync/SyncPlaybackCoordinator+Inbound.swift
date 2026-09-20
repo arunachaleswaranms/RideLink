@@ -743,7 +743,7 @@ extension SyncPlaybackCoordinator {
                 if let reconciliation {
                     switch outcome {
                     case .applied: onReconciliationApplied?(reconciliation, generation)
-                    case .rejectedStale, .rejectedRole: onReconciliationCancelled?(reconciliation, generation)
+                    case .rejectedStale, .rejectedRole, .rejectedRide: onReconciliationCancelled?(reconciliation, generation)
                     case .deferredClock, .deferredContent: break
                     }
                 }
@@ -1584,6 +1584,11 @@ extension SyncPlaybackCoordinator {
         guard await stillCurrent(generation) else { return .rejectedStale }
         // Amendment A5: the two sequence numbers, the held stream and the timeline all follow.
         guard stillCurrentNow(generation) else { return .rejectedStale }
+        // Independent-review round 4, §17: and the ride that authorised this reconciliation, which
+        // End Ride ends without moving the control generation. Stated **once**, here, and reported as
+        // its own outcome — the snapshot did arrive for the live generation, so this is not
+        // `.rejectedStale`, and the outer owner needs to tell the two apart.
+        guard synchronizedModeEpoch == rideLifetime else { return .rejectedRide }
         let commandSeq = fields.commandSeq
         if lastReceivedSeq == nil || commandSeq > (lastReceivedSeq ?? 0) {
             lastReceivedSeq = commandSeq
@@ -1653,7 +1658,6 @@ extension SyncPlaybackCoordinator {
             }
             return outcome
         }
-        guard synchronizedModeEpoch == rideLifetime else { return .rejectedStale } // round 4, §17
         guard let active = timeline, fields.trackHash == active.trackHash else { return .applied }
         timeline = active.reanchored(positionMs: fields.positionMs, sessionUs: fields.atSessionUs, playing: fields.playing)
         driftState = DriftController.reset()
@@ -1672,9 +1676,9 @@ extension SyncPlaybackCoordinator {
         guard await stillCurrent(generation) else { return .rejectedStale }
         // Amendment A5: `epoch.supersede()` in the branch below retires the live playback epoch.
         guard stillCurrentNow(generation) else { return .rejectedStale }
-        // Independent-review round 4, §17: and the ride lifetime the reconciliation was authorised
-        // under, which End Ride moves without moving the control generation.
-        guard synchronizedModeEpoch == rideLifetime else { return .rejectedStale }
+        // Independent-review round 4, §17: and the ride, for the same reason `applyPeerPlaybackState`
+        // states it — this is reached from the drain as well, whose own entry proof is older.
+        guard synchronizedModeEpoch == rideLifetime else { return .rejectedRide }
         guard let trackHash = fields.trackHash, let queueItemId = fields.queueItemId else {
             // "Nothing is loaded" is a representable authoritative state (ADR-024 §4). Every
             // scheduled effect from the epoch we lost track of is superseded, and nothing replaces it.

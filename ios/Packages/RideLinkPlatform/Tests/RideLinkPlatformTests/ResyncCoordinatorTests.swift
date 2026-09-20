@@ -683,6 +683,78 @@ final class ResyncCoordinatorTests: XCTestCase {
         XCTAssertEqual(.cancelled, coordinator.diagnostics.lastOutcome, "a torn-down obligation completed late")
     }
 
+    /// **Round 4's own fresh-fix defect, found by CI at the exact head — the wire obligation is not
+    /// the reconciliation obligation.**
+    ///
+    /// Two versions of this mistake were made and both are pinned here. The obligation-identity guard
+    /// was briefly placed *before* `StateResyncGate.onSnapshotObserved`, making the **wire** request's
+    /// clear conditional on the **reconciliation** obligation surviving the apply; and a ride-lifetime
+    /// refusal was briefly reported as `.rejectedStale`, which by §21 must *not* clear an outstanding
+    /// request because such a snapshot never answered it. Either way a snapshot that genuinely arrived
+    /// for the live generation left `requestPending` true with nothing that could ever clear it, and
+    /// `ReconnectResyncStressTests`' 100-cycle sweep timed out waiting for it to drop. That is exactly
+    /// the conflation round 3's Blocker B removed, re-created by the fix written to strengthen it.
+    ///
+    /// Deterministic and with no parking at all: the ride is ended **first**, so the snapshot that
+    /// follows is unambiguously one whose reconciliation the ride has already cancelled. An earlier
+    /// draft of this test parked on the content gate instead and **passed vacuously** — the gate armed
+    /// on an unrelated resolve, so the snapshot completed normally before End Ride ran. Pinning the
+    /// ordering by construction is the lesson this suite's own `applyPlay` regression already records.
+    func testASnapshotRefusedBecauseTheRideEndedStillClearsTheWireRequest() async {
+        await desynchronizedFollower(clockReady: true)
+        await startRide()
+        let track = SyncTestValues.hash(77)
+        await content.addLocal(track)
+        XCTAssertTrue(coordinator.diagnostics.requestPending, "the desync trigger left a wire request outstanding")
+
+        // Park the reconciliation immediately **after** `applyPeerPlaybackState` captures the ride
+        // lifetime — `skipping: 1` steps over `adoptSnapshot`'s own generation read, and the outcome
+        // asserted below is what proves we landed there rather than somewhere harmless.
+        await syncSession.armGenerationGate(skipping: 1)
+        let deliver = Task { await self.session.deliver(self.playbackSnapshot(trackHash: track, queueItemId: SyncTestValues.ulid(77)), generation: 1) }
+        var parked = false
+        for _ in 0 ..< 500 where !parked {
+            parked = await syncSession.isGenerationGateParked
+            await Task.yield()
+        }
+        XCTAssertTrue(parked, "the reconciliation never reached a generation-read suspension")
+
+        // End Ride while it is provably parked, then let it resume.
+        await endRide()
+        await syncSession.releaseGenerationGate()
+        _ = await deliver.value
+        for _ in 0 ..< 200 { await Task.yield() }
+
+        XCTAssertEqual(
+            .cancelled, coordinator.diagnostics.lastOutcome,
+            "the ride ended mid-apply, so the reconciliation is cancelled — and that is not the same as the snapshot being stale"
+        )
+        XCTAssertFalse(
+            coordinator.diagnostics.requestPending,
+            "a snapshot arrived for the live generation, so the wire request must clear whatever happened to the reconciliation"
+        )
+        let identity = await syncCoordinator.currentPlaybackIdentity
+        XCTAssertNil(identity, "a reconciliation the ride cancelled may not restore ride 1's playback")
+    }
+
+    /// The deliberate counterpart, recorded so the rule above is not read more widely than it is: a
+    /// `STATE_SNAPSHOT` that **arrives** after End Ride, under the same still-live control generation,
+    /// is ordinary new authoritative traffic and is applied — exactly as a newly arriving `PLAY` is
+    /// (`onInboundCommand` sets `syncEnabled` back to true). The ride lifetime refuses work the ended
+    /// ride *authorised*; it is not a filter on the peer, who is still riding. Unchanged by round 4
+    /// and asserted here so a future reader does not "fix" it.
+    func testASnapshotArrivingAfterEndRideIsOrdinaryNewAuthoritativeTrafficAndApplies() async {
+        await desynchronizedFollower(clockReady: true)
+        await startRide()
+        let track = SyncTestValues.hash(78)
+        await content.addLocal(track)
+        await endRide()
+
+        await session.deliver(playbackSnapshot(trackHash: track, queueItemId: SyncTestValues.ulid(78)), generation: 1)
+        await expect("reconciled") { self.coordinator.diagnostics.lastOutcome == .reconciled }
+        XCTAssertFalse(coordinator.diagnostics.requestPending)
+    }
+
     /// **§24 item 11.** Fifty same-generation cancel/apply cycles on a fresh harness each time: S1
     /// deferred and cancelled by End Ride, S2 deferred and applied in ride 2 under the same control
     /// generation. Only S2 may ever reconcile, and it must report its own `command_seq`.

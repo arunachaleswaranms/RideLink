@@ -646,6 +646,46 @@ ordering bookkeeping that `leaveSynchronizedMode` correctly does not reset. A ne
 command arriving *after* an End Ride re-enters synchronised mode on this device — unchanged, and
 correct: the peer is still riding, and this is not work authorised by the ride that ended.
 
+### This amendment's own fix needed a fix, and CI at the exact head is what found it
+
+The standing lesson again, on this pass's own code. Two versions of one mistake were made while
+adding Blocker 2's obligation identity and §17's ride guard, and both produced the same symptom: a
+`STATE_SNAPSHOT` that genuinely arrived for the live generation left `requestPending` **true with
+nothing that could ever clear it**, and `ReconnectResyncStressTests`' 100-cycle reconnect sweep timed
+out waiting for it to drop. The local suites were green; CI at the exact head was not.
+
+1. **The obligation-identity guard was placed before `StateResyncGate.onSnapshotObserved`**, which
+   made the **wire** obligation's clear conditional on the **reconciliation** obligation surviving the
+   apply. That is precisely the conflation round 3's Blocker B existed to remove — re-created by the
+   fix written to strengthen it. The clear now happens first, unconditionally for any outcome that
+   means "a snapshot for the live generation arrived", and the identity guard scopes only what follows.
+2. **A ride-lifetime refusal was reported as `.rejectedStale`**, which by §21 must *not* clear an
+   outstanding request, because such a snapshot never answered it. But a snapshot refused because the
+   *ride* ended **did** arrive for the live generation. The two are different facts and now have
+   different outcomes: `StateSnapshotOutcome.rejectedRide` / `REJECTED_RIDE` satisfies the wire round
+   trip and cancels only the reconciliation.
+
+Building the regression for it exposed a third, smaller thing worth recording: **Android captured the
+ride lifetime one function later than iOS.** iOS's content pre-check lives inside
+`applyPeerPlaybackState`, so capturing there is capturing before the operation's first suspension;
+Android's lives in `onPeerPlaybackState`, one level up, so the same capture site was *below* the
+suspension and read a post-End-Ride value. Android now captures in `onPeerPlaybackState` and threads
+it down, which is what "captured where the operation is authorised" actually means on that platform.
+The divergence was invisible until a test tried to park there.
+
+**And the first regression written for this was vacuous** — it armed the content gate with a
+`{ true }` predicate, which caught an unrelated resolve, so the snapshot completed normally *before*
+End Ride ran and the test passed against the broken code. It is now pinned by construction: iOS parks
+on the generation gate immediately after the capture, Android on the follower's content gate, and both
+assert the resulting outcome rather than merely that something parked. That is this repository's own
+"counting calls does not pin it" lesson, earned again.
+
+One behaviour is deliberately **not** changed and is now asserted so it is not mistaken for a bug: a
+`STATE_SNAPSHOT` that *arrives* after End Ride, under the same still-live control generation, is
+ordinary new authoritative traffic and **is applied** — exactly as a newly arriving `PLAY` is, since
+`onInboundCommand` sets `syncEnabled` back to true. The ride lifetime refuses work the ended ride
+*authorised*; it is not a filter on a peer who is still riding.
+
 ### Two pre-existing platform divergences, audited and deliberately unchanged
 
 - iOS performs `STATE_SNAPSHOT` manifest bookkeeping on **acceptance**; Android performs it inside

@@ -333,35 +333,68 @@ class ResyncCoordinator(
         nextObligationId += 1
         deferredReconciliation = DeferredReconciliation(obligation, generation, message)
         val outcome = syncPlaybackCoordinator.onStateSnapshot(message, generation, obligation)
-        // Whether this obligation is still the one being tracked. A cancellation or a newer snapshot
-        // during the call above means it is not, and this call must then publish nothing at all: its
-        // result belongs to a lifetime that has already been answered.
-        if (deferredReconciliation?.id != obligation) return
         when (outcome) {
-            StateSnapshotOutcome.APPLIED -> {
+            StateSnapshotOutcome.APPLIED, StateSnapshotOutcome.DEFERRED_CLOCK, StateSnapshotOutcome.DEFERRED_CONTENT -> {
+                // §21: the **wire** round trip is satisfied by any of the three — a snapshot for the
+                // live generation arrived, so there is nothing left to request.
+                //
+                // **Round 4's own fresh-fix defect, found by CI at the exact head.** This clear was
+                // briefly placed *after* the obligation-identity guard below, which made the wire
+                // obligation conditional on the **reconciliation** obligation surviving — precisely
+                // the conflation round 3's Blocker B existed to remove. A snapshot whose
+                // reconciliation was cancelled inside the call above then left `requestPending` true
+                // with nothing outstanding left to clear it.
                 pendingRequestGeneration = StateResyncGate.onSnapshotObserved(pendingRequestGeneration, generation)
-                deferredReconciliation = null
-                completeReconciliation(message)
+                // Whether *this* obligation is still the one being tracked. A cancellation (End Ride,
+                // a lifetime boundary) or a newer snapshot during the call above means it is not, and
+                // everything after this belongs to a lifetime that has already been answered.
+                if (deferredReconciliation?.id != obligation) {
+                    _diagnostics.update { it.copy(requestPending = pendingRequestGeneration != null) }
+                    return
+                }
+                if (outcome == StateSnapshotOutcome.APPLIED) {
+                    deferredReconciliation = null
+                    completeReconciliation(message)
+                } else {
+                    // `DEFERRED_CONTENT` (section 22) gets identical treatment to `DEFERRED_CLOCK`:
+                    // since round 3's Blocker A the retained snapshot is drained — and
+                    // `onReconciliationApplied` raised — for whichever precondition resolves, so one
+                    // branch correctly serves both.
+                    _diagnostics.update {
+                        it.copy(requestPending = pendingRequestGeneration != null, lastOutcome = ResyncOutcome.DEFERRED)
+                    }
+                }
             }
-            // `DEFERRED_CONTENT` (section 22) gets identical treatment to `DEFERRED_CLOCK`: the wire
-            // round trip is satisfied either way, and since independent-review round 3's Blocker A
-            // the retained snapshot is drained — and `onReconciliationApplied` raised — for whichever
-            // precondition resolves, so one branch correctly serves both.
-            StateSnapshotOutcome.DEFERRED_CLOCK, StateSnapshotOutcome.DEFERRED_CONTENT -> {
+            // Independent-review round 4, §17: the snapshot **did** arrive for the live generation —
+            // it was refused because the ride segment that authorised its reconciliation ended. The
+            // wire round trip is satisfied exactly as above, and only the reconciliation is
+            // cancelled. Conflating this with REJECTED_STALE (which never answered the outstanding
+            // request at all) left `requestPending` true with nothing that could clear it.
+            StateSnapshotOutcome.REJECTED_RIDE -> {
                 pendingRequestGeneration = StateResyncGate.onSnapshotObserved(pendingRequestGeneration, generation)
+                val owned = deferredReconciliation?.id == obligation
+                releaseObligation(obligation)
                 _diagnostics.update {
-                    it.copy(requestPending = pendingRequestGeneration != null, lastOutcome = ResyncOutcome.DEFERRED)
+                    it.copy(
+                        requestPending = pendingRequestGeneration != null,
+                        lastOutcome = if (owned) ResyncOutcome.CANCELLED else it.lastOutcome,
+                    )
                 }
             }
             // A rejected snapshot must not falsely complete the request (§21) or mutate manifest
-            // bookkeeping (§20). The obligation recorded up front is released: nothing was retained
-            // for it, so nothing will ever report on it.
-            StateSnapshotOutcome.REJECTED_STALE -> deferredReconciliation = null
+            // bookkeeping (§20). The obligation recorded up front is released — nothing was retained
+            // for it, so nothing will ever report on it — but only if it is still ours to release.
+            StateSnapshotOutcome.REJECTED_STALE -> releaseObligation(obligation)
             StateSnapshotOutcome.REJECTED_ROLE -> {
-                deferredReconciliation = null
+                releaseObligation(obligation)
                 _diagnostics.update { it.copy(roleViolationCount = it.roleViolationCount + 1) }
             }
         }
+    }
+
+    /** Releases [deferredReconciliation] only if it is still the obligation this call recorded. */
+    private fun releaseObligation(obligation: Long) {
+        if (deferredReconciliation?.id == obligation) deferredReconciliation = null
     }
 
     /**

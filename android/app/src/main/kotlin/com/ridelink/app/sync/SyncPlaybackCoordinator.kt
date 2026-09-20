@@ -643,6 +643,18 @@ class SyncPlaybackCoordinator(
 
         /** This device is not a follower — PROTOCOL §5/§9's role asymmetry (ADR-010). */
         REJECTED_ROLE,
+
+        /**
+         * Independent-review round 4, §17: the snapshot arrived for the **live generation** and was
+         * refused because the **ride segment** that authorised its reconciliation has ended — a
+         * different fact from [REJECTED_STALE], and the two must not be conflated.
+         *
+         * The distinction is load-bearing at the outer owner: a [REJECTED_STALE] snapshot never
+         * answered the `STATE_REQUEST` that is still outstanding, so that request must stay pending;
+         * this one **did** arrive for the live generation, so the wire round trip is satisfied and
+         * only the reconciliation is cancelled.
+         */
+        REJECTED_RIDE,
     }
 
     /**
@@ -2195,7 +2207,7 @@ class SyncPlaybackCoordinator(
                             recoveredCommandCount = it.recoveredCommandCount + 1,
                         )
                     }
-                    val outcome = applyPeerPlaybackState(held.message, held.generation, held.reconciliation)
+                    val outcome = applyPeerPlaybackState(held.message, held.generation, held.reconciliation, synchronizedModeEpoch)
                     // Independent-review round 3, Blocker B (Android half): the precise
                     // "was deferred, now genuinely applied" transition [ResyncCoordinator] cannot
                     // otherwise observe — the synchronous first attempt already answers its caller
@@ -2238,6 +2250,7 @@ class SyncPlaybackCoordinator(
             StateSnapshotOutcome.APPLIED -> onReconciliationApplied?.invoke(obligation, generation)
             StateSnapshotOutcome.REJECTED_STALE,
             StateSnapshotOutcome.REJECTED_ROLE,
+            StateSnapshotOutcome.REJECTED_RIDE,
             -> onReconciliationCancelled?.invoke(obligation, generation)
             StateSnapshotOutcome.DEFERRED_CLOCK, StateSnapshotOutcome.DEFERRED_CONTENT -> Unit
         }
@@ -3089,6 +3102,11 @@ class SyncPlaybackCoordinator(
         generation: Long,
         reconciliation: Long? = null,
     ): StateSnapshotOutcome {
+        // Independent-review round 4, §17: the ride lifetime that authorises this whole
+        // reconciliation, captured before the content pre-check below suspends. iOS captures in
+        // [applyPeerPlaybackState] instead, which is equivalent *there* because its pre-check lives
+        // inside that function — Android's lives here, so this is where the capture belongs.
+        val rideLifetime = synchronizedModeEpoch
         if (role != PlaybackRole.FOLLOWER) return StateSnapshotOutcome.REJECTED_ROLE
         // Amendment A2 Finding D: the reconciliation anchor is authoritative state, so it waits its
         // turn behind held commands exactly as a queue snapshot does. Its supersede rule below then
@@ -3122,7 +3140,7 @@ class SyncPlaybackCoordinator(
                 return if (!clockReady) StateSnapshotOutcome.DEFERRED_CLOCK else StateSnapshotOutcome.DEFERRED_CONTENT
             }
         }
-        return applyPeerPlaybackState(snapshot, generation, reconciliation)
+        return applyPeerPlaybackState(snapshot, generation, reconciliation, rideLifetime)
     }
 
     /** [onPeerPlaybackState] with the hold gate already answered — the drain's entry point too. */
@@ -3131,11 +3149,19 @@ class SyncPlaybackCoordinator(
         snapshot: PlaybackMessage.PlaybackStateSnapshot,
         generation: Long,
         reconciliation: Long? = null,
+        /**
+         * The ride lifetime that authorised this reconciliation. Supplied by [onPeerPlaybackState] for
+         * a snapshot arriving now, and captured by the drain for a held one being replayed — either
+         * way, before the operation's first suspension, and compared rather than re-read below.
+         */
+        rideLifetime: Long,
     ): StateSnapshotOutcome {
-        // Independent-review round 4, §17: the reconciliation's own ride lifetime, captured before
-        // this function's first suspension and threaded into every step of it.
-        val rideLifetime = synchronizedModeEpoch
         commandMutex.withLock {
+            // Independent-review round 4, §17: the ride that authorised this reconciliation, which
+            // End Ride ends without moving the control generation. Stated **once**, here, and
+            // reported as its own outcome — the snapshot did arrive for the live generation, so this
+            // is not REJECTED_STALE, and the outer owner needs to tell the two apart.
+            if (synchronizedModeEpoch != rideLifetime) return StateSnapshotOutcome.REJECTED_RIDE
             // Amendment A3 Finding B: acquiring the lock is a suspension, and everything below it
             // writes live state — the received/applied sequence numbers, the held stream, the
             // timeline. Re-proved here rather than trusting the dispatch-time check in
@@ -3174,7 +3200,6 @@ class SyncPlaybackCoordinator(
             }
             return outcome
         }
-        if (synchronizedModeEpoch != rideLifetime) return StateSnapshotOutcome.REJECTED_STALE // round 4, §17
         val active = timeline ?: return StateSnapshotOutcome.APPLIED
         if (snapshot.trackHash != active.trackHash) return StateSnapshotOutcome.APPLIED
         timeline =
@@ -3199,9 +3224,9 @@ class SyncPlaybackCoordinator(
         // clears the timeline, so this needs the same pre-mutation proof `applyStep` needs — it is
         // reached through two suspensions (the lock above, and the drain that may call it).
         if (!stillCurrent(generation)) return StateSnapshotOutcome.REJECTED_STALE
-        // Independent-review round 4, §17: and the ride lifetime the reconciliation was authorised
-        // under, which End Ride moves without moving the control generation.
-        if (synchronizedModeEpoch != rideLifetime) return StateSnapshotOutcome.REJECTED_STALE
+        // Independent-review round 4, §17: and the ride, for the same reason [applyPeerPlaybackState]
+        // states it — this is reached from the drain as well, whose own entry proof is older.
+        if (synchronizedModeEpoch != rideLifetime) return StateSnapshotOutcome.REJECTED_RIDE
         val trackHash = snapshot.trackHash
         val queueItemId = snapshot.queueItemId
         if (trackHash == null || queueItemId == null) {

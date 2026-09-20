@@ -348,10 +348,6 @@ public final class ResyncCoordinator {
             id: obligation, generation: generation, commandSeq: commandSeq, manifestRevision: manifestRevision
         )
         let outcome = await syncPlaybackCoordinator.onStateSnapshot(message, generation: generation, reconciliation: obligation)
-        // Whether this obligation is still the one being tracked. A cancellation or a newer snapshot
-        // during the `await` above means it is not, and this call must then publish nothing at all:
-        // its result belongs to a lifetime that has already been answered.
-        guard deferredReconciliation?.id == obligation else { return }
         switch outcome {
         case .applied, .deferredClock, .deferredContent:
             // §21: the *wire* round trip is satisfied either way — a snapshot for the live generation
@@ -364,9 +360,26 @@ public final class ResyncCoordinator {
             // for a missing transfer exactly as it does for an untrustworthy clock, and the drain
             // fires `onReconciliationApplied` for whichever precondition resolves — so no second
             // snapshot is needed for either.
+            //
+            // **Round 4's own fresh-fix defect, found by CI at the exact head.** This clear was
+            // briefly placed *after* the obligation-identity guard below — which made the **wire**
+            // obligation conditional on the **reconciliation** obligation surviving, and that is
+            // precisely the conflation round 3's Blocker B existed to remove. A snapshot whose
+            // reconciliation was cancelled inside the `await` above then left `requestPending` true
+            // with nothing outstanding to clear it. The two obligations are separate, and a valid
+            // snapshot for the live generation satisfies the wire one whatever happens to the other.
             pendingRequestGeneration = StateResyncGate.onSnapshotObserved(
                 pendingGeneration: pendingRequestGeneration, snapshotGeneration: generation
             )
+            // Whether *this* obligation is still the one being tracked. A cancellation (End Ride, a
+            // lifetime boundary) or a newer snapshot during the `await` above means it is not, and
+            // everything below belongs to a lifetime that has already been answered — so the wire
+            // bookkeeping above stands, and nothing else here may run.
+            guard deferredReconciliation?.id == obligation else {
+                diagnostics.requestPending = pendingRequestGeneration != nil
+                publishDiagnostics()
+                return
+            }
             // §20: manifest bookkeeping follows acceptance, not full playback application — the
             // queue/manifest portions of a snapshot have no clock dependency, so a `.deferredClock`
             // snapshot (playback alone waiting on the clock) still legitimately reports a real
@@ -388,11 +401,30 @@ public final class ResyncCoordinator {
                 diagnostics.lastSnapshotCommandSeq = commandSeq
                 publishDiagnostics()
             }
+        case .rejectedRide:
+            // Independent-review round 4, §17: the snapshot **did** arrive for the live generation —
+            // it was refused because the ride segment that authorised its reconciliation ended. So
+            // the wire round trip is satisfied exactly as it is above, and only the reconciliation is
+            // cancelled. Conflating this with `.rejectedStale` (which never answered the outstanding
+            // request at all) left `requestPending` true with nothing that could clear it.
+            pendingRequestGeneration = StateResyncGate.onSnapshotObserved(
+                pendingGeneration: pendingRequestGeneration, snapshotGeneration: generation
+            )
+            guard deferredReconciliation?.id == obligation else {
+                diagnostics.requestPending = pendingRequestGeneration != nil
+                publishDiagnostics()
+                return
+            }
+            deferredReconciliation = nil
+            diagnostics.requestPending = pendingRequestGeneration != nil
+            diagnostics.lastOutcome = .cancelled
+            publishDiagnostics()
         case .rejectedStale, .rejectedRole:
             // §21: a rejected snapshot must not falsely complete the request, and §20: must not
             // mutate manifest bookkeeping either. The obligation this call recorded up front is
-            // released — nothing was retained for it, so nothing will ever report on it.
-            deferredReconciliation = nil
+            // released — nothing was retained for it, so nothing will ever report on it — but only
+            // if it is still ours to release.
+            if deferredReconciliation?.id == obligation { deferredReconciliation = nil }
         }
     }
 

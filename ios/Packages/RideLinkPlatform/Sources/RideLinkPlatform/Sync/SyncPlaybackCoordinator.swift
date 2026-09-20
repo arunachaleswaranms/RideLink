@@ -1421,6 +1421,16 @@ enum StateSnapshotOutcome: Sendable, Equatable {
     case rejectedStale
     /// This device is not a follower — refused, nothing mutated.
     case rejectedRole
+    /// Independent-review round 4, §17: the snapshot arrived for the **live generation** and was
+    /// refused because the **ride segment** that authorised its reconciliation has ended — a
+    /// different fact from `.rejectedStale`, and the two must not be conflated.
+    ///
+    /// The distinction is load-bearing at the outer owner: a `.rejectedStale` snapshot never
+    /// answered the `STATE_REQUEST` that is still outstanding, so that request must stay pending;
+    /// this one **did** arrive for the live generation, so the wire round trip is satisfied and only
+    /// the reconciliation is cancelled. Reporting it as `.rejectedStale` left `requestPending` true
+    /// with nothing that could ever clear it.
+    case rejectedRide
 }
 
 /// `PLAYBACK_STATE`'s seven payload fields as one value, so a held snapshot is one case rather than

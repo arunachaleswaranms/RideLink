@@ -889,6 +889,66 @@ class ResyncRecoveryTest {
         }
 
     /**
+     * **Round 4's own fresh-fix defect, found by CI at the exact head — the wire obligation is not the
+     * reconciliation obligation.**
+     *
+     * Two versions of this mistake were made and both are covered. The obligation-identity guard was
+     * briefly placed *before* `StateResyncGate.onSnapshotObserved`, making the **wire** request's
+     * clear conditional on the **reconciliation** obligation surviving the apply; and a ride-lifetime
+     * refusal was briefly reported as `REJECTED_STALE`, which by §21 must *not* clear an outstanding
+     * request, because such a snapshot never answered it. Either way a snapshot that genuinely
+     * arrived for the live generation left `requestPending` true with nothing that could ever clear
+     * it — the conflation round 3's Blocker B removed, re-created by the fix written to strengthen it.
+     *
+     * Deterministic on both platforms, by different suspensions: iOS parks on its generation gate,
+     * Android on the follower's content gate, each of which sits *after* `applyPeerPlaybackState`
+     * captured the ride lifetime and *before* anything is retained. The ride then ends while the
+     * reconciliation is provably parked.
+     */
+    @Test
+    fun `a snapshot answering a request raised before End Ride still clears the wire request`() =
+        runTest(StandardTestDispatcher()) {
+            val pair = ResyncTestPair(this)
+            pair.connect(generation = 1)
+            seedPlayable(pair, listOf(SyncTestValues.hash(1)))
+            val followerSession = rideSession(this, pair.follower.sync)
+            followerSession.startRide()
+
+            pair.leader.sync.playSynchronized(SyncTestValues.hash(1))
+            runCurrent()
+            pair.leaderClock.advanceBy(LEAD_US)
+            runCurrent()
+
+            // Park the follower's reconciliation inside `onPeerPlaybackState`'s own content check —
+            // after `applyPeerPlaybackState` captured the ride lifetime, before anything is retained.
+            val gate = CompletableDeferred<Unit>()
+            pair.follower.content.resolveGate = gate
+            pair.follower.sync.forceDesynchronizedForTest()
+            runCurrent()
+            assertTrue(pair.follower.resync.diagnostics.value.requestPending, "the desync trigger left a wire request outstanding")
+
+            // End the ride while it is provably parked, then let it resume.
+            followerSession.endRide()
+            runCurrent()
+            gate.complete(Unit)
+            runCurrent()
+
+            assertEquals(
+                ResyncOutcome.CANCELLED,
+                pair.follower.resync.diagnostics.value.lastOutcome,
+                "the ride ended mid-apply, so the reconciliation is cancelled — and that is not the same as the snapshot being stale",
+            )
+            assertFalse(
+                pair.follower.resync.diagnostics.value.requestPending,
+                "a snapshot arrived for the live generation, so the wire request must clear whatever happened to the reconciliation",
+            )
+            assertNull(
+                pair.follower.sync.diagnostics.value.currentTrackHash,
+                "a reconciliation the ride cancelled may not restore ride 1's playback",
+            )
+        }
+
+    /**
      * **§24 item 11.** Fifty same-generation cancel/apply cycles on a fresh harness each time. Only S2
      * may ever reconcile, and it must report its own `command_seq`.
      */
