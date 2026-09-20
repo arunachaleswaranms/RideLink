@@ -2045,3 +2045,40 @@ here is about what a device truthfully constructs or honestly reports about its 
 about a new field or a changed encoding. No new player, queue, or timeline authority; `applyPlay`
 remains the one path an authoritative restoration goes through. No physical measurement is claimed —
 software-only, verified by unit and integration tests on both platforms.
+
+## Amendment A10 — 20 September 2026 — `applyPlay` says *why* it did not apply
+
+Status: **Accepted.** Recorded here because `applyPlay` is Phase 5's, and its result contract is what
+independent review round 5's Blocker 2 turned out to be about. The decision, the reproductions and
+the regressions live in
+[ADR-028 Amendment A4](ADR-028-ride-mode-and-state-resynchronization.md#amendment-a4--20-september-2026--independent-review-round-5-two-confirmed-blockers-both-fixed);
+this is the Phase 5 half of it.
+
+`applyPlay` has always had five distinct early exits — the authenticated control generation retired,
+the ride segment that authorised the operation ended (ADR-028 Amendment A2/A3's third lifetime), the
+track not locally resolvable, the playback epoch superseded inside the pre-roll, and success — and it
+reported them as `Unit` (Android) or `Bool` (iOS). That was adequate while its only callers were
+`applyAuthoritative` and `applyStep`, which answer nobody. Amendment A1 Finding C's reconciliation
+path then gave it a caller with an **outstanding obligation** behind it, and one bit could not carry
+the distinction: Android translated every exit to "applied", iOS translated every non-success to
+"deferred for content" — a word that *promises* retained work exists and will report a terminal
+result later.
+
+`applyPlay` now returns `StateSnapshotOutcome` on both platforms, and
+`restoreFromPlaybackState` forwards it rather than replacing it. This is the same rule A1 Finding D
+already states one layer up — **received is not applied** — pushed down to the operation that knows:
+a coordinator may not infer why a nested apply declined by looking at live state afterwards, because
+by then the state has moved.
+
+Two properties come with it and are asserted per platform:
+
+- **A `DEFERRED_*` result means retained work carrying the same reconciliation id exists.**
+  `applyPlay` retains nothing itself; `restoreFromPlaybackState` appends the anchor and starts the
+  drain before reporting `DEFERRED_CONTENT`, re-proving generation and ride in A5's
+  `await stillCurrent` → `stillCurrentNow` → mutate pattern immediately before the append.
+- **A superseded `runOwnedSteps` is classified by asking the two lifetimes directly**, synchronously,
+  at the point of refusal — never by re-reading them later.
+
+No wire change, no vector change, and no change to what any apply path *does*: every early exit wrote
+nothing before this amendment and writes nothing after it. What changed is that the caller is now
+told which one happened.

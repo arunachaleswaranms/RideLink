@@ -420,6 +420,23 @@ exercises the genuine entry point, so the production ordering is proved end to e
 and at the highest reachable seam on the other. **This is a stated limitation, not a claim of
 equivalence.**
 
+**Added by independent review round 5 (ADR-028 Amendment A4 + ADR-024 Amendment A10).** Round 4's
+*own fixes* were reviewed and two blockers were confirmed in them. Every regression below was run
+against the unmodified round-4 head (`b70a11e`) first and observed to fail for the stated reason, and
+each fix was then re-proved in isolation by reverting only its own half. **No sleeps anywhere**, and
+both parked frames are pinned **by construction** — this plan already records a round-4 regression
+that parked somewhere harmless and passed vacuously.
+
+| Round-5 finding | What is asserted, and where |
+|---|---|
+| 1 — authority established under the accepted ride, before that ride's lifecycle propagation | The production ordering round 4's own tests could not express: End Ride is accepted and takes epoch 2, Start Ride is accepted and takes epoch 3, ride 2 establishes Y **before** any ride-2 propagation runs, and ride 1's parked cleanup is released last. Expected: Y survives as `currentPlaybackIdentity`, in the diagnostics mirror and in the timeline; the refusal is **counted**; and the leader's next `STATE_SNAPSHOT` reports Y. Pre-fix, Y was cleared and the boundary thought it owned it | `RideSegmentLifecycleTests` (iOS — the platform with the window; Android's Start Ride call is synchronous) |
+| 1 — the structural half | The coordinator sees an accepted ride's epoch **before** `nextRideEpoch()` returns, with no `await` between. Stated on its own so a future reintroduction of a deferred install fails here and not only in the ordering test | `RideSegmentLifecycleTests` (iOS) |
+| 1 — Property B, retained unchanged | Ride 2 establishes nothing; ride 1's late cleanup **must** clear X. Round 4's existing test is kept as written and still passes — it is what proves the fix is a discrimination rather than a weakening | both platforms |
+| 1 — repetition | 50 cycles at the new ordering, alternating whether ride 2 establishes anything, both properties each cycle on a fresh harness | `RideSegmentLifecycleTests` (iOS) |
+| 2 — End Ride landing **inside `applyPlay`'s own `content.resolve`** | The nested restoration frame, two deeper than round 4's regressions reach: past `applyPeerPlaybackState`'s ride guard, past its clock and content pre-checks, and past `restoreFromPlaybackState`'s ride guard. Expected: S1 mutates nothing (no `currentPlaybackIdentity`, no timeline, no `currentTrackHash`, no player selection), its terminal result is **cancellation**, it is neither `RECONCILED` nor left permanently deferred, it retains nothing, it clears the **wire** request (a valid snapshot for the live generation did arrive), and neither its `command_seq` nor its `manifest_revision` is published as reconciled bookkeeping. Then ride 2 + S2 under the **same** control generation: only S2 reconciles, with S2's own values, and a late terminal signal naming S1 cannot alter it | `ResyncCoordinatorTests` (iOS), `ResyncRecoveryTest` (Android) |
+| 2 — landing proof | iOS discriminates the resolve by ordinal **and** asserts no player selection while parked; Android's gate predicate is `lastAppliedCommandSeq == 2`, true only between the outer pre-check resolve and `applyPlay`'s own, reached by severing the Phase 5 wire so the follower's applied sequence and the snapshot's genuinely differ. Both assert the resulting outcome, never merely that something parked | both platforms |
+| 2 — repetition | 50 cycles per platform, fresh harness each cycle | both platforms |
+
 **Added by the operation-lifetime audit (ADR-024 Amendment A4).** Independent verification of A3
 named the class *underneath* A3's fence, and confirmed six findings in it. A3 asks "may this
 operation run at all?"; A4 asks "may it still run **its next effect**, now that it has suspended?"

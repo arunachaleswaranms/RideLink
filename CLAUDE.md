@@ -280,6 +280,34 @@ limitation stands: `ios/RideLink.xcodeproj` has **no unit-test bundle**, so
 Android's regression exercises the genuine entry point. No physical Bluetooth, iPhone,
 battery/thermal, or riding result is claimed. Phase 8 is untouched.
 
+**A fourth independent review then audited round 4's own fixes and found two more confirmed blockers,
+both fixed** ([ADR-028 Amendment A4](docs/DECISIONS/ADR-028-ride-mode-and-state-resynchronization.md#amendment-a4--20-september-2026--independent-review-round-5-two-confirmed-blockers-both-fixed)
++ [ADR-024 Amendment A10](docs/DECISIONS/ADR-024-synchronized-playback-integration.md#amendment-a10--20-september-2026--applyplay-says-why-it-did-not-apply);
+STATUS §2ay, problems 88-89). **Its standing lesson is round 4's turned one notch: when the lifetime is
+right, check the *value*.** Neither blocker was a wrong rule; both were a fact **reconstructed at a
+moment that could not know it**, hiding inside a guard that was already there and already correct.
+**Blocker 1**: `rideAuthorityEpoch` asked exactly the right question and read an owner that had not
+been installed yet — `recordRideAuthority` read `lastRideLifecycleEpoch`, which only a successful
+`beginRideSegment` could move, and `SessionCoordinator.startRide()` handed that call to
+`launchInSession`. So the ride the FSM had accepted and the ride the one owner of ride-scoped authority
+knew about were two facts with a window between them, and authority ride 2 established inside it was
+stamped ride 1 and destroyed by ride 1's late cleanup. Fixed by **removing the window**: `RideEpochBox`
+mints and publishes the epoch in one lock-held step, synchronously, before either boundary hands
+anything to a continuation — and `beginRideSegment`/`RideSegmentLifecycle.startRide` are **deleted**,
+because a Start Ride establishes no authority and one that defers nothing cannot be overtaken. Every
+round-4 regression had forced the safe ordering, which is "a test proves an order production does not"
+for the third time. **Blocker 2**: `applyPlay` refused exactly the right writes and reported four
+distinct refusals as one bit — `Unit` on Android (so `restoreFromPlaybackState` returned `APPLIED`
+unconditionally and a ride-cancelled reconciliation became `RECONCILED`), `Bool` on iOS (so every
+`false` became `.deferredContent`, a word that *promises* retained work that did not exist, leaving the
+obligation outstanding for the session). Fixed with a precise result contract —
+`APPLIED`/`DEFERRED_CONTENT`/`DEFERRED_CLOCK`/`REJECTED_STALE`/`REJECTED_RIDE` — under three
+invariants: **every `DEFERRED_*` corresponds to actual retained work carrying the same obligation id**,
+every terminal cancellation names the exact obligation, and **only genuine convergence may produce
+`RECONCILED`**. `ResyncCoordinator` needed no change on either platform; it was being told the wrong
+thing. No wire change; no vector moved. Both reproduced against unmodified production first, and each
+fix re-proved in isolation. Independent review of *this* pass has not yet run.
+
 **A third independent review then audited round 3's own fixes and found two more confirmed lifecycle
 blockers, both fixed, plus two more found by its own §17 audit** ([ADR-028 Amendment A3](docs/DECISIONS/ADR-028-ride-mode-and-state-resynchronization.md#amendment-a3--20-september-2026--independent-review-round-4-two-confirmed-blockers-both-fixed);
 STATUS §2ax, problems 83-86). **Its standing lesson is the sharpest form of one this repo keeps

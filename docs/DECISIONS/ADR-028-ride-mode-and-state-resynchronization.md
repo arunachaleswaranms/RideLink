@@ -701,3 +701,203 @@ ordinary new authoritative traffic and **is applied** — exactly as a newly arr
 Unchanged: **DEFERRED — HARDWARE NOT AVAILABLE.** No Android↔iPhone reconnect, Bluetooth or hotspot
 recovery, screen-lock networking, battery, thermal, audible resync quality or two-hour ride result is
 claimed by this amendment.
+
+## Amendment A4 — 20 September 2026 — independent review round 5: two confirmed blockers, both fixed
+
+Status: **Accepted.** Round 4's own fixes were audited by an independent review, which returned
+**REQUEST CHANGES — DO NOT MERGE** with two blockers. Both were reproduced against the unmodified
+head (`b70a11e`) before anything was changed, both are fixed, and the regressions that reproduce
+them are in the suite. No wire change; no vector moved.
+
+**The standing lesson of this pass, and it is round 4's own lesson turned one notch:** round 4
+taught that *an identity is not a lifetime*. Round 5's two blockers are what happens when the
+lifetime is right and something about the *value* is not — an owner read a beat too early, and a
+result collapsed three different failures into one. Both are the same shape: **a fact was
+reconstructed at a moment that could not know it.**
+
+### Blocker 1 — the ride that *owns* newly established authority was read before the accepted ride was installed
+
+Round 4 introduced `rideAuthorityEpoch`: an End Ride boundary refuses only when a **strictly newer
+ride has established authority of its own**, which is what makes both ride-boundary properties hold
+at once (A: a late cleanup never destroys ride 2's state; B: ride 1's state never survives into
+ride 2 merely because its cleanup was delayed). That rule is correct and is unchanged.
+
+The **value** it stamped was not. `recordRideAuthority()` read `lastRideLifecycleEpoch`, and the only
+thing that could move that field was a successful `SyncPlaybackCoordinator.beginRideSegment(…)` —
+which reached the coordinator across an actor hop, because `SessionCoordinator.startRide()` handed it
+to `launchInSession`. So "the ride `SessionFsm` has accepted" and "the ride the one owner of
+ride-scoped authority knows about" were two different facts with a window between them:
+
+```
+ride 1 establishes X             rideAuthorityEpoch = 1
+End Ride accepted, epoch 2       cleanup parked in launchInSession
+Start Ride accepted, epoch 3     beginRideSegment(3) parked in launchInSession too
+ride 2 establishes Y             recordRideAuthority reads 1  ← the defect
+End Ride(2) finally runs         rideAuthorityEpoch(1) <= 2, so it cleared Y
+```
+
+That is the invariant this repository keeps relearning, violated inside the fix written to honour
+it: ownership was reconstructed from a mutable live value that had not caught up, rather than being
+established where the decision was made.
+
+**Every round-4 regression forced the safe ordering and could not see it.** Each ran
+`lifecycle.startRide(epoch:)` *before* ride 2 played, which is the ordering production does not
+guarantee — the "a test proves an order production does not" shape this repository's standing lesson
+already names, appearing for the third time.
+
+**The fix removes the window rather than widening a comparison.** `RideEpochBox` (both platforms) is
+a small lock-protected counter whose `next()` mints **and publishes** the epoch in one step,
+synchronously, on the main actor/thread, the instant the FSM accepts a Start Ride or an End Ride and
+before either hands anything to a continuation. `recordRideAuthority()` reads `rideEpochs.current`.
+`beginRideSegment` and `RideSegmentLifecycle.startRide` are **deleted**: once the epoch is published
+there is genuinely nothing left for a Start Ride to install, because a Start Ride establishes no
+synchronisation authority at all — and a Start Ride that defers nothing cannot be overtaken. The box
+also removes `lastRideLifecycleEpoch`, which was a second mirror of one fact.
+
+**Why reading a live value in `recordRideAuthority` is not the same defect.** The rule is "do not
+re-read a mutable live owner *later* and use it to label work authorised *earlier*". This call does
+not label earlier work: it labels *this write*, at the instant of the write, and the question
+`endRideSegment` asks afterwards is exactly "which ride established what is standing". The two can
+only come apart if the ride changed between the operation's authorisation and this write — and every
+route from `RIDE_ACTIVE` back to `CONNECTED` (the only state a Start Ride is legal from) is already
+proved against on the statement immediately above, with no suspension between:
+
+- `SessionEvent.endRide` is the one direct transition, and it bumps `synchronizedModeEpoch` through
+  `leaveSynchronizedMode` — which every caller proves against its captured `rideLifetime`.
+- A peer `BYE` or a network loss goes via `RECONNECTING`, which moves the authentication generation —
+  which every caller proves with `stillCurrentNow`/`stillCurrent`.
+- `reconnectSucceeded` from a ride returns to `RIDE_ACTIVE`, never to `CONNECTED` (ARCHITECTURE §3
+  rule 1), so it opens no Start Ride at all.
+
+**Platform difference, stated rather than left as an accident.** Android's `startRide()` already
+called through synchronously on the main thread, so the window never existed there — but that safety
+rested on an implementation property rather than a stated invariant. Android now mints and publishes
+through the same `RideEpochBox`, so both platforms make the same claim for the same reason and
+neither depends on a dispatcher. `RideSegmentOwner.beginRideSegment` is replaced by
+`RideSegmentOwner.nextRideEpoch()`, and `SessionCoordinator`'s own private `rideEpoch` mirror is gone
+for the same "two sources of one fact" reason.
+
+A side effect worth recording: `RideSegmentLifecycle` used to carry the counter itself, so a
+`RideSegmentLifecycle` rebuilt against an existing coordinator would have restarted at 1 and had its
+`beginRideSegment` refused as stale. Today's `attachSyncPlayback` builds both exactly once, so it was
+unreachable; with the counter on the coordinator it is unreachable by construction.
+
+### Blocker 2 — direct snapshot restoration crossing End Ride had the wrong terminal outcome
+
+Round 4 gave a reconciliation an immutable obligation **id** and explicit applied/cancelled
+callbacks, and added `REJECTED_RIDE`. All of that is correct and is unchanged. What it did not reach
+is the *nested* restoration: a `STATE_SNAPSHOT` can already be inside
+`restoreFromPlaybackState -> applyPlay -> content.resolve` when End Ride happens. The ride guard
+correctly refuses the write — and then the outer layers mistranslated the refusal.
+
+- **2A, Android.** `applyPlay` returned `Unit`, so `restoreFromPlaybackState` returned
+  `StateSnapshotOutcome.APPLIED` unconditionally. A reconciliation the ride had stopped was reported
+  to `ResyncCoordinator` as `ResyncOutcome.RECONCILED`, publishing ride 1's `command_seq` and
+  `manifest_revision` as a convergence that never happened.
+- **2B, iOS.** `applyPlay` returned `Bool` and `restoreFromPlaybackState` mapped every `false` to
+  `.deferredContent`. `applyPlay` returns `false` for four different reasons; only one of them is a
+  deferral. `.deferredContent` *promises* the outer owner that work is retained and will report a
+  terminal result later — on the ride-expired path nothing was retained, so the obligation stayed
+  outstanding for the rest of the session with no route to either `Applied` or `Cancelled`, while
+  ride 1's `manifest_revision` was published as accepted bookkeeping on the way past.
+
+**The fix is a precise result contract.** `applyPlay` now returns `StateSnapshotOutcome` on both
+platforms, and `restoreFromPlaybackState` forwards it:
+
+| Situation | Result |
+|---|---|
+| authoritative state genuinely established (including a paused snapshot merely loaded) | `APPLIED` |
+| content not locally resolvable, snapshot retained | `DEFERRED_CONTENT` |
+| clock not trustworthy, snapshot retained | `DEFERRED_CLOCK` |
+| authenticated control generation retired | `REJECTED_STALE` |
+| ride segment that authorised the reconciliation ended | `REJECTED_RIDE` |
+
+Three invariants are what make the table mean something:
+
+1. **Every `DEFERRED_*` corresponds to actual retained work carrying the same obligation id.**
+   `applyPlay` itself retains nothing — retention belongs to the caller that owns an obligation — so
+   `restoreFromPlaybackState` appends the anchor to `deferredEvents` (with its `reconciliation` id)
+   and starts the drain before returning `DEFERRED_CONTENT`. In practice this is defence in depth:
+   `applyPeerPlaybackState`/`onPeerPlaybackState` already proved content available before reaching
+   here and hold it there when it is not, so it covers only content disappearing inside the narrow
+   window between those two resolves. Both lifetimes are re-proved immediately before the append, in
+   ADR-024 Amendment A5's exact pattern — `await stillCurrent`, then the synchronous `stillCurrentNow`
+   mirror, then the ride, then the mutation with no `await` between the last proof and the write.
+2. **Every terminal cancellation names the exact obligation it cancels.** Unchanged from round 4 —
+   `REJECTED_RIDE`/`REJECTED_STALE`/`REJECTED_ROLE` release the obligation by id, and only that id.
+3. **Only genuine convergence may produce `RECONCILED`.** That is what 2A broke.
+
+`runOwnedSteps` refusing is classified by asking the two lifetimes directly and synchronously: a ride
+that ended inside the pre-roll is `REJECTED_RIDE`. The residue — both lifetimes live and the
+*playback epoch* superseded by a newer authoritative `PLAY` — is reported `REJECTED_STALE`. That is
+deliberately conservative rather than novel: it must not become `APPLIED`, and a `REJECTED_STALE`
+leaves the wire request outstanding, which `StateResyncGate` already dedups and a fresh `Connected`
+already re-arms. Both platforms agree.
+
+`ResyncCoordinator` needed **no change on either platform**: it already mapped `REJECTED_RIDE` to
+cancellation and `DEFERRED_*` to a retained obligation. The defect was entirely that it was being
+told the wrong thing.
+
+### The regressions
+
+Both parked frames are pinned by construction, never by counting alone — this file already records a
+vacuous content-gate regression from round 4.
+
+- iOS `RideSegmentLifecycleTests.testAuthorityEstablishedUnderTheAcceptedRideSurvivesThePredecessorsLateCleanup`
+  — the production ordering: End Ride takes epoch 2 and parks, Start Ride takes epoch 3, ride 2
+  establishes Y, ride 1's cleanup is released last. Asserts identity, diagnostics mirror, timeline,
+  `supersededEndRideCount`, and that the leader's `STATE_SNAPSHOT` reports Y. Its Property B twin
+  (`…StillClearsRideOneWhenRideTwoHasEstablishedNothing`) is retained unchanged and still passes.
+- iOS `…testAnAcceptedRideEpochIsPublishedSynchronously` — the structural half: the coordinator sees
+  the accepted epoch before `nextRideEpoch()` returns. A future reintroduction of a deferred install
+  fails here, not only in the ordering test.
+- iOS `…testFiftyLateCleanupCyclesAtTheProductionOrderingSatisfyBothProperties` — fifty cycles,
+  alternating whether ride 2 establishes anything, both properties each cycle.
+- Android `ResyncRecoveryTest."an End Ride cleanup applied after Ride 2 has begun still clears Ride 1
+  when Ride 2 owns nothing"` and its Property A twin are retained; the epoch source moved under them.
+- iOS `ResyncCoordinatorTests.testAnEndRideInsideApplyPlayCancelsTheObligationRatherThanFakingADeferral`
+  and Android `ResyncRecoveryTest."an End Ride inside applyPlay cancels the obligation rather than
+  reporting APPLIED"` — S1 parked **inside `applyPlay`'s own `content.resolve`**, past
+  `applyPeerPlaybackState`'s ride guard, past its clock and content pre-checks and past
+  `restoreFromPlaybackState`'s ride guard; End Ride while provably parked; release. Assert S1 mutates
+  nothing, is `CANCELLED`, is neither `RECONCILED` nor left permanently deferred, retains nothing,
+  clears the wire request, and publishes no bookkeeping; then ride 2 + S2 under the **same** control
+  generation, and only S2 reconciles — including against a late terminal signal naming S1.
+  - Landing is proved, not assumed. iOS discriminates by resolve ordinal *and* asserts no player
+    selection while parked; Android's gate predicate is `lastAppliedCommandSeq == 2`, which becomes
+    true only once `applyPeerPlaybackState` has adopted the snapshot's sequence number — after the
+    outer pre-check resolve and before `applyPlay`'s — reached by severing the Phase 5 wire so the
+    follower's applied sequence and the snapshot's genuinely differ.
+- `…FiftyRideCancelledMidApplyCycles…` / `"fifty ride-cancelled-mid-apply cycles complete only the
+  live obligation"` — the same, fifty times per platform, fresh harness each cycle.
+
+Each regression was additionally re-proved in isolation by reverting **only** its own fix and
+observing exactly its own failure: Android reported `RECONCILED`, iOS reported `snapshotPending` with
+obligation 1 still recorded and S1's `command_seq`/`manifest_revision` published; and with
+`recordRideAuthority` restored to the deferred-install derivation, the Property A tests failed while
+the Property B test still passed — which is the discrimination, not merely a failure.
+
+### This pass's own fresh-fix audit
+
+Every suspension in `startRide`/`endRide`/`endRideSegment`/`recordRideAuthority`/`applyAuthoritative`/
+`applyPlay`/`applyStep`/`applyTransport`/`applySeek`/`applyPeerPlaybackState`/
+`restoreFromPlaybackState`/`drainDeferredEvents`/`discardDeferredEvents`/`onReconciliationApplied`/
+`onReconciliationCancelled`/`ResyncCoordinator.handleStateSnapshot` was re-read against the four
+questions (which control generation, which ride, which obligation, and whether each is *carried* or
+*reconstructed*). One weakness was found in this pass's own first attempt and fixed before it was
+committed: the new `DEFERRED_CONTENT` retention on iOS initially proved only the synchronous
+`stillCurrentNow` mirror, when `applyPlay` returns from that branch immediately after
+`content.requestTransfer` — a suspension carrying no proof of its own — so it is now the full
+`await stillCurrent` + `stillCurrentNow` pair ADR-024 Amendment A5 requires before a mutation.
+
+Nothing else new was found. Two pre-existing divergences remain deliberate and are re-confirmed here:
+Android writes `currentPlaybackIdentity` and calls `recordRideAuthority` **before** `content.resolve`
+(PROTOCOL §5 rule 4 treats a content-pending `PLAY` as authoritative) while iOS writes them after, so
+Android's ride proof runs twice on that path; and the two manifest-bookkeeping placements recorded in
+Amendment A3 are unchanged.
+
+### Physical qualification
+
+Unchanged: **DEFERRED — HARDWARE NOT AVAILABLE.** No Android↔iPhone reconnect, Bluetooth or hotspot
+recovery, screen-lock networking, battery, thermal, audible resync quality or two-hour ride result is
+claimed by this amendment.
