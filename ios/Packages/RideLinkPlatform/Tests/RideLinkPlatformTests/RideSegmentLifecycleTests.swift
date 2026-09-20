@@ -710,4 +710,188 @@ final class RideSegmentLifecycleTests: XCTestCase {
             }
         }
     }
+
+    // MARK: - Independent-review round 6
+
+    /// **Regression 1.** Round 5's `recordRideAuthority` read `rideEpochs.current` *live, at the
+    /// moment of the write* — reconstructing ownership from current state after a suspension, exactly
+    /// the class this repository keeps finding and fixing elsewhere. An operation admitted under
+    /// ride 1, parked at its own `content.resolve` (after its ride-authority provenance would have
+    /// been captured but before it writes anything), could resume after *both* an accepted End Ride
+    /// *and* a further accepted Start Ride, and be stamped as the new ride's authority. Ride 1's own
+    /// late cleanup then found a *newer* owner standing and refused to touch it — stale ride-1 work,
+    /// relabelled as ride 2's, left standing forever.
+    ///
+    /// Deterministic: `content.armResolveGate` parks Y at exactly the suspension that matters, both
+    /// ride-boundary epochs are minted — not merely raced — while Y is provably parked, and only then
+    /// is Y released, followed by ride 1's still-delayed cleanup. This must fail against the
+    /// round-5 head, where `recordRideAuthority()` took no parameter.
+    func testAnOldRideOnesOperationParkedAcrossEndAndStartCannotBecomeRideTwosAuthority() async {
+        await build()
+        let trackX = SyncTestValues.hash(100)
+        let trackY = SyncTestValues.hash(101)
+        await content.addLocal(trackY)
+        await content.addPeer(trackY)
+
+        startRide()
+        await playAsLeader(trackX)
+        let established = await sync.diagnostics.currentTrackHash
+        XCTAssertEqual(trackX, established, "ride 1 established authoritative track X")
+
+        // Y is a second authoritative Play, admitted under ride 1, parked at its own
+        // `content.resolve` — after its ride-authority provenance is captured (`applyAuthoritative`'s
+        // first statement) and before it writes anything.
+        let wire = session!
+        await content.armResolveGate {
+            await wire.playbackMessages().contains {
+                if case .play(_, let hash, _, _) = $0 { return hash == trackY } else { return false }
+            }
+        }
+        let apply = Task { await self.sync.playSynchronized(trackY) }
+        var parked = false
+        for _ in 0 ..< 200 where !parked {
+            parked = await content.isResolveGateParked
+            await Task.yield()
+        }
+        XCTAssertTrue(parked, "Y never reached the resolve suspension")
+        let issued = await session.playbackMessages().contains {
+            if case .play(_, let hash, _, _) = $0 { return hash == trackY } else { return false }
+        }
+        XCTAssertTrue(issued, "parked before Y's PLAY was issued — this is not applyPlay's resolve")
+        let callsWhileParked = await player.calls
+        XCTAssertFalse(callsWhileParked.contains(.select(trackY)), "parked after the player was touched — too late to be applyPlay's resolve")
+
+        // End Ride 1 is accepted and takes its epoch — its cleanup is deliberately not run yet.
+        let endRideEpoch = lifecycle.nextRideEpoch()
+        // Start Ride 2 is accepted before ride 1's cleanup ever ran.
+        _ = lifecycle.nextRideEpoch()
+
+        // Release Y. It resumes with ride 2 already current and ride 1's cleanup still outstanding.
+        await content.releaseResolveGate()
+        _ = await apply.value
+        await settle()
+
+        // Only now does ride 1's delayed cleanup run.
+        await lifecycle.endRide(epoch: endRideEpoch)
+        await settle()
+
+        let identity = await sync.currentPlaybackIdentity
+        XCTAssertNil(identity, "ride 1's stale Y survived, mislabelled as ride 2's authority: \(String(describing: identity))")
+        let hash = await sync.diagnostics.currentTrackHash
+        XCTAssertNil(hash, "…and a STATE_SNAPSHOT would still report it")
+        let timeline = await sync.timeline
+        XCTAssertNil(timeline, "…including a live playback epoch/timeline Y should never have reached")
+        XCTAssertEqual(0, lifecycle.supersededEndRideCount, "ride 1's cleanup must not have been fooled into standing down")
+    }
+
+    /// **Regression 2.** The inverse of Regression 1, and the fix must not overcorrect into it:
+    /// authority genuinely established *after* an accepted End Ride but before that End Ride's own
+    /// delayed cleanup ever runs must survive that cleanup. Both share the same live `rideEpochs
+    /// .current` value at admission — the End Ride's own freshly minted epoch — which is exactly why
+    /// `endRideSegment`'s comparison had to become strict (`<`, not `<=`): under `<=` the two were
+    /// indistinguishable and Z would be destroyed along with ride 1's genuine residue. This must fail
+    /// against a fix that stops at threading `admittedRideEpoch` without also tightening the compare.
+    func testGenuinelyNewAuthorityEstablishedAfterEndRideSurvivesThatSameEndRidesDelayedCleanup() async {
+        await build()
+        let trackZ = SyncTestValues.hash(102)
+
+        startRide()
+
+        // End Ride 1 is accepted and takes its epoch — its cleanup is deliberately not run yet.
+        let endRideEpoch = lifecycle.nextRideEpoch()
+
+        // While already CONNECTED (no further Start Ride has happened), genuinely new authoritative
+        // state Z arrives and is established — authorised strictly after the End Ride boundary.
+        await playAsLeader(trackZ)
+        let established = await sync.currentPlaybackIdentity
+        XCTAssertEqual(trackZ, established?.trackHash, "Z was established while already CONNECTED")
+
+        // Only now does ride 1's own delayed cleanup run.
+        await lifecycle.endRide(epoch: endRideEpoch)
+        await settle()
+
+        let identity = await sync.currentPlaybackIdentity
+        XCTAssertEqual(trackZ, identity?.trackHash, "ride 1's own delayed cleanup destroyed genuinely new post-End authority")
+        let hash = await sync.diagnostics.currentTrackHash
+        XCTAssertEqual(trackZ, hash)
+        let timeline = await sync.timeline
+        XCTAssertNotNil(timeline, "Z's synchronised timeline was retired by ride 1's own boundary")
+        XCTAssertEqual(1, lifecycle.supersededEndRideCount, "the boundary must have recognised Z as not its own, and said so")
+    }
+
+    /// Property A and Property B (round 4) re-run once more at the new comparison, so a future change
+    /// that loosens `<` back to `<=` fails here rather than only in the regression above.
+    func testASupersededEndRideStillClearsRideOneWhenRideTwoHasEstablishedNothingAtTheStrictCompare() async {
+        await build()
+        let trackX = SyncTestValues.hash(103)
+
+        startRide()
+        await playAsLeader(trackX)
+
+        let endRideEpoch = lifecycle.nextRideEpoch()
+        _ = lifecycle.nextRideEpoch()
+
+        await lifecycle.endRide(epoch: endRideEpoch)
+        await settle()
+
+        let identity = await sync.currentPlaybackIdentity
+        XCTAssertNil(identity, "ride 2 inherited ride 1's playback identity: \(String(describing: identity))")
+        XCTAssertEqual(0, lifecycle.supersededEndRideCount)
+    }
+
+    /// §24 item 5, applied to round 6: fifty cycles alternating between an old ride's operation
+    /// parked across an End/Start boundary (Regression 1) and genuinely new post-End authority
+    /// surviving its own boundary's delayed cleanup (Regression 2), on a fresh harness each time.
+    func testFiftyCyclesOfRegression1AndRegression2SatisfyBothNewProperties() async {
+        for cycle in 0 ..< 50 {
+            await build()
+            let trackX = SyncTestValues.hash(110)
+            let trackY = SyncTestValues.hash(111)
+            let regression1 = cycle.isMultiple(of: 2)
+
+            startRide()
+            if regression1 {
+                await playAsLeader(trackX)
+                await content.addLocal(trackY)
+                await content.addPeer(trackY)
+                let wire = session!
+                await content.armResolveGate {
+                    await wire.playbackMessages().contains {
+                        if case .play(_, let hash, _, _) = $0 { return hash == trackY } else { return false }
+                    }
+                }
+                let apply = Task { await self.sync.playSynchronized(trackY) }
+                var parked = false
+                for _ in 0 ..< 200 where !parked {
+                    parked = await content.isResolveGateParked
+                    await Task.yield()
+                }
+                XCTAssertTrue(parked, "cycle \(cycle): Y never reached the resolve suspension")
+
+                let endRideEpoch = lifecycle.nextRideEpoch()
+                _ = lifecycle.nextRideEpoch()
+
+                await content.releaseResolveGate()
+                _ = await apply.value
+                await settle()
+
+                await lifecycle.endRide(epoch: endRideEpoch)
+                await settle()
+
+                let identity = await sync.currentPlaybackIdentity
+                XCTAssertNil(identity, "cycle \(cycle): Regression 1 — ride 1's stale op survived as ride 2's authority")
+                XCTAssertEqual(0, lifecycle.supersededEndRideCount, "cycle \(cycle)")
+            } else {
+                let endRideEpoch = lifecycle.nextRideEpoch()
+                await playAsLeader(trackX)
+
+                await lifecycle.endRide(epoch: endRideEpoch)
+                await settle()
+
+                let identity = await sync.currentPlaybackIdentity
+                XCTAssertEqual(trackX, identity?.trackHash, "cycle \(cycle): Regression 2 — genuinely new post-End authority was destroyed")
+                XCTAssertEqual(1, lifecycle.supersededEndRideCount, "cycle \(cycle)")
+            }
+        }
+    }
 }

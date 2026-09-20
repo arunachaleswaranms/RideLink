@@ -156,8 +156,8 @@ public actor SyncPlaybackCoordinator {
     /// track, which is the very thing Blocker C existed to stop, reached by the other side of the
     /// same race.
     ///
-    /// This field is the honest discriminator: it is stamped with `rideEpochs.current` at each
-    /// of the three places ride-scoped playback authority is *established* (a track becomes
+    /// This field is the honest discriminator: it is stamped with the **admission-time** ride epoch
+    /// at each of the three places ride-scoped playback authority is *established* (a track becomes
     /// authoritative, or is authoritatively replaced by "nothing loaded"), and reset to 0 whenever
     /// that authority ends. `endRideSegment` then refuses **only** when a strictly newer ride has
     /// already established authority of its own — so a late cleanup can never clear ride 2's track
@@ -167,34 +167,48 @@ public actor SyncPlaybackCoordinator {
     /// is not: an ordinary control-link blip does not change which ride owns what is playing.
     var rideAuthorityEpoch: Int64 = 0
 
-    /// Stamps `rideAuthorityEpoch` for the ride that is current at this instant. Called from the
-    /// three sites that establish ride-scoped playback authority, and from nowhere else — see
-    /// `rideAuthorityEpoch`. Synchronous, and every caller places it adjacent to the write it
-    /// describes, with no `await` between.
+    /// Stamps `rideAuthorityEpoch` for the ride that **authorised the operation now writing**.
+    /// Called from the three sites that establish ride-scoped playback authority, and from nowhere
+    /// else — see `rideAuthorityEpoch`. Synchronous, and every caller places it adjacent to the
+    /// write it describes, with no `await` between.
     ///
-    /// Independent-review round 5, Blocker 1: it reads `rideEpochs.current`, which every accepted
-    /// Start Ride and End Ride has already published synchronously, so the ride recorded here is
-    /// the ride that genuinely authorised the authority being established — not whichever ride's
-    /// propagation happens to have reached this actor yet.
+    /// **Independent-review round 6: the round-5 fix read `rideEpochs.current` here — live, at the
+    /// instant of the write — and that is the defect the repository's standing rule forbids, applied
+    /// to the third lifetime.** `applyPlay`, `applyStep` and `restoreFromPlaybackState` all suspend
+    /// (`content.resolve`, `readyEstimate`, `runOwnedSteps`'s pre-roll) between the point their
+    /// caller captures the ride lifetime and the point this function runs. A round-5 doc comment on
+    /// this very function argued the two could not come apart because every exit from `RIDE_ACTIVE`
+    /// bumps `synchronizedModeEpoch` or the auth generation "adjacent to this call" — but
+    /// `synchronizedModeEpoch` only bumps when `leaveSynchronizedMode` **actually runs**, and End
+    /// Ride's cleanup is asynchronous (`SessionCoordinator.endRide()` hands it to
+    /// `launchInSession`). An operation admitted under ride 1, parked in a real suspension, can
+    /// resume after both an accepted End Ride *and* a further accepted Start Ride — `rideEpochs`
+    /// already strictly newer — while `synchronizedModeEpoch` is still the value it captured,
+    /// because ride 1's cleanup has not been *scheduled* to run yet. Re-reading `rideEpochs.current`
+    /// at that instant relabels ride 1's work as ride 2's, exactly the class this file keeps finding
+    /// and fixing everywhere else. The inverse also reproduced: genuinely **new** authority admitted
+    /// after an accepted End Ride but before its parked cleanup executes was stamped with the End
+    /// Ride's own freshly-minted epoch — indistinguishable, under `<=`, from residue the cleanup
+    /// exists to clear — and a same-valued predecessor cleanup then destroyed it.
     ///
-    /// **Why reading a live value here is not the defect this repository keeps finding.** The rule
-    /// is "do not re-read a mutable live owner later and use it to label work authorised earlier".
-    /// This call does not label earlier work: it labels *this write*, at the instant of the write,
-    /// and the question `endRideSegment` asks later is exactly "which ride established what is
-    /// standing". The two can only come apart if the ride changed between the operation's
-    /// authorisation and this write — and every route from `RIDE_ACTIVE` back to `CONNECTED` (the
-    /// only state a Start Ride is legal from) is already proved against, adjacent to this call and
-    /// with no `await` between:
+    /// **The fix is provenance, not a smarter live read.** `admittedRideEpoch` is `rideEpochs
+    /// .current` captured once, by the caller, before this operation's first suspension — the same
+    /// discipline `generation` already follows (CLAUDE.md rules 19/20) applied to the ride lifetime.
+    /// It travels through every intermediate `await` as a parameter, is re-proved equal to the live
+    /// value immediately before every write it could reach (`applyPlay`, `applyTransport`,
+    /// `applySeek`, `applyStep`, `applyPeerPlaybackState`, `restoreFromPlaybackState` — a mismatch
+    /// is `.rejectedRide`, refused rather than written), and is what this function stamps — never
+    /// re-derived. By the time this runs, the guard immediately above it has already proved
+    /// `rideEpochs.current == admittedRideEpoch` with no suspension between the proof and here, so
+    /// stamping the parameter and reading the live property agree at this exact instant — the
+    /// difference is that the parameter cannot silently start disagreeing if a future edit inserts
+    /// an `await` between the guard and this call, and the live read could.
     ///
-    /// - `SessionEvent.endRide` is the one direct transition, and it bumps `synchronizedModeEpoch`
-    ///   through `leaveSynchronizedMode` — which every caller of this proves against `rideLifetime`
-    ///   on the statement above.
-    /// - A `.bye` or a network loss goes via `RECONNECTING`, which moves the authentication
-    ///   generation — which every caller proves with `stillCurrentNow`.
-    /// - `reconnectSucceeded` from a ride returns to `RIDE_ACTIVE`, never to `CONNECTED`
-    ///   (ARCHITECTURE §3 rule 1), so it opens no Start Ride at all.
-    func recordRideAuthority() {
-        rideAuthorityEpoch = rideEpochs.current
+    /// `endRideSegment`'s comparison is `<`, not `<=`, for the same reason: an End Ride's own newly
+    /// minted epoch names the boundary between "ride 1's work" and "everything after ride 1", and
+    /// authority admitted *at* that value belongs to the second half.
+    func recordRideAuthority(admittedRideEpoch: Int64) {
+        rideAuthorityEpoch = admittedRideEpoch
     }
 
     var driftState = DriftController.reset()
@@ -1190,6 +1204,14 @@ public actor SyncPlaybackCoordinator {
     /// nothing to do; in every other case what is standing belongs to this ride or an earlier one,
     /// and ending the ride is exactly the instant it must go.
     ///
+    /// **Independent-review round 6: the comparison is `<`, not `<=`.** `rideEpoch` is the epoch
+    /// *this* End Ride minted for itself, and it also names the CONNECTED-state gap that follows —
+    /// synchronised playback stays usable there (a Start Ride establishes nothing new), so genuinely
+    /// new authority admitted in that gap, before a further Start Ride, is stamped with this same
+    /// value by `recordRideAuthority`. `<=` could not tell that authority apart from ride 1's own
+    /// stale residue — both compare equal to `rideEpoch` — and cleared it. Only a value **older**
+    /// than this boundary's own belongs to the ride that is ending.
+    ///
     /// - Parameter rideEpoch: the strictly-increasing epoch `RideSegmentLifecycle` assigned to *this*
     ///   End Ride, synchronously, before the hop that carried it here. The guard is the first
     ///   statement and every mutation `leaveSynchronizedMode` performs precedes its single trailing
@@ -1198,7 +1220,7 @@ public actor SyncPlaybackCoordinator {
     ///   and left it alone. `RideSegmentLifecycle` counts the second; no caller may act on the first.
     @discardableResult
     public func endRideSegment(rideEpoch: Int64) async -> RideBoundaryOutcome {
-        guard rideAuthorityEpoch <= rideEpoch else {
+        guard rideAuthorityEpoch < rideEpoch else {
             diagnostics.staleRideLifecycleCount += 1
             publishDiagnostics()
             return .supersededByLiveRideAuthority

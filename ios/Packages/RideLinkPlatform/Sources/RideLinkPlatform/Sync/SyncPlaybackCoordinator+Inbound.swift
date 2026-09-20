@@ -934,26 +934,40 @@ extension SyncPlaybackCoordinator {
     /// step below compares it rather than re-reading. That is the same rule the *generation* already
     /// follows (CLAUDE.md rules 19/20) applied to the third lifetime: an operation's authorising ride
     /// travels with it, and a later stage never asks what the ride is *now*.
+    ///
+    /// **Independent-review round 6: `rideLifetime` alone is not enough, and `admittedRideEpoch` is
+    /// captured in the same statement for the same reason.** `rideLifetime` (`synchronizedModeEpoch`)
+    /// only moves when `leaveSynchronizedMode` actually *runs*, and End Ride's cleanup is asynchronous
+    /// — so an operation parked here across an accepted End Ride *and* a further accepted Start Ride
+    /// can resume with `rideLifetime` unchanged even though `rideEpochs.current` has moved twice.
+    /// `admittedRideEpoch` is `rideEpochs.current`, captured here for the same reason and re-proved
+    /// equal to the live value immediately before every write it could reach — see
+    /// `recordRideAuthority`.
     func applyAuthoritative(_ message: PlaybackMessage, generation: Int64, estimate: SessionClockEstimate) async {
         let rideLifetime = synchronizedModeEpoch
+        let admittedRideEpoch = rideEpochs.current
         guard await stillCurrent(generation) else { return }
         guard stillCurrentNow(generation) else { return } // Amendment A5
         switch message {
         case .play(let header, let trackHash, let positionMs, let queueItemId):
             await applyPlay(header, trackHash: trackHash, queueItemId: queueItemId, positionMs: positionMs,
-                            generation: generation, estimate: estimate, rideLifetime: rideLifetime)
+                            generation: generation, estimate: estimate, rideLifetime: rideLifetime,
+                            admittedRideEpoch: admittedRideEpoch)
         case .pause(let header, let positionMs):
             await applyTransport(header, generation: generation, estimate: estimate, playing: false,
-                                 positionMs: positionMs, rideLifetime: rideLifetime)
+                                 positionMs: positionMs, rideLifetime: rideLifetime, admittedRideEpoch: admittedRideEpoch)
         case .resume(let header, let positionMs):
             await applyTransport(header, generation: generation, estimate: estimate, playing: true,
-                                 positionMs: positionMs, rideLifetime: rideLifetime)
+                                 positionMs: positionMs, rideLifetime: rideLifetime, admittedRideEpoch: admittedRideEpoch)
         case .seek(let header, let target):
-            await applySeek(header, targetPositionMs: target, generation: generation, estimate: estimate, rideLifetime: rideLifetime)
+            await applySeek(header, targetPositionMs: target, generation: generation, estimate: estimate,
+                            rideLifetime: rideLifetime, admittedRideEpoch: admittedRideEpoch)
         case .next(let header):
-            await applyStep(header, delta: 1, generation: generation, estimate: estimate, rideLifetime: rideLifetime)
+            await applyStep(header, delta: 1, generation: generation, estimate: estimate,
+                            rideLifetime: rideLifetime, admittedRideEpoch: admittedRideEpoch)
         case .previous(let header):
-            await applyStep(header, delta: -1, generation: generation, estimate: estimate, rideLifetime: rideLifetime)
+            await applyStep(header, delta: -1, generation: generation, estimate: estimate,
+                            rideLifetime: rideLifetime, admittedRideEpoch: admittedRideEpoch)
         default:
             break
         }
@@ -988,7 +1002,11 @@ extension SyncPlaybackCoordinator {
         /// The ride/synchronised-mode lifetime that authorised the **operation this is a step of**,
         /// captured by its caller before that operation's first suspension — never re-read here
         /// (independent-review round 4, §17). See `applyAuthoritative`.
-        rideLifetime: Int64
+        rideLifetime: Int64,
+        /// The `rideEpochs.current` value at the same admission instant — independent-review round 6.
+        /// `rideLifetime` alone cannot detect an accepted-but-not-yet-cleaned-up End Ride; this can,
+        /// and is what `recordRideAuthority` stamps. Never re-read from `rideEpochs.current` here.
+        admittedRideEpoch: Int64
     ) async -> StateSnapshotOutcome {
         // Amendment A3 Finding B: reached from `applyAuthoritative`, from `applyStep` and from
         // `restoreFromPlaybackState`, and `content.resolve` is real I/O on another actor. Proved on
@@ -1019,7 +1037,13 @@ extension SyncPlaybackCoordinator {
         // the ride ended can resume after `leaveSynchronizedMode` has retired every field written
         // below and put all of them back. Synchronous, adjacent to the writes, with no `await`
         // between: ADR-024 Amendment A5's `stillCurrentNow` pattern applied to the third lifetime.
-        guard synchronizedModeEpoch == rideLifetime else { return .rejectedRide }
+        //
+        // Independent-review round 6: `synchronizedModeEpoch == rideLifetime` alone is not enough —
+        // it lags an accepted End Ride until its asynchronous cleanup actually runs, so an apply
+        // parked here across an accepted End Ride *and* a further accepted Start Ride could still
+        // pass it. `rideEpochs.current == admittedRideEpoch` catches exactly that: any accepted
+        // Start or End Ride since admission moves `rideEpochs.current` synchronously, with no window.
+        guard synchronizedModeEpoch == rideLifetime, rideEpochs.current == admittedRideEpoch else { return .rejectedRide }
         let token = epoch.begin()
         currentEpochToken = token
         driftState = DriftController.reset()
@@ -1035,7 +1059,10 @@ extension SyncPlaybackCoordinator {
         // the ride that owns it is recorded adjacent to the write, with no `await` between. This is
         // what lets an End Ride boundary tell "ride 2 has taken over" from "ride 2 has not started
         // playing anything yet" — round 3 could not, and cleared nothing in the second case.
-        recordRideAuthority()
+        //
+        // Independent-review round 6: stamped with `admittedRideEpoch`, not a fresh
+        // `rideEpochs.current` read — see `recordRideAuthority`.
+        recordRideAuthority(admittedRideEpoch: admittedRideEpoch)
         diagnostics.currentTrackHash = trackHash
         diagnostics.hardSeekCount = 0
         diagnostics.lastCorrection = .none
@@ -1058,7 +1085,10 @@ extension SyncPlaybackCoordinator {
             // reported `.rejectedStale`: it must not become `.applied`, and it is conservative
             // rather than novel (a `.rejectedStale` leaves the wire request outstanding, which
             // `StateResyncGate` already dedups and a fresh `.connected` already re-arms).
-            return stillCurrentNow(generation) && synchronizedModeEpoch != rideLifetime
+            //
+            // Independent-review round 6: the ride check here is the same pair used above, for the
+            // same reason — `synchronizedModeEpoch` alone lags an accepted-but-uncleaned End Ride.
+            return stillCurrentNow(generation) && (synchronizedModeEpoch != rideLifetime || rideEpochs.current != admittedRideEpoch)
                 ? .rejectedRide : .rejectedStale
         }
         // A snapshot-restored track that the authority says is paused is loaded and left alone:
@@ -1089,13 +1119,18 @@ extension SyncPlaybackCoordinator {
         estimate: SessionClockEstimate,
         playing: Bool,
         positionMs: Int64,
-        rideLifetime: Int64
+        rideLifetime: Int64,
+        admittedRideEpoch: Int64
     ) async {
         guard await stillCurrent(generation) else { return }
         guard stillCurrentNow(generation) else { return } // Amendment A5
         // Independent-review round 4, §17: the proof above suspends, and End Ride does not move the
         // control generation. Synchronous, adjacent, and before the first write.
-        guard synchronizedModeEpoch == rideLifetime else { return }
+        //
+        // Independent-review round 6: `rideEpochs.current == admittedRideEpoch` closes the window
+        // `synchronizedModeEpoch` alone leaves open while an accepted End Ride's cleanup is still
+        // parked — see `recordRideAuthority`.
+        guard synchronizedModeEpoch == rideLifetime, rideEpochs.current == admittedRideEpoch else { return }
         let token = currentEpochToken
         timeline = timeline?.reanchored(positionMs: positionMs, sessionUs: header.effectiveAtSessionUs, playing: playing)
         // Amendment A4 Finding A: these are two effects, and they used to sit inside one closure
@@ -1115,11 +1150,13 @@ extension SyncPlaybackCoordinator {
         targetPositionMs: Int64,
         generation: Int64,
         estimate: SessionClockEstimate,
-        rideLifetime: Int64
+        rideLifetime: Int64,
+        admittedRideEpoch: Int64
     ) async {
         guard await stillCurrent(generation) else { return }
         guard stillCurrentNow(generation) else { return } // Amendment A5
-        guard synchronizedModeEpoch == rideLifetime else { return } // round 4, §17
+        // round 4, §17; round 6 adds the second half — see `applyTransport`.
+        guard synchronizedModeEpoch == rideLifetime, rideEpochs.current == admittedRideEpoch else { return }
         let token = currentEpochToken
         timeline = timeline?.reanchored(positionMs: targetPositionMs, sessionUs: header.effectiveAtSessionUs)
         scheduleAt(
@@ -1136,7 +1173,8 @@ extension SyncPlaybackCoordinator {
         delta: Int,
         generation: Int64,
         estimate: SessionClockEstimate,
-        rideLifetime: Int64
+        rideLifetime: Int64,
+        admittedRideEpoch: Int64
     ) async {
         // Amendment A3 Finding B: the highest-risk path in the phase, and it had no proof at all.
         // Everything below reads or writes *live* state — the shared queue, the selection, the
@@ -1153,7 +1191,9 @@ extension SyncPlaybackCoordinator {
         // *fresh, live* playback epoch over the one `leaveSynchronizedMode` had just superseded — and
         // then schedules `[.stop, .clearSelection]`, which the new token makes owned, so it reaches
         // the player. End Ride's whole contract is that local playback continues (FR-025).
-        guard synchronizedModeEpoch == rideLifetime else { return }
+        //
+        // Independent-review round 6: `rideEpochs.current == admittedRideEpoch` — see `applyTransport`.
+        guard synchronizedModeEpoch == rideLifetime, rideEpochs.current == admittedRideEpoch else { return }
         let step = SharedQueue.step(state: queueState, delta: delta)
         queueState = step.state
         publishQueue()
@@ -1167,7 +1207,8 @@ extension SyncPlaybackCoordinator {
             currentPlaybackIdentity = nil
             // Blocker 1: "the leader authoritatively has nothing loaded" is established authority
             // too, and it is this ride's. An older ride's End Ride boundary must not reach past it.
-            recordRideAuthority()
+            // Round 6: stamped with `admittedRideEpoch`, not a fresh live read.
+            recordRideAuthority(admittedRideEpoch: admittedRideEpoch)
             // Amendment A4 Finding C: `stop` used to mean "stop the player **and** clear the local
             // queue", composed inside `MusicCoordinator` across the player's own suspension — so a
             // Session-A stop returning after Session B had materialised a track cleared Session B's
@@ -1180,7 +1221,8 @@ extension SyncPlaybackCoordinator {
         }
         guard step.moved else { return }
         await applyPlay(header, trackHash: selected.trackHash, queueItemId: selected.queueItemId,
-                        positionMs: 0, generation: generation, estimate: estimate, rideLifetime: rideLifetime)
+                        positionMs: 0, generation: generation, estimate: estimate, rideLifetime: rideLifetime,
+                        admittedRideEpoch: admittedRideEpoch)
     }
 
     // MARK: - Scheduling
@@ -1599,7 +1641,11 @@ extension SyncPlaybackCoordinator {
         // Independent-review round 4, §17: the reconciliation's own ride lifetime, captured before
         // this function's first suspension and threaded into every step of it. See
         // `applyAuthoritative` for why a later step may never re-read it.
+        //
+        // Independent-review round 6: `admittedRideEpoch` captured alongside it, for the same reason
+        // `applyAuthoritative` captures both — see `recordRideAuthority`.
         let rideLifetime = synchronizedModeEpoch
+        let admittedRideEpoch = rideEpochs.current
         // Amendment A3 Finding B: everything below writes live state — the received/applied sequence
         // numbers, the held stream, the timeline — and this is reached through the hold gate or the
         // deferred drain, both of which suspend before getting here.
@@ -1610,7 +1656,9 @@ extension SyncPlaybackCoordinator {
         // End Ride ends without moving the control generation. Stated **once**, here, and reported as
         // its own outcome — the snapshot did arrive for the live generation, so this is not
         // `.rejectedStale`, and the outer owner needs to tell the two apart.
-        guard synchronizedModeEpoch == rideLifetime else { return .rejectedRide }
+        //
+        // Round 6: the second half of the pair — see `applyAuthoritative`.
+        guard synchronizedModeEpoch == rideLifetime, rideEpochs.current == admittedRideEpoch else { return .rejectedRide }
         let commandSeq = fields.commandSeq
         if lastReceivedSeq == nil || commandSeq > (lastReceivedSeq ?? 0) {
             lastReceivedSeq = commandSeq
@@ -1672,7 +1720,8 @@ extension SyncPlaybackCoordinator {
             // merely attempted — `restoreFromPlaybackState` itself decides `.applied` vs
             // `.deferredClock`/`.deferredContent`, and only `.applied` may clear it.
             let outcome = await restoreFromPlaybackState(
-                fields, generation: generation, reconciliation: reconciliation, rideLifetime: rideLifetime
+                fields, generation: generation, reconciliation: reconciliation, rideLifetime: rideLifetime,
+                admittedRideEpoch: admittedRideEpoch
             )
             if outcome == .applied {
                 playbackDesynchronized = false
@@ -1691,7 +1740,8 @@ extension SyncPlaybackCoordinator {
         _ fields: PlaybackStateSnapshotFields,
         generation: Int64,
         reconciliation: Int64? = nil,
-        rideLifetime: Int64
+        rideLifetime: Int64,
+        admittedRideEpoch: Int64
     ) async -> StateSnapshotOutcome {
         // Amendment A3 Finding B: the nil-track branch below supersedes the playback epoch and clears
         // the timeline, so it needs the same pre-mutation proof `applyStep` needs.
@@ -1700,7 +1750,9 @@ extension SyncPlaybackCoordinator {
         guard stillCurrentNow(generation) else { return .rejectedStale }
         // Independent-review round 4, §17: and the ride, for the same reason `applyPeerPlaybackState`
         // states it — this is reached from the drain as well, whose own entry proof is older.
-        guard synchronizedModeEpoch == rideLifetime else { return .rejectedRide }
+        //
+        // Round 6: the second half — see `applyAuthoritative`.
+        guard synchronizedModeEpoch == rideLifetime, rideEpochs.current == admittedRideEpoch else { return .rejectedRide }
         guard let trackHash = fields.trackHash, let queueItemId = fields.queueItemId else {
             // "Nothing is loaded" is a representable authoritative state (ADR-024 §4). Every
             // scheduled effect from the epoch we lost track of is superseded, and nothing replaces it.
@@ -1712,8 +1764,9 @@ extension SyncPlaybackCoordinator {
             // separate; see `applyPeerPlaybackState`).
             currentPlaybackIdentity = nil
             // Blocker 1, as in `applyStep`'s equivalent branch: adopting the leader's "nothing
-            // loaded" is this ride exercising authority, not an absence of it.
-            recordRideAuthority()
+            // loaded" is this ride exercising authority, not an absence of it. Round 6: stamped with
+            // `admittedRideEpoch`, not a fresh live read.
+            recordRideAuthority(admittedRideEpoch: admittedRideEpoch)
             diagnostics.currentTrackHash = nil
             markSynced()
             publishDiagnostics()
@@ -1748,7 +1801,7 @@ extension SyncPlaybackCoordinator {
         // as accepted bookkeeping on the way past. `applyPlay` now says which, and this forwards it.
         let outcome = await applyPlay(header, trackHash: trackHash, queueItemId: queueItemId, positionMs: fields.positionMs,
                                       generation: generation, estimate: estimate, playing: fields.playing,
-                                      rideLifetime: rideLifetime)
+                                      rideLifetime: rideLifetime, admittedRideEpoch: admittedRideEpoch)
         guard outcome == .deferredContent else { return outcome }
         // A `.deferred*` result promises the obligation is **retained** and carries the same
         // reconciliation id, so retain it here rather than letting `applyPlay`'s own PROTOCOL §5
@@ -1765,7 +1818,7 @@ extension SyncPlaybackCoordinator {
         // first proof on that path and it may not be the weaker half of the pair.
         guard await stillCurrent(generation) else { return .rejectedStale }
         guard stillCurrentNow(generation) else { return .rejectedStale }
-        guard synchronizedModeEpoch == rideLifetime else { return .rejectedRide }
+        guard synchronizedModeEpoch == rideLifetime, rideEpochs.current == admittedRideEpoch else { return .rejectedRide }
         deferredEvents.append(.playbackState(fields, generation: generation, reconciliation: reconciliation))
         diagnostics.deferredCommandCount = deferredEvents.count
         publishDiagnostics()
