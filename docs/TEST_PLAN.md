@@ -452,6 +452,32 @@ regressions use.
 | Property B re-pinned at the new strict compare | Ride 1 establishes X; End Ride 1's cleanup is delayed; ride 2 establishes nothing; the delayed cleanup is released. X must still be cleared — the strict `<` comparison must not reintroduce round-4's Property-B failure while fixing finding 2 above | `RideSegmentLifecycleTests` (both new and pre-existing test, both platforms) |
 | repetition | 50 cycles alternating findings 1 and 2, fresh harness each cycle; the standalone suite re-run 10× beyond that (500+ effective cycles of the new regressions with no failures) | `RideSegmentLifecycleTests` (iOS) |
 
+**Added by independent review round 7 (ADR-028 Amendment A6).** Round 6's *own fix* was reviewed and
+one blocker, in three reachable forms, was confirmed in it: the ride provenance round 6 threaded so
+carefully existed only while an operation was *executing*, and was dropped the moment that operation
+became **retained**. Every regression below was run against the unmodified round-6 head
+(`fbbf1e19d88d0b30c0ca9a255ea438c219badda3`) first and observed to fail for the stated reason — by
+reverting the single behaviour under test rather than the whole change, so each failure names one
+variable — then re-verified green. **No sleeps anywhere.**
+
+| Round-7 finding | What is asserted, and where |
+|---|---|
+| A — a deferred ride-1 command becomes ride 2's authority | A follower's clock is made untrustworthy, an authoritative `PLAY` is delivered and **proved to be retained** in `deferredEvents` carrying `RideAdmission(0, 1)`; End Ride 1 is accepted (epoch minted, cleanup **not** invoked); Start Ride 2 is accepted; the clock recovers and the drain runs — all before ride 1's cleanup is released. Expected: nothing applies (`currentPlaybackIdentity`, `timeline`, `currentTrackHash` all nil), `rideAuthorityEpoch == 0`, no player call, the event discarded and counted (`retiredRideDeferredCount == 1`), and ride 1's released cleanup reports `supersededEndRideCount == 0`. Pre-fix: the pre-roll and scheduled start reached the player, `timeline.generation == 3` and `rideAuthorityEpoch == 3` | `RideSegmentLifecycleTests` (iOS) |
+| B — a deferred `STATE_SNAPSHOT` reconciles as ride 2 | S1 is accepted and deferred for the clock under ride 1 (its retained event asserted to carry `RideAdmission(0, 1)`); End Ride is accepted with its cleanup **not** released; Start Ride 2 is accepted; the clock recovers. Expected: S1 → **CANCELLED**, never `RECONCILED`, never permanently deferred, nothing mutated, no manifest refresh. Then S2 under the **same** control generation and the current ride: only S2 reconciles, publishing S2's own `command_seq`, a late terminal signal naming S1 cannot alter it, and ride 1's finally-released cleanup recognises ride 2's authority (`supersededEndRideCount == 1`) and leaves it standing | `ResyncCoordinatorTests` (iOS) |
+| C — a ride boundary **inside the snapshot pre-check**, before retention | S1 enters `applyPeerPlaybackState` under ride 1 and parks inside the full-restore pre-check's own `content.resolve`. The park is pinned on both sides: nothing is retained yet (so it is before the append) **and** the queue half has already been adopted (so it is after `onStateSnapshot` captured the provenance). Both ride epochs are minted while parked; ride 1's cleanup is released last, so it is provably not what makes the test pass. Expected: S1 is **not** appended, its obligation reaches a terminal cancellation, no transfer is requested for a ride that is over, nothing is mutated, and the **wire** request still clears (a valid snapshot for the live generation did arrive). Pre-fix on Android the retained event was stamped with the successor ride's epoch | `ResyncCoordinatorTests` (iOS), `ResyncRecoveryTest` (Android — the one form this platform can reach; see below) |
+| liveness — valid same-ride retained work still applies | The same deferrals with **no** ride boundary at all: a command held for the clock, and a snapshot held for the clock and for content. Expected: each applies/reconciles from the originally retained event, against the very `RideAdmission` it was admitted under, with `retiredRideDeferredCount == 0`. Without this the fix could pass every safety assertion by refusing everything | `RideSegmentLifecycleTests` + `ResyncCoordinatorTests` (iOS), `ResyncRecoveryTest` (Android) |
+| repetition | 50 cycles alternating finding A and the liveness case, fresh harness each cycle; the iOS resync suite re-run 8× standalone and the full platform suite 3× beyond that | `RideSegmentLifecycleTests` (iOS) |
+
+**Why Android carries only form C.** `SessionCoordinator.endRide()` calls
+`owner.endRideSegment(owner.nextRideEpoch())` as two back-to-back synchronous statements, and
+`endRideSegment`/`leaveSynchronizedMode` contain no suspension point — so an accepted End Ride's
+cleanup has already discarded `deferredEvents` and moved `synchronizedModeEpoch` before any other
+code can run, and forms A and B are unreachable rather than merely unlikely. Form C **is** reachable,
+because `content.resolve` in the pre-check is a genuine suspension between a snapshot's admission and
+its retention and — `estimate()`/`readyEstimate()` being synchronous there — the only one. That is a
+statement about Android's production call path, traced, not an assumption that a race "probably
+cannot happen".
+
 **Added by the operation-lifetime audit (ADR-024 Amendment A4).** Independent verification of A3
 named the class *underneath* A3's fence, and confirmed six findings in it. A3 asks "may this
 operation run at all?"; A4 asks "may it still run **its next effect**, now that it has suspended?"

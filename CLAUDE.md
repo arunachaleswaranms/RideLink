@@ -340,7 +340,36 @@ live read that the new guard merely proved equal *at that instant*, the same sha
 broken argument took — was found and corrected in this pass's own fresh-fix audit before anything was
 pushed. **Android is unaffected by construction**: its End Ride cleanup runs synchronously with no
 suspension between the epoch mint and the cleanup, so the window this fix closes never opens there,
-and no Android source file changed. Independent review of *this* pass has not yet run.
+and no Android source file changed.
+
+**A sixth independent review then audited round 6's own fixes and found one more confirmed blocker, in
+three reachable forms, all fixed — and it is the first of these rounds to find the defect on *both*
+platforms** ([ADR-028 Amendment A6](docs/DECISIONS/ADR-028-ride-mode-and-state-resynchronization.md#amendment-a6--20-september-2026--independent-review-round-7-retained-work-must-carry-the-ride-that-admitted-it);
+STATUS §2ba, problem 91). **Its standing lesson: provenance that exists only while an operation is
+*executing* is not provenance.** Round 6 was right that a ride lifetime must be captured at admission
+and compared rather than re-read, and it threaded exactly that through every directly-executing apply
+path. What it never asked is what happens when the operation stops executing and becomes **stored**:
+at that moment its two threaded values went out of scope, `DeferredEvent` recorded the control
+generation and the reconciliation obligation id and nothing else, and the replay — `drainDeferredEvents`,
+after a clock recovered or a transfer finished — captured a **fresh** ride admission from whatever was
+live by then. **Bug A**: a `PLAY` held for an untrustworthy clock under ride 1, replayed across an
+accepted-but-uncleaned End Ride *and* a Start Ride, pre-rolled and started on the real player and was
+stamped `rideAuthorityEpoch = 3` — ride 2's epoch on ride 1's work — after which ride 1's own
+(correctly superseded-refusing) cleanup left it standing forever. **Bug B**: the same through a
+retained `STATE_SNAPSHOT`, reported `RECONCILED` under ride 2 — the obligation id answers "is this S1
+or S2?" and the generation answers "is this lifetime live?", and neither answers "is S1 still
+authorised by the ride that admitted it?". **Bug C**: an **append-time** race, where the full-restore
+pre-check suspends and then retains while re-proving only the control generation. Fixed with one
+immutable `RideAdmission { synchronizedModeEpoch, rideEpoch }` captured at each path's **real**
+admission point, **stored on the retained event**, replayed unchanged and proved before every write
+and every retention; a required `ride:` parameter so a replay cannot silently mint a replacement; and
+a drain that **pops** retired work, cancels its obligation (`REJECTED_RIDE` → `CANCELLED`, never
+`RECONCILED`, never an indefinite deferral) and continues rather than wedging the stream.
+`DeferredEvent.queueSnapshot` deliberately carries none — End Ride does not retire queue authority,
+traced rather than assumed. **Android is affected by form C alone**, and the reason is its production
+path: End Ride's cleanup is synchronous there so retained work cannot outlive it, but `content.resolve`
+in the pre-check is a genuine admission-to-retention suspension and the only one. No wire change; no
+vector moved. Independent review of *this* pass has not yet run.
 
 **A third independent review then audited round 3's own fixes and found two more confirmed lifecycle
 blockers, both fixed, plus two more found by its own §17 audit** ([ADR-028 Amendment A3](docs/DECISIONS/ADR-028-ride-mode-and-state-resynchronization.md#amendment-a3--20-september-2026--independent-review-round-4-two-confirmed-blockers-both-fixed);
