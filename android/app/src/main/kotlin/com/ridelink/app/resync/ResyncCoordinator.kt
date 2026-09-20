@@ -164,11 +164,13 @@ class ResyncCoordinator(
                 completeReconciliation(deferred.message)
             }
         }
-        scope.launch {
-            syncPlaybackCoordinator.diagnostics.collect { diag ->
-                if (diag.ingressDesynchronized && isLocalLeader == false) {
-                    triggerRequest(session.currentAuthGeneration, desync = true)
-                }
+        // The **edge**, not the level (independent-review round 3, found by CI). This used to collect
+        // [SyncPlaybackCoordinator.diagnostics] and act whenever `ingressDesynchronized` was true —
+        // so every later diagnostics emission asked again, unboundedly once Blocker A's retained
+        // reconciliation kept the flag set. One signal per latch event is what iOS always had.
+        syncPlaybackCoordinator.onDesynchronizedTrigger = {
+            if (isLocalLeader == false) {
+                triggerRequest(session.currentAuthGeneration, desync = true)
             }
         }
     }
@@ -188,20 +190,6 @@ class ResyncCoordinator(
         generation: Long,
         desync: Boolean,
     ) {
-        // Independent-review round 3, found while building Blocker A's regression: a follower that is
-        // desynchronised **and** holds a deferred reconciliation would otherwise ask again on every
-        // single `SyncPlaybackDiagnostics` emission. `ingressDesynchronized` stays true until the
-        // retained snapshot applies, and [StateResyncGate] cannot refuse the repeat because the *wire*
-        // request was legitimately completed by that very snapshot — so the two facts together spun an
-        // unbounded `STATE_REQUEST`/`STATE_SNAPSHOT` storm (it exhausted the JVM heap in the
-        // regression before this guard existed; on a real socket it is a flood on the control plane).
-        //
-        // A reconciliation for this generation has already been **accepted** and is retained; a second
-        // copy of the same authoritative state cannot tell us anything the one we are holding does
-        // not. So the obligation itself is the thing that suppresses the retrigger — not a timer, and
-        // not a count.
-        val outstanding = deferredReconciliation
-        if (outstanding != null && outstanding.generation == generation) return
         when (StateResyncGate.onTrigger(pendingRequestGeneration, generation)) {
             StateResyncGate.RequestDecision.ALREADY_PENDING -> return
             StateResyncGate.RequestDecision.SEND_REQUEST -> Unit

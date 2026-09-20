@@ -516,6 +516,11 @@ extension SyncPlaybackCoordinator {
         queueDesynchronized = true
         refuseHeldIncrementalCommands()
         publishDesynchronized()
+        // Independent-review round 3: raised here rather than only from `onIngressOverflow`, so all
+        // three latch sites are covered and both platforms are the same shape. One signal per latch
+        // event — the edge, never the level (see Android's `onDesynchronizedTrigger` for the storm
+        // that level-triggering caused there).
+        onDesynchronizedTrigger?()
     }
 
     /// See `latchDesynchronized`. Counted, never silently dropped.
@@ -858,7 +863,6 @@ extension SyncPlaybackCoordinator {
             return
         }
         latchDesynchronized()
-        onDesynchronizedTrigger?()
     }
 
     /// Test-only entry point for the exact effect a real ingress overflow already produces on a
@@ -867,7 +871,6 @@ extension SyncPlaybackCoordinator {
     /// *recovery* need not reconstruct Phase 5's overflow mechanics to reach the latch.
     func forceDesynchronizedForTest() {
         latchDesynchronized()
-        onDesynchronizedTrigger?()
     }
 
     /// Publishes the latch. While it is set, `.desynchronized` is what the user sees; once it clears,

@@ -222,6 +222,22 @@ class SyncPlaybackCoordinator(
     internal var onReconciliationApplied: ((Long) -> Unit)? = null
 
     /**
+     * Fired **once per latch event** when this device becomes desynchronised — the edge, never the
+     * level. [ResyncCoordinator] is the one consumer, and this is how it learns to ask for state.
+     *
+     * Independent-review round 3, found by CI on this pass's own head. Android used to infer the
+     * trigger by collecting [diagnostics] and acting whenever `ingressDesynchronized` was **true**,
+     * which is level-triggered: every subsequent diagnostics emission — and the drain produces
+     * several — asked again, and `StateResyncGate` could not refuse the repeat once the snapshot that
+     * answered the first had legitimately cleared the pending request. With Blocker A's retained
+     * reconciliation that became unbounded. iOS never had the storm, because its trigger was always
+     * a callback raised at the latch. Both platforms now raise it from [latchDesynchronized], so all
+     * three latch sites are covered on both, and the storm is impossible by construction rather than
+     * suppressed after the fact.
+     */
+    internal var onDesynchronizedTrigger: (() -> Unit)? = null
+
+    /**
      * Independent-review round 3, Blocker C: the ride segment [currentPlaybackIdentity] belongs to.
      *
      * Strictly increasing, assigned by [SessionCoordinator] — which bumps it on **both** Start Ride
@@ -706,6 +722,7 @@ class SyncPlaybackCoordinator(
         queueDesynchronized = true
         refuseHeldIncrementalCommands()
         publishDesynchronized()
+        onDesynchronizedTrigger?.invoke()
     }
 
     /** See [latchDesynchronized]. Counted, never silently dropped. */

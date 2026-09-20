@@ -396,9 +396,26 @@ A follower that is desynchronised **and** holds a deferred reconciliation asked 
 `SyncPlaybackDiagnostics` emission: `ingressDesynchronized` stays true until the retained snapshot
 applies, and `StateResyncGate` cannot refuse the repeat because the *wire* request was legitimately
 completed by that very snapshot. The regression exhausted the JVM heap before this was closed; on a
-real socket it is a flood on the control plane. A reconciliation already accepted and retained for
-this generation now suppresses the retrigger — the obligation itself is the guard, not a timer and
-not a count.
+real socket it is a flood on the control plane.
+
+**The first fix for this was wrong, and CI found it.** Suppressing the retrigger while an obligation
+is outstanding also suppresses a genuinely *new* desync event — iOS's
+`ReconnectResyncStressTests` correctly failed, waiting for a `desyncRequestCount` that could no
+longer move. The real cause is a platform divergence nobody had named: **Android's desync trigger was
+level-triggered where iOS's was edge-triggered.** Android collected `SyncPlaybackDiagnostics` and
+acted whenever `ingressDesynchronized` was *true*; iOS raised a callback once, at the latch. With
+Blocker A's retained reconciliation keeping the flag set, level-triggering had nothing left to dedup
+against.
+
+So the storm is removed at its source. Both platforms now raise one explicit
+`onDesynchronizedTrigger` per latch event, from `latchDesynchronized` — which also means all three
+latch sites are covered on both, where iOS previously raised it only from `onIngressOverflow` — and
+the suppression is deleted. `StateResyncGate` dedups a repeat while a request is genuinely
+outstanding, which is all it ever needed to do.
+
+This is this pass's own instance of the standing lesson: **the freshest fix is the least-audited code
+in the repository**, and a fix's own regression can pass while the fix is wrong in a way only another
+suite reaches.
 
 ### Blocker C — production End Ride did not end ride-segment playback authority
 

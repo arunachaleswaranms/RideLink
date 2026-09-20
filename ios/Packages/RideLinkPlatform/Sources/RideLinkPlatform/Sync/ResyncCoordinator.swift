@@ -197,17 +197,6 @@ public final class ResyncCoordinator {
     }
 
     private func triggerRequest(generation: Int64, desync: Bool) async {
-        // Independent-review round 3, found while building Blocker A's regression (mirrors Android
-        // exactly): a follower that is desynchronised **and** holds a deferred reconciliation would
-        // otherwise ask again on every desync trigger. `ingressDesynchronized` stays true until the
-        // retained snapshot applies, and `StateResyncGate` cannot refuse the repeat because the *wire*
-        // request was legitimately completed by that very snapshot — so the two facts together spin an
-        // unbounded `STATE_REQUEST`/`STATE_SNAPSHOT` storm on the control plane.
-        //
-        // A reconciliation for this generation has already been **accepted** and is retained; a second
-        // copy of the same authoritative state cannot tell us anything the one we hold does not. The
-        // obligation itself is what suppresses the retrigger — not a timer, and not a count.
-        if let outstanding = deferredReconciliation, outstanding.generation == generation { return }
         switch StateResyncGate.onTrigger(pendingGeneration: pendingRequestGeneration, liveGeneration: generation) {
         case .alreadyPending: return
         case .sendRequest: break
