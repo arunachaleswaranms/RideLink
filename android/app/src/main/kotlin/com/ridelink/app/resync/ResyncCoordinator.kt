@@ -141,23 +141,28 @@ class ResyncCoordinator(
                 }
             }
         }
+        // Blocker 2E's deferred-then-later-applied transition: `drainDeferredEvents` applies a held
+        // reconciliation without ever going through `handleStateSnapshot` again, so this callback is
+        // the one place that later completion is observed.
+        //
+        // Independent-review round 3, Blocker B (Android half): this used to be inferred from
+        // `pendingPlaybackReconciliationGeneration` going null in the diagnostics flow, which cannot
+        // distinguish "the obligation converged" from "the obligation was **discarded**" —
+        // `leaveSynchronizedMode` legitimately does the second, and would have reported a
+        // reconciliation that never happened as `RECONCILED`. An explicit signal, raised only where
+        // the apply actually succeeds and carrying the generation that authorised it, answers the
+        // question asked rather than a correlated one. It also makes both platforms the same shape.
+        syncPlaybackCoordinator.onReconciliationApplied = { generation ->
+            val deferred = deferredReconciliation
+            if (deferred != null && deferred.generation == generation) {
+                deferredReconciliation = null
+                completeReconciliation(deferred.message)
+            }
+        }
         scope.launch {
             syncPlaybackCoordinator.diagnostics.collect { diag ->
                 if (diag.ingressDesynchronized && isLocalLeader == false) {
                     triggerRequest(session.currentAuthGeneration, desync = true)
-                }
-                // Blocker 2E's deferred-then-later-applied transition: `drainDeferredEvents` applies
-                // a held reconciliation without ever going through `handleStateSnapshot` again, so
-                // this is the one place that later completion is observed. Compared against this
-                // coordinator's own generation, not merely "did the flag change" — a newer session's
-                // diagnostics could otherwise be misread as this one's obligation resolving.
-                val deferred = deferredReconciliation
-                if (deferred != null &&
-                    diag.pendingPlaybackReconciliationGeneration == null &&
-                    diag.sessionGeneration == deferred.generation
-                ) {
-                    deferredReconciliation = null
-                    completeReconciliation(deferred.message)
                 }
             }
         }
@@ -178,6 +183,20 @@ class ResyncCoordinator(
         generation: Long,
         desync: Boolean,
     ) {
+        // Independent-review round 3, found while building Blocker A's regression: a follower that is
+        // desynchronised **and** holds a deferred reconciliation would otherwise ask again on every
+        // single `SyncPlaybackDiagnostics` emission. `ingressDesynchronized` stays true until the
+        // retained snapshot applies, and [StateResyncGate] cannot refuse the repeat because the *wire*
+        // request was legitimately completed by that very snapshot — so the two facts together spun an
+        // unbounded `STATE_REQUEST`/`STATE_SNAPSHOT` storm (it exhausted the JVM heap in the
+        // regression before this guard existed; on a real socket it is a flood on the control plane).
+        //
+        // A reconciliation for this generation has already been **accepted** and is retained; a second
+        // copy of the same authoritative state cannot tell us anything the one we are holding does
+        // not. So the obligation itself is the thing that suppresses the retrigger — not a timer, and
+        // not a count.
+        val outstanding = deferredReconciliation
+        if (outstanding != null && outstanding.generation == generation) return
         when (StateResyncGate.onTrigger(pendingRequestGeneration, generation)) {
             StateResyncGate.RequestDecision.ALREADY_PENDING -> return
             StateResyncGate.RequestDecision.SEND_REQUEST -> Unit
@@ -255,7 +274,18 @@ class ResyncCoordinator(
         message: ResyncMessage.StateSnapshot,
         generation: Long,
     ) {
-        when (syncPlaybackCoordinator.onStateSnapshot(message, generation)) {
+        val outcome = syncPlaybackCoordinator.onStateSnapshot(message, generation)
+        // Independent-review round 3's own fresh-fix audit (§17). [SyncPlaybackCoordinator
+        // .onStateSnapshot] above **suspends**, and a successor generation's [ControlEvent.Connected]
+        // can be collected inside that window — so this snapshot's own outcome may arrive after a
+        // newer obligation has been recorded. Writing either branch unconditionally would let an
+        // older generation's result overwrite a newer generation's obligation, and the newer one
+        // could then never complete (its completion signal would find the wrong owner). The
+        // obligation is therefore **monotonic**: an older generation may never displace a newer one.
+        // This compares two recorded owners; it never re-derives one from whatever is live now
+        // (CLAUDE.md rule 20).
+        if ((deferredReconciliation?.generation ?: generation) > generation) return
+        when (outcome) {
             StateSnapshotOutcome.APPLIED -> {
                 pendingRequestGeneration = StateResyncGate.onSnapshotObserved(pendingRequestGeneration, generation)
                 deferredReconciliation = null

@@ -72,7 +72,8 @@ class FakeResyncSession : ResyncSessionPort {
         eventFlow.emit(event)
     }
 
-    fun forwardTo(other: FakeResyncSession) {
+    /** `null` severs the wire — nothing this peer sends can reach the other one. */
+    fun forwardTo(other: FakeResyncSession?) {
         forward = other
     }
 

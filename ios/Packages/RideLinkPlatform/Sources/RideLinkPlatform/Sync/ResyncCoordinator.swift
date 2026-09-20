@@ -79,8 +79,38 @@ public final class ResyncCoordinator {
     /// `true` once this process has completed **any** prior authenticated session — see Android's
     /// identical field for the full reasoning.
     private var hasEverConnected = false
-    /// `StateResyncGate`'s own state: the generation a `STATE_REQUEST` is outstanding for, if any.
+    /// `StateResyncGate`'s own state: the generation a **wire** `STATE_REQUEST` is outstanding for,
+    /// if any. Cleared the moment a valid snapshot for that generation arrives — there is nothing
+    /// left to *ask* for — which is a genuinely different fact from reconciliation being complete.
     private var pendingRequestGeneration: Int64?
+
+    /// Independent-review round 3, Blocker B: a snapshot that was **accepted** but whose
+    /// reconciliation is still outstanding, and the lifetime that owns it.
+    ///
+    /// This is the fact `pendingRequestGeneration` above cannot carry. `handleStateSnapshot`
+    /// correctly clears the wire request on `.deferredClock`/`.deferredContent` — no resend is
+    /// needed, the snapshot arrived — and `onReconciliationApplied` then used to complete the
+    /// reconciliation only if its generation `== pendingRequestGeneration`, which by then was
+    /// **always `nil`**. `.snapshotPending` could therefore never become `.reconciled`, on either
+    /// precondition, no matter how promptly it resolved. Two different obligations were being
+    /// tracked in one field; they are now two, exactly as Android already models them.
+    ///
+    /// The generation is **immutable ownership**, recorded from the snapshot that created the
+    /// obligation and compared — never reconstructed from whatever generation is live when the
+    /// completion callback happens to run (CLAUDE.md rule 20's rule, applied to a local obligation
+    /// rather than a frame). A successor generation's own `.connected` triggers a fresh request and
+    /// overwrites this, so a predecessor's completion can only ever find a mismatch and be inert.
+    ///
+    /// The **message** is retained alongside the generation because the later completion is observed
+    /// well after `handleStateSnapshot`'s stack frame is gone, and `.reconciled` must report the same
+    /// `command_seq`/`manifest_revision` the immediate path reports.
+    private struct DeferredReconciliation {
+        let generation: Int64
+        let commandSeq: Int64
+        let manifestRevision: Int64
+    }
+
+    private var deferredReconciliation: DeferredReconciliation?
 
     public private(set) var diagnostics = ResyncDiagnostics()
     public var onDiagnosticsChanged: (@Sendable (ResyncDiagnostics) -> Void)?
@@ -124,15 +154,29 @@ public final class ResyncCoordinator {
         await syncPlaybackCoordinator.setResyncChannel(session.channel)
     }
 
-    /// A previously-deferred reconciliation has now genuinely applied (Blocker 2E). Generation-keyed
-    /// matching against `pendingRequestGeneration` — the same comparison `StateResyncGate` already
-    /// does for the synchronous case — means a signal for an unrelated restoration (an ordinary wire
-    /// `PLAYBACK_STATE`, or a retired generation's) is simply ignored rather than mismatched.
+    /// A previously-deferred reconciliation has now genuinely applied (Blocker 2E, repaired by
+    /// independent-review round 3's Blocker B).
+    ///
+    /// Matched against `deferredReconciliation` — the **reconciliation** obligation — and never
+    /// against `pendingRequestGeneration`, which is the *wire* obligation and is deliberately already
+    /// `nil` by the time this can fire. A signal for an unrelated restoration (an ordinary wire
+    /// `PLAYBACK_STATE` reconciling a plain reconnect, or a generation whose obligation has since
+    /// been superseded) finds no matching owner and is inert, which is the point: ownership is
+    /// compared, not reconstructed.
     private func onReconciliationApplied(generation: Int64) {
-        guard generation == pendingRequestGeneration else { return }
-        pendingRequestGeneration = nil
-        diagnostics.requestPending = false
+        guard let deferred = deferredReconciliation, deferred.generation == generation else { return }
+        deferredReconciliation = nil
+        completeReconciliation(commandSeq: deferred.commandSeq, manifestRevision: deferred.manifestRevision)
+    }
+
+    /// The completion bookkeeping shared by both routes to `.reconciled`: `handleStateSnapshot`'s own
+    /// immediate `.applied` branch, and a deferred obligation's later success. Mirrors Android's
+    /// `completeReconciliation` exactly.
+    private func completeReconciliation(commandSeq: Int64, manifestRevision: Int64) {
+        diagnostics.requestPending = pendingRequestGeneration != nil
         diagnostics.lastOutcome = .reconciled
+        diagnostics.lastSnapshotManifestRevision = manifestRevision
+        diagnostics.lastSnapshotCommandSeq = commandSeq
         publishDiagnostics()
     }
 
@@ -153,6 +197,17 @@ public final class ResyncCoordinator {
     }
 
     private func triggerRequest(generation: Int64, desync: Bool) async {
+        // Independent-review round 3, found while building Blocker A's regression (mirrors Android
+        // exactly): a follower that is desynchronised **and** holds a deferred reconciliation would
+        // otherwise ask again on every desync trigger. `ingressDesynchronized` stays true until the
+        // retained snapshot applies, and `StateResyncGate` cannot refuse the repeat because the *wire*
+        // request was legitimately completed by that very snapshot — so the two facts together spin an
+        // unbounded `STATE_REQUEST`/`STATE_SNAPSHOT` storm on the control plane.
+        //
+        // A reconciliation for this generation has already been **accepted** and is retained; a second
+        // copy of the same authoritative state cannot tell us anything the one we hold does not. The
+        // obligation itself is what suppresses the retrigger — not a timer, and not a count.
+        if let outstanding = deferredReconciliation, outstanding.generation == generation { return }
         switch StateResyncGate.onTrigger(pendingGeneration: pendingRequestGeneration, liveGeneration: generation) {
         case .alreadyPending: return
         case .sendRequest: break
@@ -223,9 +278,15 @@ public final class ResyncCoordinator {
             // §21: the *wire* round trip is satisfied either way — a snapshot for the live generation
             // arrived, so there is nothing left to request — even though `.deferredClock`/
             // `.deferredContent` mean reconciliation itself is not yet complete (that is
-            // `.snapshotPending` below). `.deferredContent` resolves through the leader's next
-            // authoritative `PLAY` once both sides verify the transferred content (§22), not through
-            // `onReconciliationApplied` — there is nothing enqueued for that callback to fire for.
+            // `.snapshotPending`, and `deferredReconciliation` is what owns it).
+            //
+            // Independent-review round 3, Blocker B: **both** deferrals are retained obligations.
+            // Since Blocker 2A/Race 7, `applyPeerPlaybackState` holds the snapshot in `deferredEvents`
+            // for a missing transfer exactly as it does for an untrustworthy clock, and the drain
+            // fires `onReconciliationApplied` for whichever precondition resolves — so the earlier
+            // comment here ("`.deferredContent` resolves through the leader's next authoritative
+            // `PLAY` … there is nothing enqueued for that callback to fire for") described the code
+            // as it was *before* that fix, and no second snapshot is needed for either.
             pendingRequestGeneration = StateResyncGate.onSnapshotObserved(
                 pendingGeneration: pendingRequestGeneration, snapshotGeneration: generation
             )
@@ -238,11 +299,33 @@ public final class ResyncCoordinator {
             if let previousManifestRevision, previousManifestRevision != manifestRevision {
                 requestManifestRefresh()
             }
-            diagnostics.requestPending = pendingRequestGeneration != nil
-            diagnostics.lastOutcome = outcome == .applied ? .reconciled : .snapshotPending
-            diagnostics.lastSnapshotManifestRevision = manifestRevision
-            diagnostics.lastSnapshotCommandSeq = commandSeq
-            publishDiagnostics()
+            // Independent-review round 3's own fresh-fix audit (§17). `onStateSnapshot` above
+            // **suspends**, and a successor generation's `.connected` can be reduced inside that
+            // window — so this snapshot's own outcome may arrive after a newer obligation has been
+            // recorded. Writing either branch unconditionally would let an older generation's result
+            // overwrite a newer generation's obligation, and the newer one could then never complete
+            // (its completion callback would find the wrong owner). The obligation is therefore
+            // **monotonic**: an older generation may never displace a newer one. This is a comparison
+            // of two recorded owners, never a re-derivation from whatever is live (CLAUDE.md rule 20).
+            let supersededByNewer = (deferredReconciliation?.generation ?? generation) > generation
+            if supersededByNewer {
+                break
+            }
+            if outcome == .applied {
+                // A snapshot that applied immediately supersedes any obligation still recorded for an
+                // earlier one: reconciliation is complete, so nothing is left outstanding to watch for.
+                deferredReconciliation = nil
+                completeReconciliation(commandSeq: commandSeq, manifestRevision: manifestRevision)
+            } else {
+                deferredReconciliation = DeferredReconciliation(
+                    generation: generation, commandSeq: commandSeq, manifestRevision: manifestRevision
+                )
+                diagnostics.requestPending = pendingRequestGeneration != nil
+                diagnostics.lastOutcome = .snapshotPending
+                diagnostics.lastSnapshotManifestRevision = manifestRevision
+                diagnostics.lastSnapshotCommandSeq = commandSeq
+                publishDiagnostics()
+            }
         case .rejectedStale, .rejectedRole:
             // §21: a rejected snapshot must not falsely complete the request, and §20: must not
             // mutate manifest bookkeeping either. Nothing here to update.
