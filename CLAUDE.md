@@ -306,7 +306,41 @@ invariants: **every `DEFERRED_*` corresponds to actual retained work carrying th
 every terminal cancellation names the exact obligation, and **only genuine convergence may produce
 `RECONCILED`**. `ResyncCoordinator` needed no change on either platform; it was being told the wrong
 thing. No wire change; no vector moved. Both reproduced against unmodified production first, and each
-fix re-proved in isolation. Independent review of *this* pass has not yet run.
+fix re-proved in isolation.
+
+**A fifth independent review then audited round 5's own fixes and found one more confirmed blocker, in
+two reachable orderings, both fixed** ([ADR-028 Amendment A5](docs/DECISIONS/ADR-028-ride-mode-and-state-resynchronization.md#amendment-a5--20-september-2026--independent-review-round-6-one-confirmed-blocker-two-reachable-orderings-of-it-fixed);
+STATUS §2az, problem 90). **Its standing lesson is aimed at round 5's own written argument.**
+`recordRideAuthority`'s round-5 doc comment argued at length that reading `rideEpochs.current` live
+was safe because every route from `RIDE_ACTIVE` back to `CONNECTED` is "already proved against …
+with no suspension between" — and that argument was wrong, because it treated `synchronizedModeEpoch`
+moving as the same fact as "an End Ride happened", when `SessionCoordinator.endRide()` mints and
+publishes its ride epoch synchronously but hands the actual cleanup — `leaveSynchronizedMode`, the
+only place `synchronizedModeEpoch` moves for an End Ride — to `launchInSession`, asynchronously.
+**Ordering 1**: an operation admitted under ride 1, parked in `content.resolve` across an accepted End
+Ride *and* a further accepted Start Ride, resumed with `synchronizedModeEpoch` unchanged (cleanup
+still parked), wrote ride-scoped state, and was stamped by `recordRideAuthority()` with a *live*
+`rideEpochs.current` that Start Ride 2 had already advanced — mislabelling ride 1's stale work as ride
+2's authority, which ride 1's own (correctly superseded-refusing) late cleanup then left standing
+permanently. **Ordering 2**: genuinely new authority admitted *after* an accepted End Ride but before
+that boundary's own delayed cleanup ran shared the cleanup's freshly minted epoch value at admission —
+indistinguishable under round 5's `<=` comparison from ride 1's own stale residue — and the delayed
+cleanup destroyed it. Fixed by making provenance travel with the operation: every admission point
+(`applyAuthoritative`, `applyPeerPlaybackState`) now also captures `admittedRideEpoch = rideEpochs
+.current` before its first suspension, threaded through every intermediate apply function alongside
+`rideLifetime`, with every existing ride guard gaining a second clause (`rideEpochs.current ==
+admittedRideEpoch`) that refuses (`.rejectedRide`) rather than writes on a mismatch — closing ordering
+1. `recordRideAuthority()` now takes `admittedRideEpoch` as an explicit parameter rather than reading
+the live property, making the invariant structural rather than merely true at one instant.
+`endRideSegment`'s comparison became **strict** (`<`, not `<=`) — closing ordering 2, by telling
+authority admitted in the CONNECTED gap that follows a ride apart from that ride's own stale residue,
+which the two share a value under `<=` but not under `<`. No wire change; no vector moved. Both
+orderings reproduced against unmodified production first, and a first-draft weakness — stamping via a
+live read that the new guard merely proved equal *at that instant*, the same shape round 5's own
+broken argument took — was found and corrected in this pass's own fresh-fix audit before anything was
+pushed. **Android is unaffected by construction**: its End Ride cleanup runs synchronously with no
+suspension between the epoch mint and the cleanup, so the window this fix closes never opens there,
+and no Android source file changed. Independent review of *this* pass has not yet run.
 
 **A third independent review then audited round 3's own fixes and found two more confirmed lifecycle
 blockers, both fixed, plus two more found by its own §17 audit** ([ADR-028 Amendment A3](docs/DECISIONS/ADR-028-ride-mode-and-state-resynchronization.md#amendment-a3--20-september-2026--independent-review-round-4-two-confirmed-blockers-both-fixed);
@@ -331,8 +365,8 @@ apply, which is load-bearing in both directions. **§17's two**: `applyStep` had
 and could stop local music after End Ride (FR-025 says it keeps playing), and `applyPlay` reached
 through another apply path compared the post-End-Ride value with itself — so the ride lifetime is now
 captured **once where the operation is authorised** and threaded, compared and never re-read. No wire
-change; no vector moved. All four reproduced against unmodified production first. Independent review
-of *this* pass has not yet run.
+change; no vector moved. All four reproduced against unmodified production first. (It was
+subsequently reviewed — see the fourth independent review above.)
 
 Accepted baseline:
 

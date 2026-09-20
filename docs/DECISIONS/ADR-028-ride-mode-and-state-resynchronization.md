@@ -901,3 +901,237 @@ Amendment A3 are unchanged.
 Unchanged: **DEFERRED — HARDWARE NOT AVAILABLE.** No Android↔iPhone reconnect, Bluetooth or hotspot
 recovery, screen-lock networking, battery, thermal, audible resync quality or two-hour ride result is
 claimed by this amendment.
+
+## Amendment A5 — 20 September 2026 — independent review round 6: one confirmed blocker (two reachable
+orderings of it), fixed
+
+Status: **Accepted.** Round 4's own fix (this file's Amendment A4) was audited by an independent
+review, which returned **REQUEST CHANGES — DO NOT MERGE** with one remaining blocker: iOS still
+reconstructs ride ownership from current live state after asynchronous work has already been
+authorised. Reproduced against the unmodified head (`17d905a`) before anything was changed, on both
+reachable orderings; both are fixed; the regressions that reproduce them are in the suite. No wire
+change; no vector moved.
+
+**The standing lesson turns one further notch, and it is aimed at Amendment A4's own words.** A4's
+`recordRideAuthority` doc comment argued at length that reading `rideEpochs.current` live was *not*
+the class of defect this file keeps finding, because "every route from `RIDE_ACTIVE` back to
+`CONNECTED` is already proved against on the statement immediately above, with no suspension
+between." That argument is wrong, and the reason it is wrong is the amendment's own subject: it
+treated `synchronizedModeEpoch` moving as synonymous with "an End Ride happened", when the two are
+different facts with the same asynchronous gap A4 had just finished closing for the *epoch*, still
+open for the *cleanup*.
+
+### The blocker
+
+`SessionCoordinator.endRide()` mints and publishes its ride epoch synchronously (Amendment A4's own
+fix), then hands the actual cleanup to `launchInSession`:
+
+```swift
+guard applyEvent(.endRide) else { return }
+let epoch = rideSegment.nextRideEpoch()               // synchronous — rideEpochs.current moves now
+launchInSession { _ in await rideSegment.endRide(epoch: epoch) }   // asynchronous — may run later
+```
+
+`rideSegment.endRide(epoch:)` is what eventually calls `SyncPlaybackCoordinator.endRideSegment`,
+which is what calls `leaveSynchronizedMode()`, which is the **only** place `synchronizedModeEpoch`
+moves for an End Ride. So `rideEpochs.current` and `synchronizedModeEpoch` advance at two different
+instants — the FSM's accept and the scheduled cleanup's eventual execution — and every apply path's
+existing ride proof (`guard synchronizedModeEpoch == rideLifetime`) only detects the second one.
+
+**Reachable ordering 1 — stale ride-1 work relabelled as ride 2's authority.** An operation admitted
+under ride 1 (`applyPlay`, reached from a leader's own committed `PLAY` or a follower's inbound frame
+via `applyAuthoritative`) captures `rideLifetime = synchronizedModeEpoch` at its own entry, then
+suspends in `content.resolve`. While it is parked: End Ride 1 is accepted (`rideEpochs.current` moves
+to the End Ride's own epoch; cleanup parked in `launchInSession`); Start Ride 2 is accepted before
+that cleanup ever runs (`rideEpochs.current` moves again). The operation resumes. Its
+`synchronizedModeEpoch == rideLifetime` guard still passes — `leaveSynchronizedMode` has not
+executed, so `synchronizedModeEpoch` never moved — so it proceeds to write `currentPlaybackIdentity`,
+`timeline` and a fresh playback epoch, and `recordRideAuthority()` stamps `rideAuthorityEpoch` with a
+**live** `rideEpochs.current` that Start Ride 2 already advanced. Ride 1's stale write is now labelled
+ride 2's authority. When ride 1's parked cleanup finally runs, `rideAuthorityEpoch (ride 2's value)
+<= rideEpoch (ride 1's)` is false, so the boundary finds what it believes is a newer ride's authority
+and leaves the stale write standing — permanently, because nothing else will ever ask the question
+again.
+
+**Reachable ordering 2 — genuinely new post-End authority destroyed by its own boundary's delayed
+cleanup.** The inverse: End Ride 1 is accepted (`rideEpochs.current` moves to the End Ride's own
+epoch; cleanup parked). Before that cleanup runs, genuinely new authoritative state arrives —
+legitimate, because synchronised playback stays usable in the CONNECTED gap that follows a ride (a
+Start Ride establishes no authority of its own, ARCHITECTURE §3). It is admitted, captures
+`rideLifetime` (unchanged, since `leaveSynchronizedMode` still has not run) and is stamped by
+`recordRideAuthority()` with the **same** live `rideEpochs.current` value the parked End Ride minted
+for itself — the two are indistinguishable at that value. When the parked cleanup runs,
+`rideAuthorityEpoch <= rideEpoch` (round 4's comparison) is now `true` for this genuinely new
+authority too, and the boundary destroys work it never owned.
+
+Both orderings are the same root cause: `recordRideAuthority()` answered "which ride is current *right
+now*" by re-reading `rideEpochs.current` at the moment of the write, rather than carrying "which ride
+authorised *this operation*" from the moment the operation was admitted. `rideEpochs.current` is
+authoritative for the first question; the second question is provenance, and provenance cannot be
+reconstructed from live state after a suspension — CLAUDE.md rules 19/20/23/24/25, restated for the
+third lifetime for the second time (Amendment A4 restated it the first time, and restated it
+incompletely).
+
+### The fix
+
+**Provenance travels with the operation, not the write.** Every function that can establish or
+replace ride-scoped authority — `applyAuthoritative` (the one admission point every `PLAY`/`PAUSE`/
+`RESUME`/`SEEK`/`NEXT`/`PREVIOUS` reaches, whether from a follower's inbound frame or the leader's own
+committed command via `chainApply`) and `applyPeerPlaybackState` (PROTOCOL §5's reconciliation
+anchor, reached directly and from the deferred drain) — now captures a second value in the same first
+statement that already captures `rideLifetime`:
+
+```swift
+let rideLifetime = synchronizedModeEpoch   // unchanged: catches "Play locally" and a *completed* End Ride
+let admittedRideEpoch = rideEpochs.current // new: catches an *accepted* End Ride whose cleanup has not run yet
+```
+
+`admittedRideEpoch` is threaded as a parameter through every intermediate function exactly as
+`rideLifetime` already was (`applyPlay`, `applyTransport`, `applySeek`, `applyStep`,
+`restoreFromPlaybackState`), and every one of those functions' existing `guard synchronizedModeEpoch
+== rideLifetime` checks gained a second clause: `rideEpochs.current == admittedRideEpoch`. Since any
+accepted Start *or* End Ride moves `rideEpochs.current` synchronously (Amendment A4's own guarantee —
+this fix spends that guarantee rather than repeating its mistake), a mismatch here means a ride
+boundary was accepted since this operation was admitted, whether or not its cleanup has run — and the
+operation is refused (`.rejectedRide`), writing nothing, rather than proceeding and hoping a later
+cleanup will undo it. This closes ordering 1 at its root: the stale operation never writes, so there
+is nothing for `recordRideAuthority` to mislabel.
+
+`recordRideAuthority()` itself changed shape to make the invariant structural rather than merely
+provably true at one moment:
+
+```swift
+func recordRideAuthority(admittedRideEpoch: Int64) {
+    rideAuthorityEpoch = admittedRideEpoch   // the captured value, never rideEpochs.current
+}
+```
+
+Every one of its three call sites (`applyPlay`'s established track, `applyStep`'s authoritative
+"nothing loaded", `restoreFromPlaybackState`'s authoritative "nothing loaded") sits immediately after
+its function's own `admittedRideEpoch` guard, with no `await` between guard and call — so the live
+value and the captured parameter are provably equal at that exact instant, and stamping the parameter
+rather than re-reading the property is what stops a future edit that inserts an `await` between them
+from silently reopening this defect.
+
+**`endRideSegment`'s comparison became strict**, closing ordering 2:
+
+```swift
+guard rideAuthorityEpoch < rideEpoch else { … }   // was <=
+```
+
+`rideEpoch` is the value *this* End Ride minted for itself, and — because `rideEpochs.current` only
+moves on an accepted Start or End Ride — that same value also names the CONNECTED-state gap that
+follows the ride, where synchronised playback stays legitimately usable. Under `<=`, authority
+admitted in that gap (stamped with the End Ride's own value by construction) was indistinguishable
+from ride 1's own stale residue (which also compares `<=` against a strictly newer value). Under `<`,
+only a value **strictly older** than this boundary's own belongs to the ride that is ending; a value
+equal to it belongs to what came after, and survives.
+
+Round 4's two ride-boundary properties are unchanged in what they mean and are re-verified at the new
+comparison: **Property A** — a late cleanup never destroys a strictly newer ride's own authority
+(`rideAuthorityEpoch < rideEpoch` is `false` whenever a later ride established something, `<` and `<=`
+agreeing whenever the values actually differ). **Property B** — ride 1's own residue is still cleared
+when nothing later replaces it (`rideAuthorityEpoch < rideEpoch` is `true` for a value that predates
+this boundary, `<` and `<=` agreeing there too). Neither property moved; a third case — authority
+established *at* this boundary's own value — is what the strict comparison newly tells apart from both.
+
+### The regressions
+
+Both are pinned by construction, with `content.armResolveGate` parking the exact suspension that
+matters and both ride-boundary epochs minted (never merely raced) while the operation is provably
+parked — the same discipline every prior amendment in this ADR and in ADR-024 uses. Both fail against
+the unmodified pre-fix head; re-verified by reverting only the fix and observing each fail with the
+predicted before/after values, not merely `XCTFail`.
+
+- iOS `RideSegmentLifecycleTests.testAnOldRideOnesOperationParkedAcrossEndAndStartCannotBecomeRideTwosAuthority`
+  — ordering 1. Ride 1 establishes X; a second Play (Y) is admitted under ride 1 and parked at its own
+  `content.resolve`, after `applyAuthoritative` has captured Y's ride-authority provenance and before
+  `applyPlay` writes anything; End Ride 1 is accepted (epoch minted, cleanup **not** invoked); Start
+  Ride 2 is accepted; Y is released and resumes; only then is ride 1's parked cleanup invoked. Asserts
+  `currentPlaybackIdentity`, `diagnostics.currentTrackHash` and `timeline` are all `nil` (X was
+  cleared by ride 1's own now-correctly-firing cleanup; Y never wrote) and `supersededEndRideCount ==
+  0` (the cleanup was not fooled into standing down).
+- iOS `…testGenuinelyNewAuthorityEstablishedAfterEndRideSurvivesThatSameEndRidesDelayedCleanup` —
+  ordering 2. Ride 1 is started with nothing played; End Ride 1 is accepted (epoch minted, cleanup
+  **not** invoked); while still CONNECTED and before any Start Ride 2, genuinely new authoritative
+  track Z is established; only then is ride 1's own parked cleanup invoked. Asserts
+  `currentPlaybackIdentity`/`diagnostics.currentTrackHash`/`timeline` all still name Z, and
+  `supersededEndRideCount == 1` (the boundary recognised Z as not its own and said so, rather than
+  destroying it silently).
+- iOS `…testASupersededEndRideStillClearsRideOneWhenRideTwoHasEstablishedNothingAtTheStrictCompare` —
+  Property B re-run once more at the new comparison, so a future change that loosens `<` back to `<=`
+  fails here rather than only in the ordering-2 regression above.
+- iOS `…testFiftyCyclesOfRegression1AndRegression2SatisfyBothNewProperties` — fifty cycles alternating
+  between the two orderings, fresh harness each cycle. Run an additional ten times standalone (500
+  effective cycles total) with no failures.
+
+All pre-existing `RideSegmentLifecycleTests` (Properties A/B at every earlier ordering, the §17 apply
+proofs, the fifty-cycle suites from rounds 3–5) are unchanged and still pass — the comparison change
+only distinguishes a case (authority admitted *exactly at* a boundary's own epoch) none of the earlier
+tests exercised, because none of them established anything without first advancing past that exact
+value via a further Start Ride.
+
+### This pass's own fresh-fix audit
+
+Every site that writes `rideAuthorityEpoch`, `currentPlaybackIdentity` or `timeline` was re-read
+against: what operation authorised this write; what ride/boundary token did that operation capture
+before its first suspension; is that exact token — not a fresh `rideEpochs.current` read — what is
+compared and stamped; can End Ride or Start Ride happen while this work is suspended; if so, does the
+guard immediately preceding the write catch it. `applyPlay`, `applyTransport`, `applySeek`,
+`applyStep` (both its recursive `applyPlay` call and its own "nothing loaded" branch),
+`applyPeerPlaybackState` and `restoreFromPlaybackState` (both its "nothing loaded" branch and its own
+re-proof before the `.deferredContent` retention append) all now carry and check `admittedRideEpoch`.
+Two sites were deliberately left unchanged after inspection: `applyPeerPlaybackState`'s final
+"already synced, just re-anchor" branch, reached only when no suspension has occurred since its own
+entry guard (so the guard already covers it with no window); and the clock/content-readiness retry
+append inside `applyPeerPlaybackState`'s `needsFullRestore` block, which is generation-scoped retry
+bookkeeping rather than ride-scoped authority — the eventual drain re-captures `admittedRideEpoch`
+fresh at its own resumption, which is the same "fresh admission at the drain, not a reused stale
+value" pattern already governing every other deferred-event replay in this file.
+
+**Introduced-then-caught, before anything was pushed.** The first draft added the
+`rideEpochs.current == admittedRideEpoch` guard but left `recordRideAuthority()`'s signature reading
+`rideEpochs.current` directly, reasoning (correctly, for that instant) that the guard immediately
+above already proved the two equal. That is true and is not wrong, but it is also exactly the shape
+Amendment A4's own broken argument took — "provably equal right now" is not the same claim as
+"structurally cannot disagree later" — so before running anything the signature was changed to take
+`admittedRideEpoch` as an explicit parameter, matching every other provenance value in this file.
+
+### Platform parity
+
+**Android is unaffected by construction, not by omission.** `SessionCoordinator.endRide()` on Android
+calls `owner.endRideSegment(owner.nextRideEpoch())` as two back-to-back synchronous, non-suspending
+calls with no scheduling hop between the epoch mint and the cleanup — unlike iOS, there is no
+`launchInSession`-equivalent deferral of the cleanup itself, only of `restoreRate()`'s single
+unfenced player call *after* every state mutation already completed (Amendment A4's own documented
+platform difference). Android's `endRideSegment`/`leaveSynchronizedMode` are plain functions with no
+suspension point of any kind, so by the time any other code — including a parked `applyPlay` resuming
+on a coroutine dispatcher — can run, an accepted End Ride's cleanup has *already* fully executed and
+`synchronizedModeEpoch` has *already* moved. Android's existing `synchronizedModeEpoch == rideLifetime`
+guard alone is therefore sufficient: there is no "accepted but not yet cleaned up" window for a
+second guard to close, because acceptance and cleanup are the same statement. Android's
+`recordRideAuthority()` was deliberately left reading `rideEpochs.current` live — changing it would be
+motion with no defect behind it, the thing round 4's own "never invent an Android race just to make
+the implementations look identical" instruction forbids. Android's full test suite
+(`android/app/src/test/kotlin/com/ridelink/app/resync/ResyncRecoveryTest.kt` included) was re-run in
+full and is unaffected; no Android source file changed.
+
+### Full test results
+
+**iOS.** `swift test` for both `RideLinkCore` (343 tests) and `RideLinkPlatform` (619 tests) — all
+passing, including `RideSegmentLifecycleTests` (now 17 tests, up from 12), `ResyncCoordinatorTests`,
+`ReconnectResyncStressTests` and every Phase 5 synchronised-playback suite. `RideSegmentLifecycleTests`
+alone re-run ten additional times standalone with no failures. The full `RideLink` app target builds
+(`xcodebuild -scheme RideLink -destination 'generic/platform=iOS' build`, `CODE_SIGNING_ALLOWED=NO` —
+this machine has no development team configured, unrelated to this change) with no warnings from the
+changed files.
+
+**Android.** `./gradlew :core:test :network:test :app:test --rerun-tasks` — 1,048 tests across all
+three modules, 0 failures, 0 errors (verified by parsing every `TEST-*.xml`, not just the console
+summary). `ktlintCheck`, `detekt` and `assembleDebug` all clean. No Android source file touched.
+
+### Physical qualification
+
+Unchanged: **DEFERRED — HARDWARE NOT AVAILABLE.** No Android↔iPhone reconnect, Bluetooth or hotspot
+recovery, screen-lock networking, battery, thermal, audible resync quality or two-hour ride result is
+claimed by this amendment.

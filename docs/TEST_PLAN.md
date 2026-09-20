@@ -437,6 +437,21 @@ that parked somewhere harmless and passed vacuously.
 | 2 — landing proof | iOS discriminates the resolve by ordinal **and** asserts no player selection while parked; Android's gate predicate is `lastAppliedCommandSeq == 2`, true only between the outer pre-check resolve and `applyPlay`'s own, reached by severing the Phase 5 wire so the follower's applied sequence and the snapshot's genuinely differ. Both assert the resulting outcome, never merely that something parked | both platforms |
 | 2 — repetition | 50 cycles per platform, fresh harness each cycle | both platforms |
 
+**Added by independent review round 6 (ADR-028 Amendment A5).** Round 5's *own fix* was reviewed and
+one blocker, in two reachable orderings, was confirmed in it. Both regressions were run against the
+unmodified round-5 head (`17d905a`) first and observed to fail for the stated reason, then re-verified
+green after the fix; the source changes were stashed and the test file alone re-run to confirm the
+before/after values. **No sleeps anywhere**; ordering 1's parked frame is pinned **by construction**
+with the same `content.armResolveGate` predicate-on-the-wire-message discipline round 5's own
+regressions use.
+
+| Round-6 finding | What is asserted, and where |
+|---|---|
+| 1 — an operation admitted under ride 1, parked across an accepted End Ride **and** a further accepted Start Ride, becomes ride 2's authority | The ordering round 5's fix made possible: ride 1 establishes X; a second Play (Y) is admitted under ride 1 and parked at its own `content.resolve`, after `applyAuthoritative` has captured Y's ride-authority provenance and before `applyPlay` writes anything; End Ride 1 is accepted (epoch minted, cleanup **not** invoked); Start Ride 2 is accepted; Y is released and resumes; only then is ride 1's parked cleanup invoked. Expected: `currentPlaybackIdentity`, `diagnostics.currentTrackHash` and `timeline` are all `nil` (X correctly cleared by ride 1's own cleanup; Y never wrote anything) and `supersededEndRideCount == 0` (the cleanup was not fooled into standing down). Pre-fix, Y's track survived as live identity/diagnostics/timeline and the cleanup incorrectly reported itself superseded | `RideSegmentLifecycleTests` (iOS — the platform with the window; Android's cleanup call is synchronous with the epoch mint) |
+| 2 — genuinely new post-End authority destroyed by that same boundary's own delayed cleanup | The inverse ordering: ride 1 is started with nothing played; End Ride 1 is accepted (epoch minted, cleanup **not** invoked); while still CONNECTED and before any Start Ride 2, genuinely new authoritative track Z is established; only then is ride 1's own parked cleanup invoked. Expected: `currentPlaybackIdentity`/`diagnostics.currentTrackHash`/`timeline` all still name Z, and `supersededEndRideCount == 1` (the boundary recognised Z as not its own and said so). Pre-fix, Z was destroyed and the boundary reported clearing something it never owned | `RideSegmentLifecycleTests` (iOS) |
+| Property B re-pinned at the new strict compare | Ride 1 establishes X; End Ride 1's cleanup is delayed; ride 2 establishes nothing; the delayed cleanup is released. X must still be cleared — the strict `<` comparison must not reintroduce round-4's Property-B failure while fixing finding 2 above | `RideSegmentLifecycleTests` (both new and pre-existing test, both platforms) |
+| repetition | 50 cycles alternating findings 1 and 2, fresh harness each cycle; the standalone suite re-run 10× beyond that (500+ effective cycles of the new regressions with no failures) | `RideSegmentLifecycleTests` (iOS) |
+
 **Added by the operation-lifetime audit (ADR-024 Amendment A4).** Independent verification of A3
 named the class *underneath* A3's fence, and confirmed six findings in it. A3 asks "may this
 operation run at all?"; A4 asks "may it still run **its next effect**, now that it has suspended?"
