@@ -373,6 +373,29 @@ path on receipt of `STATE_SNAPSHOT` — recovery latency is now bounded by the r
 is the shared vector set. No physical measurement of the actual recovery latency exists — S-01…S-12
 are still the gate for that.
 
+**Added by independent review round 3 (ADR-028 Amendment A2, 20 September 2026).** Three blockers and
+two further defects, each reproduced against unmodified production on both platforms before the fix
+and each reverting to failing in isolation.
+
+| Finding | What the regression proves | Where |
+|---|---|---|
+| A — a deferred reconciliation deadlocked while desynchronised | A follower genuinely desynchronised (`forceDesynchronizedForTest`, the real ingress-overflow effect) receives a valid live-generation `STATE_SNAPSHOT` whose restore needs a fresh clock; the snapshot is **retained**, the outcome is deferred, the latch stays closed and the player is untouched. The precondition then resolves and the **originally retained** snapshot applies by itself: the player converges, the latch clears, the deferred stream drains, and incremental authority resumes. **No second snapshot is delivered** — the leader's own sent-snapshot count is asserted unchanged, and the resync wire back to it is severed first, so a second one cannot exist. Repeated for the *content* precondition, resolved by `content.observeAvailability`, with no duplicate transfer request | `ResyncRecoveryTest` (Android), `ResyncCoordinatorTests` (iOS) |
+| B — a deferred reconciliation could never report completion | iOS specifically: `.snapshotPending` becomes `.reconciled` automatically, on both preconditions, with no second snapshot, and reports the retained snapshot's own `command_seq`. Ownership: an obligation recorded under generation B is inert once C authenticates, and C's own round trip still reconciles normally | `ResyncCoordinatorTests` (iOS), `ResyncRecoveryTest` (Android) |
+| C — production End Ride did not end ride-segment authority | Android drives the **real** `SessionCoordinator.endRide()` — the function the Ride Mode button calls — over a real `SessionFsm` and the real `SyncPlaybackCoordinator`: ride 1 establishes track X, End Ride moves the FSM to `CONNECTED` **and** clears `currentPlaybackIdentity`, ride 2 starts and reconnects before establishing any playback, and the leader's `STATE_SNAPSHOT` reports **nothing loaded** rather than X. Track Y then works normally and is reported. `leaveSynchronizedMode()` is never called by the test | `ResyncRecoveryTest` (Android), `RideSegmentLifecycleTests` (iOS) |
+| C′ — ride 1's late cleanup must not clear ride 2 | An End Ride whose cleanup is applied after ride 2 has begun clears nothing and is counted (`staleRideLifecycleCount` / `supersededEndRideCount`). Android's real `endRide()` performs its cleanup synchronously, so the ordering is unreachable there by construction — the test presents the coordinator with exactly the call a reordered iOS hop would make, proving the epoch guard is load-bearing rather than assumed | both platforms |
+| D — an unbounded `STATE_REQUEST` storm | Covered structurally by every Blocker A case: each asserts the leader's sent-snapshot count and the follower's sent-request count are unchanged across the whole recovery. Pre-fix the Android regression exhausted the JVM heap | both platforms |
+| repetition | All of the above, fifty times each on a fresh harness per iteration, in-process and deterministic — no sleeps, no `--rerun-tasks` loop | `ResyncRecoveryTest`, `ResyncCoordinatorTests`, `RideSegmentLifecycleTests` |
+
+**Disclosed test-infrastructure limitation, iOS.** `ios/RideLink.xcodeproj` declares one application
+target and **no unit-test bundle**, so `SessionCoordinator.endRide()` itself is unreachable from every
+test in this repository (the same gap `ReconnectResyncStressTests` already records, `docs/STATUS.md`
+§4 problem 20). The fix therefore puts every ride-lifetime *decision* in `RideSegmentLifecycle`,
+inside `RideLinkPlatform`, and leaves `SessionCoordinator.endRide()` holding two calls with no logic
+in them; `RideSegmentLifecycleTests` drives exactly what those two lines do. Android's regression
+exercises the genuine entry point, so the production ordering is proved end to end on one platform
+and at the highest reachable seam on the other. **This is a stated limitation, not a claim of
+equivalence.**
+
 **Added by the operation-lifetime audit (ADR-024 Amendment A4).** Independent verification of A3
 named the class *underneath* A3's fence, and confirmed six findings in it. A3 asks "may this
 operation run at all?"; A4 asks "may it still run **its next effect**, now that it has suspended?"

@@ -2032,6 +2032,14 @@ to prevent, reintroduced by the very fix (Finding A) meant to prevent a *differe
 clearing it in `leaveSynchronizedMode()`, before teardown, alongside the other ride-segment state that
 function already retires.
 
+**Corrected by [ADR-028 Amendment A2](ADR-028-ride-mode-and-state-resynchronization.md#amendment-a2--20-september-2026--independent-review-round-3-three-confirmed-blockers-all-fixed)
+(Blocker C).** Clearing it there is right, and this finding stands as written. What it did not
+establish is that *anything in production reached that call from End Ride*: the real button reaches
+`SessionCoordinator.endRide()`, which at the time produced `RIDE_ACTIVE -> CONNECTED` and nothing
+else, and the only production caller of `leaveSynchronizedMode()` was "Play locally". The End Ride
+order was real only in the tests that called it by hand. A2 supplies the production wiring, and makes
+the ride a lifetime with an epoch of its own.
+
 **What this amendment does not do.** No wire change; `protocol/vectors/` is untouched — every finding
 here is about what a device truthfully constructs or honestly reports about its own local state, never
 about a new field or a changed encoding. No new player, queue, or timeline authority; `applyPlay`

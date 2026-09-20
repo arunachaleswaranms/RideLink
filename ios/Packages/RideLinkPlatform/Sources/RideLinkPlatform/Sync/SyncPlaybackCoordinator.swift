@@ -110,6 +110,17 @@ public actor SyncPlaybackCoordinator {
     /// own doc comment. Updated everywhere `timeline`'s track/queue-item identity changes; **not**
     /// cleared by `resetForNewSession()`, unlike `timeline` itself.
     var currentPlaybackIdentity: PlaybackIdentity?
+
+    /// Independent-review round 3, Blocker C: the ride segment `currentPlaybackIdentity` belongs to.
+    ///
+    /// Strictly increasing, assigned by `RideSegmentLifecycle` — which bumps it on **both** Start
+    /// Ride and End Ride — and never derived here. It is compared, never re-read: `endRideSegment` is
+    /// reached through a scheduling hop from `SessionCoordinator`, so an End Ride authorised by ride 1
+    /// that resumes after ride 2 has begun must be refused rather than allowed to clear ride 2's
+    /// state. That is ADR-024 Amendment A5's rule ("a local mutation that has been authorised is not
+    /// a local mutation that may still happen") applied to the ride lifetime, which is a third
+    /// lifetime beside the control generation and the playback epoch.
+    var lastRideLifecycleEpoch: Int64 = 0
     var driftState = DriftController.reset()
     private var tickTask: Task<Void, Never>?
 
@@ -1043,6 +1054,47 @@ public actor SyncPlaybackCoordinator {
     public func next() async { await issue { header in .next(header: header) } }
 
     public func previous() async { await issue { header in .previous(header: header) } }
+
+    /// ARCHITECTURE §3's `RIDE_ACTIVE -> CONNECTED`, reaching the one owner of ride-segment playback
+    /// authority (independent-review round 3, Blocker C; ADR-028 Amendment A2).
+    ///
+    /// **End Ride is not End Session.** The control connection, the pairing and the peer session all
+    /// stay alive, and local music keeps playing exactly as a Phase 3 ride — which is precisely what
+    /// `leaveSynchronizedMode` already means, so this is that call plus the ride-lifetime proof,
+    /// never a second teardown path and never a second player owner.
+    ///
+    /// What it must end is the *ride segment's* synchronisation authority, and the reason is
+    /// `currentPlaybackIdentity`: it deliberately survives an ordinary control-link loss (Blocker 2B),
+    /// so without this the track ride 1 was playing was still the value a leader's `STATE_SNAPSHOT`
+    /// reported after ride 2 had begun — a stale identity presented as ride 2's authoritative truth.
+    ///
+    /// - Parameter rideEpoch: the strictly-increasing epoch `RideSegmentLifecycle` assigned to *this*
+    ///   End Ride. An epoch no newer than the last applied belongs to a ride that is already over and
+    ///   is refused, so a late End Ride can never clear a successor ride's state. The guard is the
+    ///   first statement and every mutation `leaveSynchronizedMode` performs precedes its single
+    ///   trailing `await`, so there is no suspension between proving ownership and acting on it.
+    public func endRideSegment(rideEpoch: Int64) async {
+        guard rideEpoch > lastRideLifecycleEpoch else {
+            diagnostics.staleRideLifecycleCount += 1
+            publishDiagnostics()
+            return
+        }
+        lastRideLifecycleEpoch = rideEpoch
+        await leaveSynchronizedMode()
+    }
+
+    /// ARCHITECTURE §3's `CONNECTED -> RIDE_ACTIVE`. Records the ride segment's epoch and **nothing
+    /// else**: a ride starting must not disturb synchronised playback, which is legitimately usable
+    /// from `CONNECTED` before any ride begins (`SyncPlaybackView` is on the main screen). Its only
+    /// job is to make a later `endRideSegment` from the *previous* ride provably stale.
+    public func beginRideSegment(rideEpoch: Int64) {
+        guard rideEpoch > lastRideLifecycleEpoch else {
+            diagnostics.staleRideLifecycleCount += 1
+            publishDiagnostics()
+            return
+        }
+        lastRideLifecycleEpoch = rideEpoch
+    }
 
     /// Leaves synchronised mode without ending the control session: local playback continues exactly
     /// as a Phase 3 ride, correction stops and the rate goes back to exactly 1.0 (brief §38).

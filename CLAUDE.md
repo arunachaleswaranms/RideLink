@@ -246,8 +246,40 @@ clock-or-content-not-ready snapshot was dropped instead of held, the outer coord
 applied from deferred from rejected, and a leader's track identity could leak past its own ride's end
 — all reachable through Phase 5's own machinery, which Phase 7's new call path was merely the first to
 reliably exercise. No wire change. Both reproduced against unmodified production before fixing, on
-both platforms. Independent review of *this* pass has not yet run. No physical Bluetooth, iPhone,
-battery/thermal, or riding result is claimed. Phase 8 is untouched.
+both platforms.
+
+**A second independent review then accepted the generation-bound resync writer and found three more
+confirmed blockers, all fixed** ([ADR-028 Amendment A2](docs/DECISIONS/ADR-028-ride-mode-and-state-resynchronization.md#amendment-a2--20-september-2026--independent-review-round-3-three-confirmed-blockers-all-fixed);
+STATUS problems 76–80). **Blocker A**: `drainDeferredEvents` began with a blanket desync guard, and
+Amendment A1 had made a reconciliation snapshot that cannot restore yet *retained in that same
+stream* — a cycle, because the flag clears only when that snapshot applies and it could apply only
+from the drain the flag stopped. A follower left desynchronised permanently, however promptly the
+precondition resolved. Fixed by a **per-item** rule — an authoritative state frame *is* the repair
+and may drain; an incremental command stays blocked — plus the second half liveness needed: ADR-024
+A1 Finding C's refusal rule now reaches a command already **held**, not only one arriving, so nothing
+blocks the repair at the head. **Blocker B**: a deferred reconciliation could never report
+completion, because iOS compared the completion's generation against the *wire* request's, which the
+deferral itself had already correctly cleared; one field was carrying two obligations. They are now
+two, and the reconciliation one carries immutable, monotonic generation ownership — compared, never
+re-derived. Android's diagnostics-inferred equivalent was replaced by the same explicit signal,
+because it could not tell "converged" from "**discarded**". **Blocker C**: no production path
+connected End Ride to the owner of ride-segment playback authority — the order existed only in tests
+that called `leaveSynchronizedMode()` by hand, the "a test proves an order production does not"
+shape this file's standing lesson already names — so ride 1's track could be reported as ride 2's
+authoritative truth. The ride is now a **third lifetime** beside the control generation and the
+playback epoch: a strictly increasing ride epoch, assigned synchronously before any scheduling hop
+and compared rather than re-derived. **End Ride is not End Session** — no ADR-026 teardown, and local
+music is untouched. **Two further defects were found by this pass's own work**: an unbounded
+`STATE_REQUEST` storm when a follower is desynchronised *and* holds a deferred reconciliation (it
+exhausted the JVM heap in the regression before it was closed), and an index-based `removeFirst()` in
+`drainDeferredEvents` that can act on the wrong frame when the held stream shortens inside one of its
+suspensions. All reproduced against unmodified production on both platforms first. One disclosed
+limitation stands: `ios/RideLink.xcodeproj` has **no unit-test bundle**, so
+`SessionCoordinator.endRide()` is untestable there — the ride lifetime's decisions live in
+`RideSegmentLifecycle` inside `RideLinkPlatform` so they are testable at their real seam, and
+Android's regression exercises the genuine entry point. Independent review of *this* pass has not yet
+run. No physical Bluetooth, iPhone, battery/thermal, or riding result is claimed. Phase 8 is
+untouched.
 
 Accepted baseline:
 
