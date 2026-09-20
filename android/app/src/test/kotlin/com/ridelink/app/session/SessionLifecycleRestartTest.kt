@@ -87,8 +87,21 @@ class SessionLifecycleRestartTest {
             sut.coordinator.startIntercom()
             sut.awaitTrue("capture open") { sut.audio.isOpen }
 
+            // The `ENDING` assertion below must not race the teardown it is watching. `ENDING ->
+            // IDLE` is opened by production's own `TeardownComplete`, asynchronously, so on a loaded
+            // machine the release can finish and the transition can happen **before** the main thread
+            // samples `state.value` — which is exactly what CI observed (expected ENDING, was IDLE).
+            // Holding the release open makes the observation deterministic rather than probable. This
+            // is the seam `a stalled release holds ENDING open and refuses a successor outright`
+            // already uses; it is deliberately **not** a widened timeout, which would hide the race
+            // instead of removing it.
+            val closeGate = CompletableDeferred<Unit>()
+            sut.audio.closeGate = closeGate
+
             sut.coordinator.handleControlEvent(ControlEvent.LinkLost(LinkLossReason.BYE))
+            sut.awaitTrue("release in flight") { sut.audio.closeCalls > 0 }
             assertEquals(SessionStatus.ENDING, sut.coordinator.state.value.status)
+            closeGate.complete(Unit)
 
             sut.awaitTrue("IDLE") { sut.coordinator.state.value.status == SessionStatus.IDLE }
             assertEquals(1, sut.audio.closeCaptureCount, "capture was released before IDLE")
@@ -105,8 +118,19 @@ class SessionLifecycleRestartTest {
     fun `the user ending the session reaches IDLE the same way`() =
         withSession { sut ->
             sut.connect()
+            // The intercom is started here for the same reason the gate exists below: the release is
+            // the one teardown step a test can hold, and holding it is what makes the `ENDING`
+            // observation deterministic. See the sibling test above for the full reasoning.
+            sut.coordinator.startIntercom()
+            sut.awaitTrue("capture open") { sut.audio.isOpen }
+            val closeGate = CompletableDeferred<Unit>()
+            sut.audio.closeGate = closeGate
+
             sut.coordinator.endSession()
+            sut.awaitTrue("release in flight") { sut.audio.closeCalls > 0 }
             assertEquals(SessionStatus.ENDING, sut.coordinator.state.value.status)
+            closeGate.complete(Unit)
+
             sut.awaitTrue("IDLE") { sut.coordinator.state.value.status == SessionStatus.IDLE }
             assertEquals(1, sut.fgs.stopCalls)
         }
