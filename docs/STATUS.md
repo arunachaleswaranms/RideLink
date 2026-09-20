@@ -6408,7 +6408,161 @@ current head's CI result in §7/PR #5).
 
 ---
 
+## 2ax. Independent review round 4 — two confirmed lifecycle blockers, both fixed (20 September 2026, ADR-028 Amendment A3)
+
+**Round 3's own fixes were reviewed, and two lifecycle blockers were confirmed in them.** Both were
+reproduced against unmodified production on both platforms before anything was changed. Both are the
+same missing distinction: **an identity is not a lifetime**. Round 3 gave the ride an epoch and the
+reconciliation a generation, and then asked each of them a question it could not answer.
+
+**Blocker 1 — an accepted End Ride could be superseded before its cleanup ran, and then never ran
+(problem 83).** `SessionCoordinator.endRide()` cannot `await`, so the cleanup crosses a scheduling
+hop. Round 3 refused any cleanup whose epoch was no longer current — which protects ride 2
+(*Property A*) and breaks the other half in the same statement (*Property B*): `startRide`
+deliberately establishes nothing, so a Start Ride pressed before ride 1's cleanup ran did nothing but
+**bump the epoch**, making that cleanup "stale" while leaving ride 1's `currentPlaybackIdentity`
+standing as the only thing ride 2's first `STATE_SNAPSHOT` had to report. Round 3's Blocker C
+reached from the other side of the same race. **Removing the epoch check would have been strictly
+unsafe** (a genuinely late cleanup would then clear ride 2's Y), so the fix is that the boundary
+compares against the right thing: a new `rideAuthorityEpoch` records the ride that *established* the
+live authority, stamped at the three places that establish it, and `endRideSegment` refuses only when
+a **strictly newer ride already owns something of its own**. Both properties hold by construction and
+neither is bought by weakening the other. `RideSegmentLifecycle.endRide` stops deciding and forwards;
+only the coordinator can see whose authority is standing.
+
+**Blocker 2 — End Ride discarded the inner reconciliation while the outer obligation survived
+(problem 84).** `leaveSynchronizedMode()` clears `deferredEvents` outright (correct — the ride that
+asked for it is over) and nothing told `ResyncCoordinator`. **End Ride deliberately does not move the
+authenticated control generation**, so the stale outer obligation kept a generation that was still
+live, and a generation-keyed `onReconciliationApplied` let the *next* genuine reconciliation under
+that same generation complete it — publishing ride 1's `command_seq`/`manifest_revision` as a
+reconciliation that never happened. **The existing B→C tests cannot reach this: they move the
+generation, and this defect exists precisely because it does not move.** Fixed with two explicit
+things: an immutable process-local obligation **id** (from 1, never on the wire, never derived from
+live state) that travels into the retained anchor and back out with the terminal result, and an
+explicit `onReconciliationCancelled` raised from the **one** place the held stream is discarded (a new
+`discardDeferredEvents()` through which all four callers now go). Applied and cancelled are the two
+terminal results, mutually exclusive, and **only applied may produce `RECONCILED`**. The obligation is
+recorded **before** the suspending apply, which is load-bearing in both directions — a cancellation
+inside that window must find something to cancel, and the cancellation callback can equally land after
+the apply returns. That identity check also **replaces** round 3's `supersededByNewerObligation`
+generation comparison outright. New `ResyncOutcome.CANCELLED`/`.cancelled`; **no wire change, no
+vector moved.**
+
+**§17's audit of round 3's own `synchronizedModeEpoch` found two more, both fixed (problems 85 and
+86).** Round 3 applied that epoch to `applyPlay` by **re-reading the field at that function's own
+entry** — right when `applyPlay` *is* the operation, wrong when it is a later step of one.
+`applyStep` had **no ride proof at all**, and its `selected == nil` branch calls `epoch.begin()`,
+minting a fresh *live* playback epoch over the one `leaveSynchronizedMode` had just superseded, then
+schedules `[.stop, .clearSelection]` — which the new token makes owned, so it reached the player and
+**stopped local music after End Ride**, whose whole contract (FR-025) is that it keeps playing. And
+`applyPlay` reached *through* `applyStep`/`restoreFromPlaybackState` compared the post-End-Ride value
+with itself and passed. The ride lifetime is now **captured once where the operation is authorised
+and threaded** (`applyAuthoritative`, `applyPeerPlaybackState`), compared and never re-read — the rule
+the generation already follows, applied to the third lifetime. Deliberately **not** stamped: the
+admission stage, whose writes are control-generation-scoped ordering bookkeeping.
+
+**What was preserved, and re-verified by the existing suites staying green:** the generation-bound
+resync writer, the single ordered Phase 5 outbound path, `STATE_REQUEST` dedup and the edge-triggered
+desync request (no storm), a retained authoritative reconciliation draining while
+`playbackDesynchronized` is still set, the automatic clock- and content-deferred completions with no
+second `STATE_SNAPSHOT`, explicit reconciliation completion (never inferred from a field going null),
+`PlaybackIdentity` surviving an ordinary link loss and clearing at a real ride end, and the leader's
+queue surviving a reconnect.
+
+**Two pre-existing platform divergences were audited and deliberately left unchanged**: iOS does
+`STATE_SNAPSHOT` manifest bookkeeping on acceptance where Android does it in `completeReconciliation`
+(both satisfy "a cancelled obligation triggers no refresh"), and Android publishes
+`lastSnapshotCommandSeq` only on completion where iOS also publishes it on the pending branch
+(diagnostics only — Android's new regressions therefore assert the wire's `command_seq`, the stronger
+claim).
+
+**One harness gap found and deliberately scoped rather than changed globally**: `ResyncTestPair.dropLink`
+severs only the *resync* plane, while production forwards `ControlEvent.LinkLost` to both. Every
+existing caller follows it immediately with `reconnect`, whose `Connected` reaches
+`resetForNewSession` anyway, so the omission was invisible; two `ResyncStressTest` scenarios
+deliberately model a resync outage across which Phase 5 keeps its session, and making `dropLink` reset
+the sync side changes what those tests are about. The one regression that needs the full production
+boundary emits the sync half itself, and `dropLink` now documents why.
+
+**Disclosed limitation, unchanged and not papered over:** `ios/RideLink.xcodeproj` has **no unit-test
+bundle**, so `SessionCoordinator.endRide()` itself is unreachable from every test in this repository.
+Every ride-lifetime decision therefore lives in `RideSegmentLifecycle`/`SyncPlaybackCoordinator` inside
+`RideLinkPlatform`, where it is driven by the real coordinator; what remains in `SessionCoordinator` is
+two calls with no logic in them, inspected directly and built as part of the app target. Android's
+regressions exercise the genuine `SessionCoordinator.endRide()` entry point.
+
+**New problem rows**: 83, 84, 85 and 86 in §4. **Independent review of *this* pass has not run.**
+Physical qualification remains **DEFERRED — HARDWARE NOT AVAILABLE**; Phase 8 is untouched.
+
+
+---
+
 ## 3. Tests passed / pending
+
+### Independent review round 4 (20 September 2026) — see §2ax
+
+**Passed and verified this session by actually running the commands on this machine**, with every
+number independently re-derived (JUnit XML summed, `swift test` output grepped) rather than taken
+from a self-report. Every Gradle command used
+`-Dorg.gradle.java.home=/opt/homebrew/opt/openjdk@21/libexec/openjdk.jdk/Contents/Home` (§4 problem 17).
+
+| Gate | Result |
+|---|---|
+| Android `./gradlew test` (all five modules) | green — **1 045** tests, 0 failures (core 447, network 283, app 251, audio 33, data 31) |
+| Android `./gradlew ktlintCheck` | green |
+| Android `./gradlew detekt` | green |
+| Android `./gradlew lint` | green |
+| Android `./gradlew assembleDebug` | green |
+| Android `./gradlew assembleRelease` | green |
+| iOS `swift test` `RideLinkPlatform` | green — **608** tests (was 573) |
+| iOS `swift test` `RideLinkCore` | green — **343** tests, unchanged |
+| iOS unsigned generic-iOS-device build, Debug **and** Release | green (`BUILD SUCCEEDED`) |
+| iOS unsigned simulator build, Debug **and** Release | green (`BUILD SUCCEEDED`) |
+| `swiftlint` / `swiftformat` | **genuinely absent from this machine** — confirmed with `which`, not assumed |
+| Repeated runs | iOS `RideSegmentLifecycleTests` + `ResyncCoordinatorTests` 3×31 green; Android `com.ridelink.app.resync.*` 3×51 green with `--rerun-tasks` |
+
+**Reproduce-before-fix, both blockers, both platforms.** Every regression added by this pass was run
+against the round-3 sources first and observed to fail for the stated reason, then against the fix and
+observed to pass:
+
+- **Blocker 1 (iOS):** with round-3's guard restored, `ride 2 inherited ride 1's playback identity`
+  and the ride-2 `STATE_SNAPSHOT` reported ride 1's `track_hash`; the Property-A test still passed,
+  which is the point — round 3 had that half right.
+- **Blocker 1 (Android):** with round-3's guard restored, `a boundary that owned Ride 1's state must
+  act, not be refused as stale` failed.
+- **Blocker 2 (both):** with the cancellation signal removed and generation-only matching restored,
+  7 of the 15 Android `ResyncRecoveryTest` methods failed and the iOS suite failed with the headline
+  line **`a late S1 signal changed S2's reported outcome`** (`snapshotPending` → `reconciled`) — S2's
+  obligation completed by S1's late signal under the same control generation.
+- **§17's two (iOS):** with the ride proof removed from `applyStep` and re-read inside `applyPlay`,
+  `a NEXT authorised before End Ride stopped local playback afterwards` (`[.stop, .clearSelection]`
+  reached the player) and `a step authorised before End Ride re-established ride playback identity`.
+
+**New deterministic regressions — no sleeps anywhere.** The parked-cleanup ordering is *stated*
+rather than raced: both ride epochs are taken synchronously, in production's own order, and the two
+effects are then run in the opposite order — which is exactly what `SessionCoordinator`'s
+`nextRideEpoch()`-then-`launchInSession` shape produces. §17's regressions park on
+`FakeSyncSession`'s existing generation gate and pin the suspension **by construction, not by
+counting**: they enter at `applyAuthoritative`, the real capture point, and arm the gate with no
+skips, so the first generation read that follows is that function's own `stillCurrent`, one statement
+after the capture. Driving them through `onPlaybackMessage` instead would depend on how many
+generation reads the admission path happens to take first — the "counting calls does not pin it"
+mistake this suite's own `applyPlay` regression already records.
+
+| Suite | Added |
+|---|---|
+| iOS `RideSegmentLifecycleTests` | `testASupersededEndRideStillClearsRideOneWhenRideTwoHasEstablishedNothing` (Property B, §6's exact scenario, no Play Y), `testASupersededEndRideReleasedAfterRideTwoEstablishedItsOwnTrackClearsNothing` (Property A), `testFiftySupersededEndRideCyclesSatisfyBothRideBoundaryProperties` (50 cycles, alternating), `testAStepRunningOffTheQueueParkedAcrossEndRideCannotStopLocalPlayback`, `testAStepSelectingATrackParkedAcrossEndRideCannotReestablishPlayback` |
+| iOS `ResyncCoordinatorTests` | clock-deferred + End Ride, content-deferred + End Ride, two obligations under one generation, a late S1 applied **and** cancelled signal against a live S2, terminal teardown with a pending obligation, 50 same-generation cancel-then-apply cycles |
+| Android `ResyncRecoveryTest` | the Blocker 1 pair at the production `SessionCoordinator.endRide()` seam, and the same six Blocker 2 regressions |
+
+**What is NOT claimed.** No Android emulator or iOS Simulator interactive run was performed this
+pass — the changes are lifecycle-internal and every one of them is covered by a deterministic
+in-process regression. The simulator's pre-existing unsigned-build Keychain entitlement failure
+(`OSStatus -34018`) is unchanged and unrelated. **Physical qualification remains DEFERRED — HARDWARE
+NOT AVAILABLE**: no Bluetooth, iPhone, battery, thermal, audible or riding result is claimed.
+TEST_PLAN §5.2's S-01…S-12 remain pending and no alignment figure exists.
+
 
 ### Phase 7 software closure (19 September 2026) — see §2av
 
@@ -7243,6 +7397,10 @@ as of this write-up — see §7.
 | 80 | **FIXED 20 September 2026 (this pass's own fresh-fix audit, §17).** `drainDeferredEvents` suspends on the clock estimate and on content resolution, and its very next statement is an index-based `removeFirst()`. The held stream can legitimately shorten inside those windows — `applyPeerPlaybackState`'s supersede rule (pre-existing) and, new in this pass, `latchDesynchronized`'s refusal of held commands — because the drain is reached from the inbound consumer, the retry cadence **and** the content-availability callback. Removing by index afterwards takes whatever moved into position 0: a different authoritative frame | ~~Medium~~ Fixed | Both platforms end the pass when the stream moved (Kotlin compares head identity, Swift the count — Swift enums have no identity). Ending a pass is a **retry**, never a wedge: `startDeferredDrain`'s loop and `content.observeAvailability` both call back in, and the next pass re-reads the real head and re-proves everything for it |
 | 81 | **FIXED 20 September 2026 (found by CI on this pass's own head, not locally).** `SessionLifecycleRestartTest`'s two headline ADR-026 tests asserted `SessionStatus.ENDING` **immediately** after the trigger that causes it, while `ENDING -> IDLE` is opened by production's own asynchronous `TeardownComplete` — so on a loaded machine the transition can happen before the main thread samples `state.value`. Latent since those tests were written (the baseline head's CI run was green); this pass's new `ResyncRecoveryTest` added enough load to the same module to expose it. A **test** defect, not a production one — the ordering it asserts is genuinely correct and is proved deterministically by the sibling `a stalled release holds ENDING open and refuses a successor outright` | ~~Medium~~ Fixed | Both tests now hold the capture release open (`FakeVoiceAudioSession.closeGate`) so the `ENDING` observation is taken while the teardown is provably parked, then release it and await `IDLE` — the seam that sibling test already established. Deliberately **not** a widened timeout, which would hide the race rather than remove it. **Honest limit: the pre-fix failure was reproduced by CI at the exact head, not locally** — two bounded attempts under artificial CPU contention did not reproduce it on this machine, and the fix's justification is therefore structural (the assertion can no longer be reached while the transition is in flight) plus 6/6 green under contention after it |
 | 82 | **FIXED 20 September 2026 (found by CI running this pass's own new ride regression).** End Ride deliberately does **not** move the control generation — the session, pairing and connection all stay alive — and `applyPlay` proves only that. `content.resolve` suspends in the middle of it, so an apply authorised before End Ride resumed afterwards and wrote `currentPlaybackIdentity`, the timeline and a fresh playback epoch back over the state `leaveSynchronizedMode` had just retired: ride 1's track reported as ride 2's truth by a different route than problem 78's, and "Play locally" resurrecting a synchronised timeline by the same one | ~~High~~ Fixed | `synchronizedModeEpoch` is bumped by **every** exit from synchronised mode and nothing else; `applyPlay` captures it before its first suspension and compares it — never re-reads it — adjacent to each write (Android writes identity earlier than iOS by a deliberate pre-existing divergence, so it is guarded twice). Deterministic failing-before/passing-after on both platforms. **The regression needed fixing twice**: a count-based content gate passed *vacuously* by parking on a harmless frame, so the gate now parks on a condition the test states ("a `PLAY` is already on the wire") and the test asserts both halves of that pinning first — audit what a regression supplies, not only what it asserts |
+| 83 | **FIXED 20 September 2026 (independent review round 4, ADR-028 Amendment A3, Blocker 1).** An accepted End Ride could be superseded before its cleanup ran, and then never run at all. `SessionCoordinator.endRide()` cannot `await`, so the cleanup crosses a scheduling hop; problem 78's fix refused any cleanup whose ride epoch was no longer current. That satisfies "a late cleanup must not destroy ride 2's state" (Property A) and **breaks** "ride 1's state must not survive into ride 2 because its cleanup was delayed" (Property B) in the same statement — `startRide` deliberately establishes nothing, so a Start Ride pressed before the cleanup ran did nothing but bump the epoch, leaving ride 1's `currentPlaybackIdentity` standing as the only thing ride 2's first `STATE_SNAPSHOT` had to report. Problem 78 reached from the other side of the same race | ~~High~~ Fixed | **Not** by removing the epoch check, which is strictly unsafe (a genuinely late cleanup would then clear ride 2's own track). New `rideAuthorityEpoch` records the ride that **established** the live authority — stamped at the three places that establish it, reset when it ends — and `endRideSegment` refuses only when a *strictly newer* ride already owns something of its own. Both properties by construction, neither bought by weakening the other. `RideSegmentLifecycle.endRide` forwards rather than decides; only the coordinator can see whose authority is standing. `RideBoundaryOutcome` is the answer coming back. Android's window is synchronous and so unreachable there, and is mirrored anyway |
+| 84 | **FIXED 20 September 2026 (independent review round 4, ADR-028 Amendment A3, Blocker 2).** End Ride discarded the **inner** retained reconciliation (`leaveSynchronizedMode` clears `deferredEvents`, correctly) while the **outer** `ResyncCoordinator.deferredReconciliation` survived, and nothing told it. **End Ride deliberately does not move the authenticated control generation**, so the stale obligation kept a generation that was still live and a generation-keyed `onReconciliationApplied` let the *next* genuine reconciliation under that same generation complete it — publishing ride 1's `command_seq`/`manifest_revision` as `RECONCILED`, manifest-refresh side effects included. The existing B→C tests cannot reach it: they move the generation, and this defect exists because it does not | ~~High~~ Fixed | Two explicit things. (1) An immutable process-local obligation **id** (from 1, never on the wire, never derived from live state) travels into the retained anchor and back out with the terminal result; `id` **and** generation are compared. (2) `onReconciliationCancelled` is raised from the **one** place the held stream is discarded — a new `discardDeferredEvents()` through which `leaveSynchronizedMode`, `resetForNewSession`, `failClosedOutbound` and the drain's retired-generation clear all go. Applied and cancelled are mutually exclusive terminal results and **only applied may produce `RECONCILED`**. The obligation is recorded **before** the suspending apply, so a cancellation inside that window finds it and one arriving after it still matches; that identity check replaces problem 77's generation-only monotonicity outright. New `ResyncOutcome.CANCELLED`/`.cancelled`. No wire change, no vector moved |
+| 85 | **FIXED 20 September 2026 (independent review round 4's §17 audit of problem 78's own fix).** `applyStep` had **no** ride-lifetime proof at all. `stillCurrent` suspends and End Ride does not move the control generation, so a `NEXT` running off the end of the queue could take its `selected == nil` branch **after** an End Ride, call `epoch.begin()` — minting a *fresh, live* playback epoch over the one `leaveSynchronizedMode` had just superseded — and schedule `[.stop, .clearSelection]`, which the new token makes owned. It reached the player: **local music stopped after End Ride**, and the local selection was cleared with it, when End Ride's whole contract (FR-025) is that Phase 3 playback continues | ~~High~~ Fixed | The ride lifetime is captured **once where the operation is authorised** (`applyAuthoritative` for every authoritative command, `applyPeerPlaybackState` for every reconciliation) and threaded to every step, which compares it rather than re-reading — the rule the *generation* already follows (rules 19/20) applied to the third lifetime. `applyTransport`, `applySeek`, `applyStep` and `restoreFromPlaybackState` each prove it adjacent to their first write. Android's `stillCurrent`/`estimate` are synchronous so the window does not exist there; mirrored anyway rather than left to that accident |
+| 86 | **FIXED 20 September 2026 (independent review round 4's §17 audit; the same fix as problem 85).** `applyPlay` reached *through* `applyStep` or `restoreFromPlaybackState` captured `synchronizedModeEpoch` at **its own entry** — which, when the End Ride had already landed during the outer operation's suspension, was already the post-End-Ride value. Its guard therefore compared the new value with itself, passed, and re-established `currentPlaybackIdentity`, the timeline and a fresh playback epoch for a ride that was over: problem 78's defect re-created one function further along, by the fix written to prevent it | ~~High~~ Fixed | Same fix as problem 85: `applyPlay` no longer re-reads the epoch, it takes the authorising ride lifetime from the caller that captured it before the operation's first suspension. **The standing lesson holds again: the freshest fix is the least-audited code, and re-reading a live value at a *later* step is how a correct-looking guard compares a value with itself** |
 
 Resolved 26 Aug 2026 session: `CLAUDE.md` in `.gitignore` (was problem 1); `.DS_Store` tracking
 (was problem 7 — the claim was incorrect; the files are untracked and now ignored); the ADR-015/
@@ -7278,9 +7436,22 @@ Not blocking Phase 1. Answers needed before Phase 6.
 ## 7. Next exact task
 
 **Phase 7 — Ride Mode and resilience. SOFTWARE CLOSURE IS IMPLEMENTED, SELF-AUDITED (§2av), AND HAS
-NOW SURVIVED ONE ROUND OF INDEPENDENT REVIEW WITH TWO CONFIRMED BLOCKER GROUPS FIXED (§2aw, ADR-028
-Amendment A1, ADR-024 Amendment A9). A SECOND ROUND OF INDEPENDENT REVIEW HAS NOT YET RUN. PHYSICAL
-RIDE QUALIFICATION REMAINS DEFERRED — HARDWARE NOT AVAILABLE.**
+NOW SURVIVED *THREE* ROUNDS OF INDEPENDENT REVIEW — §2aw (two blocker groups), round 3 (ADR-028
+Amendment A2: three blockers plus two more found by that pass's own work, recorded in the ADR and in
+problems 76-82 rather than in a §2 section of its own), and §2ax/ADR-028 Amendment A3 (two lifecycle
+blockers plus two more found by its §17 audit). A FOURTH ROUND HAS NOT YET RUN. PHYSICAL
+RIDE QUALIFICATION REMAINS DEFERRED — HARDWARE NOT AVAILABLE. PR #5 IS NOT MERGED.**
+
+**§2ax's standing lesson, which is the sharpest form this repository has produced of a rule it keeps
+relearning: an identity is not a lifetime, and the freshest fix is where the two get confused.** Both
+of round 4's blockers were *inside round 3's own fixes*, one session old and CI-green. Round 3 gave
+the ride an epoch and the reconciliation a generation, and then asked each one a question it could not
+answer — "is a newer ride current?" instead of "does a newer ride own anything?", and "is this the
+same generation?" instead of "is this the same obligation?". In both cases the wrong question produced
+a guard that *looked* like the right one and was inert or actively harmful. And §17's two further
+findings are the same shape a third time: re-reading a live epoch at a **later step** of an operation
+makes a correct-looking guard compare a value with itself. **Audit the newest fix first, and when a
+guard compares two values, check that the one it reads was captured where the work was authorised.**
 
 The exact next task is **another independent review of this pass**, for the same reason the first one
 was necessary and found something: §2aw's own two blocker groups were reachable precisely because

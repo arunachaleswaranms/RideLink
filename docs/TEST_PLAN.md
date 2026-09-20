@@ -386,6 +386,30 @@ and each reverting to failing in isolation.
 | D — an unbounded `STATE_REQUEST` storm | Covered structurally by every Blocker A case: each asserts the leader's sent-snapshot count and the follower's sent-request count are unchanged across the whole recovery. Pre-fix the Android regression exhausted the JVM heap | both platforms |
 | repetition | All of the above, fifty times each on a fresh harness per iteration, in-process and deterministic — no sleeps, no `--rerun-tasks` loop | `ResyncRecoveryTest`, `ResyncCoordinatorTests`, `RideSegmentLifecycleTests` |
 
+**Added by independent review round 4 (ADR-028 Amendment A3).** Round 3's *own fixes* were reviewed
+and two lifecycle blockers were confirmed in them, plus two more found by that review's §17 audit of
+round 3's `synchronizedModeEpoch`. Every regression below was run against the round-3 sources first
+and observed to fail for the stated reason. **No sleeps anywhere**: the parked-cleanup ordering is
+*stated* rather than raced (both ride epochs are taken synchronously in production's own order, then
+the two effects run in the opposite order — exactly what `nextRideEpoch()`-then-`launchInSession`
+produces), and §17's regressions park on `FakeSyncSession`'s existing generation gate at
+`applyAuthoritative`, the real capture point, so the parked suspension is pinned **by construction
+rather than by counting calls**.
+
+| Round-4 finding | What is asserted, and where |
+|---|---|
+| 1 — an accepted End Ride superseded before its cleanup ran, and then never running (Property B) | Ride 1 establishes X; End Ride is accepted and takes its epoch; Start Ride 2 takes the next epoch and runs **first**; the parked ride-1 cleanup is then released. Ride 2 has issued **no** Play, so a version of this test that played first would pass against the pre-fix code for the wrong reason. Expected: `currentPlaybackIdentity` nil, the leader's reconnect `STATE_SNAPSHOT` reports nothing loaded, then ride 2's own track Y works and is reported after a further reconnect | `RideSegmentLifecycleTests` (iOS), `ResyncRecoveryTest` (Android, at the real `SessionCoordinator.endRide()` seam) |
+| 1 — the same ordering with ride 2 owning its own track (Property A) | Identical setup, except ride 2 establishes Y before the parked cleanup is released. Expected: Y survives, the timeline survives, and the refusal is *counted* rather than silent. **Neither property may be bought by weakening the other** — both are asserted at the same seam | both platforms |
+| 1 — repetition | 50 cycles alternating whether ride 2 establishes anything, both properties asserted every cycle on a fresh harness | `RideSegmentLifecycleTests` (iOS) |
+| 2 — End Ride while clock-deferred | S1 accepted and deferred for the clock, End Ride, then the clock becomes ready. Expected: the inner retained snapshot discarded, the outer obligation explicitly **cancelled**, no player restoration effect, no `currentPlaybackIdentity`, no manifest refresh, and never `RECONCILED` | `ResyncCoordinatorTests` (iOS), `ResyncRecoveryTest` (Android) |
+| 2 — End Ride while content-deferred | The same with the other precondition; the transfer then completes. Phase 4's own cache behaviour is asserted **untouched** — the track really does become resolvable — and only the synchronisation obligation is cancelled | both platforms |
+| 2 — two obligations under **one** control generation | The case the existing B→C tests cannot reach, because End Ride deliberately does not move the generation. S1 cancelled by End Ride, S2 accepted in ride 2 under the same generation and later applied. Expected: only S2 reconciles, reporting **S2's** `command_seq` (read from the wire on Android, whose diagnostics publish it only on completion) | both platforms |
+| 2 — a late terminal signal for a cancelled obligation | With S1 cancelled and S2 live, a late S1 *applied* signal **and** a late S1 *cancelled* signal are fired straight at the production callbacks. Neither may alter S2, and S2 must still complete normally afterwards. The obligation id is read from the coordinator rather than assumed | both platforms |
+| 2 — terminal teardown with a pending obligation | The lifetime boundary cancels the obligation, and the precondition resolving afterwards produces no late completion | both platforms |
+| 2 — repetition | 50 same-generation cancel-then-apply cycles on a fresh harness each time | both platforms |
+| §17 — a `NEXT` running off the queue, parked across End Ride | The one that could **stop the music**: pre-fix, `applyStep`'s `selected == nil` branch minted a fresh live playback epoch and scheduled `[.stop, .clearSelection]`, which reached the player. Expected: no `stop`, no `clearSelection`, no timeline | `RideSegmentLifecycleTests` (iOS; Android's `stillCurrent`/`estimate` are synchronous so the window does not exist there, and the rule is mirrored rather than left to that accident) |
+| §17 — a `NEXT` selecting a track, parked across End Ride | `applyPlay` reached *through* `applyStep` re-read the epoch at its own entry and compared the post-End-Ride value with itself. Expected: no ride identity, no timeline, no player effect | `RideSegmentLifecycleTests` (iOS) |
+
 **Disclosed test-infrastructure limitation, iOS.** `ios/RideLink.xcodeproj` declares one application
 target and **no unit-test bundle**, so `SessionCoordinator.endRide()` itself is unreachable from every
 test in this repository (the same gap `ReconnectResyncStressTests` already records, `docs/STATUS.md`

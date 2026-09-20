@@ -503,3 +503,161 @@ for it. Ending a pass is a retry, never a wedge.
 Unchanged: **DEFERRED — HARDWARE NOT AVAILABLE.** No Android↔iPhone reconnect, Bluetooth or hotspot
 recovery, screen-lock networking, battery, thermal, audible resync quality or two-hour ride result is
 claimed by this amendment.
+
+## Amendment A3 — 20 September 2026 — independent review round 4: two confirmed blockers, both fixed
+
+Round 3's own fixes were reviewed and two lifecycle blockers were confirmed in them. Both were
+reproduced against unmodified production on both platforms before anything was changed, and both are
+about the same missing distinction: **an identity is not the same thing as a lifetime**.
+
+Round 3 gave the ride an epoch and the reconciliation a generation, and then asked each of them a
+question it could not answer. This amendment gives each the question it can.
+
+### Blocker 1 — an accepted End Ride could be superseded before its cleanup ran, and then never ran
+
+`SessionCoordinator.endRide()` cannot `await`, so the ride-segment cleanup crosses a scheduling hop.
+Round 3 closed the obvious half of that: a cleanup that arrives after a successor ride has begun must
+not clear the successor's state. It did so by refusing any End Ride whose epoch was no longer the
+current one — and that single statement bought one property while breaking the other.
+
+A ride boundary owes two properties, and they are **not** the same property:
+
+- **Property A** — ride 1's cleanup must never destroy ride 2's state.
+- **Property B** — ride 1's state must never survive into ride 2 merely because its cleanup was
+  delayed.
+
+`startRide` deliberately establishes nothing — synchronised playback is legitimately usable from
+`CONNECTED`, before any ride begins, and a ride starting must not disturb it. So a Start Ride pressed
+before ride 1's cleanup ran did nothing except **bump the epoch**, which made that cleanup "stale".
+Ride 1's `currentPlaybackIdentity` was then still standing, and because ride 2 had established
+nothing of its own to overwrite it, it was the only thing ride 2's first `STATE_SNAPSHOT` had to
+report. That is precisely the defect round 3's Blocker C existed to remove, reached from the other
+side of the same race.
+
+**The fix is not removing the epoch check**, which would be strictly unsafe: a genuinely late cleanup
+released after ride 2 owns track Y would then clear Y. The fix is that the boundary compares against
+the right thing.
+
+`SyncPlaybackCoordinator` now records **`rideAuthorityEpoch`** — the ride epoch under which the live
+ride-scoped synchronisation authority was *established*, stamped at exactly the three places that
+establish it (a track becomes authoritative in `applyPlay`; the leader's authoritative "nothing
+loaded" is adopted in `applyStep`'s and `restoreFromPlaybackState`'s nil branches) and reset to 0
+whenever that authority ends. `endRideSegment` then refuses **only** when `rideAuthorityEpoch >
+rideEpoch`: a strictly newer ride already owns something of its own. In every other case what is
+standing belongs to this ride or an earlier one, and ending the ride is exactly the instant it must
+go.
+
+Both properties hold by construction, and neither is bought by weakening the other:
+
+- Property A: ride 2's Y is stamped with ride 2's epoch, which is newer, so the late boundary is
+  refused (`staleRideLifecycleCount`).
+- Property B: ride 2 having established nothing means the live authority is ride 1's, and the
+  boundary clears it.
+
+`lastRideLifecycleEpoch` is still what `beginRideSegment` keeps monotonic; it is simply no longer
+asked a question about ownership that it cannot answer. `RideSegmentLifecycle.endRide` stops deciding
+and starts forwarding: only the coordinator can see whose authority is standing, so the boundary
+always reaches it and `RideBoundaryOutcome` is the answer coming back. The type still owns ride-segment
+cleanup **ordering and ownership only** — it is not a second `SessionFsm`, holds no session or
+navigation state, and never decides whether a ride may start or end.
+
+Android's `endRide()` performs its cleanup synchronously, so the *window* is iOS's; the rule is
+mirrored anyway, because "this ordering probably cannot happen here" is not a guarantee.
+
+### Blocker 2 — End Ride discarded the inner reconciliation while the outer obligation survived
+
+`SyncPlaybackCoordinator` owns the retained authoritative snapshot; `ResyncCoordinator` owns the
+`STATE_SNAPSHOT` metadata needed to later report `RECONCILED` with the right `command_seq` and
+`manifest_revision`. That separation is right, and round 3 made both halves explicit rather than
+inferred. What it did not do is connect them in the *failing* direction.
+
+`leaveSynchronizedMode()` clears `deferredEvents` outright — correct, the ride that asked for the
+reconciliation is over. Nothing told the outer owner. And **End Ride deliberately does not move the
+authenticated control generation**: the connection, the pairing and the session all stay alive on
+purpose. So the stale outer obligation kept a generation that was still live, and
+`onReconciliationApplied(generation)` — keyed on the generation alone — let the *next* genuine
+reconciliation under that same generation complete it, publishing ride 1's `command_seq` and
+`manifest_revision` as a reconciliation that never happened, manifest-refresh side effects included.
+
+The existing B→C tests could not reach this. They move the generation; this defect exists precisely
+because the generation does **not** move.
+
+Two things were needed, and both are now explicit:
+
+1. **An obligation identity beyond the generation.** Each accepted snapshot gets an immutable,
+   process-local `id` (strictly increasing, from 1, never on the wire, never derived from live
+   state). It travels *into* the retained anchor — `DeferredEvent.playbackState(…, reconciliation:)`
+   — and comes back out with the terminal result. Both `id` and generation are compared; neither is
+   re-derived.
+2. **An explicit cancellation signal.** `onReconciliationCancelled(obligation, generation)` is raised
+   from the **one** place the held stream is thrown away — a new `discardDeferredEvents()` through
+   which all four callers now go: `leaveSynchronizedMode` (End Ride, "Play locally"),
+   `resetForNewSession` (a control-lifetime boundary, including a terminal teardown's link loss),
+   `failClosedOutbound`, and `drainDeferredEvents` finding its own generation retired. A popped
+   anchor whose apply is refused reports it too; a re-deferral is the one non-terminal answer, and it
+   keeps the same id.
+
+Applied and cancelled are the two terminal results; they are mutually exclusive, and **only applied
+may produce `RECONCILED`**. Nothing is inferred from an absence — round 3 already had to remove one
+inference of that shape, and this is that rule applied to the obligation rather than to the flag.
+
+**The obligation is recorded before the suspending apply, and that ordering is load-bearing in both
+directions.** `onStateSnapshot` suspends, so a cancellation raised inside that window must find
+something to cancel; and the cancellation callback hops to the coordinator's own executor, so it can
+equally arrive after `handleStateSnapshot` resumes. Recording up front makes both orders converge:
+the cancel clears the record whenever it lands, and every branch acts only if its own id is still the
+recorded one. That identity check also **replaces** round 3's `supersededByNewerObligation` generation
+comparison outright — same protection, by comparison of two recorded owners rather than two
+generations, and it now covers two obligations that share a generation as well.
+
+Diagnostics gain `ResyncOutcome.CANCELLED` / `.cancelled`. Local state only; **no wire change**, and
+no vector moved — this is a local obligation's lifetime, not a distributed decision.
+
+### §17's audit of round 3's `synchronizedModeEpoch` — two more, both fixed
+
+Round 3 added `synchronizedModeEpoch` to stop an apply suspended across End Ride from writing its
+state back, and applied it to `applyPlay` **by re-reading the field at that function's own entry**.
+That is right when `applyPlay` *is* the operation and wrong when it is a later step of one. Sweeping
+every apply path with the question the review asks — *could this work have been authorised before End
+Ride and resume after it without the control generation changing?* — found two reachable instances:
+
+- **`applyStep` had no ride proof at all, and it is the one that could stop the music.**
+  `stillCurrent` suspends; End Ride does not move the control generation; and the `selected == nil`
+  branch calls `epoch.begin()`, minting a *fresh, live* playback epoch over the one
+  `leaveSynchronizedMode` had just superseded, then schedules `[.stop, .clearSelection]` — which the
+  new token makes owned, so it reaches the player. End Ride's whole contract is that local playback
+  continues (FR-025). It stopped it, and cleared the local selection with it.
+- **`applyPlay` reached *through* `applyStep` or `restoreFromPlaybackState`** captured the epoch at
+  its own entry, which by then was already the post-End-Ride value — so its guard compared the new
+  value with itself and passed, re-establishing `currentPlaybackIdentity`, the timeline and a fresh
+  playback epoch for a ride that was over. Round 3's own defect, one function further along.
+
+The ride lifetime is now **captured once, where the operation is authorised, and threaded** —
+`applyAuthoritative` for every authoritative command, `applyPeerPlaybackState` for every
+reconciliation — and every later step compares it rather than re-reading. That is the rule the
+*generation* already follows (CLAUDE.md rules 19/20) applied to the third lifetime: an operation's
+authorising ride travels with it, and a later stage never asks what the ride is *now*. Android's
+windows here are narrower (`stillCurrent` and `estimate` are synchronous, so the suspensions do not
+exist), which is exactly why the shape is mirrored rather than left to that accident.
+
+**Deliberately not stamped:** the *admission* stage (`onInboundCommand`, `admitAuthoritativeCommand`)
+writes `lastReceivedSeq`/`lastAppliedSeq`/`deferredEvents`, which are control-generation-scoped
+ordering bookkeeping that `leaveSynchronizedMode` correctly does not reset. A new inbound authoritative
+command arriving *after* an End Ride re-enters synchronised mode on this device — unchanged, and
+correct: the peer is still riding, and this is not work authorised by the ride that ended.
+
+### Two pre-existing platform divergences, audited and deliberately unchanged
+
+- iOS performs `STATE_SNAPSHOT` manifest bookkeeping on **acceptance**; Android performs it inside
+  `completeReconciliation`. Both satisfy the property that matters here — a cancelled obligation
+  triggers no refresh — and changing either is a behaviour change outside this review's scope.
+- Android publishes `lastSnapshotCommandSeq`/`lastSnapshotManifestRevision` only from
+  `completeReconciliation`; iOS also publishes them on the pending branch. Diagnostics only. Android's
+  regressions therefore assert the snapshot's `command_seq` read from the **wire**, which is the
+  stronger claim.
+
+### Physical qualification
+
+Unchanged: **DEFERRED — HARDWARE NOT AVAILABLE.** No Android↔iPhone reconnect, Bluetooth or hotspot
+recovery, screen-lock networking, battery, thermal, audible resync quality or two-hour ride result is
+claimed by this amendment.

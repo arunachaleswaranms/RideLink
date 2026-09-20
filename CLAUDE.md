@@ -277,9 +277,34 @@ suspensions. All reproduced against unmodified production on both platforms firs
 limitation stands: `ios/RideLink.xcodeproj` has **no unit-test bundle**, so
 `SessionCoordinator.endRide()` is untestable there — the ride lifetime's decisions live in
 `RideSegmentLifecycle` inside `RideLinkPlatform` so they are testable at their real seam, and
-Android's regression exercises the genuine entry point. Independent review of *this* pass has not yet
-run. No physical Bluetooth, iPhone, battery/thermal, or riding result is claimed. Phase 8 is
-untouched.
+Android's regression exercises the genuine entry point. No physical Bluetooth, iPhone,
+battery/thermal, or riding result is claimed. Phase 8 is untouched.
+
+**A third independent review then audited round 3's own fixes and found two more confirmed lifecycle
+blockers, both fixed, plus two more found by its own §17 audit** ([ADR-028 Amendment A3](docs/DECISIONS/ADR-028-ride-mode-and-state-resynchronization.md#amendment-a3--20-september-2026--independent-review-round-4-two-confirmed-blockers-both-fixed);
+STATUS §2ax, problems 83-86). **Its standing lesson is the sharpest form of one this repo keeps
+relearning: an identity is not a lifetime, and the freshest fix is where the two get confused.**
+Round 3 gave the ride an epoch and the reconciliation a generation, then asked each a question it
+could not answer. **Blocker 1**: `endRide()` crosses a scheduling hop, and round 3 refused any cleanup
+whose epoch was no longer current — which protects ride 2 (Property A) and breaks Property B in the
+same statement, because `startRide` deliberately establishes nothing, so a Start Ride pressed first
+merely *bumped the epoch* and ride 1's `currentPlaybackIdentity` was left standing as the only thing
+ride 2's first `STATE_SNAPSHOT` had to report. Removing the check would have been strictly unsafe, so
+the boundary now compares against `rideAuthorityEpoch` — the ride that **established** the live
+authority — and refuses only when a *strictly newer* ride owns something of its own. **Blocker 2**:
+End Ride discards the inner retained reconciliation and nothing told `ResyncCoordinator`; since End
+Ride deliberately does **not** move the control generation, a generation-keyed completion let the next
+genuine reconciliation under that same generation complete the discarded one and publish ride 1's
+`command_seq` as `RECONCILED`. Fixed with an immutable obligation **id** that travels into the
+retained anchor and back out with its terminal result, plus an explicit `onReconciliationCancelled`
+raised from the one place the held stream is discarded; applied and cancelled are mutually exclusive
+and **only applied may produce `RECONCILED`**. The obligation is recorded *before* the suspending
+apply, which is load-bearing in both directions. **§17's two**: `applyStep` had no ride proof at all
+and could stop local music after End Ride (FR-025 says it keeps playing), and `applyPlay` reached
+through another apply path compared the post-End-Ride value with itself — so the ride lifetime is now
+captured **once where the operation is authorised** and threaded, compared and never re-read. No wire
+change; no vector moved. All four reproduced against unmodified production first. Independent review
+of *this* pass has not yet run.
 
 Accepted baseline:
 
