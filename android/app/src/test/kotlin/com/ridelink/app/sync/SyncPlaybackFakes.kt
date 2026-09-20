@@ -289,8 +289,23 @@ class FakeSyncContent : SyncContentPort {
     /** Set to make `resolve` suspend, so a test can land a session boundary *inside* it. */
     var resolveGate: kotlinx.coroutines.CompletableDeferred<Unit>? = null
 
+    /**
+     * Parks on the **first resolve for which this is true**, which is how a test pins the exact stack
+     * frame it means to interrupt rather than counting calls (independent-review round 3). Counting
+     * is fragile here: a leader's `playSynchronized` resolves once to decide whether it may issue,
+     * `applyPlay` resolves again before it writes, and how many others run depends on scheduling.
+     * Mirrors iOS's `FakeSyncContent.armResolveGate(when:)`.
+     */
+    var resolveGateWhen: (() -> Boolean)? = null
+
     override suspend fun resolve(contentHash: ContentHash): SyncPlayableContent? {
-        resolveGate?.await()
+        val predicate = resolveGateWhen
+        if (predicate != null && predicate()) {
+            resolveGateWhen = null
+            resolveGate?.await()
+        } else if (predicate == null) {
+            resolveGate?.await()
+        }
         if (contentHash.value !in localHashes) return null
         val seed = contentHash.value.takeLast(4).toInt(16)
         return SyncTestValues.content(seed).copy(contentHash = contentHash)

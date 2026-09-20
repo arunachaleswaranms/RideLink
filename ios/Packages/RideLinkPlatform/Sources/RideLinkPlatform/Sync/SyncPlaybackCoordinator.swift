@@ -121,6 +121,19 @@ public actor SyncPlaybackCoordinator {
     /// a local mutation that may still happen") applied to the ride lifetime, which is a third
     /// lifetime beside the control generation and the playback epoch.
     var lastRideLifecycleEpoch: Int64 = 0
+
+    /// Bumped by **every** exit from synchronised mode — End Ride and "Play locally" alike — and by
+    /// nothing else (independent-review round 3, found by CI on this pass's own new regression).
+    ///
+    /// `applyPlay` proves the *control* generation before it writes, and End Ride does not change
+    /// that generation: the control connection, the pairing and the session all stay alive on
+    /// purpose. So an `applyPlay` suspended in `content.resolve` when the user ends the ride resumed
+    /// afterwards and wrote `currentPlaybackIdentity`, `timeline` and a fresh playback epoch back
+    /// over the state `leaveSynchronizedMode` had just retired — ride 1's track reported as ride 2's
+    /// truth by a different route than Blocker C's, and "Play locally" resurrecting a synchronised
+    /// timeline by the same one. Kept separate from `lastRideLifecycleEpoch` because that one is
+    /// `SessionCoordinator`'s to assign and must stay comparable with it.
+    var synchronizedModeEpoch: Int64 = 0
     var driftState = DriftController.reset()
     private var tickTask: Task<Void, Never>?
 
@@ -1099,6 +1112,9 @@ public actor SyncPlaybackCoordinator {
     /// Leaves synchronised mode without ending the control session: local playback continues exactly
     /// as a Phase 3 ride, correction stops and the rate goes back to exactly 1.0 (brief §38).
     public func leaveSynchronizedMode() async {
+        // First statement: everything below retires synchronised-mode state, and an apply already in
+        // flight must be refused before it can write any of it back.
+        synchronizedModeEpoch += 1
         syncEnabled = false
         epoch.supersede()
         // Amendment A1 Finding E: leaving synchronised mode cancels the retained Play. A transfer

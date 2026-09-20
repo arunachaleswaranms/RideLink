@@ -249,6 +249,21 @@ class SyncPlaybackCoordinator(
      * generation and the playback epoch.
      */
     private var lastRideLifecycleEpoch: Long = 0
+
+    /**
+     * Bumped by **every** exit from synchronised mode — End Ride and "Play locally" alike — and by
+     * nothing else (independent-review round 3, found by CI on this pass's own new regression).
+     *
+     * [applyPlay] proves the *control* generation before it writes, and End Ride does not change that
+     * generation: the control connection, the pairing and the session all stay alive on purpose. So
+     * an [applyPlay] suspended in `content.resolve` when the user ends the ride resumed afterwards
+     * and wrote [currentPlaybackIdentity], [timeline] and a fresh playback epoch back over the state
+     * [leaveSynchronizedMode] had just retired — ride 1's track reported as ride 2's truth by a
+     * different route than Blocker C's, and "Play locally" resurrecting a synchronised timeline by
+     * the same one. Kept separate from [lastRideLifecycleEpoch] because that one is
+     * `SessionCoordinator`'s to assign and must stay comparable with it.
+     */
+    private var synchronizedModeEpoch: Long = 0
     private var driftState: DriftState = DriftController.reset()
     private var tickJob: Job? = null
 
@@ -1625,6 +1640,9 @@ class SyncPlaybackCoordinator(
      * as a Phase 3 ride, correction stops and the rate goes back to exactly 1.0 (brief §38).
      */
     fun leaveSynchronizedMode() {
+        // First statement: everything below retires synchronised-mode state, and an apply already in
+        // flight must be refused before it can write any of it back.
+        synchronizedModeEpoch += 1
         syncEnabled = false
         playbackFence.supersede()
         // Amendment A1 Finding E: leaving synchronised mode cancels the retained Play. A transfer
@@ -2228,7 +2246,11 @@ class SyncPlaybackCoordinator(
         // `restoreFromPlaybackState`, and `content.resolve` is real I/O. Proved on entry so a Play
         // that only *starts* after a boundary does no work, and again below because the resolve
         // suspends.
+        // The ride/synchronised-mode lifetime this apply belongs to, captured before its first
+        // suspension and compared — never re-read — at each write below. See [synchronizedModeEpoch].
+        val enteredSynchronizedModeEpoch = synchronizedModeEpoch
         if (!stillCurrent(generation)) return
+        if (synchronizedModeEpoch != enteredSynchronizedModeEpoch) return
         // Independent-review Blocker 2B: this is the authoritative track identity the instant this
         // PLAY is accepted, regardless of whether content resolves locally right now -- PROTOCOL §5
         // rule 4 already treats a content-pending PLAY as the authoritative state to report
@@ -2244,6 +2266,14 @@ class SyncPlaybackCoordinator(
             content.requestTransfer(trackHash)
             return
         }
+        // Independent-review round 3, found by CI on this pass's own new ride regression. The proof
+        // above is about the **control generation**, which End Ride deliberately does not move — the
+        // session stays alive. `content.resolve` suspends, so an apply authorised before the ride
+        // ended can resume after `leaveSynchronizedMode` has retired every field written below and
+        // put all of them back. Synchronous, adjacent to the writes: ADR-024 Amendment A5's rule
+        // applied to the third lifetime. Android writes `currentPlaybackIdentity` above rather than
+        // here (a deliberate pre-existing divergence — see its own comment), so it is guarded twice.
+        if (synchronizedModeEpoch != enteredSynchronizedModeEpoch) return
         val token = playbackFence.begin()
         currentEpochToken = token
         driftState = DriftController.reset()

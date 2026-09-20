@@ -458,6 +458,35 @@ Ownership placement differs by platform, deliberately:
   entry point, so the production ordering is proved end to end on one platform and at the highest
   reachable seam on the other. Delivery is `launchInSession`, never a bare `Task` (rule 21).
 
+### And one more, found by CI running this pass's own new ride regression
+
+**End Ride does not move the control generation — and `applyPlay` proves only that.** The session,
+the pairing and the control connection all stay alive on purpose (that is the whole distinction
+between End Ride and End Session), so every ownership proof `applyPlay` takes is satisfied across a
+ride boundary. `content.resolve` suspends in the middle of it. An apply authorised before End Ride
+therefore resumed afterwards and wrote `currentPlaybackIdentity`, the timeline and a fresh playback
+epoch straight back over the state `leaveSynchronizedMode` had just retired — ride 1's track reported
+as ride 2's truth by a different route than Blocker C's, and "Play locally" resurrecting a
+synchronised timeline by the same one.
+
+`synchronizedModeEpoch` is bumped by **every** exit from synchronised mode and by nothing else;
+`applyPlay` captures it before its first suspension and compares it — never re-reads it — adjacent to
+each write. That is ADR-024 Amendment A5's rule applied to the third lifetime. It is kept separate
+from `lastRideLifecycleEpoch`, which is `SessionCoordinator`'s to assign and must stay comparable
+with it.
+
+**The regression had to be made deterministic twice over, and that is the part worth keeping.** A
+first version gated the content resolve by *counting* calls — and passed **vacuously**, by parking on
+a harmless frame, because how many resolves run before `applyPlay`'s depends on scheduling. The gate
+now parks on a *condition the test states* ("a `PLAY` is already on the wire"), which pins the frame
+by construction, and the test asserts both halves of that pinning before it does anything else. The
+lesson is the one this repository already records about regressions: **audit what a regression
+supplies as carefully as what it asserts.**
+
+Separately, the 50-cycle ride test's own helper waited a fixed number of scheduling yields for a
+leader's play to converge; it now waits on the condition. A larger fixed budget would only have made
+the flake rarer, which is precisely what this brief's §16 forbids.
+
 ### One more found by this pass's own fresh-fix audit
 
 `drainDeferredEvents` suspends on the clock estimate and on content resolution, and its very next

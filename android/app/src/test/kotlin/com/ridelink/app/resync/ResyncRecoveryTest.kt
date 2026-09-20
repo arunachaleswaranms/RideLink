@@ -17,6 +17,7 @@ import com.ridelink.core.model.ContentHash
 import com.ridelink.core.model.PeerId
 import com.ridelink.core.model.SessionId
 import com.ridelink.core.model.SpkiHash
+import com.ridelink.core.playback.PlaybackMessage
 import com.ridelink.core.resync.ResyncMessage
 import com.ridelink.core.security.InMemoryTrustedPeerStore
 import com.ridelink.core.sessionfsm.SessionEvent
@@ -27,6 +28,7 @@ import com.ridelink.network.control.ControlEvent
 import com.ridelink.network.control.ControlSessionManager
 import com.ridelink.network.control.LocalHandshakeIdentity
 import com.ridelink.network.voice.VoiceController
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.TestScope
@@ -420,6 +422,67 @@ class ResyncRecoveryTest {
                 "Ride 1's late cleanup cleared Ride 2's playback identity",
             )
             assertEquals(staleBefore + 1, pair.leader.sync.diagnostics.value.staleRideLifecycleCount, "…and said so, rather than silently")
+        }
+
+    /**
+     * **The defect CI found in this pass's own new ride regression.** [SyncPlaybackCoordinator]'s
+     * `applyPlay` proves the *control* generation before it writes `currentPlaybackIdentity`, the
+     * timeline and a fresh playback epoch — and End Ride deliberately does not move that generation,
+     * because the session stays alive. So an apply suspended in `content.resolve` when the ride ends
+     * resumed afterwards and wrote all of it back over the state `leaveSynchronizedMode` had just
+     * retired: ride 1's track reported as ride 2's truth by a different route than Blocker C's.
+     *
+     * Deterministic rather than load-dependent. The gate's predicate — "a `PLAY` is already on the
+     * wire" — is what pins the parked frame to `applyPlay`'s own resolve, which is the only one that
+     * happens after the leader commits and before it touches the player. Counting resolve calls does
+     * not pin it: how many run first depends on scheduling, and a count-based version of this test
+     * passed **vacuously** by parking somewhere harmless.
+     */
+    @Test
+    fun `an apply parked across End Ride writes nothing back`() =
+        runTest(StandardTestDispatcher()) {
+            val pair = ResyncTestPair(this)
+            pair.connect(generation = 1)
+            seedPlayable(pair, listOf(SyncTestValues.hash(1)))
+            val session = rideSession(this, pair.leader.sync)
+            session.startRide()
+
+            val gate = CompletableDeferred<Unit>()
+            pair.leader.content.resolveGate = gate
+            pair.leader.content.resolveGateWhen = {
+                pair.leader.syncSession
+                    .sentOfType<PlaybackMessage.Play>()
+                    .isNotEmpty()
+            }
+            pair.leader.sync
+                .playSynchronized(SyncTestValues.hash(1))
+            runCurrent()
+
+            assertTrue(
+                pair.leader.syncSession
+                    .sentOfType<PlaybackMessage.Play>()
+                    .isNotEmpty(),
+                "parked before the PLAY was issued — this is not applyPlay's resolve",
+            )
+            assertTrue(
+                pair.leader.player.calls
+                    .none { it is FakeSyncPlayer.Call.Select },
+                "parked after the player was touched — too late to be applyPlay's resolve: ${pair.leader.player.calls}",
+            )
+
+            session.endRide()
+            runCurrent()
+            assertNull(pair.leader.sync.diagnostics.value.currentTrackHash, "End Ride clears ride-segment identity")
+
+            gate.complete(Unit)
+            runCurrent()
+            pair.leaderClock.advanceBy(LEAD_US)
+            runCurrent()
+
+            assertNull(
+                pair.leader.sync.diagnostics.value.currentTrackHash,
+                "an apply authorised before End Ride wrote its track back afterwards",
+            )
         }
 
     // --- repetition ------------------------------------------------------------------------------

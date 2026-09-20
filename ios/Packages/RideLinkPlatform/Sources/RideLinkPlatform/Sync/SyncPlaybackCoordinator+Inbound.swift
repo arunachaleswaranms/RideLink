@@ -937,6 +937,9 @@ extension SyncPlaybackCoordinator {
         // `restoreFromPlaybackState`, and `content.resolve` is real I/O on another actor. Proved on
         // entry so a Play that only *starts* after a boundary does no work, and again below because
         // the resolve suspends.
+        // The ride/synchronised-mode lifetime this apply belongs to, captured before its first
+        // suspension and compared — never re-read — below. See `synchronizedModeEpoch`.
+        let enteredSynchronizedModeEpoch = synchronizedModeEpoch
         guard await stillCurrent(generation) else { return false }
         guard stillCurrentNow(generation) else { return false } // Amendment A5
         let playable = await content.resolve(trackHash)
@@ -952,6 +955,13 @@ extension SyncPlaybackCoordinator {
             await content.requestTransfer(trackHash)
             return false
         }
+        // Independent-review round 3, found by CI on this pass's own new ride regression. The proofs
+        // above are all about the **control generation**, which End Ride deliberately does not move —
+        // the session stays alive. `content.resolve` above suspends, so an apply authorised before
+        // the ride ended can resume after `leaveSynchronizedMode` has retired every field written
+        // below and put all of them back. Synchronous, adjacent to the writes, with no `await`
+        // between: ADR-024 Amendment A5's `stillCurrentNow` pattern applied to the third lifetime.
+        guard synchronizedModeEpoch == enteredSynchronizedModeEpoch else { return false }
         let token = epoch.begin()
         currentEpochToken = token
         driftState = DriftController.reset()

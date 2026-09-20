@@ -76,13 +76,24 @@ final class RideSegmentLifecycleTests: XCTestCase {
     }
 
     /// Establishes authoritative track X as the leader, exactly as a real `playSynchronized` does.
-    private func playAsLeader(_ track: ContentHash) async {
+    ///
+    /// Waits on the **condition**, not on a fixed number of yields: a leader's play crosses the
+    /// outbound consumer, the commit hook and the apply chain, and how many scheduling hops that
+    /// takes is not fixed. A fixed budget made this helper the flakiest thing in the suite under CI
+    /// load — and a bigger fixed budget would only have made the flake rarer, which §16 forbids.
+    /// There is no sleep here: each round advances the fake clock and yields, and the loop ends on
+    /// the state the test actually cares about.
+    private func playAsLeader(_ track: ContentHash, file: StaticString = #filePath, line: UInt = #line) async {
         await content.addLocal(track)
         await content.addPeer(track)
         await sync.playSynchronized(track)
-        await settle()
-        clock.advance(to: clock.now() + 500_000)
-        await settle()
+        for _ in 0 ..< 200 {
+            if await sync.diagnostics.currentTrackHash == track { return }
+            clock.advance(to: clock.now() + 100_000)
+            await settle(5)
+        }
+        let observed = await sync.diagnostics.currentTrackHash
+        XCTFail("the leader never converged on \(track): \(String(describing: observed))", file: file, line: line)
     }
 
     /// The two statements `SessionCoordinator.startRide()` performs after its FSM transition.
@@ -236,5 +247,62 @@ final class RideSegmentLifecycleTests: XCTestCase {
             let rideTwo = await sync.diagnostics.currentTrackHash
             XCTAssertEqual(trackY, rideTwo, "cycle \(cycle): ride 2's own track must still work")
         }
+    }
+
+    /// **The defect CI found in this suite's own 50-cycle run.** `applyPlay` proves the *control*
+    /// generation before it writes `currentPlaybackIdentity`, `timeline` and a fresh playback epoch —
+    /// and End Ride deliberately does not move that generation, because the session stays alive. So
+    /// an apply suspended in `content.resolve` when the ride ends resumed afterwards and wrote all of
+    /// it back over the state `leaveSynchronizedMode` had just retired.
+    ///
+    /// Deterministic rather than load-dependent: the resolve gate parks the apply at exactly the
+    /// suspension that matters, End Ride runs while it is provably parked, and the gate is then
+    /// released. No sleeps and no repetition are needed to reach the ordering.
+    func testAnApplyParkedAcrossEndRideWritesNothingBack() async {
+        await build()
+        let track = SyncTestValues.hash(40)
+        await content.addLocal(track)
+        await content.addPeer(track)
+        await startRide()
+
+        // `applyPlay`'s own `content.resolve` is the suspension that matters, and it is the only one
+        // that happens **after** the leader has committed its `PLAY` to the wire. Stating that as the
+        // gate's own predicate pins the parked frame by construction; counting calls does not, because
+        // how many resolves run before it depends on scheduling.
+        let wire = session!
+        await content.armResolveGate {
+            await wire.playbackMessages().contains { if case .play = $0 { return true } else { return false } }
+        }
+        let apply = Task { await self.sync.playSynchronized(track) }
+        var parked = false
+        for _ in 0 ..< 200 where !parked {
+            parked = await content.isResolveGateParked
+            await Task.yield()
+        }
+        XCTAssertTrue(parked, "the apply never reached the resolve suspension")
+        // **Which** suspension we parked on is the whole validity of this test. `applyPlay`'s
+        // `content.resolve` is the only one that happens *after* the leader has committed its `PLAY`
+        // to the wire and *before* it touches the player — so asserting both pins the parked frame to
+        // `applyPlay` and nothing earlier. Without this the test could park in `resolvePendingPlay`
+        // instead, where `PendingPlayGate` already cancels correctly, and pass for the wrong reason.
+        let issued = await session.playbackMessages().contains { if case .play = $0 { return true } else { return false } }
+        XCTAssertTrue(issued, "parked before the PLAY was issued — this is not applyPlay's resolve")
+        let callsWhileParked = await player.calls
+        XCTAssertFalse(callsWhileParked.contains(.select(track)), "parked after the player was touched — too late to be applyPlay's resolve")
+
+        await endRide()
+        let clearedByEndRide = await sync.diagnostics.currentTrackHash
+        XCTAssertNil(clearedByEndRide, "End Ride clears ride-segment identity")
+
+        await content.releaseResolveGate()
+        _ = await apply.value
+        await settle()
+
+        let afterRelease = await sync.diagnostics.currentTrackHash
+        XCTAssertNil(afterRelease, "an apply authorised before End Ride wrote its track back afterwards")
+        let identity = await sync.currentPlaybackIdentity
+        XCTAssertNil(identity, "…including the ride-segment identity a STATE_SNAPSHOT would report")
+        let timeline = await sync.timeline
+        XCTAssertNil(timeline, "…and the synchronised timeline End Ride had retired")
     }
 }
