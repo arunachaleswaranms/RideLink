@@ -369,7 +369,37 @@ a drain that **pops** retired work, cancels its obligation (`REJECTED_RIDE` → 
 traced rather than assumed. **Android is affected by form C alone**, and the reason is its production
 path: End Ride's cleanup is synchronous there so retained work cannot outlive it, but `content.resolve`
 in the pre-check is a genuine admission-to-retention suspension and the only one. No wire change; no
-vector moved. Independent review of *this* pass has not yet run.
+vector moved.
+
+**A seventh independent review then audited round 7's own fixes and found one more confirmed blocker
+in three places — and, separately, proved that the recurring CI timeout was a real production defect**
+([ADR-028 Amendment A7](docs/DECISIONS/ADR-028-ride-mode-and-state-resynchronization.md#amendment-a7--21-september-2026--independent-review-round-8-a-proof-taken-before-a-suspension-authorises-nothing-after-it-and-the-ci-wall-was-a-real-defect);
+STATUS §2bb, problems 92-93). **Its standing lesson: the caller owns its own bookkeeping, and a
+downstream refusal cannot un-publish it.** Round 7's retained `RideAdmission` is right and unchanged;
+what it lacked was a proof *adjacent to the write the caller itself performs*. `drainDeferredEvents`
+proved the retained admission at the top of its loop, then suspended in `estimate()`/`stillCurrent`,
+then popped the item, wrote `lastAppliedSeq`, published `lastAppliedCommandSeq` and counted a
+recovery — and only then called `applyAuthoritative`, which correctly refused the frame as
+`.rejectedRide`. The effect never happened and the wire was told it had, because `lastAppliedSeq` is
+what `PLAYBACK_STATE.command_seq` and `STATE_SNAPSHOT.command_seq` publish as "reflected in my
+authoritative playback state". The same shape sat in `admitAuthoritativeCommand` (both sequence
+numbers), in the `.playbackState` drain branch (`recoveredCommandCount`, documented as *applied*,
+incremented before the outcome was known), and — found by the sweep — in `onCommandOutcome`,
+`playSynchronized` and `servePlaybackIntent`. **Neither sequence number advances for a command a ride
+boundary refused**: `CommandOrderGate` treats a gap as `.accept`, so the floor may stay put, while
+advancing it would make the leader's own re-statement a `.duplicate` — ADR-024 A1 Finding C's existing
+rule applied to the third lifetime. **The CI half is the more important finding.** Two
+`ReconnectResyncStressTests` cases had been timing out with a bare `notReady`; instrumenting the poll
+that hung, dumping the state at the timeout and counting the leader's silent early returns produced
+exactly one cause every time — `enqueueStateSnapshotReply`'s `role == nil`. `role` is cleared by a
+link loss and set again by `handleConnected`, which `SessionCoordinator` reaches through a
+continuation, while the peer's `STATE_REQUEST` arrives on the read loop of the freshly authenticated
+connection; nothing orders the two, so a request for the **live** generation reached a leader whose
+own `.connected` was still queued and was **dropped permanently** — PROTOCOL §10 has no retry and
+`StateResyncGate` sends exactly one request per generation. A `STATE_REQUEST` is now **retained** in
+one generation-stamped slot and replayed by `handleConnected`, compared and never re-read. Mirrored on
+Android, where the same three unordered paths exist. No wire change; no vector moved. Independent
+review of *this* pass has not yet run.
 
 **A third independent review then audited round 3's own fixes and found two more confirmed lifecycle
 blockers, both fixed, plus two more found by its own §17 audit** ([ADR-028 Amendment A3](docs/DECISIONS/ADR-028-ride-mode-and-state-resynchronization.md#amendment-a3--20-september-2026--independent-review-round-4-two-confirmed-blockers-both-fixed);

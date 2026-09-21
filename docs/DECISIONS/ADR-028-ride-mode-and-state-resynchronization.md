@@ -1352,3 +1352,233 @@ what that test's comment forbids.
 Unchanged: **DEFERRED — HARDWARE NOT AVAILABLE.** No Android↔iPhone reconnect, Bluetooth or hotspot
 recovery, screen-lock networking, battery, thermal, audible resync quality or two-hour ride result is
 claimed by this amendment.
+
+---
+
+## Amendment A7 — 21 September 2026 — independent review round 8: a proof taken before a suspension authorises nothing after it, and the CI wall was a real defect
+
+**Status:** Accepted. Starting SHA `02496ae60afd7424c30d9e5a420c7758f1e35fe4`. No wire change; no
+vector moved.
+
+Round 7 gave retained work its own immutable `RideAdmission` and threaded it everywhere. That
+architecture is accepted and unchanged here. What this round found is that storing the right value
+is not the same as **proving** it at the right instant: three code paths proved the ride lifetime,
+then suspended, then wrote bookkeeping that claimed an effect the downstream apply path would go on
+to refuse. And, separately, the CI timeouts the previous pass recorded as a runner slowdown turned
+out to have a **real production defect** underneath them, found by instrumented measurement rather
+than by argument.
+
+### Standing lesson
+
+**The caller owns its own bookkeeping, and a downstream refusal cannot un-publish it.** Every one of
+this round's three blockers had a correct guard, a correct retained provenance and a correct
+downstream refusal. What none of them had was a proof *adjacent to the write the caller itself
+performs*. `applyPlay` returning `.rejectedRide` is the right answer at the wrong time when
+`lastAppliedSeq` was published two statements earlier — and `lastAppliedSeq` is what
+`PLAYBACK_STATE.command_seq` and `STATE_SNAPSHOT.command_seq` carry onto the wire as *"this command
+is reflected in my authoritative playback state"*.
+
+And the round's second lesson, from the CI work: **"a different test fails each run" is evidence
+about *variance*, not about *cause*.** The previous pass's A/B was sound and its conclusion — that
+the runner had slowed — was true. It was also not the whole story, and the way to find that out was
+not more argument but instrumentation: label every poll, dump the state at the timeout, count the
+production early-returns. That took one afternoon and produced a defect.
+
+### Blocker A — the drain could publish a refused command as applied
+
+`drainDeferredEvents` proves the retained `RideAdmission` at the top of its loop, then — in the
+`.command` branch — takes `await estimate()` and `await stillCurrent(generation)`. Both suspend, and
+on an actor every `await` is a re-entrancy point.
+
+`SessionCoordinator.endRide()` mints and publishes its ride epoch **synchronously** and hands
+`leaveSynchronizedMode` — the only thing that empties the held stream — to `launchInSession`. So an
+accepted End Ride *and* an accepted Start Ride can both land inside those suspensions while ride 1's
+cleanup is still parked: the control generation does not move, `deferredEvents` is not emptied, and
+`stillCurrentNow` plus the `heldCount` witness both still pass on resume.
+
+The pre-fix code then did, in order: `removeFirst()`, `lastAppliedSeq = seq`,
+`diagnostics.lastAppliedCommandSeq = lastAppliedSeq`, `recoveredCommandCount += 1`,
+`publishDiagnostics()` — and *only then* called `applyAuthoritative`, which refused the frame as
+`.rejectedRide`. The playback effect never happened; the wire was told it had.
+
+**Fix.** The retained admission is re-proved immediately before the pop, with no `await` between the
+proof and the writes it guards. A retired item is **retired** — popped, counted as
+`retiredRideDeferredCount`, its reconciliation obligation cancelled — and the drain `continue`s, so
+live work queued behind a dead item is not wedged (round 3's Blocker A, not reintroduced).
+
+### Blocker B — the immediate admission path had the same shape
+
+`admitAuthoritativeCommand` captures its `RideAdmission` correctly (round 7) and then awaits
+`estimate()`. The `.apply` branch on the far side wrote `lastReceivedSeq`, `lastAppliedSeq` and
+`diagnostics.lastAppliedCommandSeq` with no adjacent ride proof, relying on `applyAuthoritative` to
+refuse — one call too late.
+
+**Fix, and the sequence-number decision it required.** The ride is proved adjacent to the branch
+writes, and **neither** sequence number moves on a retired ride. That is traced rather than
+symmetric:
+
+- `lastReceivedSeq` is the ordering floor `CommandOrderGate` reads. A *gap* is `.accept`, so leaving
+  the floor where it was refuses nothing the leader sends afterwards.
+- Advancing it for a command that will never apply would make the leader's own re-statement of that
+  command a `.duplicate` — ADR-024 Amendment A1 Finding D's exact failure, reached by a different
+  route.
+- Not spending the sequence number of a refused command is already this codebase's rule: A1 Finding
+  C says an incremental command refused while incremental state is untrusted keeps its number so the
+  authoritative snapshot decides where ordering resumes. This is that rule applied to the third
+  lifetime rather than to the desynchronisation latch.
+
+Refusals are counted as `retiredRideAdmissionCount` — a new diagnostic, distinct from
+`retiredRideDeferredCount` (work that was already *retained* when its ride ended), because "never
+retained and never applied" and "retained, then retired" are different facts.
+
+### Blocker C — `recoveredCommandCount` meant "applied" and was incremented before the outcome
+
+The `.playbackState` drain branch popped the anchor and incremented `recoveredCommandCount` *before*
+calling `applyPeerPlaybackState`, whose answer can legitimately be `.rejectedRide`, `.rejectedStale`
+or a **re-deferral** (it re-appends the same anchor for a clock or a transfer). The field's own
+documentation says "how many held commands were **applied** once the clock became trustworthy
+again", so every one of those was a success claim for a reconciliation that had not happened.
+
+**Fix.** The adjacent ride re-proof, as in Blocker A, plus the counter moved to `outcome ==
+.applied`. The `.command` and `.queueSnapshot` branches keep theirs where they are: both hand the
+event straight to an apply whose every precondition — clock, ordering revision, control generation
+and ride lifetime — has just been proved synchronously adjacent to the pop.
+
+**One thing deliberately *not* changed, and it was found by an assertion that failed:** a
+`STATE_SNAPSHOT`'s own `command_seq` moves `lastReceivedSeq`/`lastAppliedSeq` at the frame's
+**arrival**, inside `applyPeerPlaybackState`, immediately after that function's own adjacent
+`rideStillLive` proof and before it decides whether restoration must be deferred. PROTOCOL §5 rule 2
+is why that is right — the snapshot names its own instant, and the leader has *stated* that its
+authority stands at that `command_seq`. The regression therefore asserts "unchanged by the drain",
+not "never set". A first draft asserted the latter and was wrong.
+
+### The sweep — three more sites of the same shape
+
+`rideStillLive` / `await` / write, across every iOS path the review named:
+
+- **`onCommandOutcome`** (the leader's own commit): the transport answers across the outbound
+  consumer, an actor hop and a real socket write, and `stillCurrent` suspends again. The two
+  sequence writes would publish this `command_seq` as applied while `chainApply`'s
+  `applyAuthoritative` refused it. The frame did reach the peer and is deliberately not un-sent —
+  but nothing on this device applied it, so nothing here may claim it did.
+- **`playSynchronized`** and **`servePlaybackIntent`**: both capture the ride, then suspend, then
+  call `playRequestFence.begin()`, which **supersedes** whatever retained Play is current. A press
+  whose ride ended inside that suspension would cancel a *successor* ride's retained Play and
+  install one of its own that `resolvePendingPlay` can only cancel.
+
+`resolvePendingPlay`, `applyAuthoritative`, `applyPlay`, `applyTransport`, `applySeek`, `applyStep`,
+`applyPeerPlaybackState` and `restoreFromPlaybackState` were all audited and were already correct —
+every one of them proves the ride synchronously, adjacent to its first write.
+
+### Android
+
+**The drain and admission orderings are unreachable on Android, and a test now says so rather than a
+comment.** `SessionCoordinator.endRide()` calls `endRideSegment` on the same thread one statement
+after `nextRideEpoch()`; `endRideSegment` calls `leaveSynchronizedMode()` synchronously; and
+`leaveSynchronizedMode` calls `discardDeferredEvents()` synchronously. The epoch moving and the held
+stream emptying are therefore one indivisible step, so "ride epoch moved, retained ride-1 work still
+queued" never exists there. `an end ride empties the held stream in the same step that moves the ride
+epoch` asserts exactly that chain, with no `runCurrent()` between the call and the observation — if a
+future change makes any link asynchronous, the window opens on Android too and that test fails first.
+
+The guards are mirrored anyway, in the position the platform's own suspensions demand (inside
+`commandMutex.withLock`, which suspends on contention, and adjacent to the pop after
+`content.resolve`), for the reason `RideEpochBox` already gives: safety that rests on two statements
+happening to be synchronous is an undocumented accident until something asserts it.
+
+### The CI investigation — and the production defect it found
+
+The two `notReady` failures at the starting SHA were investigated rather than re-documented. The
+method was instrumentation, in four steps:
+
+1. **Label every poll.** All ~50 call sites threw the same bare `ControlTransportError.notReady`, so
+   a CI log said only "something somewhere". The hanging poll turned out to be the same one every
+   time: `!a.resync.diagnostics.requestPending && !b.resync.diagnostics.requestPending`.
+2. **Dump the state at the timeout.** Fully settled — both sides authenticated at the same
+   generation, `a.role == .leader`, `isLocalLeader` correct on both, zero role violations, zero
+   relay drops, zero codec rejections — and the follower still `requestPending`, `lastOutcome
+   == .requested`. Its request had gone out and had simply never been answered.
+3. **Count the leader's silent early returns.** Exactly one per wedge, always the first guard:
+   `role == nil`.
+4. **Reproduce deterministically at the production seam**, which is what the regressions below do.
+
+**The defect.** `SyncPlaybackCoordinator.role` is cleared by a link loss and set again by
+`handleConnected`, which `SessionCoordinator` reaches through `launchInSession` — a continuation. The
+peer's `STATE_REQUEST` travels a different path entirely: the read loop on the freshly authenticated
+connection, through `ResyncRelay.deliver`'s own hop. Nothing orders the two, so a request for the
+**live** generation can be dispatched at a leader whose own `.connected` is still queued.
+`enqueueStateSnapshotReply` returned silently, and the loss was permanent: PROTOCOL §10 has no retry,
+and `StateResyncGate` deliberately sends exactly one request per generation — a request storm is the
+failure mode it exists to prevent — so the follower stayed desynchronised until the *next* reconnect.
+
+On a ride that is: reconnect, follower asks for state, leader drops it, follower is left
+desynchronised for the rest of that link. Phase 7 is precisely about not doing that.
+
+**The fix is retention, not a retry.** `role == nil` means "not ready yet", not "never": the request
+is stored in one slot with the generation that authorised it, and `handleConnected` replays it once
+the session it names is established — captured *before* `resetForNewSession()`, which is deliberately
+the one thing that drops a request no session ever came for. The generation is **compared, never
+re-read**, so a request authorised by a lifetime that has since retired is dropped
+(`droppedStateSnapshotReplyCount`) rather than answered with a successor's state — the same rule
+Amendment A1 established for the outbound write, applied to a reply this device is only now able to
+build. One slot is sufficient by construction: §10 allows one outstanding request per generation, so
+a second retained request can only be a newer generation's, and nothing can answer the older one any
+more. Mirrored on Android, where the same three unordered paths exist (two independent `SharedFlow`
+collectors plus the relay).
+
+**Two harness defects were found alongside it, and both are readiness signals rather than margins.**
+
+- `reconnectCycle` redialled immediately after `b.manager.shutdown()`, into a peer that had not yet
+  observed the loss — so `a`'s duplicate-connection resolution compared a fresh inbound connection
+  against a corpse. Measured: under CPU saturation `a` still reported the *old* generation as live
+  eight seconds after the redial. Production never produces that ordering; `ReconnectPolicy` backs a
+  real reconnect off. The cycle now waits for both sides to observe the loss first. Every assertion
+  downstream is unchanged, and each cycle is still a genuine link loss, a genuine fresh TLS
+  authentication and a genuine resync round trip.
+- `settleResyncForwarding` polled `isLocalLeader`, which is set on the first connect and never
+  changes afterwards — so from cycle 2 onwards it returned immediately, proving nothing about the
+  connection just built. Its own doc comment described the *generation* comparison. It now performs
+  the comparison the comment always claimed.
+
+Neither the cycle count, the timeout budget, nor any assertion was touched. `poll` additionally
+captures `#filePath`/`#line` at each call site, so the next timeout names the condition that hung —
+which is the one thing the previous pass's investigation had to reconstruct by hand.
+
+### Regressions
+
+Every one of these fails against the unmodified starting SHA and passes after.
+
+**iOS, `RideSegmentLifecycleTests`** — the drain and admission windows, parked in the real
+`sessionClockEstimate()` read via `FakeSyncSession.armClockGate`:
+
+- `testARideRetiringInsideTheDrainsClockReadNeverPublishesTheCommandAsApplied` (Blocker A)
+- `testARideRetiringInsideTheAdmissionsClockReadNeverPublishesTheCommandAsApplied` (Blocker B)
+- `testValidSameRideWorkStillAppliesThroughBothParkedWindows` (liveness — passes both before and
+  after, which is what makes it a guard against over-rejection rather than a second safety test)
+- `testFiftyCyclesOfTheParkedDrainWindow` (50 deterministic cycles alternating the two)
+
+**iOS, `ResyncCoordinatorTests`** — the snapshot drain and the held request:
+
+- `testARideRetiringInsideTheSnapshotDrainCancelsWithoutClaimingARecovery` (Blocker C)
+- `testAValidSameRideSnapshotStillReconcilesThroughTheParkedDrain` (liveness)
+- `testAStateRequestArrivingBeforeThisLeadersSessionIsEstablishedIsAnsweredOnceItIs` (the CI defect)
+- `testAHeldStateRequestWhoseGenerationRetiredIsDroppedRatherThanAnsweredByTheSuccessor`
+
+**Android, `ResyncRecoveryTest` / `ResyncCoordinatorTest`:**
+
+- `an end ride empties the held stream in the same step that moves the ride epoch` (the
+  unreachability claim, asserted)
+- `valid same-ride retained work still reconciles through a parked drain resolve`
+- `a STATE_REQUEST arriving before the leader's own playback session is established is answered once
+  it is`
+- `a held STATE_REQUEST whose generation retired is dropped rather than answered by the successor`
+
+Each park is **proved** rather than assumed: the test asserts the gate is parked, that nothing has
+been popped and that no bookkeeping has moved, before it creates the boundary. A test whose final
+state happens to be right without having entered the window is not a regression for that window.
+
+### Physical qualification
+
+Unchanged: **DEFERRED — HARDWARE NOT AVAILABLE.** No Android↔iPhone reconnect, Bluetooth or hotspot
+recovery, screen-lock networking, battery, thermal, audible resync quality or two-hour ride result is
+claimed by this amendment.
