@@ -1096,6 +1096,275 @@ final class RideSegmentLifecycleTests: XCTestCase {
         XCTAssertEqual(trackB, survives?.trackHash, "ride 1's delayed cleanup destroyed ride 2's own authority")
     }
 
+    // MARK: - Independent-review round 8 (a proof taken before a suspension authorises nothing after it)
+
+    /// Becomes a follower whose clock **is** trustworthy — the configuration in which an authoritative
+    /// command is admitted and applied straight away (`PendingCommandGate`'s `.apply`), which is the
+    /// branch that publishes `lastAppliedSeq`.
+    private func readyFollower() async {
+        await sync.handleLinkLost()
+        await sync.handleConnected(isLocalLeader: false)
+        await session.setClock(SessionClockEstimate(offsetToLeaderUs: 0, rttP95Us: 8_000, ready: true))
+        await player.clearCalls()
+    }
+
+    /// **Round 8, Regression 1 — Blocker A.** A retained command whose ride retires *after* the
+    /// drain's own first ride proof, inside a real suspension, must not be published as applied.
+    ///
+    /// Round 7 put the retained `RideAdmission` on the event and proved it once, at the top of the
+    /// drain loop. Everything after that proof suspends — `estimate()` is two cross-actor reads, and
+    /// the `stillCurrent` proof behind it is a third — and on an actor every `await` is a re-entrancy
+    /// point. An accepted End Ride and an accepted Start Ride can both land inside those windows
+    /// while ride 1's cleanup is still parked in `launchInSession`: the control generation does not
+    /// move, `deferredEvents` is not emptied, and so `stillCurrentNow` and the `heldCount` witness
+    /// both still pass on resume. The pre-fix code then popped the item, wrote `lastAppliedSeq`,
+    /// published `lastAppliedCommandSeq` and counted a recovery — and only *afterwards* did
+    /// `applyPlay`'s own `rideStillLive` refuse the frame as `.rejectedRide`.
+    ///
+    /// The refusal is correct and it is too late: `lastAppliedSeq` is what `PLAYBACK_STATE
+    /// .command_seq` and `STATE_SNAPSHOT.command_seq` publish as "this command is reflected in my
+    /// authoritative playback state", so a command that never touched playback was announced on the
+    /// wire as having done so.
+    ///
+    /// **The park proves the window rather than approximating it.** The only `sessionClockEstimate()`
+    /// read in `drainDeferredEvents` is the `.command` branch's, which sits *after* the top-of-loop
+    /// ride proof, the per-item desync rule, both generation proofs and the `heldCount` witness — so
+    /// the gate being parked is structural proof that the first ride check has already passed. The
+    /// two assertions taken while parked prove the other end: nothing has been popped and nothing has
+    /// been booked yet. No sleep anywhere, and ride 1's cleanup is deliberately not released until
+    /// every assertion has been made, so it cannot be what saves the test.
+    func testARideRetiringInsideTheDrainsClockReadNeverPublishesTheCommandAsApplied() async {
+        await build()
+        await deferringFollower()
+        let track = SyncTestValues.hash(140)
+        let itemId = SyncTestValues.ulid(140)
+        await content.addLocal(track)
+
+        startRide()
+        await deliverPlay(track, queueItemId: itemId, commandSeq: 7)
+        await expect("the command was accepted and held") { await self.sync.deferredEvents.count == 1 }
+        let heldRide = await sync.deferredEvents.first?.ride
+        XCTAssertEqual(RideAdmission(synchronizedModeEpoch: 0, rideEpoch: 1), heldRide)
+        let receivedBefore = await sync.diagnostics.lastReceivedCommandSeq
+        XCTAssertEqual(7, receivedBefore, "the command was not accepted for ordering, so this proves nothing")
+
+        // The clock recovers, and the drain parks inside its own read of it.
+        await session.setClock(SessionClockEstimate(offsetToLeaderUs: 0, rttP95Us: 8_000, ready: true))
+        await session.armClockGate()
+        let drain = Task { await self.sync.drainDeferredEvents() }
+        await expect("the drain parked inside its clock read") { await self.session.isClockGateParked }
+        let heldWhileParked = await sync.deferredEvents.count
+        XCTAssertEqual(1, heldWhileParked, "parked after the pop — this is not the window under test")
+        let appliedWhileParked = await sync.lastAppliedSeq
+        XCTAssertNil(appliedWhileParked, "parked after the bookkeeping — this is not the window under test")
+
+        // End Ride 1 accepted, then Start Ride 2 accepted. Ride 1's cleanup is **not** released.
+        let endRideEpoch = lifecycle.nextRideEpoch()
+        _ = lifecycle.nextRideEpoch()
+
+        await session.releaseClockGate()
+        await drain.value
+        await settle()
+
+        let applied = await sync.lastAppliedSeq
+        XCTAssertNil(applied, "a command the ride fence refused was recorded as applied")
+        let publishedApplied = await sync.diagnostics.lastAppliedCommandSeq
+        XCTAssertNil(publishedApplied, "…and published as this device's authoritative command_seq")
+        let recovered = await sync.diagnostics.recoveredCommandCount
+        XCTAssertEqual(0, recovered, "a refused command was counted as a successful recovery")
+        let discarded = await sync.diagnostics.retiredRideDeferredCount
+        XCTAssertEqual(1, discarded, "the retired-ride discard was not counted")
+        let remaining = await sync.deferredEvents
+        XCTAssertTrue(remaining.isEmpty, "the retired event must be removed cleanly, not left to wedge the stream")
+        let calls = await player.calls
+        XCTAssertFalse(calls.contains(.select(track)), "a retired ride's held command reached the player: \(calls)")
+        let identity = await sync.currentPlaybackIdentity
+        XCTAssertNil(identity, "a retired ride's held command established playback identity")
+        let timeline = await sync.timeline
+        XCTAssertNil(timeline, "…and a synchronised timeline")
+        let authority = await sync.rideAuthorityEpoch
+        XCTAssertEqual(0, authority, "…and stamped ride-scoped authority for a successor ride")
+
+        // Ride 1's own delayed cleanup runs last and must find nothing newer standing.
+        await lifecycle.endRide(epoch: endRideEpoch)
+        await settle()
+        XCTAssertEqual(0, lifecycle.supersededEndRideCount, "ride 1's cleanup was fooled into standing down")
+    }
+
+    /// **Round 8, Regression 2 — Blocker B.** The same class at the *immediate* admission point.
+    ///
+    /// `admitAuthoritativeCommand` captures its `RideAdmission` correctly (round 7) and then awaits
+    /// `estimate()`. The `.apply` branch on the far side of that suspension wrote `lastReceivedSeq`,
+    /// `lastAppliedSeq` and `diagnostics.lastAppliedCommandSeq` with no ride proof adjacent to them,
+    /// relying on `applyAuthoritative` to refuse a stale ride — which it does, one call later, after
+    /// the bookkeeping is already published.
+    ///
+    /// **`lastReceivedSeq` must not move either, and that is a traced decision rather than a
+    /// symmetry.** `CommandOrderGate` reads it as the ordering floor and returns `.accept` for a
+    /// *gap*, so leaving the floor where it was refuses nothing the leader sends afterwards; whereas
+    /// advancing it for a command that will never apply would make the leader's own re-statement of
+    /// that command a `.duplicate`. Not spending the sequence number of a command that was refused is
+    /// ADR-024 Amendment A1 Finding C's existing rule, applied to the ride lifetime rather than to
+    /// the desynchronisation latch.
+    func testARideRetiringInsideTheAdmissionsClockReadNeverPublishesTheCommandAsApplied() async {
+        await build()
+        await readyFollower()
+        let track = SyncTestValues.hash(141)
+        let itemId = SyncTestValues.ulid(141)
+        await content.addLocal(track)
+
+        startRide()
+        await session.armClockGate()
+        await deliverPlay(track, queueItemId: itemId, commandSeq: 9)
+        await expect("the admission parked inside its clock read") { await self.session.isClockGateParked }
+        let receivedWhileParked = await sync.diagnostics.lastReceivedCommandSeq
+        XCTAssertNil(receivedWhileParked, "parked after the admission wrote its bookkeeping — not the window under test")
+
+        let endRideEpoch = lifecycle.nextRideEpoch()
+        _ = lifecycle.nextRideEpoch()
+
+        await session.releaseClockGate()
+        await settle()
+
+        let applied = await sync.lastAppliedSeq
+        XCTAssertNil(applied, "a command the ride fence refused was recorded as applied")
+        let publishedApplied = await sync.diagnostics.lastAppliedCommandSeq
+        XCTAssertNil(publishedApplied, "…and published as this device's authoritative command_seq")
+        let received = await sync.lastReceivedSeq
+        XCTAssertNil(received, "a refused command spent its command_seq and moved the ordering floor")
+        let publishedReceived = await sync.diagnostics.lastReceivedCommandSeq
+        XCTAssertNil(publishedReceived)
+        let refused = await sync.diagnostics.retiredRideAdmissionCount
+        XCTAssertEqual(1, refused, "the retired-ride admission refusal was not counted")
+        let held = await sync.deferredEvents
+        XCTAssertTrue(held.isEmpty, "a refused command was retained instead")
+        let calls = await player.calls
+        XCTAssertFalse(calls.contains(.select(track)), "a retired ride's command reached the player: \(calls)")
+        let identity = await sync.currentPlaybackIdentity
+        XCTAssertNil(identity)
+        let timeline = await sync.timeline
+        XCTAssertNil(timeline)
+        let authority = await sync.rideAuthorityEpoch
+        XCTAssertEqual(0, authority)
+
+        await lifecycle.endRide(epoch: endRideEpoch)
+        await settle()
+        XCTAssertEqual(0, lifecycle.supersededEndRideCount)
+    }
+
+    /// **Round 8, Regression 3 — the fix must not over-reject.** Both windows above, parked in exactly
+    /// the same place, with **no** ride boundary at all: the ordinary "the clock read was slow"
+    /// case. Everything must apply, against the very `RideAdmission` that admitted it.
+    ///
+    /// Without this, a fix that simply refused anything that had suspended would pass Regressions 1
+    /// and 2 and break synchronised playback outright.
+    func testValidSameRideWorkStillAppliesThroughBothParkedWindows() async {
+        // The drain half.
+        await build()
+        await deferringFollower()
+        let trackOne = SyncTestValues.hash(142)
+        await content.addLocal(trackOne)
+        startRide()
+        await deliverPlay(trackOne, queueItemId: SyncTestValues.ulid(142), commandSeq: 7)
+        await expect("held") { await self.sync.deferredEvents.count == 1 }
+        await session.setClock(SessionClockEstimate(offsetToLeaderUs: 0, rttP95Us: 8_000, ready: true))
+        await session.armClockGate()
+        let drain = Task { await self.sync.drainDeferredEvents() }
+        await expect("the drain parked inside its clock read") { await self.session.isClockGateParked }
+        await session.releaseClockGate()
+        await drain.value
+        await settle()
+
+        let drainReceived = await sync.lastReceivedSeq
+        XCTAssertEqual(7, drainReceived)
+        let drainApplied = await sync.lastAppliedSeq
+        XCTAssertEqual(7, drainApplied, "valid same-ride retained work no longer applies")
+        let drainPublished = await sync.diagnostics.lastAppliedCommandSeq
+        XCTAssertEqual(7, drainPublished)
+        let drainRecovered = await sync.diagnostics.recoveredCommandCount
+        XCTAssertEqual(1, drainRecovered, "a genuine recovery stopped being counted")
+        let drainDiscarded = await sync.diagnostics.retiredRideDeferredCount
+        XCTAssertEqual(0, drainDiscarded, "valid work was discarded as retired")
+        let drainIdentity = await sync.currentPlaybackIdentity
+        XCTAssertEqual(trackOne, drainIdentity?.trackHash)
+        let drainTimeline = await sync.timeline
+        XCTAssertEqual(trackOne, drainTimeline?.trackHash)
+        let drainCalls = await player.calls
+        XCTAssertTrue(drainCalls.contains(.select(trackOne)), "the held command never reached the player: \(drainCalls)")
+        let drainAuthority = await sync.rideAuthorityEpoch
+        XCTAssertEqual(1, drainAuthority, "stamped with a ride other than the one that admitted it")
+
+        // The immediate-admission half, on a fresh harness.
+        await build()
+        await readyFollower()
+        let trackTwo = SyncTestValues.hash(143)
+        await content.addLocal(trackTwo)
+        startRide()
+        await session.armClockGate()
+        await deliverPlay(trackTwo, queueItemId: SyncTestValues.ulid(143), commandSeq: 9)
+        await expect("the admission parked inside its clock read") { await self.session.isClockGateParked }
+        await session.releaseClockGate()
+        await expect("the admitted command reached the player") {
+            await self.player.calls.contains(.select(trackTwo))
+        }
+        await settle()
+
+        let admitReceived = await sync.lastReceivedSeq
+        XCTAssertEqual(9, admitReceived)
+        let admitApplied = await sync.lastAppliedSeq
+        XCTAssertEqual(9, admitApplied, "valid same-ride work no longer applies")
+        let admitPublished = await sync.diagnostics.lastAppliedCommandSeq
+        XCTAssertEqual(9, admitPublished)
+        let admitRefused = await sync.diagnostics.retiredRideAdmissionCount
+        XCTAssertEqual(0, admitRefused, "valid work was refused as a retired-ride admission")
+        let admitIdentity = await sync.currentPlaybackIdentity
+        XCTAssertEqual(trackTwo, admitIdentity?.trackHash)
+        let admitAuthority = await sync.rideAuthorityEpoch
+        XCTAssertEqual(1, admitAuthority)
+    }
+
+    /// §24's cadence applied to round 8: fifty deterministic cycles alternating Regression 1 (the
+    /// boundary lands inside the parked clock read) and Regression 3 (it does not), on a fresh
+    /// harness each time — so neither a fix that happens to pass once nor one that over-corrects into
+    /// refusing everything survives.
+    func testFiftyCyclesOfTheParkedDrainWindow() async {
+        for cycle in 0 ..< 50 {
+            await build()
+            await deferringFollower()
+            let track = SyncTestValues.hash(144)
+            await content.addLocal(track)
+            let boundaryHappens = cycle.isMultiple(of: 2)
+
+            startRide()
+            await deliverPlay(track, queueItemId: SyncTestValues.ulid(144), commandSeq: 11)
+            await expect("held, cycle \(cycle)") { await self.sync.deferredEvents.count == 1 }
+            await session.setClock(SessionClockEstimate(offsetToLeaderUs: 0, rttP95Us: 8_000, ready: true))
+            await session.armClockGate()
+            let drain = Task { await self.sync.drainDeferredEvents() }
+            await expect("parked, cycle \(cycle)") { await self.session.isClockGateParked }
+            if boundaryHappens {
+                _ = lifecycle.nextRideEpoch()
+                _ = lifecycle.nextRideEpoch()
+            }
+            await session.releaseClockGate()
+            await drain.value
+            await settle()
+
+            let applied = await sync.lastAppliedSeq
+            let recovered = await sync.diagnostics.recoveredCommandCount
+            let discarded = await sync.diagnostics.retiredRideDeferredCount
+            if boundaryHappens {
+                XCTAssertNil(applied, "cycle \(cycle): refused work was published as applied")
+                XCTAssertEqual(0, recovered, "cycle \(cycle)")
+                XCTAssertEqual(1, discarded, "cycle \(cycle)")
+            } else {
+                XCTAssertEqual(11, applied, "cycle \(cycle): valid work stopped applying")
+                XCTAssertEqual(1, recovered, "cycle \(cycle)")
+                XCTAssertEqual(0, discarded, "cycle \(cycle)")
+            }
+        }
+    }
+
     /// §24 item 5: fifty deterministic cycles alternating Regression 1 (a boundary while the command
     /// is held) and Regression 4 (no boundary at all), on a fresh harness each time — so a fix that
     /// happens to pass once, or one that over-corrects into refusing everything, fails here.

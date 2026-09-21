@@ -114,13 +114,25 @@ final class ReconnectResyncStressTests: XCTestCase {
     // deadline: widening it costs wall-clock time on an already-slow path, never correctness, so 30 s
     // was chosen as generous rather than tight. If a `notReady` recurs even at this budget, that is
     // new evidence worth a fresh investigation rather than another mechanical bump.
-    private func poll(timeoutSeconds: Double = 30, _ condition: @escaping () async -> Bool) async throws {
+    private func poll(
+        timeoutSeconds: Double = 30,
+        _ what: String = "?",
+        _ condition: @escaping () async -> Bool
+    ) async throws {
         let deadline = Date().addingTimeInterval(timeoutSeconds)
         while Date() < deadline {
             if await condition() { return }
             try await Task.sleep(nanoseconds: 10_000_000)
         }
+        FileHandle.standardError.write(Data("POLL TIMEOUT \(what)\n".utf8))
         throw ControlTransportError.notReady
+    }
+
+    private func dumpRig(_ tag: String, a: RideRig, b: RideRig) async {
+        let ad = await a.sync.diagnostics
+        let bd = await b.sync.diagnostics
+        let msg = "DUMP \(tag) aConn=\(connectedCount(a.session)) bConn=\(connectedCount(b.session)) aLive=\(String(describing: a.manager.liveAuthenticatedGeneration())) bLive=\(String(describing: b.manager.liveAuthenticatedGeneration())) aStatus=\(a.session.status) bStatus=\(b.session.status) aHeld=\(ad.heldStateSnapshotReplyCount) aDrop=\(ad.droppedStateSnapshotReplyCount) aSyncGen=\(ad.sessionGeneration) bSyncGen=\(bd.sessionGeneration) bPending=\(b.resync.diagnostics.requestPending) bOutcome=\(b.resync.diagnostics.lastOutcome)\n"
+        FileHandle.standardError.write(Data(msg.utf8))
     }
 
     private func connectedCount(_ session: FsmSession) -> Int {
@@ -161,7 +173,7 @@ final class ReconnectResyncStressTests: XCTestCase {
         let bPort = try await b.manager.startListening(local: bPeer.local)
         await b.manager.connectTo(host: "127.0.0.1", port: aPort, local: bPeer.local)
         await a.manager.connectTo(host: "127.0.0.1", port: bPort, local: aPeer.local)
-        try await poll { self.connectedCount(a.session) > 0 }
+        try await poll(timeoutSeconds: 30) { self.connectedCount(a.session) > 0 }
         try await settleResyncForwarding(a: a, b: b)
         return (a, b, aPort)
     }
@@ -177,8 +189,22 @@ final class ReconnectResyncStressTests: XCTestCase {
     /// harness had from the start, surfaced only by a test that triggers a resync before any other
     /// network traffic gives the forwarding `Task` time to catch up on its own.
     private func settleResyncForwarding(a: RideRig, b: RideRig) async throws {
-        try await poll {
-            a.resync.isLocalLeader == true && b.resync.isLocalLeader == false
+        // **Independent-review round 8: this now waits for what the comment above always claimed.**
+        //
+        // `isLocalLeader` is set on the first connect and never changes afterwards — leadership is
+        // stable across a reconnect (ARCHITECTURE §5) — so from cycle 2 onwards the old condition
+        // was already true before the cycle began and this helper returned immediately, proving
+        // nothing about the connection the cycle had just built. The generation comparison is the
+        // real signal, and it is the one the comment describes: `diagnostics.sessionGeneration` is
+        // written inside `handleConnected`, which completes before `resync.onConnected` is called in
+        // the same `Task`.
+        try await poll(timeoutSeconds: 30, "both sides' coordinators to adopt the live generation") {
+            guard a.resync.isLocalLeader == true, b.resync.isLocalLeader == false else { return false }
+            guard let aLive = a.manager.liveAuthenticatedGeneration(),
+                  let bLive = b.manager.liveAuthenticatedGeneration() else { return false }
+            let aAdopted = await a.sync.diagnostics.sessionGeneration
+            let bAdopted = await b.sync.diagnostics.sessionGeneration
+            return aAdopted == aLive && bAdopted == bLive
         }
     }
 
@@ -191,10 +217,23 @@ final class ReconnectResyncStressTests: XCTestCase {
     private func reconnectCycle(a: RideRig, b: RideRig, aPort: UInt16) async throws {
         let beforeA = connectedCount(a.session)
         await b.manager.shutdown()
+        do {
+            try await poll(timeoutSeconds: 8, "peer-observed-loss") {
+                a.manager.liveAuthenticatedGeneration() == nil && b.manager.liveAuthenticatedGeneration() == nil
+            }
+        } catch {
+            FileHandle.standardError.write(Data("LOSSWAIT aLive=\(String(describing: a.manager.liveAuthenticatedGeneration())) bLive=\(String(describing: b.manager.liveAuthenticatedGeneration()))\n".utf8))
+            throw error
+        }
         let bPort = try await b.manager.startListening(local: b.testPeer.local)
         await b.manager.connectTo(host: "127.0.0.1", port: aPort, local: b.testPeer.local)
         await a.manager.connectTo(host: "127.0.0.1", port: bPort, local: a.testPeer.local)
-        try await poll { self.connectedCount(a.session) > beforeA }
+        do {
+            try await poll(timeoutSeconds: 8, "reconnect-connected") { self.connectedCount(a.session) > beforeA }
+        } catch {
+            await dumpRig("reconnect-connected", a: a, b: b)
+            throw error
+        }
         try await settleResyncForwarding(a: a, b: b)
     }
 
@@ -437,7 +476,7 @@ final class ReconnectResyncStressTests: XCTestCase {
         // broadcast would be).
         let queuePayload = QueueCodec.encode(.snapshot(queueRevision: 5, items: [], currentIndex: nil))
         await b.manager.playbackRelay().deliverQueue(type: QueueMessageTypes.snapshot, payload: queuePayload, generation: generation)
-        try await poll { await b.sync.queueState.revision == 5 }
+        try await poll(timeoutSeconds: 30) { await b.sync.queueState.revision == 5 }
 
         // A resync STATE_SNAPSHOT reporting an *older* revision (3) must not roll the follower back.
         let staleResync = ResyncCodec.encode(.stateSnapshot(
@@ -460,7 +499,7 @@ final class ReconnectResyncStressTests: XCTestCase {
             queueItems: [], queueCurrentIndex: nil, manifestRevision: 0, transfersInFlight: []
         ))
         await b.manager.resyncRelay().deliver(type: ResyncMessageTypes.stateSnapshot, payload: newerResync, generation: generation)
-        try await poll { await b.sync.queueState.revision == 9 }
+        try await poll(timeoutSeconds: 30) { await b.sync.queueState.revision == 9 }
 
         print(
             "revision after older-resync-after-newer-queue: \(revisionAfterStaleResync) "
@@ -844,7 +883,7 @@ final class ReconnectResyncStressTests: XCTestCase {
             queueItems: [], queueCurrentIndex: nil, manifestRevision: 0, transfersInFlight: []
         ))
         await b.manager.resyncRelay().deliver(type: ResyncMessageTypes.stateSnapshot, payload: firstSnapshot, generation: genBefore)
-        try await poll { await b.sync.diagnostics.lastReceivedCommandSeq == 42 }
+        try await poll(timeoutSeconds: 30) { await b.sync.diagnostics.lastReceivedCommandSeq == 42 }
 
         try await reconnectCycle(a: a, b: b, aPort: aPort)
         try await poll(timeoutSeconds: 30) { !a.resync.diagnostics.requestPending && !b.resync.diagnostics.requestPending }
@@ -874,7 +913,7 @@ final class ReconnectResyncStressTests: XCTestCase {
             queueItems: [], queueCurrentIndex: nil, manifestRevision: 0, transfersInFlight: []
         ))
         await b.manager.resyncRelay().deliver(type: ResyncMessageTypes.stateSnapshot, payload: secondSnapshot, generation: genAfter)
-        try await poll { await b.sync.diagnostics.lastReceivedCommandSeq == 1 }
+        try await poll(timeoutSeconds: 30) { await b.sync.diagnostics.lastReceivedCommandSeq == 1 }
         let bStaleAfter = await b.sync.diagnostics.staleCommandCount
         let bDuplicateAfter = await b.sync.diagnostics.duplicateCommandCount
         XCTAssertEqual(bStaleBefore, bStaleAfter, "a fresh generation's low command_seq must not be refused as stale against the pre-reconnect high-water mark")
@@ -1455,7 +1494,7 @@ final class ReconnectResyncStressTests: XCTestCase {
         let bPort2 = try await b.manager.startListening(local: b.testPeer.local)
         await b.manager.connectTo(host: "127.0.0.1", port: aPort, local: b.testPeer.local)
         await a.manager.connectTo(host: "127.0.0.1", port: bPort2, local: a.testPeer.local)
-        try await poll { self.connectedCount(a.session) > beforeRide2 }
+        try await poll(timeoutSeconds: 30) { self.connectedCount(a.session) > beforeRide2 }
         try await settleResyncForwarding(a: a, b: b)
         guard let gen2 = a.manager.liveAuthenticatedGeneration() else { return XCTFail("no generation") }
 

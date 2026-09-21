@@ -1507,6 +1507,168 @@ class ResyncRecoveryTest {
             )
         }
 
+    // --- Independent-review round 8 (bookkeeping is owned by the caller, not by the apply path) ---
+
+    /**
+     * **Round 8's Android audit, stated as an executable claim rather than as prose.**
+     *
+     * The iOS blocker is a *retained* event whose ride retires while the drain is parked in a
+     * suspension after its own first ride proof — so the drain pops it, writes `lastAppliedSeq`,
+     * publishes `lastAppliedCommandSeq` and counts a recovery, and only then does the apply path
+     * refuse it. Reaching that on iOS needs one specific thing: a ride epoch that has moved while
+     * the held stream still contains work admitted under the older one. `SessionCoordinator
+     * .endRide()` gives iOS exactly that, because it mints the epoch synchronously and hands
+     * `leaveSynchronizedMode` — the only thing that empties the stream — to `launchInSession`.
+     *
+     * **On Android that state is unreachable, and this test is why.** `SessionCoordinator.endRide()`
+     * calls `endRideSegment` on the same thread, one statement after `nextRideEpoch()`, with no
+     * suspension between; `endRideSegment` calls `leaveSynchronizedMode()` synchronously; and
+     * `leaveSynchronizedMode` calls `discardDeferredEvents()` synchronously. So the epoch moving and
+     * the stream emptying are one indivisible step, and "ride epoch moved, retained ride-1 work
+     * still queued" never exists here.
+     *
+     * The guards added to [SyncPlaybackCoordinator.drainDeferredEvents] and
+     * [SyncPlaybackCoordinator.admitAuthoritativeCommand] on this platform are therefore structural
+     * parity, not a bug fix — the same posture `RideEpochBox` already takes, and for the same stated
+     * reason: safety that rests on two statements happening to be synchronous is an undocumented
+     * accident until something asserts it. This test is that assertion. If a future change makes any
+     * link in that chain asynchronous, the window opens on Android too and this fails first.
+     */
+    @Test
+    fun `an end ride empties the held stream in the same step that moves the ride epoch`() =
+        runTest(StandardTestDispatcher()) {
+            val pair = ResyncTestPair(this)
+            pair.connect(generation = 1)
+            seedPlayable(pair, listOf(SyncTestValues.hash(1)))
+            val followerSession = rideSession(this, pair.follower.sync)
+            followerSession.startRide()
+
+            // Make the follower's clock untrustworthy so the leader's next command is *held* rather
+            // than applied — the only configuration in which retained work exists at all.
+            pair.follower.syncSession.setClock(
+                SessionClockEstimate(offsetToLeaderUs = 0, rttP95Us = 8_000, ready = false),
+            )
+            pair.leader.sync.playSynchronized(SyncTestValues.hash(1))
+            runCurrent()
+            pair.leaderClock.advanceBy(LEAD_US)
+            runCurrent()
+
+            assertEquals(
+                1,
+                pair.follower.sync.diagnostics.value.deferredCommandCount,
+                "nothing was retained, so this proves nothing about retained work",
+            )
+            val epochBefore = pair.follower.sync.rideEpochs.current
+
+            // The real production End Ride, and nothing else.
+            followerSession.endRide()
+
+            // **Both facts, observed with no `runCurrent()` between them and the call above.** A
+            // coroutine dispatched by `endRide` has not run at this point, so anything true here is
+            // true because it happened synchronously inside that call.
+            assertTrue(
+                pair.follower.sync.rideEpochs.current > epochBefore,
+                "the ride epoch did not move — this test is no longer observing an End Ride",
+            )
+            assertEquals(
+                0,
+                pair.follower.sync.diagnostics.value.deferredCommandCount,
+                "the held stream outlived the epoch move: the iOS drain window is now reachable here",
+            )
+        }
+
+    /**
+     * Round 8's liveness half on Android: the drain's `content.resolve` — the one genuine suspension
+     * between this platform's top-of-loop ride proof and the bookkeeping it guards — is parked, and
+     * with **no** ride boundary the retained reconciliation still reconciles and still counts
+     * exactly one recovery.
+     *
+     * The new adjacent `rideStillLive` proofs must be invisible to valid work; without this, a fix
+     * that refused anything that had suspended would pass every safety test above and break
+     * synchronised playback outright.
+     */
+    @Test
+    fun `valid same-ride retained work still reconciles through a parked drain resolve`() =
+        runTest(StandardTestDispatcher()) {
+            val pair = ResyncTestPair(this)
+            pair.connect(generation = 1)
+            seedPlayable(pair, listOf(SyncTestValues.hash(1)))
+            pair.leader.content.localHashes
+                .add(SyncTestValues.hash(2).value)
+            pair.leader.content.peerHashes
+                .add(SyncTestValues.hash(2).value)
+            val followerSession = rideSession(this, pair.follower.sync)
+            followerSession.startRide()
+
+            pair.leader.sync.playSynchronized(SyncTestValues.hash(1))
+            runCurrent()
+            pair.leaderClock.advanceBy(LEAD_US)
+            runCurrent()
+
+            pair.leader.syncSession.forwardTo(null)
+            pair.leader.sync.playSynchronized(SyncTestValues.hash(2))
+            runCurrent()
+            pair.leaderClock.advanceBy(LEAD_US)
+            runCurrent()
+            pair.leader.syncSession.forwardTo(pair.follower.syncSession)
+
+            // Deferred for content: the follower cannot play track 2 yet.
+            pair.follower.sync.forceDesynchronizedForTest()
+            runCurrent()
+            assertEquals(ResyncOutcome.DEFERRED, pair.follower.resync.diagnostics.value.lastOutcome)
+            assertEquals(1, pair.follower.sync.diagnostics.value.deferredCommandCount)
+
+            // Park the **drain's** resolve: only it runs while the held stream is non-empty.
+            val gate = CompletableDeferred<Unit>()
+            pair.follower.content.resolveGate = gate
+            pair.follower.content.resolveGateWhen = {
+                pair.follower.sync.diagnostics.value.deferredCommandCount > 0
+            }
+            pair.follower.content.completeTransfer(SyncTestValues.hash(2))
+            runCurrent()
+            pair.followerClock.advanceBy(DEFERRED_RETRY_US * 2)
+            runCurrent()
+
+            assertNull(pair.follower.content.resolveGateWhen, "never parked inside the drain's resolve")
+            assertEquals(
+                1,
+                pair.follower.sync.diagnostics.value.deferredCommandCount,
+                "parked after the pop — this is not the window under test",
+            )
+            assertEquals(
+                0,
+                pair.follower.sync.diagnostics.value.recoveredCommandCount,
+                "parked after the bookkeeping — this is not the window under test",
+            )
+
+            gate.complete(Unit)
+            runCurrent()
+            pair.followerClock.advanceBy(DEFERRED_RETRY_US * 2)
+            runCurrent()
+
+            assertEquals(
+                ResyncOutcome.RECONCILED,
+                pair.follower.resync.diagnostics.value.lastOutcome,
+                "valid same-ride retained work no longer reconciles through a parked resolve",
+            )
+            assertEquals(SyncTestValues.hash(2), pair.follower.sync.diagnostics.value.currentTrackHash)
+            assertEquals(
+                1,
+                pair.follower.sync.diagnostics.value.recoveredCommandCount,
+                "a genuine deferred recovery stopped being counted",
+            )
+            assertEquals(
+                0,
+                pair.follower.sync.diagnostics.value.retiredRideDeferredCount,
+                "valid work was discarded as retired",
+            )
+            assertEquals(
+                0,
+                pair.follower.sync.diagnostics.value.retiredRideAdmissionCount,
+                "valid work was refused as a retired-ride admission",
+            )
+        }
+
     /** The exact adapter `AppContainer` installs — this test must not invent a different one. */
     private class SyncRideSegmentOwner(
         private val sync: SyncPlaybackCoordinator,

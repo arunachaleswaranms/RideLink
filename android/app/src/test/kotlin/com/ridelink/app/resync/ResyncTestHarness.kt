@@ -194,6 +194,13 @@ internal class ResyncTestPair(
         scope.runCurrent()
     }
 
+    /**
+     * `scope` is private, and independent-review round 8's ordering regression needs to drain the
+     * dispatcher between two halves of one authentication. Exposed as a method rather than the
+     * scope itself so a test can only advance it, never re-own it.
+     */
+    fun scopeRunCurrent() = scope.runCurrent()
+
     companion object {
         val SESSION_ID = SessionId("resync-two-peer")
     }

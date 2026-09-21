@@ -2,6 +2,7 @@ package com.ridelink.app.resync
 
 import com.ridelink.app.sync.SyncTestValues
 import com.ridelink.core.resync.ResyncMessage
+import com.ridelink.core.sync.SessionClockEstimate
 import com.ridelink.network.control.ControlEvent
 import com.ridelink.network.control.LinkLossReason
 import kotlinx.coroutines.test.StandardTestDispatcher
@@ -9,6 +10,8 @@ import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 /**
@@ -49,6 +52,160 @@ class ResyncCoordinatorTest {
             assertEquals(ResyncOutcome.RECONCILED, followerDiag.lastOutcome)
             assertEquals(false, followerDiag.requestPending)
         }
+
+    /**
+     * **Independent-review round 8's CI root cause, mirrored from iOS where it was measured.**
+     *
+     * `ReconnectResyncStressTests`' reconnect loops timed out in CI with a bare `notReady`, on a
+     * different case each run. Instrumenting the poll that hung showed it was always the follower's
+     * `requestPending` never clearing, and counting the leader's silent early returns showed exactly
+     * one per wedge, always the first: `role == null`.
+     *
+     * The ordering is a property of the **wiring**, not of the platform, which is why it is asserted
+     * here too. [SyncPlaybackCoordinator] and [ResyncCoordinator] each collect `session.events`
+     * through their own `scope.launch`, and the peer's `STATE_REQUEST` arrives on a third path
+     * entirely — the read loop, through the resync relay. Nothing orders the three. So a request for
+     * the **live** generation can reach a leader whose own `Connected` has been delivered to its
+     * resync coordinator and not yet to its playback coordinator.
+     *
+     * Dropping it was permanent: PROTOCOL §10 has no retry and
+     * [com.ridelink.core.resync.StateResyncGate] deliberately sends exactly one request per
+     * generation — a storm is the failure mode it exists to prevent — so the follower stayed
+     * desynchronised until the *next* reconnect.
+     *
+     * Deterministic: the two halves of the leader's `Connected` are emitted as separate statements
+     * with a `runCurrent()` between them, which is the ordering itself rather than a stand-in for it.
+     */
+    @Test
+    fun `a STATE_REQUEST arriving before the leader's own playback session is established is answered once it is`() =
+        runTest(StandardTestDispatcher()) {
+            val pair = ResyncTestPair(this)
+            pair.connect(generation = 1)
+            pair.dropLink()
+            // The playback plane is told about the loss too, so the leader's `role` is genuinely
+            // null — which is the premise, not an artefact.
+            pair.leader.syncSession.emit(ControlEvent.LinkLost(LinkLossReason.NETWORK))
+            pair.follower.syncSession.emit(ControlEvent.LinkLost(LinkLossReason.NETWORK))
+            runCurrent()
+            assertNull(pair.leader.sync.diagnostics.value.role, "the leader's role must be unset for this window to exist")
+
+            // Generation 2 authenticates. Every plane learns it **except** the leader's playback
+            // coordinator, which is the continuation production defers.
+            authenticateExceptLeaderPlayback(pair, generation = 2)
+
+            // The follower asked, and the leader held the request rather than losing it.
+            assertEquals(
+                1,
+                pair.follower.resyncSession
+                    .sentOfType<ResyncMessage.StateRequest>()
+                    .size,
+                "the follower must have asked exactly once",
+            )
+            assertEquals(
+                1,
+                pair.leader.sync.diagnostics.value.heldStateSnapshotReplyCount,
+                "the early request was not held",
+            )
+            assertTrue(
+                pair.leader.resyncSession
+                    .sentOfType<ResyncMessage.StateSnapshot>()
+                    .isEmpty(),
+                "a snapshot was built before the session it names existed",
+            )
+
+            // The leader's playback plane finally learns about generation 2.
+            pair.leader.syncSession.emit(
+                ControlEvent.Connected(pair.follower.localPeerId, ResyncTestPair.SESSION_ID, true, 2),
+            )
+            runCurrent()
+
+            assertEquals(
+                1,
+                pair.leader.resyncSession
+                    .sentOfType<ResyncMessage.StateSnapshot>()
+                    .size,
+                "the held request must be answered exactly once",
+            )
+            assertEquals(
+                ResyncOutcome.RECONCILED,
+                pair.follower.resync.diagnostics.value.lastOutcome,
+                "the follower stayed desynchronised because its request was lost",
+            )
+            assertFalse(pair.follower.resync.diagnostics.value.requestPending)
+            assertEquals(0, pair.leader.sync.diagnostics.value.droppedStateSnapshotReplyCount)
+        }
+
+    /**
+     * The other half: a held request whose generation retired before the leader's playback session
+     * was ever established must be **dropped**, not answered with a successor's state. The follower
+     * that sent it is gone with its generation, and [com.ridelink.core.resync.StateResyncGate]
+     * re-arms on the next one.
+     */
+    @Test
+    fun `a held STATE_REQUEST whose generation retired is dropped rather than answered by the successor`() =
+        runTest(StandardTestDispatcher()) {
+            val pair = ResyncTestPair(this)
+            pair.connect(generation = 1)
+            pair.dropLink()
+            pair.leader.syncSession.emit(ControlEvent.LinkLost(LinkLossReason.NETWORK))
+            pair.follower.syncSession.emit(ControlEvent.LinkLost(LinkLossReason.NETWORK))
+            runCurrent()
+
+            authenticateExceptLeaderPlayback(pair, generation = 2)
+            assertEquals(1, pair.leader.sync.diagnostics.value.heldStateSnapshotReplyCount)
+            pair.leader.resyncSession.sent
+                .clear()
+
+            // Generation 2 never establishes on the leader's playback plane; generation 3 does.
+            pair.leader.syncSession.currentAuthGeneration = 3
+            pair.leader.syncSession.emit(
+                ControlEvent.Connected(pair.follower.localPeerId, ResyncTestPair.SESSION_ID, true, 3),
+            )
+            runCurrent()
+
+            assertEquals(
+                1,
+                pair.leader.sync.diagnostics.value.droppedStateSnapshotReplyCount,
+                "generation 2's request was not dropped",
+            )
+            assertTrue(
+                pair.leader.resyncSession
+                    .sentOfType<ResyncMessage.StateSnapshot>()
+                    .isEmpty(),
+                "generation 2's request was answered on generation 3's connection",
+            )
+        }
+
+    /**
+     * Everything [ResyncTestPair.reconnect] does, minus the one emission this pass's window is
+     * about: the leader's playback coordinator is deliberately left uninformed.
+     */
+    private suspend fun authenticateExceptLeaderPlayback(
+        pair: ResyncTestPair,
+        generation: Long,
+    ) {
+        pair.scopeRunCurrent()
+        pair.leader.syncSession.currentAuthGeneration = generation
+        pair.follower.syncSession.currentAuthGeneration = generation
+        pair.leader.syncSession.setClock(SessionClockEstimate(offsetToLeaderUs = 0L, rttP95Us = 8_000, ready = true))
+        pair.follower.syncSession.setClock(SessionClockEstimate(offsetToLeaderUs = 0L, rttP95Us = 8_000, ready = true))
+        pair.leader.resyncSession.currentAuthGeneration = generation
+        pair.follower.resyncSession.currentAuthGeneration = generation
+        pair.leader.resyncSession.liveAuthenticatedGeneration = generation
+        pair.follower.resyncSession.liveAuthenticatedGeneration = generation
+
+        // Deliberately **not** `leader.syncSession.emit(Connected(...))`.
+        pair.follower.syncSession.emit(
+            ControlEvent.Connected(pair.leader.localPeerId, ResyncTestPair.SESSION_ID, false, generation),
+        )
+        pair.leader.resyncSession.emit(
+            ControlEvent.Connected(pair.follower.localPeerId, ResyncTestPair.SESSION_ID, true, generation),
+        )
+        pair.follower.resyncSession.emit(
+            ControlEvent.Connected(pair.leader.localPeerId, ResyncTestPair.SESSION_ID, false, generation),
+        )
+        pair.scopeRunCurrent()
+    }
 
     @Test
     fun `a desynchronized follower requests state without a reconnect`() =
