@@ -10,6 +10,7 @@ import com.ridelink.core.security.TrustedPeerStore
 import com.ridelink.core.sync.ClockSync
 import com.ridelink.network.manifest.ManifestRelay
 import com.ridelink.network.playback.PlaybackRelay
+import com.ridelink.network.resync.ResyncRelay
 import com.ridelink.network.transfer.TransferRelay
 import com.ridelink.network.voice.AuthenticatedFrameWriter
 import com.ridelink.network.voice.VoiceSignalRelay
@@ -396,6 +397,8 @@ class ControlSessionManager(
     val transfer: TransferRelay get() = relays.transfer
 
     val playback: PlaybackRelay get() = relays.playback
+
+    val resync: ResyncRelay get() = relays.resync
 
     /**
      * Binds the OS-selected dynamic port and starts accepting inbound candidates. This instance

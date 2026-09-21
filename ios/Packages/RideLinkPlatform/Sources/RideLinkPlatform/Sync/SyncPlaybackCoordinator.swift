@@ -106,6 +106,142 @@ public actor SyncPlaybackCoordinator {
     var lastAppliedSeq: Int64?
     var nextSeq: Int64 = PlaybackBounds.firstCommandSeq
     var timeline: PlaybackTimeline?
+    /// Ride-segment playback identity (independent review, Blocker 2B) — see `PlaybackIdentity`'s
+    /// own doc comment. Updated everywhere `timeline`'s track/queue-item identity changes; **not**
+    /// cleared by `resetForNewSession()`, unlike `timeline` itself.
+    var currentPlaybackIdentity: PlaybackIdentity?
+
+    /// Independent-review round 3, Blocker C: the ride segment `currentPlaybackIdentity` belongs to.
+    ///
+    /// Strictly increasing, minted **and published in the same step** by `RideEpochBox.next()` on
+    /// the main actor the instant `SessionFsm` accepts a Start Ride or an End Ride, and never
+    /// derived here. It answers "which ride is current", and it is what `recordRideAuthority`
+    /// stamps into `rideAuthorityEpoch` when authority is established.
+    ///
+    /// **Independent-review round 5, Blocker 1: this is a `nonisolated let` box rather than an
+    /// actor-isolated field a `beginRideSegment` had to travel here to set.** A field only a
+    /// successful hop could move made "the ride `SessionFsm` accepted" and "the ride this actor
+    /// knows about" two different facts with a window between them, and authority established
+    /// inside that window was stamped with the *predecessor* ride. See `RideEpochBox`.
+    ///
+    /// **Independent-review round 4, Blocker 1: it is deliberately not what an End Ride boundary
+    /// compares against.** "A newer ride-lifecycle decision has been taken" is not the same fact as
+    /// "a newer ride owns something", because a Start Ride establishes nothing — and treating them
+    /// as one left ride 1's state standing whenever a Start Ride merely got there first. See
+    /// `endRideSegment` and `rideAuthorityEpoch`.
+    nonisolated let rideEpochs = RideEpochBox()
+
+    /// Bumped by **every** exit from synchronised mode — End Ride and "Play locally" alike — and by
+    /// nothing else (independent-review round 3, found by CI on this pass's own new regression).
+    ///
+    /// `applyPlay` proves the *control* generation before it writes, and End Ride does not change
+    /// that generation: the control connection, the pairing and the session all stay alive on
+    /// purpose. So an `applyPlay` suspended in `content.resolve` when the user ends the ride resumed
+    /// afterwards and wrote `currentPlaybackIdentity`, `timeline` and a fresh playback epoch back
+    /// over the state `leaveSynchronizedMode` had just retired — ride 1's track reported as ride 2's
+    /// truth by a different route than Blocker C's, and "Play locally" resurrecting a synchronised
+    /// timeline by the same one. Kept separate from `rideEpochs` because that one is
+    /// `SessionCoordinator`'s to assign and must stay comparable with it.
+    var synchronizedModeEpoch: Int64 = 0
+
+    /// Independent-review round 4, Blocker 1: the ride epoch under which the **live** ride-scoped
+    /// synchronisation authority was established.
+    ///
+    /// `rideEpochs.current` says which ride is nominally current. That is not the question an
+    /// End Ride boundary has to answer, and round 3 answered the wrong one. `SessionCoordinator`
+    /// assigns the epoch synchronously and then *hops*, so a Start Ride can make ride 2 current
+    /// before ride 1's End Ride cleanup has run — and refusing the cleanup because "a newer ride
+    /// exists" left ride 1's `currentPlaybackIdentity` standing, with ride 2 having established
+    /// nothing of its own to overwrite it. Ride 2's first `STATE_SNAPSHOT` then reported ride 1's
+    /// track, which is the very thing Blocker C existed to stop, reached by the other side of the
+    /// same race.
+    ///
+    /// This field is the honest discriminator: it is stamped with the **admission-time** ride epoch
+    /// at each of the three places ride-scoped playback authority is *established* (a track becomes
+    /// authoritative, or is authoritatively replaced by "nothing loaded"), and reset to 0 whenever
+    /// that authority ends. `endRideSegment` then refuses **only** when a strictly newer ride has
+    /// already established authority of its own — so a late cleanup can never clear ride 2's track
+    /// (Property A) and can never leave ride 1's behind either (Property B).
+    ///
+    /// Deliberately **not** cleared by `resetForNewSession`, exactly as `currentPlaybackIdentity`
+    /// is not: an ordinary control-link blip does not change which ride owns what is playing.
+    var rideAuthorityEpoch: Int64 = 0
+
+    /// Stamps `rideAuthorityEpoch` for the ride that **authorised the operation now writing**.
+    /// Called from the three sites that establish ride-scoped playback authority, and from nowhere
+    /// else — see `rideAuthorityEpoch`. Synchronous, and every caller places it adjacent to the
+    /// write it describes, with no `await` between.
+    ///
+    /// **Independent-review round 6: the round-5 fix read `rideEpochs.current` here — live, at the
+    /// instant of the write — and that is the defect the repository's standing rule forbids, applied
+    /// to the third lifetime.** `applyPlay`, `applyStep` and `restoreFromPlaybackState` all suspend
+    /// (`content.resolve`, `readyEstimate`, `runOwnedSteps`'s pre-roll) between the point their
+    /// caller captures the ride lifetime and the point this function runs. A round-5 doc comment on
+    /// this very function argued the two could not come apart because every exit from `RIDE_ACTIVE`
+    /// bumps `synchronizedModeEpoch` or the auth generation "adjacent to this call" — but
+    /// `synchronizedModeEpoch` only bumps when `leaveSynchronizedMode` **actually runs**, and End
+    /// Ride's cleanup is asynchronous (`SessionCoordinator.endRide()` hands it to
+    /// `launchInSession`). An operation admitted under ride 1, parked in a real suspension, can
+    /// resume after both an accepted End Ride *and* a further accepted Start Ride — `rideEpochs`
+    /// already strictly newer — while `synchronizedModeEpoch` is still the value it captured,
+    /// because ride 1's cleanup has not been *scheduled* to run yet. Re-reading `rideEpochs.current`
+    /// at that instant relabels ride 1's work as ride 2's, exactly the class this file keeps finding
+    /// and fixing everywhere else. The inverse also reproduced: genuinely **new** authority admitted
+    /// after an accepted End Ride but before its parked cleanup executes was stamped with the End
+    /// Ride's own freshly-minted epoch — indistinguishable, under `<=`, from residue the cleanup
+    /// exists to clear — and a same-valued predecessor cleanup then destroyed it.
+    ///
+    /// **The fix is provenance, not a smarter live read.** `admittedRideEpoch` is `RideAdmission
+    /// .rideEpoch` — `rideEpochs.current` captured once, at the coordinator's own admission point,
+    /// before this operation's first suspension — the same discipline `generation` already follows
+    /// (CLAUDE.md rules 19/20) applied to the ride lifetime. It travels through every intermediate
+    /// `await` as a parameter, is re-proved live immediately before every write it could reach
+    /// (`applyPlay`, `applyTransport`, `applySeek`, `applyStep`, `applyPeerPlaybackState`,
+    /// `restoreFromPlaybackState` — a mismatch is `.rejectedRide`, refused rather than written), and
+    /// is what this function stamps — never re-derived. By the time this runs, the guard immediately
+    /// above it has already proved `rideStillLive` with no suspension between the proof and here, so
+    /// stamping the parameter and reading the live property agree at this exact instant — the
+    /// difference is that the parameter cannot silently start disagreeing if a future edit inserts
+    /// an `await` between the guard and this call, and the live read could.
+    ///
+    /// **Independent-review round 7 is why the parameter is now half of a single `RideAdmission`
+    /// rather than one of two loose values**: round 6 threaded both correctly through every
+    /// *executing* path and neither survived the moment an operation became *retained*. See
+    /// `RideAdmission`.
+    ///
+    /// `endRideSegment`'s comparison is `<`, not `<=`, for the same reason: an End Ride's own newly
+    /// minted epoch names the boundary between "ride 1's work" and "everything after ride 1", and
+    /// authority admitted *at* that value belongs to the second half.
+    func recordRideAuthority(admittedRideEpoch: Int64) {
+        rideAuthorityEpoch = admittedRideEpoch
+    }
+
+    /// Captures the ride provenance of an operation **at the instant this coordinator admits it**
+    /// (independent-review round 7).
+    ///
+    /// Synchronous, and every caller places it before that operation's first suspension — which is
+    /// what makes the captured pair the ride that actually authorised the work rather than whichever
+    /// ride happens to be current when a later stage runs. See `RideAdmission`.
+    func admitRide() -> RideAdmission {
+        RideAdmission(synchronizedModeEpoch: synchronizedModeEpoch, rideEpoch: rideEpochs.current)
+    }
+
+    /// Whether the ride lifetime that admitted an operation is still the live one.
+    ///
+    /// Both halves are load-bearing and neither subsumes the other:
+    ///
+    /// - `synchronizedModeEpoch` moves only when `leaveSynchronizedMode` **runs**, so it is the half
+    ///   that catches "Play locally" and an End Ride whose cleanup has already executed;
+    /// - `rideEpochs.current` moves the instant `SessionFsm` **accepts** a Start Ride or an End Ride,
+    ///   synchronously, with no window — so it is the half that catches an accepted End Ride whose
+    ///   cleanup is still parked in `launchInSession` (independent-review round 6).
+    ///
+    /// Synchronous by construction: every caller places it immediately before the write or the
+    /// retention it authorises, with no `await` between.
+    func rideStillLive(_ admission: RideAdmission) -> Bool {
+        synchronizedModeEpoch == admission.synchronizedModeEpoch && rideEpochs.current == admission.rideEpoch
+    }
+
     var driftState = DriftController.reset()
     private var tickTask: Task<Void, Never>?
 
@@ -142,6 +278,15 @@ public actor SyncPlaybackCoordinator {
     /// the leader chose. A `POSITION_REPORT` is never held: it produces one diagnostics number and
     /// can change no command's meaning.
     var deferredEvents: [DeferredEvent] = []
+
+    /// A peer `STATE_REQUEST` that reached this coordinator **before** its own session was
+    /// established (independent-review round 8's CI investigation).
+    ///
+    /// One slot, never a queue: PROTOCOL §10 allows one outstanding request per generation
+    /// (`StateResyncGate`), so a second retained request could only ever be a newer generation's,
+    /// and nothing can answer the older one any more. Cleared by `resetForNewSession`, so a request
+    /// never survives into a session that did not admit it.
+    var pendingStateSnapshotReply: PendingStateSnapshotReply?
     var deferredDrainTask: Task<Void, Never>?
     let deferredCommandCapacity: Int
 
@@ -236,6 +381,54 @@ public actor SyncPlaybackCoordinator {
     public var onDiagnosticsChanged: (@Sendable (SyncPlaybackDiagnostics) -> Void)?
     public var onQueueChanged: (@Sendable (SharedQueueState) -> Void)?
 
+    /// Phase 7 (ADR-028): fired whenever an ingress overflow latches
+    /// `playbackDesynchronized`/`queueDesynchronized` on a **follower** — the trigger
+    /// `ResyncCoordinator` turns into a `STATE_REQUEST` (PROTOCOL §10). A dedicated slot,
+    /// deliberately separate from `onDiagnosticsChanged` (which `SyncPlaybackPresenter` already owns
+    /// for the UI): two owners of one concern each, not one slot serving two. Carries no generation —
+    /// `ResyncCoordinator` reads the live one at the instant it reacts, exactly as Android's
+    /// `ResyncCoordinator.init`'s diagnostics collector reads `session.currentAuthGeneration` rather
+    /// than a frame-bound value, because this is a "current state" trigger, not frame provenance.
+    public var onDesynchronizedTrigger: (@Sendable () -> Void)?
+
+    /// Independent review, Blocker 2E: fired with the authorising `generation` whenever a full
+    /// playback restoration actually **completes** — including one that was first deferred for the
+    /// clock and only applied later, from `drainDeferredEvents`. `ResyncCoordinator` is the one
+    /// consumer: it compares the generation against its own `pendingRequestGeneration` before
+    /// reacting, the same generation-keyed matching `StateResyncGate` already does for the
+    /// synchronous case, so a signal belonging to an unrelated (e.g. ordinary wire `PLAYBACK_STATE`,
+    /// or a retired generation's) restoration is simply ignored rather than mismatched. Never fired
+    /// for the ordinary "already synced, just re-anchor" path, which is always synchronous and
+    /// already answered directly by `onStateSnapshot`'s return value.
+    ///
+    /// **Independent-review round 4, Blocker 2: it carries the obligation's own id, not just the
+    /// generation.** End Ride deliberately does not move the authenticated control generation, so
+    /// two reconciliation obligations can exist sequentially under one generation — S1 discarded by
+    /// an End Ride, S2 accepted in the ride that follows — and a generation-only signal let S2's
+    /// success complete S1, publishing ride 1's `command_seq`/`manifest_revision` as a reconciliation
+    /// that never happened. The id is minted by `ResyncCoordinator`, travels *into* the retained
+    /// event, and comes back out with the terminal result; it is compared, never re-derived.
+    public var onReconciliationApplied: (@Sendable (_ obligation: Int64, _ generation: Int64) -> Void)?
+
+    /// Independent-review round 4, Blocker 2: the other terminal result a retained reconciliation
+    /// can reach — it was **discarded** rather than applied.
+    ///
+    /// `leaveSynchronizedMode` (End Ride, "Play locally"), `resetForNewSession` (a control-lifetime
+    /// boundary), `failClosedOutbound` and a drain that finds its generation retired all legitimately
+    /// throw held authoritative work away. Before this, the outer owner of the obligation simply
+    /// never heard: `ResyncCoordinator.deferredReconciliation` stayed alive holding ride 1's snapshot,
+    /// and the next completion signal that matched its generation completed it.
+    ///
+    /// Applied and cancelled are the two terminal results, they are mutually exclusive, and **only
+    /// applied may produce `RECONCILED`**. Nothing is ever inferred from an absence.
+    public var onReconciliationCancelled: (@Sendable (_ obligation: Int64, _ generation: Int64) -> Void)?
+
+    /// Phase 7 (ADR-028 Amendment): where a `.resync` outbound frame is actually written.
+    /// `ResyncCoordinator.attach()` installs this once, mirroring `onDesynchronizedTrigger` — a
+    /// second late-bound collaborator, not a constructor dependency, so Phase 5 does not need to
+    /// know Phase 7 exists at `init` time.
+    private var resyncChannel: (any ResyncChannel)?
+
     public init(
         monotonicNowUs: @escaping @Sendable () -> Int64,
         localPeerId: PeerId,
@@ -290,7 +483,16 @@ public actor SyncPlaybackCoordinator {
         let queue = inbound
         await content.observeAvailability { [weak self] in
             _ = queue
-            Task { await self?.resolvePendingPlay() }
+            Task {
+                await self?.resolvePendingPlay()
+                // Independent review, Race 7: a `STATE_SNAPSHOT` restoration held for missing content
+                // (`DeferredEvent.playbackState`, held by `applyPeerPlaybackState`) is a different
+                // obligation from `pendingPlay`'s local-intent one, and content becoming available is
+                // exactly the event that can unblock it — the same drain `startDeferredDrain`'s own
+                // retry cadence already re-attempts, triggered promptly instead of waiting out the
+                // interval.
+                await self?.drainDeferredEvents()
+            }
         }
     }
 
@@ -325,6 +527,31 @@ public actor SyncPlaybackCoordinator {
         onQueueChanged = observer
     }
 
+    /// Phase 7 (ADR-028): installs the desync trigger. A method rather than direct property
+    /// assignment, matching `setDiagnosticsObserver`/`setQueueObserver` exactly — external callback
+    /// registration on an actor-isolated property goes through a method on this platform.
+    public func setDesynchronizedTrigger(_ trigger: (@Sendable () -> Void)?) {
+        onDesynchronizedTrigger = trigger
+    }
+
+    /// Independent review, Blocker 2E: installs where a deferred-then-later-applied reconciliation
+    /// is reported, mirroring `setDesynchronizedTrigger` exactly.
+    public func setReconciliationAppliedTrigger(_ trigger: (@Sendable (Int64, Int64) -> Void)?) {
+        onReconciliationApplied = trigger
+    }
+
+    /// Independent-review round 4, Blocker 2: installs where a retained reconciliation that was
+    /// **discarded** is reported, mirroring `setReconciliationAppliedTrigger` exactly.
+    public func setReconciliationCancelledTrigger(_ trigger: (@Sendable (Int64, Int64) -> Void)?) {
+        onReconciliationCancelled = trigger
+    }
+
+    /// Phase 7 (ADR-028 Amendment): installs where a `.resync` outbound frame is written. See
+    /// `resyncChannel`'s doc comment.
+    public func setResyncChannel(_ channel: (any ResyncChannel)?) {
+        resyncChannel = channel
+    }
+
     // MARK: - Session lifecycle
 
     /// ADR-019: `.connected` means the trust gate passed, so this is the first instant a Phase 5
@@ -334,6 +561,10 @@ public actor SyncPlaybackCoordinator {
     /// Forwarded by the app's `SessionCoordinator` rather than subscribed to here, for the reason
     /// `SyncSessionPort` records: `onEvent` is a single mutable callback slot on this platform.
     public func handleConnected(isLocalLeader: Bool) async {
+        // Round 8: taken **before** the reset, because `resetForNewSession` is what drops a request
+        // no session ever came for — and this is the one caller for which a session *is* arriving.
+        // Held locally across the reset so nothing between here and the flush can answer it twice.
+        let heldReply = pendingStateSnapshotReply
         await resetForNewSession()
         role = isLocalLeader ? .leader : .follower
         diagnostics.role = role
@@ -342,6 +573,38 @@ public actor SyncPlaybackCoordinator {
         publishDiagnostics()
         let generation = diagnostics.sessionGeneration
         tickTask = Task { [weak self] in await self?.tickLoop(generation: generation) }
+        // Independent-review round 8's CI investigation: a `STATE_REQUEST` that reached
+        // `enqueueStateSnapshotReply` before this session was established is answered here, once,
+        // and only if it named *this* generation. See `PendingStateSnapshotReply`.
+        await flushPendingStateSnapshotReply(heldReply)
+    }
+
+    /// PROTOCOL §10's `STATE_REQUEST` answered late, because it arrived early.
+    ///
+    /// The request is captured by `handleConnected` **before** its `resetForNewSession()` — which
+    /// is deliberately the one thing that drops a request no session ever came for — and passed in
+    /// here, so the value being answered is the one that was held when this session began and not
+    /// whatever landed in the slot since. The generation is **compared, never re-read**: a request
+    /// authorised by a lifetime that has since retired is dropped here rather than answered with a
+    /// successor's state, which is ADR-028 Amendment A1's rule applied to a reply this device is
+    /// only now able to build.
+    private func flushPendingStateSnapshotReply(_ held: PendingStateSnapshotReply?) async {
+        guard let held else { return }
+        // Defence in depth: `resetForNewSession` above already cleared the slot, so nothing else can
+        // still be holding this request — but a future edit that moved the reset must not silently
+        // produce two answers.
+        pendingStateSnapshotReply = nil
+        guard held.generation == liveGeneration else {
+            diagnostics.droppedStateSnapshotReplyCount += 1
+            publishDiagnostics()
+            return
+        }
+        await enqueueStateSnapshotReply(
+            generation: held.generation,
+            leaderPeerId: held.leaderPeerId,
+            manifestRevision: held.manifestRevision,
+            transfersInFlight: held.transfersInFlight
+        )
     }
 
     /// ADR-004: "A Wi-Fi drop does **not** interrupt music. Both phones keep playing; only
@@ -377,7 +640,10 @@ public actor SyncPlaybackCoordinator {
         let cancelled = pendingPlay == nil ? 0 : 1
         pendingPlay = nil
         transferRequestedForToken = nil
-        deferredEvents.removeAll()
+        discardDeferredEvents()
+        // Round 8: a `STATE_REQUEST` held for a session that never arrived belongs to a lifetime
+        // that is over. The follower's own `StateResyncGate` re-arms on the next generation.
+        pendingStateSnapshotReply = nil
         // Amendment A2 Finding B: a fresh generation retires everything the previous one authorised.
         // Frames still queued outbound stay physically queued and become inert, because each carries
         // the generation that authorised it and `outboundUsable` refuses to write them.
@@ -386,16 +652,33 @@ public actor SyncPlaybackCoordinator {
         lastAppliedSeq = nil
         nextSeq = PlaybackBounds.firstCommandSeq
         timeline = nil
+        // Independent review, Blocker 2B: `currentPlaybackIdentity` is deliberately **not** reset
+        // here, unlike `timeline` — it is ride-segment truth (which track, which queue item), not
+        // the session-clock-relative scheduling apparatus `timeline` carries. Before this fix, a
+        // leader whose control link merely blipped reported `track_hash: nil, queue_item_id: nil` in
+        // its next STATE_SNAPSHOT even while still audibly playing something, because the snapshot
+        // read `timeline?.trackHash`/`timeline?.queueItemId` — both wiped here — instead of anything
+        // that survives a link loss the way ADR-004 says local playback itself does.
         driftState = DriftController.reset()
         playbackDesynchronized = false
         queueDesynchronized = false
-        queueState = SharedQueueState()
+        // ADR-024 Amendment A8: `queueState` is deliberately **not** reset here. Everything above it
+        // is session-bound coordination state (sequence numbering, chains, epoch, timeline, drift) —
+        // scoped to the authentication generation that is ending, correctly retired with it. The
+        // queue is not: it is ride-segment-local state PROTOCOL §10 assumes survives a link loss
+        // ("session_id survives a reconnect… the follower adopts the leader's command_seq and
+        // queue_revision wholesale" presumes the leader still *has* authoritative state to resume
+        // from), and this repo's brief rule 7 requires it, the same principle already applied to
+        // capture/voice consent surviving a control-lifetime boundary. Before this fix, an ordinary
+        // link loss unconditionally wiped it via `queueState = SharedQueueState()` here, with no
+        // leader/follower distinction and nothing downstream that ever repopulated a leader's copy —
+        // reachable with no peer at all, see `testALeadersQueueSurvivesAnOrdinaryLinkLoss`.
         diagnostics.syncState = .inactive
         diagnostics.lastAppliedCommandSeq = nil
         diagnostics.lastReceivedCommandSeq = nil
         diagnostics.nextCommandSeq = nil
-        diagnostics.queueRevision = 0
-        diagnostics.queueSize = 0
+        diagnostics.queueRevision = queueState.revision
+        diagnostics.queueSize = queueState.items.count
         diagnostics.currentTrackHash = nil
         diagnostics.localDriftMs = nil
         diagnostics.peerDriftMs = nil
@@ -618,6 +901,12 @@ public actor SyncPlaybackCoordinator {
         switch frame {
         case .playback(let message): return await session.channel.send(message, authorizingGeneration: generation)
         case .queue(let message): return await session.channel.send(message, authorizingGeneration: generation)
+        // Independent review, Blocker 1 (fixed): `ResyncRelay` now takes `authorizingGeneration` and
+        // is bound to the one immutable `AuthenticatedConnection` record, exactly like Playback/Voice
+        // — `outboundUsable(generation)`'s upstream proof alone left a window between that proof and
+        // the actual write (the queue consumer, the actor hop, the write lock all suspend), which is
+        // the same class ADR-020 Amendment A9 already closed for `VOICE_*`.
+        case .resync(let message): return await resyncChannel?.send(message, generation: generation) ?? false
         }
     }
 
@@ -675,7 +964,7 @@ public actor SyncPlaybackCoordinator {
         let cancelled = pendingPlay == nil ? 0 : 1
         pendingPlay = nil
         transferRequestedForToken = nil
-        deferredEvents.removeAll()
+        discardDeferredEvents()
         deferredDrainTask?.cancel()
         deferredDrainTask = nil
         driftState = DriftController.reset()
@@ -775,7 +1064,15 @@ public actor SyncPlaybackCoordinator {
     /// stamp, try to admit, and consume the sequence number only if the admission succeeded.
     /// Everything after that is `onCommandOutcome`, which the single outbound consumer calls with
     /// what actually happened.
-    func issue(_ build: (PlaybackCommandHeader) -> PlaybackMessage) async {
+    ///
+    /// **Independent-review round 7: `ride` is the caller's, never read here.** Every caller captures
+    /// it before its own first suspension — the user action before it reads the player, the retained
+    /// Play from the press that created it, a follower's intent at the instant the leader admitted it
+    /// — and it is proved live in the same no-`await` block that stamps the header, so a command whose
+    /// ride ended is never stamped, never enqueued, and never applied. The envelope carries it back to
+    /// `onCommandOutcome`, so the leader's own local apply is authorised by the ride that *issued* the
+    /// command rather than by whichever ride is current when the transport finally answers.
+    func issue(ride: RideAdmission, _ build: (PlaybackCommandHeader) -> PlaybackMessage) async {
         guard let currentRole = role, !outboundAuthorityLost else { return }
         let generation = await session.currentAuthGeneration()
         if currentRole == .follower {
@@ -784,6 +1081,8 @@ public actor SyncPlaybackCoordinator {
             // suspension. No `await` from here to the enqueue: the actor makes the pair atomic
             // (Finding B).
             guard stillCurrentNow(generation) else { return }
+            // Round 7: and the ride that admitted this action, proved in the same block.
+            guard rideStillLive(ride) else { return }
             let header = PlaybackCommandHeader(
                 commandSeq: PlaybackBounds.unassignedCommandSeq,
                 effectiveAtSessionUs: 0,
@@ -804,6 +1103,8 @@ public actor SyncPlaybackCoordinator {
         // suspends — so a boundary landing in it would let this stamp Session B's sequence number.
         // No `await` from here to the enqueue.
         guard stillCurrentNow(generation) else { return }
+        // Round 7: `readyEstimate` above suspends too, and End Ride moves no control generation.
+        guard rideStillLive(ride) else { return }
         let seq = nextSeq
         let header = PlaybackCommandHeader(
             commandSeq: seq,
@@ -816,7 +1117,8 @@ public actor SyncPlaybackCoordinator {
             Phase5Outbound(generation: generation, authority: .authoritative, frame: .playback(message)) {
                 [weak self] outcome in
                 await self?.onCommandOutcome(
-                    seq: seq, message: message, generation: generation, estimate: estimate, outcome: outcome
+                    seq: seq, message: message, generation: generation, ride: ride, estimate: estimate,
+                    outcome: outcome
                 )
             }
         )
@@ -849,6 +1151,10 @@ public actor SyncPlaybackCoordinator {
         seq: Int64,
         message: PlaybackMessage,
         generation: Int64,
+        /// Independent-review round 7: the ride that **issued** this command, carried on the outbound
+        /// envelope. The transport answers across the outbound consumer, an actor hop and a real
+        /// socket write, so reading a live ride here would be the same defect one layer out.
+        ride: RideAdmission,
         estimate: SessionClockEstimate,
         outcome: OutboundOutcome
     ) async {
@@ -868,6 +1174,22 @@ public actor SyncPlaybackCoordinator {
         // Amendment A5: the two sequence numbers below are exactly what Finding A is about, reached
         // from the leader's side. No `await` between the synchronous proof and the writes.
         guard stillCurrentNow(generation) else { return }
+        // **Independent-review round 8's sweep, the leader's own half of Blocker B.** The transport
+        // answers across the outbound consumer, an actor hop and a real socket write, and
+        // `stillCurrent` above suspends again — so a ride boundary accepted in any of those windows
+        // leaves the control generation untouched and both proofs above passing. The two writes
+        // below would then publish this `command_seq` as applied while `chainApply`'s
+        // `applyAuthoritative` refused it as `.rejectedRide`: the same false bookkeeping as the
+        // receiving side's, reached from the issuing side.
+        //
+        // The frame did reach the peer, and this deliberately does not un-send it — but nothing on
+        // this device applied it, so nothing on this device may claim it did. Proved with no
+        // `await` between the proof and the writes.
+        guard rideStillLive(ride) else {
+            diagnostics.retiredRideAdmissionCount += 1
+            publishDiagnostics()
+            return
+        }
         // max, not assignment: these commit on the outbound consumer, in send order, and a monotone
         // write says the same thing without depending on that ordering twice over.
         lastReceivedSeq = max(lastReceivedSeq ?? seq, seq)
@@ -876,7 +1198,7 @@ public actor SyncPlaybackCoordinator {
         diagnostics.lastReceivedCommandSeq = lastReceivedSeq
         publishDiagnostics()
         chainApply(generation: generation) { [weak self] in
-            await self?.applyAuthoritative(message, generation: generation, estimate: estimate)
+            await self?.applyAuthoritative(message, generation: generation, ride: ride, estimate: estimate)
         }
     }
 
@@ -902,6 +1224,10 @@ public actor SyncPlaybackCoordinator {
         // *into*. Local playback is Phase 3's again and answers this on its own.
         guard !outboundAuthorityLost else { return }
         syncEnabled = true
+        // Independent-review round 7: the press's own ride, captured before this function's first
+        // suspension. It is stored on the retained request and travels all the way to the `PLAY` this
+        // press eventually issues — never re-read when the transfer that unblocked it completes.
+        let ride = admitRide()
         let generation = await session.currentAuthGeneration()
         // Amendment A5: `playRequestFence.begin()` below supersedes whatever Play is current, so a
         // press whose session changed inside that read would cancel the live session's own retained
@@ -909,13 +1235,19 @@ public actor SyncPlaybackCoordinator {
         // actor has not been told about yet — `resolvePendingPlay` would otherwise issue it into a
         // session whose state has not been reset.
         guard stillCurrentNow(generation) else { return }
+        // Independent-review round 8's sweep: `currentAuthGeneration()` above suspends, and
+        // `playRequestFence.begin()` below **supersedes** whatever retained Play is current. A press
+        // whose ride ended inside that read would therefore cancel a *successor* ride's retained
+        // Play and install one of its own that `resolvePendingPlay` can only cancel — so the ride is
+        // proved here, adjacent to the fence, rather than only where the request is resolved.
+        guard rideStillLive(ride) else { return }
         // No `await` in this block: the fence, the id and the retained request move together.
         let existing = queueState.items.first { $0.trackHash == contentHash }
         let queueItemId = existing?.queueItemId ?? nextQueueItemId()
         // begin() supersedes whatever earlier request held the slot, which is what makes "the user
         // asked for X while H was still transferring" resolve to X and only X.
         pendingPlay = PendingPlay(
-            token: playRequestFence.begin(), generation: generation, contentHash: contentHash,
+            token: playRequestFence.begin(), generation: generation, ride: ride, contentHash: contentHash,
             queueItemId: queueItemId, positionMs: 0
         )
         if existing == nil {
@@ -944,27 +1276,94 @@ public actor SyncPlaybackCoordinator {
         await mutateQueue(.move(queueItemId: queueItemId, toIndex: toIndex))
     }
 
+    // Independent-review round 7: each of these captures the ride **before** its own first
+    // suspension — `playerState()` is a cross-actor read — and hands it to `issue`, which proves it
+    // adjacent to the stamp. A transport press made in ride 1 can no longer be stamped, sent and
+    // applied as ride 2's authority.
+
     public func pause() async {
+        let ride = admitRide()
         let position = max(await player.playerState().positionMs, 0)
-        await issue { header in .pause(header: header, positionMs: position) }
+        await issue(ride: ride) { header in .pause(header: header, positionMs: position) }
     }
 
     public func resume() async {
+        let ride = admitRide()
         let position = max(await player.playerState().positionMs, 0)
-        await issue { header in .resume(header: header, positionMs: position) }
+        await issue(ride: ride) { header in .resume(header: header, positionMs: position) }
     }
 
     public func seek(positionMs: Int64) async {
-        await issue { header in .seek(header: header, targetPositionMs: max(positionMs, 0)) }
+        await issue(ride: admitRide()) { header in .seek(header: header, targetPositionMs: max(positionMs, 0)) }
     }
 
-    public func next() async { await issue { header in .next(header: header) } }
+    public func next() async { await issue(ride: admitRide()) { header in .next(header: header) } }
 
-    public func previous() async { await issue { header in .previous(header: header) } }
+    public func previous() async { await issue(ride: admitRide()) { header in .previous(header: header) } }
+
+    /// ARCHITECTURE §3's `RIDE_ACTIVE -> CONNECTED`, reaching the one owner of ride-segment playback
+    /// authority (independent-review round 3, Blocker C; ADR-028 Amendment A2).
+    ///
+    /// **End Ride is not End Session.** The control connection, the pairing and the peer session all
+    /// stay alive, and local music keeps playing exactly as a Phase 3 ride — which is precisely what
+    /// `leaveSynchronizedMode` already means, so this is that call plus the ride-lifetime proof,
+    /// never a second teardown path and never a second player owner.
+    ///
+    /// What it must end is the *ride segment's* synchronisation authority, and the reason is
+    /// `currentPlaybackIdentity`: it deliberately survives an ordinary control-link loss (Blocker 2B),
+    /// so without this the track ride 1 was playing was still the value a leader's `STATE_SNAPSHOT`
+    /// reported after ride 2 had begun — a stale identity presented as ride 2's authoritative truth.
+    ///
+    /// **Independent-review round 4, Blocker 1: what the guard compares changed.** Round 3 refused a
+    /// cleanup whose epoch was no newer than the current ride epoch — "a newer ride-lifecycle
+    /// *decision* has been taken". That is the wrong question, and it satisfied only half of what an
+    /// End Ride boundary owes:
+    ///
+    /// - **Property A** — a late cleanup must never destroy a successor ride's state. Round 3 had
+    ///   this right.
+    /// - **Property B** — ride 1's state must never survive into ride 2 merely because its cleanup
+    ///   was delayed. Round 3 got this wrong: `startRide` deliberately establishes nothing, so a
+    ///   Start Ride that merely *bumped the epoch* made ride 1's cleanup "stale" while leaving ride
+    ///   1's `currentPlaybackIdentity` in place as the only thing a ride-2 `STATE_SNAPSHOT` had to
+    ///   report.
+    ///
+    /// Both hold when the comparison is against `rideAuthorityEpoch` — the ride that established the
+    /// authority actually standing here — rather than against whichever ride is nominally current.
+    /// A strictly newer ride owning live authority is the one and only case where this boundary has
+    /// nothing to do; in every other case what is standing belongs to this ride or an earlier one,
+    /// and ending the ride is exactly the instant it must go.
+    ///
+    /// **Independent-review round 6: the comparison is `<`, not `<=`.** `rideEpoch` is the epoch
+    /// *this* End Ride minted for itself, and it also names the CONNECTED-state gap that follows —
+    /// synchronised playback stays usable there (a Start Ride establishes nothing new), so genuinely
+    /// new authority admitted in that gap, before a further Start Ride, is stamped with this same
+    /// value by `recordRideAuthority`. `<=` could not tell that authority apart from ride 1's own
+    /// stale residue — both compare equal to `rideEpoch` — and cleared it. Only a value **older**
+    /// than this boundary's own belongs to the ride that is ending.
+    ///
+    /// - Parameter rideEpoch: the strictly-increasing epoch `RideSegmentLifecycle` assigned to *this*
+    ///   End Ride, synchronously, before the hop that carried it here. The guard is the first
+    ///   statement and every mutation `leaveSynchronizedMode` performs precedes its single trailing
+    ///   `await`, so there is no suspension between proving ownership and acting on it.
+    /// - Returns: whether this boundary cleared the ride segment, or found a newer ride's authority
+    ///   and left it alone. `RideSegmentLifecycle` counts the second; no caller may act on the first.
+    @discardableResult
+    public func endRideSegment(rideEpoch: Int64) async -> RideBoundaryOutcome {
+        guard rideAuthorityEpoch < rideEpoch else {
+            diagnostics.staleRideLifecycleCount += 1
+            publishDiagnostics()
+            return .supersededByLiveRideAuthority
+        }
+        await leaveSynchronizedMode()
+        return .cleared
+    }
 
     /// Leaves synchronised mode without ending the control session: local playback continues exactly
     /// as a Phase 3 ride, correction stops and the rate goes back to exactly 1.0 (brief §38).
     public func leaveSynchronizedMode() async {
+        // First statement: everything below retires synchronised-mode state, and an apply already in
+        // flight must be refused before it can write any of it back.
+        synchronizedModeEpoch += 1
         syncEnabled = false
         epoch.supersede()
         // Amendment A1 Finding E: leaving synchronised mode cancels the retained Play. A transfer
@@ -973,14 +1372,26 @@ public actor SyncPlaybackCoordinator {
         let cancelled = pendingPlay == nil ? 0 : 1
         pendingPlay = nil
         transferRequestedForToken = nil
-        deferredEvents.removeAll()
+        discardDeferredEvents()
         deferredDrainTask?.cancel()
         deferredDrainTask = nil
         timeline = nil
+        // Independent review, Race 7 (mirroring Android's identical finding): leaving synchronised
+        // mode is the user genuinely ending authoritative playback, not a control-lifetime blip —
+        // unlike `resetForNewSession`, which deliberately preserves `currentPlaybackIdentity` across
+        // a reconnect (Blocker 2B), this is a legitimate place for ride-segment identity to clear
+        // too. Without this, a stale track hash from an already-ended synchronised session would
+        // still be reported by the next `enqueueStateSnapshotReply` as if still authoritative.
+        currentPlaybackIdentity = nil
+        // Nothing is established any more, so no ride owns authority. Kept in lockstep with
+        // `currentPlaybackIdentity` above — the two answer "what is standing" and "whose it is", and
+        // they must never disagree.
+        rideAuthorityEpoch = 0
         driftState = DriftController.reset()
         // Amendment A6 Finding B, swept: the identical post-`restoreRate` write shape, in the second
         // of that call's three callers. Every write first, the unfenced player effect last.
         diagnostics.syncState = .inactive
+        diagnostics.currentTrackHash = nil
         diagnostics.localDriftMs = nil
         diagnostics.peerDriftMs = nil
         diagnostics.deferredCommandCount = 0
@@ -1012,6 +1423,30 @@ public actor SyncPlaybackCoordinator {
         await player.setRate(DriftController.rateNormal)
     }
 
+    /// Throws the held authoritative stream away, and tells whoever was waiting on a reconciliation
+    /// in it that it was **discarded** (independent-review round 4, Blocker 2).
+    ///
+    /// The one place `deferredEvents` is emptied wholesale, so a cancellation cannot be forgotten at
+    /// one of the four callers that legitimately do this — `leaveSynchronizedMode` (End Ride, "Play
+    /// locally"), `resetForNewSession` (a control-lifetime boundary, including a terminal teardown's
+    /// link loss), `failClosedOutbound`, and `drainDeferredEvents` finding its generation retired.
+    /// Each retained anchor reports its own obligation id and the generation that authorised it;
+    /// nothing is inferred from the buffer merely becoming empty, which is the inference round 3
+    /// already had to remove once.
+    ///
+    /// Deliberately does **not** publish diagnostics or touch `deferredCommandCount`: every caller
+    /// already writes its own diagnostics block, and adding a second publish here would emit a
+    /// half-updated snapshot between them.
+    func discardDeferredEvents() {
+        guard !deferredEvents.isEmpty else { return }
+        let discarded = deferredEvents
+        deferredEvents.removeAll()
+        for event in discarded {
+            guard let obligation = event.reconciliation else { continue }
+            onReconciliationCancelled?(obligation, event.generation)
+        }
+    }
+
     func publishDiagnostics() { onDiagnosticsChanged?(diagnostics) }
 
     func publishQueue() {
@@ -1029,10 +1464,42 @@ public actor SyncPlaybackCoordinator {
 struct PendingPlay: Sendable {
     let token: Int64
     let generation: Int64
+    /// The ride lifetime that admitted this press (independent-review round 7).
+    ///
+    /// A retained Play is stored work by definition — it exists precisely so one press survives a
+    /// queue revision and a file transfer — so it must carry its own authorising ride exactly as the
+    /// held authoritative stream does. `leaveSynchronizedMode` clears it, but an End Ride's cleanup
+    /// is asynchronous on this platform: between the FSM accepting the End Ride and that cleanup
+    /// running, a completing transfer could otherwise fire `resolvePendingPlay` and issue ride 1's
+    /// `PLAY` under a successor ride, establishing ride-1 work as ride-2 authority — Bug A's shape
+    /// reached through `pendingPlay` rather than through `deferredEvents`.
+    let ride: RideAdmission
     let contentHash: ContentHash
     let queueItemId: String
     /// The intent's own `position_ms`, so serving a follower's Play never silently rewinds it to 0.
     let positionMs: Int64
+}
+
+/// The ride lifetime that authorised one operation, captured once at the instant this coordinator
+/// admitted it and thereafter **compared, never re-derived** (independent-review round 7; ADR-028
+/// Amendment A6).
+///
+/// Round 6 established the two values and threaded them through directly-executing work. Round 7 is
+/// the half that was missing: *retained* work — a held authoritative event, a retained Play — dropped
+/// them at the point of storage and a later replay captured whatever ride was current then. That is
+/// the repository's standing provenance rule (CLAUDE.md rules 19/20) violated for the third lifetime,
+/// in the one place it is hardest to see, because the loss happens at *storage* rather than at a read.
+///
+/// The two fields are one value so that a caller cannot thread one without the other, and so that
+/// storing provenance is a single field on the retained event rather than a pair a future edit could
+/// half-forget. See `SyncPlaybackCoordinator.rideStillLive` for why both are required.
+struct RideAdmission: Sendable, Equatable {
+    /// `SyncPlaybackCoordinator.synchronizedModeEpoch` at admission — moves when synchronised mode is
+    /// actually **left** (End Ride cleanup, "Play locally").
+    let synchronizedModeEpoch: Int64
+    /// `RideEpochBox.current` at admission — moves the instant a Start Ride or an End Ride is
+    /// **accepted**, synchronously, before any continuation runs.
+    let rideEpoch: Int64
 }
 
 /// One outbound Phase 5 frame, waiting its turn on the one ordered outbound path — with the two
@@ -1052,6 +1519,11 @@ struct Phase5Outbound: Sendable {
     enum Frame: Sendable {
         case playback(PlaybackMessage)
         case queue(QueueMessage)
+        /// PROTOCOL §10 (Phase 7, ADR-028 Amendment): a `STATE_SNAPSHOT` answering a `STATE_REQUEST`.
+        /// Folded into this same enum, not a second outbound path, so it can never be written out of
+        /// order relative to a `QUEUE_SNAPSHOT`/`PLAYBACK_STATE` decided around the same time — the
+        /// exact hazard ADR-024 Amendment A1 Finding B closed for every other Phase 5 broadcast.
+        case resync(ResyncMessage)
     }
 
     let generation: Int64
@@ -1075,21 +1547,122 @@ struct Phase5Outbound: Sendable {
 /// One authoritative event accepted for ordering but not yet applied — because the clock is not
 /// trusted, or because something ahead of it is not (Amendment A1 Finding D, widened by
 /// Amendment A2 Finding D).
+/// **Independent-review round 7: a retained event carries the ride that admitted it.** The control
+/// generation was already stored here and compared at replay; the ride was not, so
+/// `drainDeferredEvents` handed the work to an apply path that captured a *fresh* `RideAdmission` —
+/// ride 1's held `PLAY` and ride 1's held `STATE_SNAPSHOT` were replayed as ride 2's work, and the
+/// authority they established then made ride 1's own (correctly superseded-refusing) late cleanup
+/// stand down. See `RideAdmission`.
 enum DeferredEvent: Sendable {
     /// A `PLAY`/`PAUSE`/`RESUME`/`SEEK`/`NEXT`/`PREVIOUS` the order gate accepted.
-    case command(PlaybackMessage, generation: Int64)
+    case command(PlaybackMessage, generation: Int64, ride: RideAdmission)
     /// PROTOCOL §9's authoritative queue state, held so it cannot change a held command's meaning.
+    ///
+    /// **Deliberately the one case with no `RideAdmission`** (independent-review round 7's queue
+    /// audit). The replicated queue is not ride-scoped state: `leaveSynchronizedMode` — End Ride and
+    /// "Play locally" alike — clears the timeline, the playback epoch, `currentPlaybackIdentity`,
+    /// `rideAuthorityEpoch` and the retained Play, and leaves `queueState` exactly where it was, just
+    /// as `resetForNewSession` does for a control-lifetime boundary (ADR-024 Amendment A8). Neither
+    /// `adoptSnapshot` nor `applyQueueSnapshot` proves a ride or stamps `recordRideAuthority`, because
+    /// PROTOCOL §9's "the snapshot always wins" is scoped to the authenticated control generation and
+    /// nothing narrower — and the leader's own queue survives *its* End Ride by the same code, so a
+    /// held snapshot replayed after a ride boundary carries state that is still the leader's current
+    /// authoritative queue. Adding ride provenance here would refuse valid queue state, not protect
+    /// anything. The one effect `applyQueueSnapshot` has beyond the queue is `resolvePendingPlay`,
+    /// and the retained Play carries its own `RideAdmission`.
     case queueSnapshot(revision: Int64, items: [SharedQueueItem], currentIndex: Int?, generation: Int64)
     /// PROTOCOL §5's reconciliation anchor, held for the same reason.
-    case playbackState(PlaybackStateSnapshotFields, generation: Int64)
+    ///
+    /// `reconciliation` is the `ResyncCoordinator` obligation id this anchor discharges, and is
+    /// non-nil **only** when the anchor came from a PROTOCOL §10 `STATE_SNAPSHOT` (independent-review
+    /// round 4, Blocker 2). An ordinary wire `PLAYBACK_STATE` carries `nil`: nobody outside is
+    /// waiting on it, so it has no terminal result to report.
+    case playbackState(
+        PlaybackStateSnapshotFields, generation: Int64, reconciliation: Int64?, ride: RideAdmission
+    )
 
     var generation: Int64 {
         switch self {
-        case .command(_, let generation): return generation
+        case .command(_, let generation, _): return generation
         case .queueSnapshot(_, _, _, let generation): return generation
-        case .playbackState(_, let generation): return generation
+        case .playbackState(_, let generation, _, _): return generation
         }
     }
+
+    /// The ride lifetime that admitted this event, or nil for the one case that is not ride-scoped.
+    var ride: RideAdmission? {
+        switch self {
+        case .command(_, _, let ride): return ride
+        case .queueSnapshot: return nil
+        case .playbackState(_, _, _, let ride): return ride
+        }
+    }
+
+    /// The reconciliation obligation this held event owes a terminal result to, if any.
+    var reconciliation: Int64? {
+        switch self {
+        case .command, .queueSnapshot: return nil
+        case .playbackState(_, _, let reconciliation, _): return reconciliation
+        }
+    }
+}
+
+/// PROTOCOL §10's `STATE_REQUEST`, retained because it arrived before this device's own
+/// `.connected` had been applied (independent-review round 8's CI investigation).
+///
+/// Carries the generation that authorised it, so the replay compares rather than re-derives — the
+/// same discipline `ReadFrameBinding`, `RideAdmission` and `DeferredEvent` already follow.
+struct PendingStateSnapshotReply: Sendable {
+    let generation: Int64
+    let leaderPeerId: PeerId
+    let manifestRevision: Int64
+    let transfersInFlight: [ResyncTransferInFlight]
+}
+
+/// What an End Ride boundary did when it reached the one owner of ride-segment playback authority
+/// (independent-review round 4, Blocker 1). See `SyncPlaybackCoordinator.endRideSegment`.
+public enum RideBoundaryOutcome: Sendable, Equatable {
+    /// The boundary owned what was standing and retired it.
+    case cleared
+    /// A strictly newer ride had already established synchronisation authority of its own, so this
+    /// boundary belongs to a ride that is over and touched nothing.
+    case supersededByLiveRideAuthority
+}
+
+/// What actually happened to a `STATE_SNAPSHOT`'s playback portion (independent review, Blocker 2E)
+/// — a snapshot *received* is not a snapshot *applied*, and `ResyncCoordinator` needs to tell the two
+/// apart rather than assuming reconciliation completed the instant `onStateSnapshot` returns.
+enum StateSnapshotOutcome: Sendable, Equatable {
+    /// Reconciliation genuinely completed — the follower now conforms to the leader's authoritative
+    /// playback state (or the leader authoritatively has nothing loaded).
+    case applied
+    /// A trustworthy clock was not available. The snapshot is retained, generation-owned, in
+    /// `deferredEvents` and will be applied automatically once the clock recovers (or discarded if
+    /// this generation retires first) — this is not a failure to retry by resending `STATE_REQUEST`.
+    case deferredClock
+    /// Independent review §22: the clock was ready and the snapshot's queue/manifest/identity
+    /// portions were accepted, but the authoritative track itself is not locally playable —
+    /// `applyPlay` already requested the transfer through the existing Phase 4 mechanism (PROTOCOL
+    /// §5 rule 4: only the leader may reschedule, so nothing here retries on its own; the leader's
+    /// next authoritative frame — a fresh `PLAY` once both sides verify the content, exactly as an
+    /// ordinary wire `PLAY` for missing content already behaves — is what completes this). Distinct
+    /// from `.deferredClock`: nothing is enqueued into `deferredEvents`, because a content transfer
+    /// completing is not a clock-readiness event the drain loop polls for.
+    case deferredContent
+    /// The snapshot's generation is no longer live — refused, nothing mutated.
+    case rejectedStale
+    /// This device is not a follower — refused, nothing mutated.
+    case rejectedRole
+    /// Independent-review round 4, §17: the snapshot arrived for the **live generation** and was
+    /// refused because the **ride segment** that authorised its reconciliation has ended — a
+    /// different fact from `.rejectedStale`, and the two must not be conflated.
+    ///
+    /// The distinction is load-bearing at the outer owner: a `.rejectedStale` snapshot never
+    /// answered the `STATE_REQUEST` that is still outstanding, so that request must stay pending;
+    /// this one **did** arrive for the live generation, so the wire round trip is satisfied and only
+    /// the reconciliation is cancelled. Reporting it as `.rejectedStale` left `requestPending` true
+    /// with nothing that could ever clear it.
+    case rejectedRide
 }
 
 /// `PLAYBACK_STATE`'s seven payload fields as one value, so a held snapshot is one case rather than

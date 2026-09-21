@@ -349,7 +349,35 @@ actor FakeSyncContent: SyncContentPort {
 
     func addPeer(_ hash: ContentHash) { peerHashes.insert(hash.value) }
 
+    /// Parks **inside** `resolve`, which is the last suspension `applyPlay` takes before it writes
+    /// `currentPlaybackIdentity` — the seam a test needs to land a ride boundary in the middle of an
+    /// apply. Mirrors Android's `FakeSyncContent.resolveGate`.
+    private var resolveGate: CheckedContinuation<Void, Never>?
+    /// Parks on the **first resolve for which `predicate` is true**, which is how a test pins the
+    /// exact stack frame it means to interrupt rather than counting calls. Counting is fragile here:
+    /// a leader's `playSynchronized` resolves once to decide whether it may issue, `applyPlay`
+    /// resolves again before it writes, and how many others run depends on scheduling.
+    private var resolveGatePredicate: (@Sendable () async -> Bool)?
+
+    func armResolveGate(when predicate: @escaping @Sendable () async -> Bool) {
+        resolveGatePredicate = predicate
+    }
+
+    var isResolveGateParked: Bool { resolveGate != nil }
+
+    func releaseResolveGate() {
+        resolveGatePredicate = nil
+        resolveGate?.resume()
+        resolveGate = nil
+    }
+
     func resolve(_ contentHash: ContentHash) async -> SyncPlayableContent? {
+        if let predicate = resolveGatePredicate, await predicate() {
+            resolveGatePredicate = nil
+            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                resolveGate = continuation
+            }
+        }
         guard localHashes.contains(contentHash.value) else { return nil }
         return SyncPlayableContent(
             contentHash: contentHash,

@@ -213,17 +213,232 @@ resume are deferred, but the chunk and page framing keep both possible.
 
 ## Current phase
 
-**Phase 6 — intercom/music coexistence. Software closure is implemented on the feature branch;
-physical qualification is explicitly deferred.** `IntercomMusicCoexistence` is the one mirrored,
-vector-pinned decision seam. It applies multiplicative 25%/35% ramps through the existing player,
-uses exact-track local suppression for Mode D, leaves Mode E unaffected, preserves user volume and
-Phase 5 authority, and isolates voice/music failures. Every effect is generation-bound and terminal
+**Phase 7 — Ride Mode and resilience. Software closure is implemented on the feature branch;
+physical ride qualification is explicitly deferred — hardware not available.** `STATE_REQUEST`/
+`STATE_SNAPSHOT` close the previously-recorded gap (STATUS.md problem 42) exactly per PROTOCOL §10's
+existing spec — no field invented, `STATE_SNAPSHOT.playback`'s `queue_item_id` derived from §5's own
+cross-reference. `StateResyncGate` is the one new pure, generation-keyed decision table; reconciliation
+reuses Phase 5's existing role/generation-checked apply path wholesale, never a second one. Ride Mode
+is real production `SessionFsm` traffic (`startRide()`/`endRide()`), with a simplified riding UI on
+both platforms whose visibility is a pure projection of FSM status — never a second navigation
+authority. Automatic reconnect, fresh clock sync after reconnect, and voice/coexistence continuation
+across reconnect were all audited and confirmed already correct before this phase; nothing needed
+building there. **This phase's own reconnect/second-ride stress testing found and fixed two real,
+pre-existing defects before closure**: a leader's own queue was being wiped on every ordinary link
+loss since the original Phase 5 integration ([ADR-024 Amendment A8](docs/DECISIONS/ADR-024-synchronized-playback-integration.md#amendment-a8--19-september-2026--a-leaders-own-queue-must-survive-a-link-it-did-not-choose-to-lose)),
+and `STATE_SNAPSHOT` could reach the wire out of order relative to `QUEUE_SNAPSHOT`/`PLAYBACK_STATE`
+because it bypassed the single ordered outbound writer ([ADR-028](docs/DECISIONS/ADR-028-ride-mode-and-state-resynchronization.md)).
+A third, iOS-only defect — Ride Mode's visibility gate dropping the rider back to the main screen the
+instant an ordinary reconnect began — was found by direct review and fixed. All three reproduced
+against unmodified production before fixing.
+
+**An independent review of that pass then found two more confirmed blocker groups, both fixed**
+([ADR-028 Amendment A1](docs/DECISIONS/ADR-028-ride-mode-and-state-resynchronization.md#amendment-a1--20-september-2026--independent-review-two-confirmed-blocker-groups-both-fixed)
++ [ADR-024 Amendment A9](docs/DECISIONS/ADR-024-synchronized-playback-integration.md#amendment-a9--20-september-2026--a-null-timeline-is-not-the-same-fact-as-nothing-to-restore)).
+**Blocker 1**: outbound `STATE_SNAPSHOT`/`STATE_REQUEST` were admission-checked but not
+generation-*bound* to the actual socket write — the same class already fixed once for `VOICE_*`
+(ADR-020 A9) and Playback (ADR-024 A2), reopened because ADR-028's own "alternatives rejected"
+reasoning wrongly concluded the admission proof made a bound writer redundant; fixed by reusing the
+existing mechanism outright. **Blocker 2**: reconnect/resync did not reliably reconstruct authoritative
+playback, for five linked *pre-existing* Phase 5 defects — a leader's own current track did not
+survive a link loss, a normal reconnect's snapshot silently skipped restoration, a
+clock-or-content-not-ready snapshot was dropped instead of held, the outer coordinator couldn't tell
+applied from deferred from rejected, and a leader's track identity could leak past its own ride's end
+— all reachable through Phase 5's own machinery, which Phase 7's new call path was merely the first to
+reliably exercise. No wire change. Both reproduced against unmodified production before fixing, on
+both platforms.
+
+**A second independent review then accepted the generation-bound resync writer and found three more
+confirmed blockers, all fixed** ([ADR-028 Amendment A2](docs/DECISIONS/ADR-028-ride-mode-and-state-resynchronization.md#amendment-a2--20-september-2026--independent-review-round-3-three-confirmed-blockers-all-fixed);
+STATUS problems 76–80). **Blocker A**: `drainDeferredEvents` began with a blanket desync guard, and
+Amendment A1 had made a reconciliation snapshot that cannot restore yet *retained in that same
+stream* — a cycle, because the flag clears only when that snapshot applies and it could apply only
+from the drain the flag stopped. A follower left desynchronised permanently, however promptly the
+precondition resolved. Fixed by a **per-item** rule — an authoritative state frame *is* the repair
+and may drain; an incremental command stays blocked — plus the second half liveness needed: ADR-024
+A1 Finding C's refusal rule now reaches a command already **held**, not only one arriving, so nothing
+blocks the repair at the head. **Blocker B**: a deferred reconciliation could never report
+completion, because iOS compared the completion's generation against the *wire* request's, which the
+deferral itself had already correctly cleared; one field was carrying two obligations. They are now
+two, and the reconciliation one carries immutable, monotonic generation ownership — compared, never
+re-derived. Android's diagnostics-inferred equivalent was replaced by the same explicit signal,
+because it could not tell "converged" from "**discarded**". **Blocker C**: no production path
+connected End Ride to the owner of ride-segment playback authority — the order existed only in tests
+that called `leaveSynchronizedMode()` by hand, the "a test proves an order production does not"
+shape this file's standing lesson already names — so ride 1's track could be reported as ride 2's
+authoritative truth. The ride is now a **third lifetime** beside the control generation and the
+playback epoch: a strictly increasing ride epoch, assigned synchronously before any scheduling hop
+and compared rather than re-derived. **End Ride is not End Session** — no ADR-026 teardown, and local
+music is untouched. **Two further defects were found by this pass's own work**: an unbounded
+`STATE_REQUEST` storm when a follower is desynchronised *and* holds a deferred reconciliation (it
+exhausted the JVM heap in the regression before it was closed), and an index-based `removeFirst()` in
+`drainDeferredEvents` that can act on the wrong frame when the held stream shortens inside one of its
+suspensions. All reproduced against unmodified production on both platforms first. One disclosed
+limitation stands: `ios/RideLink.xcodeproj` has **no unit-test bundle**, so
+`SessionCoordinator.endRide()` is untestable there — the ride lifetime's decisions live in
+`RideSegmentLifecycle` inside `RideLinkPlatform` so they are testable at their real seam, and
+Android's regression exercises the genuine entry point. No physical Bluetooth, iPhone,
+battery/thermal, or riding result is claimed. Phase 8 is untouched.
+
+**A fourth independent review then audited round 4's own fixes and found two more confirmed blockers,
+both fixed** ([ADR-028 Amendment A4](docs/DECISIONS/ADR-028-ride-mode-and-state-resynchronization.md#amendment-a4--20-september-2026--independent-review-round-5-two-confirmed-blockers-both-fixed)
++ [ADR-024 Amendment A10](docs/DECISIONS/ADR-024-synchronized-playback-integration.md#amendment-a10--20-september-2026--applyplay-says-why-it-did-not-apply);
+STATUS §2ay, problems 88-89). **Its standing lesson is round 4's turned one notch: when the lifetime is
+right, check the *value*.** Neither blocker was a wrong rule; both were a fact **reconstructed at a
+moment that could not know it**, hiding inside a guard that was already there and already correct.
+**Blocker 1**: `rideAuthorityEpoch` asked exactly the right question and read an owner that had not
+been installed yet — `recordRideAuthority` read `lastRideLifecycleEpoch`, which only a successful
+`beginRideSegment` could move, and `SessionCoordinator.startRide()` handed that call to
+`launchInSession`. So the ride the FSM had accepted and the ride the one owner of ride-scoped authority
+knew about were two facts with a window between them, and authority ride 2 established inside it was
+stamped ride 1 and destroyed by ride 1's late cleanup. Fixed by **removing the window**: `RideEpochBox`
+mints and publishes the epoch in one lock-held step, synchronously, before either boundary hands
+anything to a continuation — and `beginRideSegment`/`RideSegmentLifecycle.startRide` are **deleted**,
+because a Start Ride establishes no authority and one that defers nothing cannot be overtaken. Every
+round-4 regression had forced the safe ordering, which is "a test proves an order production does not"
+for the third time. **Blocker 2**: `applyPlay` refused exactly the right writes and reported four
+distinct refusals as one bit — `Unit` on Android (so `restoreFromPlaybackState` returned `APPLIED`
+unconditionally and a ride-cancelled reconciliation became `RECONCILED`), `Bool` on iOS (so every
+`false` became `.deferredContent`, a word that *promises* retained work that did not exist, leaving the
+obligation outstanding for the session). Fixed with a precise result contract —
+`APPLIED`/`DEFERRED_CONTENT`/`DEFERRED_CLOCK`/`REJECTED_STALE`/`REJECTED_RIDE` — under three
+invariants: **every `DEFERRED_*` corresponds to actual retained work carrying the same obligation id**,
+every terminal cancellation names the exact obligation, and **only genuine convergence may produce
+`RECONCILED`**. `ResyncCoordinator` needed no change on either platform; it was being told the wrong
+thing. No wire change; no vector moved. Both reproduced against unmodified production first, and each
+fix re-proved in isolation.
+
+**A fifth independent review then audited round 5's own fixes and found one more confirmed blocker, in
+two reachable orderings, both fixed** ([ADR-028 Amendment A5](docs/DECISIONS/ADR-028-ride-mode-and-state-resynchronization.md#amendment-a5--20-september-2026--independent-review-round-6-one-confirmed-blocker-two-reachable-orderings-of-it-fixed);
+STATUS §2az, problem 90). **Its standing lesson is aimed at round 5's own written argument.**
+`recordRideAuthority`'s round-5 doc comment argued at length that reading `rideEpochs.current` live
+was safe because every route from `RIDE_ACTIVE` back to `CONNECTED` is "already proved against …
+with no suspension between" — and that argument was wrong, because it treated `synchronizedModeEpoch`
+moving as the same fact as "an End Ride happened", when `SessionCoordinator.endRide()` mints and
+publishes its ride epoch synchronously but hands the actual cleanup — `leaveSynchronizedMode`, the
+only place `synchronizedModeEpoch` moves for an End Ride — to `launchInSession`, asynchronously.
+**Ordering 1**: an operation admitted under ride 1, parked in `content.resolve` across an accepted End
+Ride *and* a further accepted Start Ride, resumed with `synchronizedModeEpoch` unchanged (cleanup
+still parked), wrote ride-scoped state, and was stamped by `recordRideAuthority()` with a *live*
+`rideEpochs.current` that Start Ride 2 had already advanced — mislabelling ride 1's stale work as ride
+2's authority, which ride 1's own (correctly superseded-refusing) late cleanup then left standing
+permanently. **Ordering 2**: genuinely new authority admitted *after* an accepted End Ride but before
+that boundary's own delayed cleanup ran shared the cleanup's freshly minted epoch value at admission —
+indistinguishable under round 5's `<=` comparison from ride 1's own stale residue — and the delayed
+cleanup destroyed it. Fixed by making provenance travel with the operation: every admission point
+(`applyAuthoritative`, `applyPeerPlaybackState`) now also captures `admittedRideEpoch = rideEpochs
+.current` before its first suspension, threaded through every intermediate apply function alongside
+`rideLifetime`, with every existing ride guard gaining a second clause (`rideEpochs.current ==
+admittedRideEpoch`) that refuses (`.rejectedRide`) rather than writes on a mismatch — closing ordering
+1. `recordRideAuthority()` now takes `admittedRideEpoch` as an explicit parameter rather than reading
+the live property, making the invariant structural rather than merely true at one instant.
+`endRideSegment`'s comparison became **strict** (`<`, not `<=`) — closing ordering 2, by telling
+authority admitted in the CONNECTED gap that follows a ride apart from that ride's own stale residue,
+which the two share a value under `<=` but not under `<`. No wire change; no vector moved. Both
+orderings reproduced against unmodified production first, and a first-draft weakness — stamping via a
+live read that the new guard merely proved equal *at that instant*, the same shape round 5's own
+broken argument took — was found and corrected in this pass's own fresh-fix audit before anything was
+pushed. **Android is unaffected by construction**: its End Ride cleanup runs synchronously with no
+suspension between the epoch mint and the cleanup, so the window this fix closes never opens there,
+and no Android source file changed.
+
+**A sixth independent review then audited round 6's own fixes and found one more confirmed blocker, in
+three reachable forms, all fixed — and it is the first of these rounds to find the defect on *both*
+platforms** ([ADR-028 Amendment A6](docs/DECISIONS/ADR-028-ride-mode-and-state-resynchronization.md#amendment-a6--20-september-2026--independent-review-round-7-retained-work-must-carry-the-ride-that-admitted-it);
+STATUS §2ba, problem 91). **Its standing lesson: provenance that exists only while an operation is
+*executing* is not provenance.** Round 6 was right that a ride lifetime must be captured at admission
+and compared rather than re-read, and it threaded exactly that through every directly-executing apply
+path. What it never asked is what happens when the operation stops executing and becomes **stored**:
+at that moment its two threaded values went out of scope, `DeferredEvent` recorded the control
+generation and the reconciliation obligation id and nothing else, and the replay — `drainDeferredEvents`,
+after a clock recovered or a transfer finished — captured a **fresh** ride admission from whatever was
+live by then. **Bug A**: a `PLAY` held for an untrustworthy clock under ride 1, replayed across an
+accepted-but-uncleaned End Ride *and* a Start Ride, pre-rolled and started on the real player and was
+stamped `rideAuthorityEpoch = 3` — ride 2's epoch on ride 1's work — after which ride 1's own
+(correctly superseded-refusing) cleanup left it standing forever. **Bug B**: the same through a
+retained `STATE_SNAPSHOT`, reported `RECONCILED` under ride 2 — the obligation id answers "is this S1
+or S2?" and the generation answers "is this lifetime live?", and neither answers "is S1 still
+authorised by the ride that admitted it?". **Bug C**: an **append-time** race, where the full-restore
+pre-check suspends and then retains while re-proving only the control generation. Fixed with one
+immutable `RideAdmission { synchronizedModeEpoch, rideEpoch }` captured at each path's **real**
+admission point, **stored on the retained event**, replayed unchanged and proved before every write
+and every retention; a required `ride:` parameter so a replay cannot silently mint a replacement; and
+a drain that **pops** retired work, cancels its obligation (`REJECTED_RIDE` → `CANCELLED`, never
+`RECONCILED`, never an indefinite deferral) and continues rather than wedging the stream.
+`DeferredEvent.queueSnapshot` deliberately carries none — End Ride does not retire queue authority,
+traced rather than assumed. **Android is affected by form C alone**, and the reason is its production
+path: End Ride's cleanup is synchronous there so retained work cannot outlive it, but `content.resolve`
+in the pre-check is a genuine admission-to-retention suspension and the only one. No wire change; no
+vector moved.
+
+**A seventh independent review then audited round 7's own fixes and found one more confirmed blocker
+in three places — and, separately, proved that the recurring CI timeout was a real production defect**
+([ADR-028 Amendment A7](docs/DECISIONS/ADR-028-ride-mode-and-state-resynchronization.md#amendment-a7--21-september-2026--independent-review-round-8-a-proof-taken-before-a-suspension-authorises-nothing-after-it-and-the-ci-wall-was-a-real-defect);
+STATUS §2bb, problems 92-93). **Its standing lesson: the caller owns its own bookkeeping, and a
+downstream refusal cannot un-publish it.** Round 7's retained `RideAdmission` is right and unchanged;
+what it lacked was a proof *adjacent to the write the caller itself performs*. `drainDeferredEvents`
+proved the retained admission at the top of its loop, then suspended in `estimate()`/`stillCurrent`,
+then popped the item, wrote `lastAppliedSeq`, published `lastAppliedCommandSeq` and counted a
+recovery — and only then called `applyAuthoritative`, which correctly refused the frame as
+`.rejectedRide`. The effect never happened and the wire was told it had, because `lastAppliedSeq` is
+what `PLAYBACK_STATE.command_seq` and `STATE_SNAPSHOT.command_seq` publish as "reflected in my
+authoritative playback state". The same shape sat in `admitAuthoritativeCommand` (both sequence
+numbers), in the `.playbackState` drain branch (`recoveredCommandCount`, documented as *applied*,
+incremented before the outcome was known), and — found by the sweep — in `onCommandOutcome`,
+`playSynchronized` and `servePlaybackIntent`. **Neither sequence number advances for a command a ride
+boundary refused**: `CommandOrderGate` treats a gap as `.accept`, so the floor may stay put, while
+advancing it would make the leader's own re-statement a `.duplicate` — ADR-024 A1 Finding C's existing
+rule applied to the third lifetime. **The CI half is the more important finding.** Two
+`ReconnectResyncStressTests` cases had been timing out with a bare `notReady`; instrumenting the poll
+that hung, dumping the state at the timeout and counting the leader's silent early returns produced
+exactly one cause every time — `enqueueStateSnapshotReply`'s `role == nil`. `role` is cleared by a
+link loss and set again by `handleConnected`, which `SessionCoordinator` reaches through a
+continuation, while the peer's `STATE_REQUEST` arrives on the read loop of the freshly authenticated
+connection; nothing orders the two, so a request for the **live** generation reached a leader whose
+own `.connected` was still queued and was **dropped permanently** — PROTOCOL §10 has no retry and
+`StateResyncGate` sends exactly one request per generation. A `STATE_REQUEST` is now **retained** in
+one generation-stamped slot and replayed by `handleConnected`, compared and never re-read. Mirrored on
+Android, where the same three unordered paths exist. No wire change; no vector moved. Independent
+review of *this* pass has not yet run.
+
+**A third independent review then audited round 3's own fixes and found two more confirmed lifecycle
+blockers, both fixed, plus two more found by its own §17 audit** ([ADR-028 Amendment A3](docs/DECISIONS/ADR-028-ride-mode-and-state-resynchronization.md#amendment-a3--20-september-2026--independent-review-round-4-two-confirmed-blockers-both-fixed);
+STATUS §2ax, problems 83-86). **Its standing lesson is the sharpest form of one this repo keeps
+relearning: an identity is not a lifetime, and the freshest fix is where the two get confused.**
+Round 3 gave the ride an epoch and the reconciliation a generation, then asked each a question it
+could not answer. **Blocker 1**: `endRide()` crosses a scheduling hop, and round 3 refused any cleanup
+whose epoch was no longer current — which protects ride 2 (Property A) and breaks Property B in the
+same statement, because `startRide` deliberately establishes nothing, so a Start Ride pressed first
+merely *bumped the epoch* and ride 1's `currentPlaybackIdentity` was left standing as the only thing
+ride 2's first `STATE_SNAPSHOT` had to report. Removing the check would have been strictly unsafe, so
+the boundary now compares against `rideAuthorityEpoch` — the ride that **established** the live
+authority — and refuses only when a *strictly newer* ride owns something of its own. **Blocker 2**:
+End Ride discards the inner retained reconciliation and nothing told `ResyncCoordinator`; since End
+Ride deliberately does **not** move the control generation, a generation-keyed completion let the next
+genuine reconciliation under that same generation complete the discarded one and publish ride 1's
+`command_seq` as `RECONCILED`. Fixed with an immutable obligation **id** that travels into the
+retained anchor and back out with its terminal result, plus an explicit `onReconciliationCancelled`
+raised from the one place the held stream is discarded; applied and cancelled are mutually exclusive
+and **only applied may produce `RECONCILED`**. The obligation is recorded *before* the suspending
+apply, which is load-bearing in both directions. **§17's two**: `applyStep` had no ride proof at all
+and could stop local music after End Ride (FR-025 says it keeps playing), and `applyPlay` reached
+through another apply path compared the post-End-Ride value with itself — so the ride lifetime is now
+captured **once where the operation is authorised** and threaded, compared and never re-read. No wire
+change; no vector moved. All four reproduced against unmodified production first. (It was
+subsequently reviewed — see the fourth independent review above.)
+
+Accepted baseline:
+
+**Phase 6 — intercom/music coexistence. Software closure is implemented on the feature branch,
+independently reviewed once with two confirmed blockers fixed** ([ADR-027 Amendment A1](docs/DECISIONS/ADR-027-intercom-music-coexistence-ownership.md#amendment-a1--18-sep-2026-independent-review-two-confirmed-blockers)),
+**and physical qualification remains explicitly deferred.** `IntercomMusicCoexistence` is the one
+mirrored, vector-pinned decision seam. It applies multiplicative 25%/35% ramps through the existing
+player, uses exact-track local suppression for Mode D, leaves Mode E unaffected, preserves user volume
+and Phase 5 authority, and isolates voice/music failures. Every effect is generation-bound and terminal
 teardown joins restoration. One coordinator owns the process-global iOS audio session. VOX policy is
 fully testable with synthetic levels, but production remains **PENDING REAL AUDIO INPUT / LATER
 HARDENING** because the pinned public WebRTC APIs expose no suitably fast level source. No physical
-Bluetooth, iPhone, audible-quality, screen-lock, or riding result is claimed. Phase 7 is untouched.
-
-Accepted baseline:
+Bluetooth, iPhone, audible-quality, screen-lock, or riding result is claimed.
 
 **Phase 5 — synchronized playback. Software closure is CLAIMED as of the thirty-fifth session
 (`docs/STATUS.md` §2al) and re-affirmed after an independent review of that pass (§2am); real-device

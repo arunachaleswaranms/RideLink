@@ -194,6 +194,17 @@ interface PlaybackChannelPort {
  * [SyncPlaybackCoordinator]'s exact call surface on [ControlSessionManager]: the Phase 5 channel,
  * the session-lifecycle event stream, the read-only live-session view, and the one session clock.
  * Never the connection-management surface, which stays [ControlSessionManager]'s alone.
+ *
+ * Phase 7's `STATE_REQUEST` inbound handling is deliberately **not** here:
+ * `com.ridelink.app.resync.ResyncCoordinator` owns that inbound read directly against
+ * [ControlSessionManager], exactly as `SharedLibraryCoordinator` already does for `MANIFEST_*`/
+ * `TRANSFER_*`, and calls [SyncPlaybackCoordinator.onStateSnapshot] directly rather than through
+ * this test seam — it touches no relay, socket or real time, so the seam this interface narrows
+ * access to buys nothing there. The **outbound** `STATE_SNAPSHOT` a leader answers with is
+ * different: [SyncPlaybackCoordinator.emitStateSnapshot] admits it onto this coordinator's own
+ * ordered outbound queue (a private `resync: ResyncChannelPort` constructor parameter, not this
+ * interface), so its construction and its wire ordering relative to `QUEUE_SNAPSHOT`/
+ * `PLAYBACK_STATE` share the one writer those already do (ADR-028).
  */
 interface SyncSessionPort {
     val playback: PlaybackChannelPort

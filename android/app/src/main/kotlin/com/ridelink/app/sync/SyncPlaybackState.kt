@@ -183,6 +183,22 @@ data class SyncPlaybackDiagnostics(
      */
     val ingressDesynchronized: Boolean = false,
     /**
+     * Independent-review Blocker 2E: the generation a full playback reconciliation is genuinely
+     * outstanding for — set the instant one is deferred for the clock ([onPeerPlaybackState]) and
+     * cleared the instant a full restore actually succeeds ([applyPeerPlaybackState]), regardless of
+     * [ingressDesynchronized]'s own value. Kept separate from that flag because a reconnect can need
+     * full restoration (`timeline == null`) without [ingressDesynchronized] ever having been set —
+     * an ordinary reconnect's own reset clears it alongside the timeline — so a consumer watching
+     * only [ingressDesynchronized] would see nothing transition when this obligation resolves.
+     * **Independent-review round 3, Blocker B: this is a diagnostic, not a completion signal.**
+     * `ResyncCoordinator` used to infer convergence from this going null, which cannot distinguish
+     * "the obligation converged" from "the obligation was **discarded**" — `leaveSynchronizedMode`
+     * legitimately does the second. Convergence is now reported explicitly by
+     * `SyncPlaybackCoordinator.onReconciliationApplied`, carrying the generation that authorised it.
+     * This field remains what the FR-023 screen shows: whether an obligation is outstanding at all.
+     */
+    val pendingPlaybackReconciliationGeneration: Long? = null,
+    /**
      * The highest `command_seq` this device has taken *responsibility* for — applied, or accepted
      * and still held pending a trustworthy clock. Distinct from [lastAppliedCommandSeq], and the
      * distinction is ADR-024 Amendment A1 Finding D: recording an accepted command as *applied*
@@ -201,6 +217,69 @@ data class SyncPlaybackDiagnostics(
     val deferredCommandCount: Int = 0,
     /** How many held commands were applied once the clock became trustworthy again. */
     val recoveredCommandCount: Int = 0,
+    /**
+     * Independent-review round 3, Blocker A: how many *held incremental commands* were refused
+     * because desynchronisation latched while they were waiting.
+     *
+     * ADR-024 Amendment A1 Finding C already refuses an incremental command that **arrives** while
+     * incremental state is untrusted, without spending its sequence number, so that the authoritative
+     * snapshot which reconciles us decides where ordering resumes. A command already *held* when the
+     * latch closes is untrusted for exactly the same reason, and leaving it at the head of
+     * [deferredCommandCount]'s stream is what made recovery deadlock: the repair snapshot queued
+     * behind it could never reach the head, and the desync flag it would have cleared is what stopped
+     * the drain. Refusing them at the latch is the same rule applied to the stream rather than only
+     * to the arrival — surfaced here rather than discarded silently.
+     */
+    val refusedHeldCommandCount: Int = 0,
+    /**
+     * Independent-review round 3, Blocker C: how many [SyncPlaybackCoordinator.endRideSegment]
+     * boundaries were refused because a strictly newer ride had already established
+     * synchronisation authority of its own. Nonzero means a late End Ride was
+     * correctly stopped from clearing a successor ride's playback state — the ride-lifetime analogue
+     * of ADR-024 Amendment A5's rule.
+     */
+    val staleRideLifecycleCount: Int = 0,
+    /**
+     * Independent-review round 7: how many **retained** authoritative events were discarded because
+     * the ride lifetime that admitted them had ended before the drain reached them.
+     *
+     * Distinct from [refusedHeldCommandCount] (desynchronisation refused an incremental command) and
+     * from [staleRideLifecycleCount] (an End Ride boundary found a newer ride's authority standing).
+     * This one counts work that was legitimately admitted, legitimately held, and is no longer
+     * authorised by the ride it was admitted under — surfaced rather than dropped silently, and a
+     * reconciliation among them receives its terminal cancellation.
+     */
+    val retiredRideDeferredCount: Int = 0,
+    /**
+     * Independent-review round 8: how many authoritative operations were refused **at their own
+     * admission or commit point** because the ride lifetime that admitted them retired inside a
+     * suspension the admission had to take.
+     *
+     * Distinct from [retiredRideDeferredCount], which counts work that was already *retained* when
+     * its ride ended. This one counts work that never became retained and never became applied: an
+     * inbound command whose ride ended inside the sequence-number lock, and the leader's own command
+     * whose ride ended between the transport accepting the frame and the commit callback running.
+     * Neither spends a `command_seq`, because neither was ever taken responsibility for — see
+     * [lastReceivedCommandSeq].
+     */
+    val retiredRideAdmissionCount: Int = 0,
+    /**
+     * Independent-review round 8's CI investigation: how many peer `STATE_REQUEST`s were held
+     * because they reached this coordinator before its own `Connected` had been applied.
+     *
+     * [SyncPlaybackCoordinator]'s role is cleared by a link loss and set again by its own session
+     * collector; [com.ridelink.app.resync.ResyncCoordinator] collects the same flow separately and
+     * the peer's request arrives on the read loop. Nothing orders the three, so a valid request for
+     * the live generation can land in that gap. Nonzero here is normal on a busy reconnect and means
+     * the request was **answered late**, not lost.
+     */
+    val heldStateSnapshotReplyCount: Int = 0,
+    /**
+     * The other half: how many held `STATE_REQUEST`s were dropped because the generation that
+     * authorised them had retired before this device's session was established. Nothing could
+     * honestly answer those — the follower's own `StateResyncGate` re-arms on its next generation.
+     */
+    val droppedStateSnapshotReplyCount: Int = 0,
     /**
      * How many outbound Phase 5 frames this device could not hand to its own ordered outbound queue
      * because that queue was full (ADR-024 Amendment A1 Finding B). Locally produced, so a nonzero

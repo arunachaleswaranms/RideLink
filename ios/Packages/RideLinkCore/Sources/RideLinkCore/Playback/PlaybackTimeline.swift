@@ -61,3 +61,24 @@ public struct PlaybackTimeline: Sendable, Equatable {
         return floored
     }
 }
+
+/// A ride-segment's playback identity — **which track, which queue item** — independent of
+/// `PlaybackTimeline`'s session-clock-relative anchor (independent review, Blocker 2B).
+///
+/// `PlaybackTimeline` is correctly retired on every control-lifetime boundary: its
+/// `anchorSessionUs`/`anchorPositionMs` are meaningless once the session clock that produced them
+/// resets. But a leader's *identity* — what it is actually playing — is ride-segment truth, the same
+/// principle already applied to capture (rule 17) and the shared queue (ADR-024 Amendment A8): it
+/// must survive an ordinary link loss so a post-reconnect `STATE_SNAPSHOT` can report the truth
+/// rather than "nothing loaded" merely because the control lifetime that would have known otherwise
+/// just ended. `PlayerState`'s own local content identifier cannot substitute — it is a local,
+/// per-device identifier, not the `ContentHash` PROTOCOL §10 needs.
+public struct PlaybackIdentity: Sendable, Equatable {
+    public let trackHash: ContentHash
+    public let queueItemId: String
+
+    public init(trackHash: ContentHash, queueItemId: String) {
+        self.trackHash = trackHash
+        self.queueItemId = queueItemId
+    }
+}

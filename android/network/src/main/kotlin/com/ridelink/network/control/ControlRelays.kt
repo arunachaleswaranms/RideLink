@@ -6,10 +6,12 @@ import com.ridelink.core.protocol.AudioStateMessageTypes
 import com.ridelink.core.protocol.ManifestMessageTypes
 import com.ridelink.core.protocol.PlaybackMessageTypes
 import com.ridelink.core.protocol.QueueMessageTypes
+import com.ridelink.core.protocol.ResyncMessageTypes
 import com.ridelink.core.protocol.TransferMessageTypes
 import com.ridelink.core.protocol.VoiceMessageTypes
 import com.ridelink.network.manifest.ManifestRelay
 import com.ridelink.network.playback.PlaybackRelay
+import com.ridelink.network.resync.ResyncRelay
 import com.ridelink.network.transfer.TransferRelay
 import com.ridelink.network.voice.AuthenticatedFrameWriter
 import com.ridelink.network.voice.VoiceSignalRelay
@@ -51,14 +53,18 @@ class ControlRelays internal constructor(
      * The same, **bound to one control lifetime**: a writer for the surviving connection only while
      * the generation asked for is the one that owns it (STATUS §4 problem 64, ADR-020 Amendment A9).
      *
-     * Only [voice] takes it, and deliberately so. A `VOICE_*` frame is one step of a negotiation
+     * [voice], [playback] and [resync] take it. A `VOICE_*` frame is one step of a negotiation
      * owned by a named control lifetime, and every step between that lifetime's authorisation and
      * the write suspends — so "the authenticated writer, now" is not the connection the frame was
-     * authorised for. The other four families' outbound work is either re-derived per session
-     * (`AUDIO_STATE` — PROTOCOL §4.4 sends one on every `CONNECTED` regardless of change) or already
-     * carries its own generation to a check of its own (Phase 4's transfers, Phase 5's
-     * `PlaybackRelay.send`, ADR-024 Amendment A2), so widening this would duplicate a guard rather
-     * than add one.
+     * authorised for. Phase 5's `PLAY`/`PAUSE`/… and Phase 7's `STATE_REQUEST`/`STATE_SNAPSHOT`
+     * both travel through `Phase5FrameQueue`'s own single ordered consumer, the identical shape of
+     * suspension (independent-review Blocker 1, mirroring ADR-024 Amendment A2's `PlaybackRelay`
+     * exactly — Phase 7's own earlier reasoning that resync was "re-derived per session, not
+     * carried on an outbound queue that could outlive one" stopped being true the moment
+     * `STATE_SNAPSHOT` was folded into that same queue). `AUDIO_STATE`'s outbound work remains
+     * re-derived per session (PROTOCOL §4.4 sends one on every `CONNECTED` regardless of change)
+     * and Phase 4's transfers already carry their own generation to a check of their own, so
+     * widening this to those two would duplicate a guard rather than add one.
      */
     authenticatedWriterFor: (Long) -> AuthenticatedFrameWriter?,
     /** ADR-023 §3's live authentication generation. Only [playback] needs it — see its doc. */
@@ -86,6 +92,17 @@ class ControlRelays internal constructor(
         PlaybackRelay(localPeerId, monotonicNowUs, nextSeq, activeSessionId, authenticatedWriter, currentAuthGeneration)
 
     /**
+     * PROTOCOL §10 (Phase 7). Outbound `STATE_SNAPSHOT`/`STATE_REQUEST` now travel through
+     * `Phase5FrameQueue`'s single ordered consumer exactly like [playback]'s own frames do, so
+     * [resync] takes the same **generation-bound** writer supplier [voice] and [playback] do
+     * (independent-review Blocker 1) rather than the plain [authenticatedWriter] a family whose
+     * outbound work is re-derived per session would use. Inbound delivery is still gated on
+     * liveness at [deliver], unchanged.
+     */
+    val resync: ResyncRelay =
+        ResyncRelay(localPeerId, monotonicNowUs, nextSeq, activeSessionId, authenticatedWriterFor, liveGeneration)
+
+    /**
      * Records that a frame of [type] was refused because the connection had not passed the trust
      * gate. Counted rather than merely dropped: "it never happened" and "it happened and was
      * refused" are different facts on a diagnostics screen, and only the second lets a test prove
@@ -100,6 +117,7 @@ class ControlRelays internal constructor(
             in ManifestMessageTypes.ALL -> manifest.countPreAuthenticationDrop()
             in TransferMessageTypes.ALL -> transfer.countPreAuthenticationDrop()
             in PlaybackMessageTypes.ALL, in QueueMessageTypes.ALL -> playback.countPreAuthenticationDrop()
+            in ResyncMessageTypes.ALL -> resync.countPreAuthenticationDrop()
             else -> return false
         }
         return true
@@ -135,6 +153,7 @@ class ControlRelays internal constructor(
             // accounting A6 exists to produce. The generation it carries is what keeps it harmless.
             in PlaybackMessageTypes.ALL -> playback.deliverPlayback(type, payload, generation)
             in QueueMessageTypes.ALL -> playback.deliverQueue(type, payload, generation)
+            in ResyncMessageTypes.ALL -> resync.deliver(type, payload, generation)
             else -> return false
         }
         return true
@@ -168,5 +187,6 @@ class ControlRelays internal constructor(
         manifest.resetCounters()
         transfer.resetCounters()
         playback.resetCounters()
+        resync.resetCounters()
     }
 }

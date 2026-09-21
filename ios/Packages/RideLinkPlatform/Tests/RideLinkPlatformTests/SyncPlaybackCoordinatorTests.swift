@@ -423,6 +423,36 @@ final class SyncPlaybackCoordinatorTests: XCTestCase {
         XCTAssertFalse(active)
     }
 
+    /// **ADR-024 Amendment A8 reachability proof.** No peer, no reconnect, no Phase 7 code at all —
+    /// just one leader whose control link drops. `resetForNewSession()` (called from both
+    /// `handleConnected` and `handleLinkLost`) unconditionally sets `queueState = SharedQueueState()`
+    /// with no leader/follower distinction, so this is reachable at the moment a link is lost, before
+    /// any reconnection even attempts. For a follower this is harmless — the resync/QUEUE_SNAPSHOT
+    /// path repopulates it — but the **leader** is the authoritative source PROTOCOL §10 says a
+    /// reconnecting follower resumes from, and brief rule 7 requires queue/local state to remain
+    /// locally available across a link loss the same way capture/voice consent already does.
+    func testALeadersQueueSurvivesAnOrdinaryLinkLoss() async {
+        await build()
+        await connect(asLeader: true)
+        await coordinator.mutateQueue(.add(items: [
+            QueueAddItem(queueItemId: SyncTestValues.ulid(1), trackHash: SyncTestValues.hash(1), addedBy: SyncTestValues.leaderPeerId, position: PlaybackBounds.queuePositionEnd),
+        ]))
+        await settle()
+        let beforeCount = await coordinator.queueState.items.count
+        XCTAssertEqual(1, beforeCount, "the leader's own mutation must have applied before the link loss")
+
+        await coordinator.handleLinkLost()
+        await settle()
+
+        let afterCount = await coordinator.queueState.items.count
+        XCTAssertEqual(
+            beforeCount, afterCount,
+            "ADR-024 Amendment A8: the leader is the authoritative source PROTOCOL §10 says a "
+                + "reconnecting follower resumes from — an ordinary link loss must not silently "
+                + "discard the one copy of the queue that exists to answer a STATE_SNAPSHOT with"
+        )
+    }
+
     func testAScheduledStartBelongingToASupersededEpochNeverFires() async {
         await build()
         await connect(asLeader: false)

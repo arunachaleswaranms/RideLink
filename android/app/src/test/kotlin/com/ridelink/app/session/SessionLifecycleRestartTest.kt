@@ -1,37 +1,19 @@
 package com.ridelink.app.session
 
-import com.ridelink.core.audiopolicy.AudioRouteSnapshot
 import com.ridelink.core.logging.InMemoryLogSink
 import com.ridelink.core.model.ConnTiebreak
 import com.ridelink.core.model.PeerId
 import com.ridelink.core.model.SessionId
 import com.ridelink.core.model.SpkiHash
-import com.ridelink.core.protocol.VoiceSignal
 import com.ridelink.core.security.InMemoryTrustedPeerStore
 import com.ridelink.core.sessionfsm.SessionEvent
 import com.ridelink.core.sessionfsm.SessionStatus
 import com.ridelink.core.voice.AudioProcessingConfig
-import com.ridelink.core.voice.AudioProcessingStatus
-import com.ridelink.core.voice.IceGatheringState
-import com.ridelink.core.voice.MediaTransportState
-import com.ridelink.core.voice.SdpKind
-import com.ridelink.core.voice.VoiceAudioSession
-import com.ridelink.core.voice.VoiceEngine
-import com.ridelink.core.voice.VoiceEngineConfig
-import com.ridelink.core.voice.VoiceEngineDiagnostics
-import com.ridelink.core.voice.VoiceEngineEvent
-import com.ridelink.core.voice.VoiceSignalTransport
-import com.ridelink.network.control.ControlChannel
 import com.ridelink.network.control.ControlEvent
-import com.ridelink.network.control.ControlListener
 import com.ridelink.network.control.ControlSessionManager
-import com.ridelink.network.control.ControlSocket
 import com.ridelink.network.control.ControlState
 import com.ridelink.network.control.LinkLossReason
 import com.ridelink.network.control.LocalHandshakeIdentity
-import com.ridelink.network.discovery.AdvertiseState
-import com.ridelink.network.discovery.DiscoveryController
-import com.ridelink.network.discovery.DiscoveryEvent
 import com.ridelink.network.manifest.ManifestSink
 import com.ridelink.network.playback.PlaybackSink
 import com.ridelink.network.playback.QueueSink
@@ -43,8 +25,6 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.emptyFlow
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import java.util.concurrent.atomic.AtomicInteger
@@ -107,8 +87,21 @@ class SessionLifecycleRestartTest {
             sut.coordinator.startIntercom()
             sut.awaitTrue("capture open") { sut.audio.isOpen }
 
+            // The `ENDING` assertion below must not race the teardown it is watching. `ENDING ->
+            // IDLE` is opened by production's own `TeardownComplete`, asynchronously, so on a loaded
+            // machine the release can finish and the transition can happen **before** the main thread
+            // samples `state.value` — which is exactly what CI observed (expected ENDING, was IDLE).
+            // Holding the release open makes the observation deterministic rather than probable. This
+            // is the seam `a stalled release holds ENDING open and refuses a successor outright`
+            // already uses; it is deliberately **not** a widened timeout, which would hide the race
+            // instead of removing it.
+            val closeGate = CompletableDeferred<Unit>()
+            sut.audio.closeGate = closeGate
+
             sut.coordinator.handleControlEvent(ControlEvent.LinkLost(LinkLossReason.BYE))
+            sut.awaitTrue("release in flight") { sut.audio.closeCalls > 0 }
             assertEquals(SessionStatus.ENDING, sut.coordinator.state.value.status)
+            closeGate.complete(Unit)
 
             sut.awaitTrue("IDLE") { sut.coordinator.state.value.status == SessionStatus.IDLE }
             assertEquals(1, sut.audio.closeCaptureCount, "capture was released before IDLE")
@@ -125,8 +118,19 @@ class SessionLifecycleRestartTest {
     fun `the user ending the session reaches IDLE the same way`() =
         withSession { sut ->
             sut.connect()
+            // The intercom is started here for the same reason the gate exists below: the release is
+            // the one teardown step a test can hold, and holding it is what makes the `ENDING`
+            // observation deterministic. See the sibling test above for the full reasoning.
+            sut.coordinator.startIntercom()
+            sut.awaitTrue("capture open") { sut.audio.isOpen }
+            val closeGate = CompletableDeferred<Unit>()
+            sut.audio.closeGate = closeGate
+
             sut.coordinator.endSession()
+            sut.awaitTrue("release in flight") { sut.audio.closeCalls > 0 }
             assertEquals(SessionStatus.ENDING, sut.coordinator.state.value.status)
+            closeGate.complete(Unit)
+
             sut.awaitTrue("IDLE") { sut.coordinator.state.value.status == SessionStatus.IDLE }
             assertEquals(1, sut.fgs.stopCalls)
         }
@@ -564,144 +568,6 @@ class SessionLifecycleRestartTest {
                 throw AssertionError("timed out waiting for '$what'", timeout)
             }
         }
-    }
-
-    /**
-     * A `ControlChannel` whose `bind()` records the attempt and then never returns.
-     *
-     * `ControlListener`'s constructor is `internal` to `:network`, so one cannot be built from `:app`
-     * at all. Parking is the honest alternative, and it happens to be exactly what these tests need:
-     * `bindCalls` answers "has this session reached the control plane?", which is the whole question
-     * the teardown ordering is about.
-     */
-    private class ParkingControlChannel : ControlChannel {
-        override val transportLabel: String = "test"
-        override val isSecure: Boolean = true
-        val bindCalls = AtomicInteger(0)
-        private val never = CompletableDeferred<Unit>()
-
-        override suspend fun bind(): ControlListener {
-            bindCalls.incrementAndGet()
-            never.await()
-            error("unreachable: this channel never finishes binding")
-        }
-
-        override suspend fun connect(
-            host: String,
-            port: Int,
-        ): ControlSocket = error("not used by this test")
-    }
-
-    private class SilentDiscoveryController : DiscoveryController {
-        override fun advertise(
-            port: Int,
-            rotationIntervalMs: Long,
-        ): Flow<AdvertiseState> = emptyFlow()
-
-        override fun browse(): Flow<DiscoveryEvent> = emptyFlow()
-    }
-
-    private class FakeForegroundService : ForegroundServiceController {
-        @Volatile var stopCalls = 0
-            private set
-
-        override fun stop() {
-            stopCalls += 1
-        }
-    }
-
-    /** Mirrors `SessionCoordinatorEndingEffectTest.FakeVoiceAudioSession`, kept local and minimal. */
-    private class FakeVoiceAudioSession : VoiceAudioSession {
-        @Volatile var closeCaptureCount = 0
-            private set
-
-        @Volatile var openCaptureCount = 0
-            private set
-
-        @Volatile var closeCalls = 0
-            private set
-
-        override var isOpen: Boolean = false
-            private set
-
-        override var route: AudioRouteSnapshot = AudioRouteSnapshot()
-            private set
-
-        var closeGate: CompletableDeferred<Unit>? = null
-        private var sink: ((AudioRouteSnapshot) -> Unit)? = null
-
-        override fun setRouteSink(sink: (AudioRouteSnapshot) -> Unit) {
-            this.sink = sink
-        }
-
-        override suspend fun open(): Result<Unit> {
-            if (isOpen) return Result.success(Unit)
-            isOpen = true
-            openCaptureCount += 1
-            sink?.invoke(route)
-            return Result.success(Unit)
-        }
-
-        override suspend fun close() {
-            closeCalls += 1
-            closeGate?.await()
-            if (isOpen) closeCaptureCount += 1
-            isOpen = false
-        }
-    }
-
-    private class FakeVoiceEngine : VoiceEngine {
-        override var diagnostics: VoiceEngineDiagnostics =
-            VoiceEngineDiagnostics(audioProcessing = AudioProcessingStatus(true, true, true, false))
-        private var sink: ((VoiceEngineEvent) -> Unit)? = null
-
-        override fun setEventSink(sink: (VoiceEngineEvent) -> Unit) {
-            this.sink = sink
-        }
-
-        override suspend fun start(config: VoiceEngineConfig): Result<Unit> {
-            diagnostics = diagnostics.copy(transportState = MediaTransportState.NEW, localAudioTrackPresent = true)
-            return Result.success(Unit)
-        }
-
-        override suspend fun createOffer(): Result<Unit> = Result.success(Unit)
-
-        override suspend fun createAnswer(): Result<Unit> = Result.success(Unit)
-
-        override suspend fun applyRemoteDescription(
-            kind: SdpKind,
-            sdp: String,
-        ): Result<Unit> = Result.success(Unit)
-
-        override suspend fun addRemoteCandidate(
-            candidate: String,
-            sdpMid: String?,
-            sdpMlineIndex: Int,
-        ): Result<Unit> = Result.success(Unit)
-
-        override fun setMicrophoneMuted(muted: Boolean) = Unit
-
-        override suspend fun stop() {
-            diagnostics =
-                diagnostics.copy(
-                    transportState = MediaTransportState.CLOSED,
-                    iceGatheringState = IceGatheringState.NEW,
-                    remoteAudioTrackPresent = false,
-                )
-        }
-
-        override suspend fun release() {
-            diagnostics = VoiceEngineDiagnostics(transportState = MediaTransportState.CLOSED)
-        }
-
-        override suspend fun refreshDiagnostics() = Unit
-    }
-
-    private class NoOpVoiceTransport : VoiceSignalTransport {
-        override suspend fun send(
-            signal: VoiceSignal,
-            controlGeneration: Long?,
-        ): Boolean = false
     }
 
     private fun withSession(body: suspend (Sut) -> Unit) =

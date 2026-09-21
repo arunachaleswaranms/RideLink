@@ -671,10 +671,17 @@ class SyncPlaybackClosureAuditTest {
             runCurrent()
 
             val diagnostics = coordinator.diagnostics.value
-            assertEquals(1, diagnostics.deferredCommandCount, "the buffer is bounded and the bound is real")
-            assertEquals(1, diagnostics.inboundOverflowCount)
+            assertEquals(1, diagnostics.inboundOverflowCount, "the buffer is bounded and the bound is real")
             assertTrue(diagnostics.ingressDesynchronized, "the refusal halts synchronisation instead of losing the command quietly")
             assertEquals(10, diagnostics.lastReceivedCommandSeq, "the refused command spends no sequence number")
+            // Independent-review round 3, Blocker A: the overflow *latches desynchronisation*, and
+            // ADR-024 Amendment A1 Finding C says an incremental command may not be applied while
+            // incremental state is untrusted. That rule now reaches the command already **held** as
+            // well as the one arriving — it could never have been applied (the drain refuses commands
+            // while the latch is closed), and leaving it at the head of the stream is what blocked the
+            // repair snapshot behind it from ever reaching the drain. Refused, surfaced, never silent.
+            assertEquals(0, diagnostics.deferredCommandCount, "a held incremental command is refused with the latch, not kept")
+            assertEquals(1, diagnostics.refusedHeldCommandCount, "…and the refusal is counted rather than hidden")
         }
 
     // --- Finding E: one Play request survives a Phase 4 transfer ---------------------------------

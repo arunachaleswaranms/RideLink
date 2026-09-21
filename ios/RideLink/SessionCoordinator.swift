@@ -54,6 +54,11 @@ public final class SessionCoordinator {
 
     /// FR-023 voice diagnostics. Empty until an authenticated session exists (PROTOCOL §7.1).
     public private(set) var voiceDiagnostics = VoiceDiagnostics()
+
+    /// Phase 7 (ADR-028, FR-023): republished from `resync`'s own `onDiagnosticsChanged`, exactly as
+    /// `voiceDiagnostics` above is republished from `VoiceController` — one `@Observable` surface for
+    /// the diagnostics screen, never a second source the view has to reach past this coordinator for.
+    public private(set) var resyncDiagnostics = ResyncDiagnostics()
     public private(set) var coexistenceDiagnostics = CoexistenceDiagnostics()
 
     /// ARCHITECTURE §6.3's selected policy. Owned here rather than in the voice controller because it
@@ -242,6 +247,15 @@ public final class SessionCoordinator {
     /// `onEvent` is a single mutable callback slot, and this class owns the one subscription.
     public private(set) var syncPlayback: SyncPlaybackCoordinator?
 
+    /// Phase 7's PROTOCOL §10 resync plane (ADR-028), forwarded `.connected` exactly as
+    /// [syncPlayback] is and for the same reason this file's comment above already gives.
+    public private(set) var resync: ResyncCoordinator?
+
+    /// Phase 7's ride-segment lifetime owner (independent-review round 3, Blocker C; ADR-028
+    /// Amendment A2). Built alongside [syncPlayback], because it is that coordinator's ride-scoped
+    /// authority it ends. Non-nil from then on.
+    private var rideSegment: RideSegmentLifecycle?
+
     /// Builds and attaches [sharedLibrary]. A no-op if already attached. `SharedLibraryCoordinator`
     /// gets its own `TlsControlChannel` for the bulk plane — a second, independent listener
     /// (ADR-015) — but the **same** [deviceIdentity] as the control connection, which is what the
@@ -284,8 +298,33 @@ public final class SessionCoordinator {
             nextQueueItemId: nextQueueItemId
         )
         syncPlayback = coordinator
+        // Independent-review round 3, Blocker C: the one production owner of the ride-segment
+        // lifetime, built with the coordinator it ends. Every decision it makes lives in
+        // `RideLinkPlatform` (and is therefore testable) precisely because this file is in the app
+        // target, which has no test bundle at all — see `RideSegmentLifecycle`'s own doc comment.
+        rideSegment = RideSegmentLifecycle(syncPlayback: coordinator)
         Task { await coordinator.start() }
         return coordinator
+    }
+
+    /// Builds and attaches [resync]. A no-op if already attached, or if [syncPlayback]/[sharedLibrary]
+    /// are not yet attached — `ResyncCoordinator` needs both (PROTOCOL §10 reconciles playback/queue
+    /// through the one, manifest revision through the other). Mirrors Android's `AppContainer`
+    /// wiring order exactly: Phase 7 composes after Phase 4 and Phase 5.
+    public func attachResync() {
+        guard resync == nil, let sync = syncPlayback, let library = sharedLibrary else { return }
+        let coordinator = ResyncCoordinator(
+            session: ControlSessionResyncPort(manager: controlSessionManager),
+            syncPlaybackCoordinator: sync,
+            currentCatalogueRevision: { [weak library] in library?.currentCatalogueRevision ?? 0 },
+            requestManifestRefresh: { [weak library] in library?.requestCatalogue() },
+            localPeerId: localPeerId
+        )
+        resync = coordinator
+        coordinator.onDiagnosticsChanged = { [weak self] value in
+            Task { @MainActor in self?.resyncDiagnostics = value }
+        }
+        Task { await coordinator.attach() }
     }
 
     /// The user's answer on the pairing screen. Both peers must answer before any pin is written.
@@ -338,6 +377,41 @@ public final class SessionCoordinator {
     /// anywhere else. Everything after the transition is `ENDING`'s one effect (see `runEffect`).
     public func endSession() {
         _ = applyEvent(.userEnded)
+    }
+
+    /// Phase 7 (ADR-028): `CONNECTED -> RIDE_ACTIVE` (FR-018). Legal only from `CONNECTED` —
+    /// `SessionFsm` rejects it from anywhere else, including mid-reconnect, so Ride Mode is entered
+    /// only from a session already known-good. Carries no teardown effect, unlike `endSession()`:
+    /// the FSM alone decides whether this is reachable, never a direct state mutation from the view.
+    public func startRide() {
+        guard applyEvent(.startRide) else { return }
+        // Independent-review round 5, Blocker 1: the accepted ride epoch is minted **and published**
+        // here, synchronously on the main actor, and Start Ride hands off no asynchronous work at
+        // all. It used to take the epoch here and carry it to `SyncPlaybackCoordinator` inside
+        // `launchInSession` — so between this line and that hop the FSM had accepted ride 2 while
+        // the one owner of ride-scoped authority still believed ride 1 was current, and authority
+        // ride 2 established in that window was stamped as ride 1's and destroyed by ride 1's late
+        // cleanup. A Start Ride establishes nothing, so once the epoch is published there is
+        // genuinely nothing left to defer; removing the deferral removes the window rather than
+        // widening a comparison. See `RideEpochBox`.
+        _ = rideSegment?.nextRideEpoch()
+    }
+
+    /// `RIDE_ACTIVE -> CONNECTED` (FR-018's End Ride). **Not** the same as `endSession()`: this
+    /// returns to a still-connected session rather than tearing it down — ending a ride is not
+    /// ending the peer session, which stays available for a second ride (brief §28). A reconnect
+    /// budget exhaustion or peer-initiated `BYE` still reaches `ENDING`/`DISCONNECTED` through the
+    /// FSM's own `RIDE_ACTIVE` transitions, independent of this call.
+    public func endRide() {
+        // The FSM transition is proved **first**, so a rejected End Ride cannot end a ride's playback
+        // authority. Ride-segment cleanup then follows, carrying the epoch assigned synchronously
+        // here; `RideSegmentLifecycle.endRide` and `SyncPlaybackCoordinator.endRideSegment` each
+        // re-prove it, because this call crosses a scheduling hop and ride 2 may have started by the
+        // time it resumes (independent-review round 3, Blocker C, and §12's own audit).
+        guard applyEvent(.endRide) else { return }
+        guard let rideSegment else { return }
+        let epoch = rideSegment.nextRideEpoch()
+        launchInSession { _ in await rideSegment.endRide(epoch: epoch) }
     }
 
     private func beginDiscoverySession(_ event: SessionEvent, retireHere: Bool) {
@@ -916,6 +990,11 @@ public final class SessionCoordinator {
             publishAudioState(force: true)
             await sharedLibrary?.handleConnected()
             await syncPlayback?.handleConnected(isLocalLeader: isLocalLeader)
+            // Phase 7 (ADR-028): forwarded exactly as `.connected` already is to `sharedLibrary`/
+            // `syncPlayback` above — `ControlSessionManager.onEvent` is a single mutable callback
+            // slot on this platform, so `ResyncCoordinator` cannot self-subscribe the way Android's
+            // does.
+            await resync?.onConnected(isLeader: isLocalLeader, generation: authGeneration)
         case .linkLost(_, let retiredAuthGeneration):
             // PROTOCOL §7.8: media goes, the capture device stays (ARCHITECTURE §6.3/§6.4), and nothing
             // is retried here — §10's control ladder is the app's only reconnect loop.

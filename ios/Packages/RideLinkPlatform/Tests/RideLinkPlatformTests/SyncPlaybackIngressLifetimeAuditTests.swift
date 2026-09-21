@@ -267,7 +267,12 @@ final class SyncPlaybackIngressLifetimeAuditTests: XCTestCase {
 
         await session.setSendResult(true)
         await boundary(toFollower: 2)
-        await deliverAndAwait(playCommand(seq: 1, hash: Self.hashB), generation: 2)
+        // ADR-024 Amendment A8: Session A's leader `enqueue(hashA)` applied locally (queue_revision
+        // 1) before its send ever failed — and a session boundary no longer discards the queue, only
+        // the coordination state around it — so Session B's follower correctly starts from revision
+        // 1, not 0. A command still carrying `queue_revision: 0` here would now be genuinely stale
+        // (PROTOCOL §5 rule 3) and held rather than applied, which is not what this test is about.
+        await deliverAndAwait(playCommand(seq: 1, hash: Self.hashB, queueRevision: 1), generation: 2)
         // The command is *considered* as soon as the consumer dispatches it, but its deadline has
         // already passed, so the start and the `.synced` transition it publishes are one more hop
         // away. Waiting on the transition rather than on the frame is what makes the baseline below
@@ -488,15 +493,15 @@ final class SyncPlaybackIngressLifetimeAuditTests: XCTestCase {
         XCTFail("timed out waiting for: \(description)")
     }
 
-    private func header(seq: Int64) -> PlaybackCommandHeader {
+    private func header(seq: Int64, queueRevision: Int64 = 0) -> PlaybackCommandHeader {
         PlaybackCommandHeader(
             commandSeq: seq, effectiveAtSessionUs: clock.now(),
-            issuedBy: SyncTestValues.leaderPeerId, queueRevision: 0
+            issuedBy: SyncTestValues.leaderPeerId, queueRevision: queueRevision
         )
     }
 
-    private func playCommand(seq: Int64, hash: ContentHash) -> PlaybackMessage {
-        .play(header: header(seq: seq), trackHash: hash, positionMs: 0, queueItemId: SyncTestValues.ulid(1))
+    private func playCommand(seq: Int64, hash: ContentHash, queueRevision: Int64 = 0) -> PlaybackMessage {
+        .play(header: header(seq: seq, queueRevision: queueRevision), trackHash: hash, positionMs: 0, queueItemId: SyncTestValues.ulid(1))
     }
 
     private func pauseCommand(seq: Int64, positionMs: Int64) -> PlaybackMessage {

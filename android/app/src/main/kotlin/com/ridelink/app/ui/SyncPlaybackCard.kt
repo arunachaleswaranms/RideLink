@@ -16,11 +16,17 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import com.ridelink.app.library.DownloadState
 import com.ridelink.app.library.SharedLibraryCoordinator
+import com.ridelink.app.music.CoexistenceDiagnostics
+import com.ridelink.app.session.SessionCoordinator
 import com.ridelink.app.sync.SyncPlaybackCoordinator
 import com.ridelink.app.sync.SyncState
+import com.ridelink.core.audiopolicy.IntercomPolicy
+import com.ridelink.core.audiopolicy.RideStartDecision
 import com.ridelink.core.library.LibraryEntry
 import com.ridelink.core.manifest.ManifestEntry
 import com.ridelink.core.playback.PlaybackRole
+import com.ridelink.core.protocol.AudioStateMessage
+import com.ridelink.network.voice.VoiceDiagnostics
 
 /**
  * Phase 5's minimal affordance: enough to *drive and observe* synchronised playback on two phones,
@@ -102,6 +108,60 @@ fun SyncPlaybackCard(
             SyncDiagnosticsBlock(sync)
         }
     }
+}
+
+/**
+ * [MainScreen]'s post-trust-gate content (PROTOCOL §7.1: voice, catalogue and synchronisation all
+ * require the trust gate the same way, so they share one guard at the call site and one extraction
+ * here) — its own file/function for the same `config/detekt/detekt.yml` extract-rather-than-raise
+ * reason [SharedLibraryAndSyncSections] already is.
+ */
+@Suppress("LongParameterList") // one per existing MainScreen value this block already read directly
+@Composable
+fun AuthenticatedSections(
+    coordinator: SessionCoordinator,
+    sharedLibraryCoordinator: SharedLibraryCoordinator,
+    syncPlaybackCoordinator: SyncPlaybackCoordinator,
+    voice: VoiceDiagnostics,
+    coexistence: CoexistenceDiagnostics,
+    policy: IntercomPolicy,
+    peerAudioState: AudioStateMessage?,
+    intercomRefusal: RideStartDecision.Refused?,
+    remoteEntries: List<ManifestEntry>,
+    localEntries: List<LibraryEntry>,
+    downloadStates: Map<String, DownloadState>,
+    cachedHashes: Set<String>,
+    onStartIntercom: () -> Unit,
+    onStopIntercom: () -> Unit,
+    onPlaySharedTrackLocally: (ManifestEntry) -> Unit,
+) {
+    VoiceCard(
+        voice = voice,
+        coexistence = coexistence,
+        policy = policy,
+        peerAudioState = peerAudioState,
+        refusal = intercomRefusal,
+        onStartIntercom = onStartIntercom,
+        onStopIntercom = onStopIntercom,
+        // The user's own Mute latch, not the wire's `mic_muted` — under PTT the latter is true
+        // whenever the button is not held, and toggling from it would be a coin flip.
+        onToggleMute = { coordinator.setMicrophoneMuted(!voice.userMuted) },
+        onPushToTalkHeld = coordinator::setPushToTalkHeld,
+        onSelectPolicy = coordinator::selectIntercomPolicy,
+    )
+
+    // PROTOCOL §8's catalogue plane and PROTOCOL §5/§9's synchronisation plane, both gated the
+    // same way voice is: brief §22 and ADR-024 §8 — an unpaired peer must never receive the
+    // shared library and can never move this phone's music.
+    SharedLibraryAndSyncSections(
+        sharedLibraryCoordinator = sharedLibraryCoordinator,
+        syncPlaybackCoordinator = syncPlaybackCoordinator,
+        remoteEntries = remoteEntries,
+        localEntries = localEntries,
+        downloadStates = downloadStates,
+        cachedHashes = cachedHashes,
+        onPlaySharedTrackLocally = onPlaySharedTrackLocally,
+    )
 }
 
 /**

@@ -87,6 +87,56 @@ fun interface ForegroundServiceController {
 }
 
 /**
+ * The narrow seam between ARCHITECTURE §3's ride lifecycle and Phase 5's synchronisation authority
+ * (independent-review round 3, Blocker C; ADR-028 Amendment A2).
+ *
+ * Both halves take a **strictly increasing ride epoch**, assigned by [SessionCoordinator] and
+ * compared — never re-derived — by the implementation, so an End Ride authorised by ride 1 can never
+ * clear ride 2's state if it is applied after ride 2 began. That is CLAUDE.md's standing invariant
+ * ("once asynchronous work has an authority/lifetime owner, that owner travels with it or the work
+ * is rejected") applied to the ride, which is a lifetime distinct from both the authenticated control
+ * generation and the playback epoch.
+ *
+ * `SyncPlaybackCoordinator` is the production implementation; a test supplies a recorder.
+ */
+interface RideSegmentOwner {
+    /**
+     * Mints and **publishes** the next strictly-increasing ride epoch, in one step
+     * (independent-review round 5, Blocker 1; `com.ridelink.app.sync.RideEpochBox`).
+     *
+     * Called once per accepted Start Ride and once per accepted End Ride. `beginRideSegment` is
+     * gone: once the accepted epoch is published there is nothing left for a Start Ride to install,
+     * because a Start Ride establishes no synchronisation authority — and a Start Ride that defers
+     * nothing cannot be overtaken by the authority a successor ride establishes.
+     */
+    fun nextRideEpoch(): Long
+
+    /**
+     * `RIDE_ACTIVE -> CONNECTED`. Ends ride-segment synchronisation authority, not the session.
+     *
+     * Returns what the boundary actually did (independent-review round 4, Blocker 1). Only the owner
+     * of ride-scoped authority can say whether a strictly newer ride has established authority of its
+     * own — "a newer ride exists" is not that fact, because a Start Ride establishes nothing.
+     */
+    fun endRideSegment(rideEpoch: Long): RideBoundaryOutcome
+}
+
+/**
+ * What an End Ride boundary did when it reached the one owner of ride-segment playback authority
+ * (independent-review round 4, Blocker 1). Mirrors iOS's `RideBoundaryOutcome` exactly.
+ */
+enum class RideBoundaryOutcome {
+    /** The boundary owned what was standing and retired it. */
+    CLEARED,
+
+    /**
+     * A strictly newer ride had already established synchronisation authority of its own, so this
+     * boundary belongs to a ride that is over and touched nothing.
+     */
+    SUPERSEDED_BY_LIVE_RIDE_AUTHORITY,
+}
+
+/**
  * The single owner of session state (CLAUDE.md rule 8 / ARCHITECTURE §3 rule 4). No view model
  * holds connection state of its own; every screen observes [state], [discoveredPeers] and
  * [controlDiagnostics] here.
@@ -132,6 +182,20 @@ class SessionCoordinator(
     private val buildVoiceController: (isLocalLeader: Boolean) -> VoiceController,
     /** Sole owner of temporary intercom/music effects; optional only for narrow legacy tests. */
     private val coexistence: IntercomMusicCoexistenceCoordinator? = null,
+    /**
+     * The one owner of **ride-segment synchronised-playback authority** (independent-review round 3,
+     * Blocker C; ADR-028 Amendment A2). Non-null in production, where the composition root binds it
+     * to `SyncPlaybackCoordinator`; optional only for the narrow legacy tests that predate Ride Mode.
+     *
+     * This is the production wiring that was missing: [endRide] produced `RIDE_ACTIVE -> CONNECTED`
+     * and nothing else, so `SyncPlaybackCoordinator.currentPlaybackIdentity` — which deliberately
+     * survives an ordinary control-link loss — survived the **end of the ride** as well, and a
+     * `STATE_SNAPSHOT` built early in ride 2 reported ride 1's track as ride 2's authoritative truth.
+     *
+     * A narrow port rather than the coordinator itself, for the same reason `foregroundService`
+     * above is one: this class must be able to end a ride without gaining a dependency on Phase 5.
+     */
+    private val rideSegment: RideSegmentOwner? = null,
 ) {
     private val logger = StructuredLogger(logSink, environment.monotonicNowUs)
 
@@ -440,6 +504,60 @@ class SessionCoordinator(
     fun endSession() {
         applyEvent(SessionEvent.UserEnded)
     }
+
+    /**
+     * ARCHITECTURE §3's `CONNECTED -> RIDE_ACTIVE` (Phase 7, ADR-028): the user's explicit "start
+     * the ride" action, and until now the FSM's one transition with no production emitter
+     * (`docs/STATUS.md`'s "Current phase" note). Legal only from `CONNECTED`; [SessionFsm] rejects
+     * and logs it from anywhere else, so a Ride Mode screen that only renders while
+     * `status == RIDE_ACTIVE` (or `RECONNECTING` returning to it) can never be reached except
+     * through this call.
+     *
+     * Deliberately just an FSM event. Nothing here opens capture, starts voice or touches the
+     * player — `RIDE_ACTIVE` only *permits* those, exactly as `CONNECTED` already does (ARCHITECTURE
+     * §6.4's own readiness gate is what actually opens the microphone, on its own explicit tap).
+     */
+    fun startRide() {
+        if (!applyEvent(SessionEvent.StartRide)) return
+        // Independent-review round 5, Blocker 1: the accepted ride epoch is minted **and published**
+        // in one step, and a Start Ride hands off no work of its own. See `RideEpochBox`.
+        rideSegment?.nextRideEpoch()
+    }
+
+    /**
+     * ARCHITECTURE §3's `RIDE_ACTIVE -> CONNECTED` (Phase 7, ADR-028) — the mirror of [startRide].
+     * **Not** the ADR-026 `ENDING -> IDLE` teardown: this exits Ride Mode back to the pre-ride/
+     * diagnostics screen while the session, pairing and control connection all stay alive, exactly
+     * as [SessionFsm] already defines the transition. The user's separate "disconnect the whole
+     * session" action remains [endSession], unchanged, and is what actually reaches
+     * [SessionTeardownOwner]'s teardown path. Legal only from `RIDE_ACTIVE`; rejected and logged
+     * from anywhere else.
+     */
+    fun endRide() {
+        if (!applyEvent(SessionEvent.EndRide)) return
+        // The FSM transition is proved **first**, so a rejected End Ride (from `CONNECTED`, say)
+        // cannot clear a ride's playback authority; the ride-segment call then follows synchronously,
+        // on this same thread, with no suspension between the two. Android needs no post-suspension
+        // ownership proof here for that reason — `endRideSegment`'s epoch check is the mirror of the
+        // one iOS genuinely needs, where the call has to cross an actor boundary.
+        //
+        // Independent-review round 4, Blocker 1: the outcome is counted rather than discarded, so the
+        // "a newer ride already owned live authority" case is observable here too. In production on
+        // this platform it cannot occur — this call is synchronous and the epoch was assigned one
+        // statement ago — and [supersededEndRideCount] staying zero is what says so, rather than an
+        // assumption that it must.
+        val owner = rideSegment ?: return
+        val outcome = owner.endRideSegment(owner.nextRideEpoch())
+        if (outcome == RideBoundaryOutcome.SUPERSEDED_BY_LIVE_RIDE_AUTHORITY) supersededEndRideCount += 1
+    }
+
+    /**
+     * How many End Ride boundaries the ride-segment owner refused because a strictly newer ride had
+     * already established synchronisation authority of its own (independent-review round 4,
+     * Blocker 1). The mirror of iOS's `RideSegmentLifecycle.supersededEndRideCount`.
+     */
+    var supersededEndRideCount: Int = 0
+        private set
 
     private fun beginDiscoverySession(
         event: SessionEvent,

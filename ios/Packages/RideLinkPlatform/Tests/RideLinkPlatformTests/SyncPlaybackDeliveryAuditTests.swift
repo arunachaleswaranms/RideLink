@@ -331,6 +331,9 @@ final class SyncPlaybackDeliveryAuditTests: XCTestCase {
         await expect("the snapshot is queued behind it") { [self] in
             await coordinator.diagnostics.outboundEnqueuedCount > queued
         }
+        // The leader's local apply (bump-then-enqueue, no `await` between — Amendment A1 Finding B)
+        // already happened, independent of whether the send ever leaves the wire.
+        let revisionBeforeBoundary = await coordinator.queueState.revision
 
         await coordinator.handleLinkLost()
         await session.setGeneration(2)
@@ -342,8 +345,13 @@ final class SyncPlaybackDeliveryAuditTests: XCTestCase {
         XCTAssertTrue(probe5, "no Session A snapshot under Session B")
         let probe6 = await coordinator.diagnostics.outboundSentCount
         XCTAssertEqual(probe6, sentBefore)
+        // ADR-024 Amendment A8: a session boundary retires *coordination* state (sequence numbers,
+        // chains, epoch) but must not discard the queue itself — it is ride-segment-local state a
+        // leader has nothing to resync from if it is wiped. Session B therefore starts from what
+        // Session A's leader had already applied locally, never from zero and never from Session A's
+        // *stuck* frame (which `probe5`/`probe6` above already prove never reached the wire).
         let probe7 = await coordinator.queueState.revision
-        XCTAssertEqual(probe7, 0, "and Session B started from an empty queue")
+        XCTAssertEqual(probe7, revisionBeforeBoundary, "Session B retains the queue Session A's leader had already applied — it is not Session A's *stuck send* that survives, but its completed local state")
     }
 
     // MARK: - Finding C — the transport's answer is the only definition of "sent"
@@ -563,8 +571,12 @@ final class SyncPlaybackDeliveryAuditTests: XCTestCase {
         await player.clearCalls()
         let probe23 = await coordinator.diagnostics.deferredCommandCount
         XCTAssertEqual(probe23, 0)
+        // ADR-024 Amendment A8: the *held* revision-6 snapshot is correctly discarded with the rest
+        // of the deferred stream (never applied, so it leaves nothing behind) — but the *applied*
+        // revision-5 snapshot is queue content, not session-bound coordination state, and a link
+        // loss must not discard it either. Revision 5 survives; revision 6 never happened.
         let probe24 = await coordinator.queueState.revision
-        XCTAssertEqual(probe24, 0, "the old session's queue went with it")
+        XCTAssertEqual(probe24, 5, "the applied snapshot's queue survives a link loss; only the held, never-applied one is gone")
 
         await session.setGeneration(2)
         await connect(asLeader: false)
@@ -574,8 +586,11 @@ final class SyncPlaybackDeliveryAuditTests: XCTestCase {
         let probe25 = await player.calls.isEmpty
         XCTAssertTrue(probe25,
                       "not one held event of the old session touched the new one's player")
+        // Still 5 after the reconnect: nothing in this test sends a fresh snapshot on the new
+        // generation, so the follower's local copy — the one that survived the boundary above —
+        // is what a real reconnecting follower would display until resync corrects it.
         let probe26 = await coordinator.queueState.revision
-        XCTAssertEqual(probe26, 0)
+        XCTAssertEqual(probe26, 5)
         let probe27 = await coordinator.diagnostics.lastAppliedCommandSeq
         XCTAssertNil(probe27)
     }
@@ -594,9 +609,15 @@ final class SyncPlaybackDeliveryAuditTests: XCTestCase {
         await deliverAndAwait(.snapshot(queueRevision: 6, items: [], currentIndex: nil))
 
         let diagnostics = await coordinator.diagnostics
-        XCTAssertEqual(diagnostics.deferredCommandCount, 1, "the bound is real")
-        XCTAssertEqual(diagnostics.inboundOverflowCount, 1)
+        XCTAssertEqual(diagnostics.inboundOverflowCount, 1, "the bound is real")
         XCTAssertTrue(diagnostics.ingressDesynchronized, "an overflow halts; it never evicts and never reorders")
+        // Independent-review round 3, Blocker A: the held `NEXT` is refused *with* the latch — see
+        // `SyncPlaybackClosureAuditTests`' identical assertion for the full reasoning. This is not an
+        // eviction to make room (nothing took its place) and it is not a reorder (the overflowing
+        // snapshot still did not apply); it is A1 Finding C's refusal rule reaching the stream as well
+        // as the arrival, so the repair snapshot is not blocked behind it.
+        XCTAssertEqual(diagnostics.deferredCommandCount, 0, "a held incremental command is refused with the latch, not kept")
+        XCTAssertEqual(diagnostics.refusedHeldCommandCount, 1, "…and the refusal is counted rather than hidden")
         let probe28 = await coordinator.queueState.revision
         XCTAssertEqual(probe28, 5, "and the snapshot that overflowed did not apply")
     }

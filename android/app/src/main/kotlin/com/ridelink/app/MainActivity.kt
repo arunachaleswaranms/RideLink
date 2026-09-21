@@ -12,7 +12,7 @@ import com.ridelink.app.library.SharedLibraryCoordinator
 import com.ridelink.app.music.MusicCoordinator
 import com.ridelink.app.service.RideForegroundService
 import com.ridelink.app.session.SessionCoordinator
-import com.ridelink.app.ui.MainScreen
+import com.ridelink.app.ui.RideLinkRoot
 import com.ridelink.app.ui.SecureTransportUnavailableScreen
 import com.ridelink.core.audiopolicy.RideStartDecision
 import com.ridelink.core.library.LibraryEntry
@@ -85,11 +85,12 @@ class MainActivity : ComponentActivity() {
                     onSuccess = { appContainer ->
                         coordinator = appContainer.sessionCoordinator
                         musicCoordinator = appContainer.musicCoordinator
-                        MainScreen(
+                        RideLinkRoot(
                             coordinator = appContainer.sessionCoordinator,
                             musicCoordinator = appContainer.musicCoordinator,
                             sharedLibraryCoordinator = appContainer.sharedLibraryCoordinator,
                             syncPlaybackCoordinator = appContainer.syncPlaybackCoordinator,
+                            resyncCoordinator = appContainer.resyncCoordinator,
                             deviceDescription = deviceDescription,
                             onStartIntercom = {
                                 attemptIntercomStart(appContainer.sessionCoordinator, requestPermissionsIfMissing = true)

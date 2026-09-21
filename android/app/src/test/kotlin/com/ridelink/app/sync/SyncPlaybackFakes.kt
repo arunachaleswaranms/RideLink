@@ -66,6 +66,15 @@ class FakeSyncSession : SyncSessionPort {
     /** The authentication generation live at the instant each frame was actually written. */
     val sentGenerations = mutableListOf<Long>()
 
+    /**
+     * Optional, additive: when set, every frame this fake writes is *also* appended here, in the
+     * same call — never instead of [sent]. A test proving wire order across this channel **and**
+     * `FakeResyncSession`'s (ADR-028's `STATE_SNAPSHOT`, which now shares [outbound]'s single
+     * ordered writer with `QUEUE_SNAPSHOT`/`PLAYBACK_STATE`) points both fakes at the same list, so
+     * the combined order it records is the true wire order rather than two separately-ordered ones.
+     */
+    var combinedWireLog: MutableList<Any>? = null
+
     private var forward: FakeSyncSession? = null
 
     override val playback: PlaybackChannelPort =
@@ -101,6 +110,7 @@ class FakeSyncSession : SyncSessionPort {
         if (authorizingGeneration != currentAuthGeneration) return false
         sent.add(message)
         sentGenerations.add(currentAuthGeneration)
+        combinedWireLog?.add(message)
         deliver()
         return true
     }
@@ -130,8 +140,12 @@ class FakeSyncSession : SyncSessionPort {
      * Joins this peer's outbound wire to [other]'s inbound one — the in-process stand-in for the
      * control connection in the two-peer test. Delivery is immediate and ordered, which is what a
      * TCP control connection gives; what it deliberately does not model is TLS, framing or loss.
+     *
+     * `null` models the ordinary Phase 5 broadcast channel being physically down — unlike
+     * [currentAuthGeneration], which this fake's [write] only ever uses to refuse a frame the
+     * *caller* authored under a stale generation, never to model "no wire exists right now".
      */
-    fun forwardTo(other: FakeSyncSession) {
+    fun forwardTo(other: FakeSyncSession?) {
         forward = other
     }
 
@@ -275,8 +289,23 @@ class FakeSyncContent : SyncContentPort {
     /** Set to make `resolve` suspend, so a test can land a session boundary *inside* it. */
     var resolveGate: kotlinx.coroutines.CompletableDeferred<Unit>? = null
 
+    /**
+     * Parks on the **first resolve for which this is true**, which is how a test pins the exact stack
+     * frame it means to interrupt rather than counting calls (independent-review round 3). Counting
+     * is fragile here: a leader's `playSynchronized` resolves once to decide whether it may issue,
+     * `applyPlay` resolves again before it writes, and how many others run depends on scheduling.
+     * Mirrors iOS's `FakeSyncContent.armResolveGate(when:)`.
+     */
+    var resolveGateWhen: (() -> Boolean)? = null
+
     override suspend fun resolve(contentHash: ContentHash): SyncPlayableContent? {
-        resolveGate?.await()
+        val predicate = resolveGateWhen
+        if (predicate != null && predicate()) {
+            resolveGateWhen = null
+            resolveGate?.await()
+        } else if (predicate == null) {
+            resolveGate?.await()
+        }
         if (contentHash.value !in localHashes) return null
         val seed = contentHash.value.takeLast(4).toInt(16)
         return SyncTestValues.content(seed).copy(contentHash = contentHash)
