@@ -7026,6 +7026,16 @@ immediately and proved nothing about the connection just built — its own doc c
 touched**; `poll` additionally captures `#filePath`/`#line`, so the next timeout names the condition
 that hung.
 
+### This pass's own fresh-fix audit
+
+The Android mirror's first draft put the ride proof and the `lastAppliedSeq` write inside
+`commandMutex` and left `heldStreamChanged` *after* it — so a stream that shortened inside the lock
+acquisition left `lastAppliedSeq` advanced for a command that was never popped and never applied:
+the exact defect this pass exists to remove, reintroduced by the pass itself. The witness, the ride
+proof, the pop and the write are now one critical section in that order, with the verdict acted on
+outside the lock (retiring a held event reports a reconciliation outcome, and a callback must never
+run under `commandMutex`). iOS was already correct — its four steps are one synchronous block.
+
 ### Regressions (each fails against the unmodified starting SHA)
 
 iOS `RideSegmentLifecycleTests`: `testARideRetiringInsideTheDrainsClockReadNeverPublishesTheCommandAsApplied`,

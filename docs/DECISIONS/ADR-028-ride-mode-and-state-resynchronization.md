@@ -1544,6 +1544,24 @@ Neither the cycle count, the timeout budget, nor any assertion was touched. `pol
 captures `#filePath`/`#line` at each call site, so the next timeout names the condition that hung —
 which is the one thing the previous pass's investigation had to reconstruct by hand.
 
+### This pass's own fresh-fix audit
+
+The standing instruction is to audit the newest fix first, and this pass's own newest fix needed
+one. The Android mirror's first draft put the ride proof and the `lastAppliedSeq` write inside
+`commandMutex` — correctly, since that lock suspends on contention — and left `heldStreamChanged`
+*after* it. A stream that shortened inside the lock acquisition therefore left `lastAppliedSeq`
+advanced for a command that was never popped and never applied: **the exact defect this amendment
+exists to remove, reintroduced by the amendment itself**, and the third time this repository has had
+a fix recreate its own class of bug (problem 56's wedge re-created by rule 23; A9's held-offer
+adoption).
+
+Three things can legitimately shorten the held stream there — `latchDesynchronized`'s refusal of
+held incremental commands, `applyPeerPlaybackState`'s supersede rule, and `discardDeferredEvents` —
+so the witness must come **first** and must be inside the same lock as the write. It now is, and the
+verdict is acted on outside the lock because retiring a held event reports a reconciliation outcome
+and a callback must never run under `commandMutex`. iOS was already correct: its witness, ride proof,
+pop and write are one synchronous block with no `await` between them.
+
 ### Regressions
 
 Every one of these fails against the unmodified starting SHA and passes after.
