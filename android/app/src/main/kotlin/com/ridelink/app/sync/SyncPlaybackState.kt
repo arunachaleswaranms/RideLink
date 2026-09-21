@@ -251,6 +251,36 @@ data class SyncPlaybackDiagnostics(
      */
     val retiredRideDeferredCount: Int = 0,
     /**
+     * Independent-review round 8: how many authoritative operations were refused **at their own
+     * admission or commit point** because the ride lifetime that admitted them retired inside a
+     * suspension the admission had to take.
+     *
+     * Distinct from [retiredRideDeferredCount], which counts work that was already *retained* when
+     * its ride ended. This one counts work that never became retained and never became applied: an
+     * inbound command whose ride ended inside the sequence-number lock, and the leader's own command
+     * whose ride ended between the transport accepting the frame and the commit callback running.
+     * Neither spends a `command_seq`, because neither was ever taken responsibility for — see
+     * [lastReceivedCommandSeq].
+     */
+    val retiredRideAdmissionCount: Int = 0,
+    /**
+     * Independent-review round 8's CI investigation: how many peer `STATE_REQUEST`s were held
+     * because they reached this coordinator before its own `Connected` had been applied.
+     *
+     * [SyncPlaybackCoordinator]'s role is cleared by a link loss and set again by its own session
+     * collector; [com.ridelink.app.resync.ResyncCoordinator] collects the same flow separately and
+     * the peer's request arrives on the read loop. Nothing orders the three, so a valid request for
+     * the live generation can land in that gap. Nonzero here is normal on a busy reconnect and means
+     * the request was **answered late**, not lost.
+     */
+    val heldStateSnapshotReplyCount: Int = 0,
+    /**
+     * The other half: how many held `STATE_REQUEST`s were dropped because the generation that
+     * authorised them had retired before this device's session was established. Nothing could
+     * honestly answer those — the follower's own `StateResyncGate` re-arms on its next generation.
+     */
+    val droppedStateSnapshotReplyCount: Int = 0,
+    /**
      * How many outbound Phase 5 frames this device could not hand to its own ordered outbound queue
      * because that queue was full (ADR-024 Amendment A1 Finding B). Locally produced, so a nonzero
      * value means the control socket is wedged, never a pathological peer.

@@ -1177,11 +1177,55 @@ class SyncPlaybackCoordinator(
      * this is.
      */
     private fun onSessionEstablished(isLocalLeader: Boolean) {
+        // Round 8: taken **before** the reset, because [resetForNewSession] is what drops a request
+        // no session ever came for — and this is the one caller for which a session *is* arriving.
+        val heldReply = pendingStateSnapshotReply
         resetForNewSession()
         role = if (isLocalLeader) PlaybackRole.LEADER else PlaybackRole.FOLLOWER
         _diagnostics.update { it.copy(role = role, sessionGeneration = session.currentAuthGeneration) }
         tickJob = scope.launch { tickLoop(session.currentAuthGeneration) }
+        flushPendingStateSnapshotReply(heldReply)
     }
+
+    /**
+     * PROTOCOL §10's `STATE_REQUEST` answered late, because it arrived early (independent-review
+     * round 8's CI investigation). See [PendingStateSnapshotReply].
+     *
+     * The request is captured by [onSessionEstablished] **before** its [resetForNewSession] —
+     * deliberately the one thing that drops a request no session ever came for — and passed in here,
+     * so what is answered is the value that was held when this session began. The generation is
+     * **compared, never re-read**: a request authorised by a lifetime that has since retired is
+     * dropped rather than answered with a successor's state.
+     */
+    private fun flushPendingStateSnapshotReply(held: PendingStateSnapshotReply?) {
+        if (held == null) return
+        // Defence in depth: [resetForNewSession] above already cleared the slot.
+        pendingStateSnapshotReply = null
+        if (held.generation != session.currentAuthGeneration) {
+            _diagnostics.update { it.copy(droppedStateSnapshotReplyCount = it.droppedStateSnapshotReplyCount + 1) }
+            return
+        }
+        scope.launch { emitStateSnapshot(held.generation, held.leaderPeerId, held.manifestRevision) }
+    }
+
+    /**
+     * A peer `STATE_REQUEST` that reached this coordinator **before** its own session was
+     * established (independent-review round 8's CI investigation). The exact mirror of iOS's
+     * `PendingStateSnapshotReply`.
+     *
+     * One slot, never a queue: PROTOCOL §10 allows one outstanding request per generation
+     * ([com.ridelink.core.resync.StateResyncGate]), so a second retained request could only be a
+     * newer generation's, and nothing can answer the older one any more. Carries the generation that
+     * authorised it, so the replay compares rather than re-derives — the same discipline
+     * [RideAdmission] and `DeferredEvent` already follow.
+     */
+    private data class PendingStateSnapshotReply(
+        val generation: Long,
+        val leaderPeerId: PeerId,
+        val manifestRevision: Long,
+    )
+
+    private var pendingStateSnapshotReply: PendingStateSnapshotReply? = null
 
     /**
      * ADR-004: "A Wi-Fi drop does **not** interrupt music. Both phones keep playing; only
@@ -1197,6 +1241,9 @@ class SyncPlaybackCoordinator(
     private fun resetForNewSession() {
         role = null
         syncEnabled = false
+        // Round 8: a `STATE_REQUEST` held for a session that never arrived belongs to a lifetime
+        // that is over. The follower's own `StateResyncGate` re-arms on the next generation.
+        pendingStateSnapshotReply = null
         tickJob?.cancel()
         tickJob = null
         deferredDrainJob?.cancel()
@@ -1521,6 +1568,15 @@ class SyncPlaybackCoordinator(
             // the peer will act on it, and the only consistent thing this device can do is act on it
             // too. The latch stops *new* authority; it does not un-send what was sent.
             if (!stillCurrent(generation)) return@withLock
+            // **Independent-review round 8's sweep, the leader's own half of Blocker B.** The
+            // transport answers across the outbound consumer and a real socket write, and this lock
+            // suspends again — so a ride boundary accepted in any of those windows leaves the
+            // control generation untouched and the proof above passing. The writes below would then
+            // publish this `command_seq` as applied while [chainApply]'s [applyAuthoritative]
+            // refused it as REJECTED_RIDE. The frame did reach the peer and this deliberately does
+            // not un-send it, but nothing on this device applied it, so nothing here may claim it
+            // did.
+            if (!rideStillLive(ride)) return@withLock
             // maxOf, not assignment: these commit on the outbound consumer, in send order, and a
             // monotone write says the same thing without depending on that ordering twice over.
             lastReceivedSeq = maxOf(lastReceivedSeq ?: seq, seq)
@@ -1567,6 +1623,11 @@ class SyncPlaybackCoordinator(
             val generation = session.currentAuthGeneration
             val addition =
                 commandMutex.withLock {
+                    // Round 8's sweep: this lock suspends, and `playRequestFence.begin()` below
+                    // **supersedes** whatever retained Play is current. A press whose ride ended
+                    // inside that suspension would cancel a *successor* ride's retained Play and
+                    // install one of its own that `resolvePendingPlay` can only cancel.
+                    if (!rideStillLive(ride)) return@withLock null
                     val existing = _queueState.value.items.firstOrNull { it.trackHash == contentHash }
                     val queueItemId = existing?.queueItemId ?: nextQueueItemId()
                     // begin() supersedes whatever earlier request held the slot, which is what makes
@@ -2144,7 +2205,28 @@ class SyncPlaybackCoordinator(
         when (admission) {
             CommandAdmission.OVERFLOW -> onHoldOverflow()
             CommandAdmission.DEFER -> {
-                commandMutex.withLock { lastReceivedSeq = header.commandSeq }
+                // **Independent-review round 8, Blocker B, mirrored.** iOS proves the retained
+                // admission here because its `estimate()` suspends; this platform's does not, so the
+                // exact iOS ordering is unreachable — but [commandMutex] is a real suspension on
+                // contention and the sequence writes are on the far side of it, which is enough for
+                // the same shape. The proof therefore goes **inside** the lock, adjacent to the
+                // write, rather than resting on `estimate()` happening to be synchronous. Neither
+                // sequence number moves on a retired ride: the command was never taken
+                // responsibility for, so it does not spend its `command_seq` either (ADR-024
+                // Amendment A1 Finding C's rule, applied to the ride lifetime).
+                val admitted =
+                    commandMutex.withLock {
+                        if (!rideStillLive(ride)) {
+                            false
+                        } else {
+                            lastReceivedSeq = header.commandSeq
+                            true
+                        }
+                    }
+                if (!admitted) {
+                    onRetiredRideAdmission()
+                    return
+                }
                 deferredEvents.addLast(DeferredEvent.Command(message, generation, ride))
                 _diagnostics.update {
                     it.copy(
@@ -2157,9 +2239,24 @@ class SyncPlaybackCoordinator(
                 startDeferredDrain(generation)
             }
             CommandAdmission.APPLY -> {
-                commandMutex.withLock {
-                    lastReceivedSeq = header.commandSeq
-                    lastAppliedSeq = header.commandSeq
+                // Round 8, Blocker B: as the DEFER branch above, and this is the branch that
+                // publishes `lastAppliedSeq` — the field `PLAYBACK_STATE.command_seq` and
+                // `STATE_SNAPSHOT.command_seq` carry as "reflected in my authoritative playback
+                // state". [applyAuthoritative]'s own `rideStillLive` refusal is downstream of it and
+                // therefore too late to un-publish it.
+                val admitted =
+                    commandMutex.withLock {
+                        if (!rideStillLive(ride)) {
+                            false
+                        } else {
+                            lastReceivedSeq = header.commandSeq
+                            lastAppliedSeq = header.commandSeq
+                            true
+                        }
+                    }
+                if (!admitted) {
+                    onRetiredRideAdmission()
+                    return
                 }
                 _diagnostics.update {
                     it.copy(lastAppliedCommandSeq = header.commandSeq, lastReceivedCommandSeq = header.commandSeq)
@@ -2167,6 +2264,16 @@ class SyncPlaybackCoordinator(
                 applyAuthoritative(message, generation, ride, requireNotNull(estimate))
             }
         }
+    }
+
+    /**
+     * An authoritative operation refused at its own admission or commit point because the ride that
+     * admitted it retired inside a suspension that admission had to take (independent-review round
+     * 8). Surfaced rather than dropped silently; see
+     * [SyncPlaybackDiagnostics.retiredRideAdmissionCount].
+     */
+    private fun onRetiredRideAdmission() {
+        _diagnostics.update { it.copy(retiredRideAdmissionCount = it.retiredRideAdmissionCount + 1) }
     }
 
     /**
@@ -2258,7 +2365,7 @@ class SyncPlaybackCoordinator(
      * Each early-out is one distinct reason this pass must stop — halted, untrusted clock, missing
      * content, dead session, or a stream that moved under us.
      */
-    @Suppress("ReturnCount", "CyclomaticComplexMethod")
+    @Suppress("ReturnCount")
     private suspend fun drainDeferredEvents() {
         while (deferredEvents.isNotEmpty()) {
             val held = deferredEvents.first()
@@ -2284,27 +2391,21 @@ class SyncPlaybackCoordinator(
             //   condition it exists to clear is the deadlock. It still proves its own generation,
             //   role, clock readiness, content availability and ordering below and in the apply path;
             //   nothing is bypassed here except a flag that was never about authoritative state.
+            //
             // **Independent-review round 7: the retained work's own ride, proved before anything
             // else and re-derived nowhere.** Everything from `deferredEvents.first()` above to the
             // `removeFirst()` below is synchronous, so nothing can have moved the stream underneath
-            // this decision.
+            // this decision. The item is popped rather than left, and the loop continues: a later
+            // item may have been admitted under a newer, still-live ride, and leaving a dead one at
+            // the head would wedge the stream exactly as round 3's Blocker A did.
             //
-            // The item is popped rather than left, and the loop continues: a later item may have been
-            // admitted under a newer, still-live ride, and leaving a dead one at the head would wedge
-            // the stream exactly as round 3's Blocker A did. Its reconciliation obligation gets its
-            // terminal cancellation here — never RECONCILED, never silence.
+            // **Independent-review round 8: this proof is necessary and was not sufficient.** It is
+            // taken before the content resolve and the sequence-number lock each branch below takes,
+            // both of which suspend — so each branch re-proves the *same* retained admission
+            // immediately before it pops and books the item. See [retireHeldRideEvent].
             val heldRide = held.ride
             if (heldRide != null && !rideStillLive(heldRide)) {
-                deferredEvents.removeFirst()
-                _diagnostics.update {
-                    it.copy(
-                        deferredCommandCount = deferredEvents.size,
-                        retiredRideDeferredCount = it.retiredRideDeferredCount + 1,
-                    )
-                }
-                if (held is DeferredEvent.PlaybackState) {
-                    reportReconciliationOutcome(held.reconciliation, held.generation, StateSnapshotOutcome.REJECTED_RIDE)
-                }
+                retireHeldRideEvent(held)
                 continue
             }
             if ((playbackDesynchronized || queueDesynchronized) && held is DeferredEvent.Command) return
@@ -2313,84 +2414,177 @@ class SyncPlaybackCoordinator(
                 _diagnostics.update { it.copy(deferredCommandCount = 0) }
                 return
             }
-            when (held) {
-                is DeferredEvent.Command -> {
-                    val estimate = estimate()
-                    if (estimate == null || !estimate.ready) return
-                    if (heldStreamChanged(held)) return
-                    val heldHeader = headerOf(held.message)
-                    if (heldHeader != null && heldHeader.queueRevision != _queueState.value.revision) {
-                        deferredEvents.removeFirst()
-                        _diagnostics.update { it.copy(deferredCommandCount = deferredEvents.size) }
-                        onHeldRevisionMismatch()
-                        return
-                    }
-                    deferredEvents.removeFirst()
-                    val seq = heldHeader?.commandSeq
-                    commandMutex.withLock { if (seq != null) lastAppliedSeq = seq }
-                    _diagnostics.update {
-                        it.copy(
-                            lastAppliedCommandSeq = seq,
-                            deferredCommandCount = deferredEvents.size,
-                            recoveredCommandCount = it.recoveredCommandCount + 1,
-                            clockReady = true,
-                        )
-                    }
-                    // Round 7: the ride the command was **admitted** under, replayed unchanged.
-                    applyAuthoritative(held.message, held.generation, held.ride, estimate)
+            val step =
+                when (held) {
+                    is DeferredEvent.Command -> drainHeldCommand(held)
+                    is DeferredEvent.QueueSnapshot -> drainHeldQueueSnapshot(held)
+                    is DeferredEvent.PlaybackState -> drainHeldPlaybackState(held)
                 }
-                is DeferredEvent.QueueSnapshot -> {
-                    deferredEvents.removeFirst()
-                    _diagnostics.update {
-                        it.copy(
-                            deferredCommandCount = deferredEvents.size,
-                            recoveredCommandCount = it.recoveredCommandCount + 1,
-                        )
-                    }
-                    applyQueueSnapshot(held.message)
-                }
-                is DeferredEvent.PlaybackState -> {
-                    // Independent-review Blocker 2A/2D (clock) and section 22 (content): mirrors the
-                    // `Command` branch above exactly — proved *before* removal, so a still-not-ready
-                    // precondition leaves the item queued for the next drain attempt (this cadence,
-                    // or content.observeAvailability's prompt trigger) rather than popping and
-                    // silently dropping it a second time, the way this branch used to for the clock
-                    // alone. Checking here, rather than only inside `applyPlay`, is what makes this
-                    // loop terminate instead of popping and immediately re-queuing the same item.
-                    val estimate = estimate()
-                    if (estimate == null || !estimate.ready) return
-                    val heldTrackHash = held.message.trackHash
-                    if (heldTrackHash != null && content.resolve(heldTrackHash) == null) return
-                    if (heldStreamChanged(held)) return
-                    deferredEvents.removeFirst()
-                    _diagnostics.update {
-                        it.copy(
-                            deferredCommandCount = deferredEvents.size,
-                            recoveredCommandCount = it.recoveredCommandCount + 1,
-                        )
-                    }
-                    // Round 7: the retained admission, replayed unchanged. This used to read
-                    // `synchronizedModeEpoch` live — a replacement provenance for work admitted long
-                    // before, which is exactly the class this repository keeps finding.
-                    val outcome = applyPeerPlaybackState(held.message, held.generation, held.reconciliation, held.ride)
-                    // Independent-review round 3, Blocker B (Android half): the precise
-                    // "was deferred, now genuinely applied" transition [ResyncCoordinator] cannot
-                    // otherwise observe — the synchronous first attempt already answers its caller
-                    // through [onStateSnapshot]'s return value. Mirrors iOS exactly; it replaces a
-                    // diagnostics-flow comparison that could not tell "the obligation converged" from
-                    // "the obligation was discarded" (which [leaveSynchronizedMode] legitimately does).
-                    //
-                    // Independent-review round 4, Blocker 2: **every** branch is terminal for the
-                    // obligation now. The anchor has been popped, so if the apply refused it (its
-                    // generation ended inside the apply's own proofs) nothing will ever come back to
-                    // it and its owner must be told rather than left waiting. A re-deferral is the one
-                    // non-terminal answer: [applyPeerPlaybackState] re-appended the anchor carrying
-                    // this same id, so the obligation is still live and still owned. A `null` id is an
-                    // ordinary wire `PLAYBACK_STATE` held for the clock — no `STATE_SNAPSHOT` produced
-                    // it and nobody outside is waiting on it.
-                    reportReconciliationOutcome(held.reconciliation, held.generation, outcome)
+            if (step == DrainStep.STOP) return
+        }
+    }
+
+    /**
+     * What [drainDeferredEvents] does after one held item: take the next one, or end this pass.
+     *
+     * Extracted with the three branch bodies (independent-review round 8) because those bodies grew
+     * past what one readable function holds — and because a `return` buried three levels inside a
+     * `when` inside a `while` is exactly the shape detekt's `LoopWithTooManyJumpStatements` exists to
+     * object to. Ending the pass is never a wedge: [startDeferredDrain]'s cadence and
+     * `content.observeAvailability` both call back in, and the next pass re-reads the real head.
+     */
+    private enum class DrainStep { CONTINUE, STOP }
+
+    /**
+     * One held authoritative command, replayed once the clock it was waiting for is trustworthy.
+     *
+     * **Independent-review round 8, Blocker A, mirrored.** [commandMutex] suspends on contention, and
+     * [drainDeferredEvents]' top-of-loop ride proof is therefore older than the write it guards — so
+     * the proof moves **inside** the lock, adjacent to [lastAppliedSeq], and the pop and the
+     * diagnostics follow only when it held. Popping first and discovering staleness afterwards is
+     * precisely what must not happen: a downstream `REJECTED_RIDE` cannot un-publish a `command_seq`
+     * this device has already told the wire is reflected in its authoritative playback state.
+     */
+    @Suppress("ReturnCount") // one early-out per precondition; naming each is the point
+    private suspend fun drainHeldCommand(held: DeferredEvent.Command): DrainStep {
+        val estimate = estimate()
+        if (estimate == null || !estimate.ready) return DrainStep.STOP
+        if (heldStreamChanged(held)) return DrainStep.STOP
+        val heldHeader = headerOf(held.message)
+        if (heldHeader != null && heldHeader.queueRevision != _queueState.value.revision) {
+            deferredEvents.removeFirst()
+            _diagnostics.update { it.copy(deferredCommandCount = deferredEvents.size) }
+            onHeldRevisionMismatch()
+            return DrainStep.STOP
+        }
+        val seq = heldHeader?.commandSeq
+        val stillOwned =
+            commandMutex.withLock {
+                if (!rideStillLive(held.ride)) {
+                    false
+                } else {
+                    if (seq != null) lastAppliedSeq = seq
+                    true
                 }
             }
+        if (!stillOwned) {
+            // Retired rather than left: an item behind this one may belong to a newer, still-live
+            // ride, and a dead head would wedge it (round 3, Blocker A).
+            if (!heldStreamChanged(held)) retireHeldRideEvent(held)
+            return DrainStep.CONTINUE
+        }
+        if (heldStreamChanged(held)) return DrainStep.STOP
+        deferredEvents.removeFirst()
+        _diagnostics.update {
+            it.copy(
+                lastAppliedCommandSeq = seq,
+                deferredCommandCount = deferredEvents.size,
+                recoveredCommandCount = it.recoveredCommandCount + 1,
+                clockReady = true,
+            )
+        }
+        // Round 7: the ride the command was **admitted** under, replayed unchanged.
+        applyAuthoritative(held.message, held.generation, held.ride, estimate)
+        return DrainStep.CONTINUE
+    }
+
+    /**
+     * PROTOCOL §9's authoritative queue state, held so it could not change a held command's meaning.
+     * Deliberately carries no `RideAdmission` — see [DeferredEvent.QueueSnapshot].
+     */
+    private suspend fun drainHeldQueueSnapshot(held: DeferredEvent.QueueSnapshot): DrainStep {
+        deferredEvents.removeFirst()
+        _diagnostics.update {
+            it.copy(
+                deferredCommandCount = deferredEvents.size,
+                recoveredCommandCount = it.recoveredCommandCount + 1,
+            )
+        }
+        applyQueueSnapshot(held.message)
+        return DrainStep.CONTINUE
+    }
+
+    /**
+     * PROTOCOL §5's reconciliation anchor, replayed once its clock *and* its content are ready.
+     *
+     * Independent-review Blocker 2A/2D (clock) and section 22 (content): both are proved *before*
+     * removal, so a still-not-ready precondition leaves the item queued for the next drain attempt
+     * (this cadence, or `content.observeAvailability`'s prompt trigger) rather than popping and
+     * silently dropping it a second time. Checking here, rather than only inside [applyPlay], is what
+     * makes the drain loop terminate instead of popping and immediately re-queuing the same item.
+     */
+    @Suppress("ReturnCount") // one early-out per precondition; naming each is the point
+    private suspend fun drainHeldPlaybackState(held: DeferredEvent.PlaybackState): DrainStep {
+        val estimate = estimate()
+        if (estimate == null || !estimate.ready) return DrainStep.STOP
+        val heldTrackHash = held.message.trackHash
+        if (heldTrackHash != null && content.resolve(heldTrackHash) == null) return DrainStep.STOP
+        if (heldStreamChanged(held)) return DrainStep.STOP
+        // **Independent-review round 8, Blocker C, and this platform reaches it through its own
+        // production path**: `content.resolve` above is a genuine suspension, so an accepted End Ride
+        // and an accepted Start Ride can both land inside it while the control generation and the
+        // held stream are untouched. Re-proved adjacent to the pop, exactly as [drainHeldCommand] is.
+        // Its obligation gets its terminal cancellation from [retireHeldRideEvent], so a retired
+        // `STATE_SNAPSHOT` is CANCELLED and never RECONCILED.
+        if (!rideStillLive(held.ride)) {
+            retireHeldRideEvent(held)
+            return DrainStep.CONTINUE
+        }
+        deferredEvents.removeFirst()
+        _diagnostics.update { it.copy(deferredCommandCount = deferredEvents.size) }
+        // Round 7: the retained admission, replayed unchanged. This used to read
+        // `synchronizedModeEpoch` live — a replacement provenance for work admitted long before,
+        // which is exactly the class this repository keeps finding.
+        val outcome = applyPeerPlaybackState(held.message, held.generation, held.reconciliation, held.ride)
+        // **Round 8, Blocker C's second half.** [SyncPlaybackDiagnostics.recoveredCommandCount] is
+        // documented as "how many held commands were **applied**", and this branch used to increment
+        // it before the outcome was known — so a rejection, or a re-deferral ([applyPeerPlaybackState]
+        // legitimately re-appends this same anchor for a clock or a transfer), counted as a
+        // successful recovery. Only APPLIED does now. [drainHeldCommand] and [drainHeldQueueSnapshot]
+        // keep theirs where they are: both hand the event straight to an apply whose every
+        // precondition was proved synchronously adjacent to the pop.
+        if (outcome == StateSnapshotOutcome.APPLIED) {
+            _diagnostics.update { it.copy(recoveredCommandCount = it.recoveredCommandCount + 1) }
+        }
+        // Independent-review round 3, Blocker B (Android half): the precise "was deferred, now
+        // genuinely applied" transition [ResyncCoordinator] cannot otherwise observe — the synchronous
+        // first attempt already answers its caller through [onStateSnapshot]'s return value. Mirrors
+        // iOS exactly; it replaces a diagnostics-flow comparison that could not tell "the obligation
+        // converged" from "the obligation was discarded" (which [leaveSynchronizedMode] legitimately
+        // does).
+        //
+        // Independent-review round 4, Blocker 2: **every** branch is terminal for the obligation now.
+        // The anchor has been popped, so if the apply refused it (its generation ended inside the
+        // apply's own proofs) nothing will ever come back to it and its owner must be told rather than
+        // left waiting. A re-deferral is the one non-terminal answer: [applyPeerPlaybackState]
+        // re-appended the anchor carrying this same id, so the obligation is still live and still
+        // owned. A `null` id is an ordinary wire `PLAYBACK_STATE` held for the clock — no
+        // `STATE_SNAPSHOT` produced it and nobody outside is waiting on it.
+        reportReconciliationOutcome(held.reconciliation, held.generation, outcome)
+        return DrainStep.CONTINUE
+    }
+
+    /**
+     * Discards the retained event at the **head** of the held stream because the ride lifetime that
+     * admitted it is no longer live, and gives its reconciliation obligation the terminal
+     * cancellation it is owed (independent-review rounds 7 and 8). The exact mirror of iOS's
+     * `retireHeldRideEvent`.
+     *
+     * **It is deliberately not "recovered".** [SyncPlaybackDiagnostics.recoveredCommandCount] means
+     * applied; [lastAppliedSeq] means applied; this event was applied to nothing.
+     * [SyncPlaybackDiagnostics.retiredRideDeferredCount] is the one counter that grows, which is
+     * what makes the discard observable rather than silent.
+     */
+    private fun retireHeldRideEvent(held: DeferredEvent) {
+        deferredEvents.removeFirst()
+        _diagnostics.update {
+            it.copy(
+                deferredCommandCount = deferredEvents.size,
+                retiredRideDeferredCount = it.retiredRideDeferredCount + 1,
+            )
+        }
+        if (held is DeferredEvent.PlaybackState) {
+            reportReconciliationOutcome(held.reconciliation, held.generation, StateSnapshotOutcome.REJECTED_RIDE)
         }
     }
 
@@ -2478,6 +2672,10 @@ class SyncPlaybackCoordinator(
             // one authoritative PLAY when the transfer verifies — the leader being the only side
             // with the authority to reschedule it (PROTOCOL §5 rule 4).
             commandMutex.withLock {
+                // Round 8's sweep, the same shape as [playSynchronized]: this lock suspends and
+                // `playRequestFence.begin()` supersedes whatever retained Play is current. [issue]
+                // proves the ride for itself, so this covers the retention branch alone.
+                if (!rideStillLive(ride)) return@withLock
                 pendingPlay =
                     PendingPlay(
                         playRequestFence.begin(),
@@ -3179,6 +3377,31 @@ class SyncPlaybackCoordinator(
         leaderPeerId: PeerId,
         manifestRevision: Long,
     ) {
+        // **Independent-review round 8's CI investigation (found on iOS, structurally identical
+        // here): `role == null` is "not ready yet", not "never".**
+        //
+        // [role] is cleared by [onSessionLost] and set again by [onSessionEstablished], which this
+        // coordinator reaches from its **own** `session.events` collector. [ResyncCoordinator] has a
+        // separate collector on the same `SharedFlow`, and the peer's `STATE_REQUEST` arrives on the
+        // read loop through [ResyncRelay] — three independent paths, none of them ordered against
+        // the others. So a valid request for the **live** generation can be dispatched here while
+        // this side's own `Connected` is still queued behind it.
+        //
+        // Returning silently lost it outright: PROTOCOL §10 has no retry and [StateResyncGate]
+        // deliberately sends exactly one request per generation, so the follower stayed
+        // `requestPending` — and desynchronised — until the *next* reconnect. Measured on iOS, where
+        // `ReconnectResyncStressTests`' 100-cycle reconnect loop reproduced it roughly once per
+        // 30-100 cycles under CPU saturation and wedged CI; mirrored here because the ordering is a
+        // property of the wiring, not of the platform.
+        //
+        // The request is **retained** and replayed by [onSessionEstablished] once the session it
+        // names exists. One slot: a newer generation's request supersedes an older one (nothing can
+        // answer the older one any more), and [resetForNewSession] drops it.
+        if (role == null) {
+            pendingStateSnapshotReply = PendingStateSnapshotReply(generation, leaderPeerId, manifestRevision)
+            _diagnostics.update { it.copy(heldStateSnapshotReplyCount = it.heldStateSnapshotReplyCount + 1) }
+            return
+        }
         if (role != PlaybackRole.LEADER) return
         if (outboundAuthorityLost) return
         val estimate = estimate() ?: return

@@ -278,6 +278,15 @@ public actor SyncPlaybackCoordinator {
     /// the leader chose. A `POSITION_REPORT` is never held: it produces one diagnostics number and
     /// can change no command's meaning.
     var deferredEvents: [DeferredEvent] = []
+
+    /// A peer `STATE_REQUEST` that reached this coordinator **before** its own session was
+    /// established (independent-review round 8's CI investigation).
+    ///
+    /// One slot, never a queue: PROTOCOL §10 allows one outstanding request per generation
+    /// (`StateResyncGate`), so a second retained request could only ever be a newer generation's,
+    /// and nothing can answer the older one any more. Cleared by `resetForNewSession`, so a request
+    /// never survives into a session that did not admit it.
+    var pendingStateSnapshotReply: PendingStateSnapshotReply?
     var deferredDrainTask: Task<Void, Never>?
     let deferredCommandCapacity: Int
 
@@ -552,6 +561,10 @@ public actor SyncPlaybackCoordinator {
     /// Forwarded by the app's `SessionCoordinator` rather than subscribed to here, for the reason
     /// `SyncSessionPort` records: `onEvent` is a single mutable callback slot on this platform.
     public func handleConnected(isLocalLeader: Bool) async {
+        // Round 8: taken **before** the reset, because `resetForNewSession` is what drops a request
+        // no session ever came for — and this is the one caller for which a session *is* arriving.
+        // Held locally across the reset so nothing between here and the flush can answer it twice.
+        let heldReply = pendingStateSnapshotReply
         await resetForNewSession()
         role = isLocalLeader ? .leader : .follower
         diagnostics.role = role
@@ -560,6 +573,38 @@ public actor SyncPlaybackCoordinator {
         publishDiagnostics()
         let generation = diagnostics.sessionGeneration
         tickTask = Task { [weak self] in await self?.tickLoop(generation: generation) }
+        // Independent-review round 8's CI investigation: a `STATE_REQUEST` that reached
+        // `enqueueStateSnapshotReply` before this session was established is answered here, once,
+        // and only if it named *this* generation. See `PendingStateSnapshotReply`.
+        await flushPendingStateSnapshotReply(heldReply)
+    }
+
+    /// PROTOCOL §10's `STATE_REQUEST` answered late, because it arrived early.
+    ///
+    /// The request is captured by `handleConnected` **before** its `resetForNewSession()` — which
+    /// is deliberately the one thing that drops a request no session ever came for — and passed in
+    /// here, so the value being answered is the one that was held when this session began and not
+    /// whatever landed in the slot since. The generation is **compared, never re-read**: a request
+    /// authorised by a lifetime that has since retired is dropped here rather than answered with a
+    /// successor's state, which is ADR-028 Amendment A1's rule applied to a reply this device is
+    /// only now able to build.
+    private func flushPendingStateSnapshotReply(_ held: PendingStateSnapshotReply?) async {
+        guard let held else { return }
+        // Defence in depth: `resetForNewSession` above already cleared the slot, so nothing else can
+        // still be holding this request — but a future edit that moved the reset must not silently
+        // produce two answers.
+        pendingStateSnapshotReply = nil
+        guard held.generation == liveGeneration else {
+            diagnostics.droppedStateSnapshotReplyCount += 1
+            publishDiagnostics()
+            return
+        }
+        await enqueueStateSnapshotReply(
+            generation: held.generation,
+            leaderPeerId: held.leaderPeerId,
+            manifestRevision: held.manifestRevision,
+            transfersInFlight: held.transfersInFlight
+        )
     }
 
     /// ADR-004: "A Wi-Fi drop does **not** interrupt music. Both phones keep playing; only
@@ -596,6 +641,9 @@ public actor SyncPlaybackCoordinator {
         pendingPlay = nil
         transferRequestedForToken = nil
         discardDeferredEvents()
+        // Round 8: a `STATE_REQUEST` held for a session that never arrived belongs to a lifetime
+        // that is over. The follower's own `StateResyncGate` re-arms on the next generation.
+        pendingStateSnapshotReply = nil
         // Amendment A2 Finding B: a fresh generation retires everything the previous one authorised.
         // Frames still queued outbound stay physically queued and become inert, because each carries
         // the generation that authorised it and `outboundUsable` refuses to write them.
@@ -1126,6 +1174,22 @@ public actor SyncPlaybackCoordinator {
         // Amendment A5: the two sequence numbers below are exactly what Finding A is about, reached
         // from the leader's side. No `await` between the synchronous proof and the writes.
         guard stillCurrentNow(generation) else { return }
+        // **Independent-review round 8's sweep, the leader's own half of Blocker B.** The transport
+        // answers across the outbound consumer, an actor hop and a real socket write, and
+        // `stillCurrent` above suspends again — so a ride boundary accepted in any of those windows
+        // leaves the control generation untouched and both proofs above passing. The two writes
+        // below would then publish this `command_seq` as applied while `chainApply`'s
+        // `applyAuthoritative` refused it as `.rejectedRide`: the same false bookkeeping as the
+        // receiving side's, reached from the issuing side.
+        //
+        // The frame did reach the peer, and this deliberately does not un-send it — but nothing on
+        // this device applied it, so nothing on this device may claim it did. Proved with no
+        // `await` between the proof and the writes.
+        guard rideStillLive(ride) else {
+            diagnostics.retiredRideAdmissionCount += 1
+            publishDiagnostics()
+            return
+        }
         // max, not assignment: these commit on the outbound consumer, in send order, and a monotone
         // write says the same thing without depending on that ordering twice over.
         lastReceivedSeq = max(lastReceivedSeq ?? seq, seq)
@@ -1171,6 +1235,12 @@ public actor SyncPlaybackCoordinator {
         // actor has not been told about yet — `resolvePendingPlay` would otherwise issue it into a
         // session whose state has not been reset.
         guard stillCurrentNow(generation) else { return }
+        // Independent-review round 8's sweep: `currentAuthGeneration()` above suspends, and
+        // `playRequestFence.begin()` below **supersedes** whatever retained Play is current. A press
+        // whose ride ended inside that read would therefore cancel a *successor* ride's retained
+        // Play and install one of its own that `resolvePendingPlay` can only cancel — so the ride is
+        // proved here, adjacent to the fence, rather than only where the request is resolved.
+        guard rideStillLive(ride) else { return }
         // No `await` in this block: the fence, the id and the retained request move together.
         let existing = queueState.items.first { $0.trackHash == contentHash }
         let queueItemId = existing?.queueItemId ?? nextQueueItemId()
@@ -1535,6 +1605,18 @@ enum DeferredEvent: Sendable {
         case .playbackState(_, _, let reconciliation, _): return reconciliation
         }
     }
+}
+
+/// PROTOCOL §10's `STATE_REQUEST`, retained because it arrived before this device's own
+/// `.connected` had been applied (independent-review round 8's CI investigation).
+///
+/// Carries the generation that authorised it, so the replay compares rather than re-derives — the
+/// same discipline `ReadFrameBinding`, `RideAdmission` and `DeferredEvent` already follow.
+struct PendingStateSnapshotReply: Sendable {
+    let generation: Int64
+    let leaderPeerId: PeerId
+    let manifestRevision: Int64
+    let transfersInFlight: [ResyncTransferInFlight]
 }
 
 /// What an End Ride boundary did when it reached the one owner of ride-segment playback authority

@@ -183,6 +183,30 @@ public struct SyncPlaybackDiagnostics: Sendable, Equatable {
     /// authorised by the ride it was admitted under — surfaced rather than dropped silently, and a
     /// reconciliation among them receives its terminal cancellation.
     public var retiredRideDeferredCount = 0
+    /// Independent-review round 8: how many authoritative operations were refused **at their own
+    /// admission or commit point** because the ride lifetime that admitted them retired inside a
+    /// suspension the admission had to take.
+    ///
+    /// Distinct from `retiredRideDeferredCount`, which counts work that was already *retained* when
+    /// its ride ended. This one counts work that never became retained and never became applied: an
+    /// inbound command whose ride ended inside `estimate()`, and the leader's own command whose ride
+    /// ended between the transport accepting the frame and the commit callback running. Neither
+    /// spends a `command_seq`, because neither was ever taken responsibility for — see
+    /// `lastReceivedCommandSeq`.
+    public var retiredRideAdmissionCount = 0
+    /// Independent-review round 8's CI investigation: how many peer `STATE_REQUEST`s were held
+    /// because they reached this coordinator before its own `.connected` had been applied.
+    ///
+    /// `role` is cleared by a link loss and set again by `handleConnected`, which production reaches
+    /// through a continuation; the peer's request arrives on the read loop for the very connection
+    /// that continuation is about. Nothing orders the two, so a valid request for the live
+    /// generation can land in that gap. Nonzero here is normal on a busy reconnect and means the
+    /// request was **answered late**, not lost.
+    public var heldStateSnapshotReplyCount = 0
+    /// The other half: how many held `STATE_REQUEST`s were dropped because the generation that
+    /// authorised them had retired before this device's session was established. Nothing could
+    /// honestly answer those — the follower's own `StateResyncGate` re-arms on its next generation.
+    public var droppedStateSnapshotReplyCount = 0
     /// How many outbound Phase 5 frames this device could not hand to its own ordered outbound
     /// queue because that queue was full (Amendment A1 Finding B). Locally produced, so a nonzero
     /// value means the control socket is wedged, never a pathological peer.
