@@ -2436,6 +2436,13 @@ class SyncPlaybackCoordinator(
     private enum class DrainStep { CONTINUE, STOP }
 
     /**
+     * What [drainHeldCommand]'s one critical section decided, so the action it implies happens
+     * outside the lock: retiring a held event reports a reconciliation outcome, and a callback must
+     * never run under [commandMutex].
+     */
+    private enum class HeldCommandVerdict { APPLY, RETIRED, MOVED }
+
+    /**
      * One held authoritative command, replayed once the clock it was waiting for is trustworthy.
      *
      * **Independent-review round 8, Blocker A, mirrored.** [commandMutex] suspends on contention, and
@@ -2458,23 +2465,39 @@ class SyncPlaybackCoordinator(
             return DrainStep.STOP
         }
         val seq = heldHeader?.commandSeq
-        val stillOwned =
+        // The stream witness, the ride proof, the pop and the sequence write are **one** critical
+        // section, in that order.
+        //
+        // This pass's own fresh-fix audit found the first draft had the ride proof and the sequence
+        // write inside the lock but the witness *after* it — so a stream that shortened inside the
+        // lock acquisition left `lastAppliedSeq` advanced for a command that was never popped and
+        // never applied, which is the very defect this change exists to remove, reintroduced by the
+        // change itself. Three things can legitimately shorten the stream here
+        // ([latchDesynchronized], [applyPeerPlaybackState]'s supersede rule, [discardDeferredEvents]),
+        // so the witness has to come first, and it has to be inside the same lock as the write.
+        val verdict =
             commandMutex.withLock {
-                if (!rideStillLive(held.ride)) {
-                    false
-                } else {
-                    if (seq != null) lastAppliedSeq = seq
-                    true
+                when {
+                    heldStreamChanged(held) -> HeldCommandVerdict.MOVED
+                    !rideStillLive(held.ride) -> HeldCommandVerdict.RETIRED
+                    else -> {
+                        deferredEvents.removeFirst()
+                        if (seq != null) lastAppliedSeq = seq
+                        HeldCommandVerdict.APPLY
+                    }
                 }
             }
-        if (!stillOwned) {
+        when (verdict) {
             // Retired rather than left: an item behind this one may belong to a newer, still-live
-            // ride, and a dead head would wedge it (round 3, Blocker A).
-            if (!heldStreamChanged(held)) retireHeldRideEvent(held)
-            return DrainStep.CONTINUE
+            // ride, and a dead head would wedge it (round 3, Blocker A). The witness above proved
+            // `held` is still the head, so this pops the item it means to.
+            HeldCommandVerdict.RETIRED -> {
+                retireHeldRideEvent(held)
+                return DrainStep.CONTINUE
+            }
+            HeldCommandVerdict.MOVED -> return DrainStep.STOP
+            HeldCommandVerdict.APPLY -> Unit
         }
-        if (heldStreamChanged(held)) return DrainStep.STOP
-        deferredEvents.removeFirst()
         _diagnostics.update {
             it.copy(
                 lastAppliedCommandSeq = seq,
