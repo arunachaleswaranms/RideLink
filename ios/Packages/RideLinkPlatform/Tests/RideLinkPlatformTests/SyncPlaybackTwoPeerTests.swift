@@ -152,6 +152,78 @@ final class SyncPlaybackTwoPeerTests: XCTestCase {
         }
     }
 
+    // MARK: - ADR-024 Amendment A11, over real TLS
+
+    /// **The two-peer statement of Amendment A11, over a real authenticated TLS connection, and the
+    /// explicit refutation of "Outcome C".**
+    ///
+    /// Phase 8 correctly found that bounded wire queues feed unbounded local apply/scheduled work.
+    /// Its first fix refused at the point the work was created, which on a leader is reached from the
+    /// outbound commit hook — **after** the real transport accepted the frame. The follower therefore
+    /// had the command and applied it while the leader cancelled its own apply and wiped
+    /// `lastAppliedSeq`. Nothing on the wire could repair that, because nothing on the wire said
+    /// anything had happened.
+    ///
+    /// The bound is injected at 1 and the leader's own pre-roll is parked inside the fake player, so
+    /// the one outstanding obligation is held deterministically rather than raced against the real
+    /// 120 ms scheduling lead. The next command therefore meets a genuinely full ledger.
+    ///
+    /// - **Outcome A** — the second command is refused *before* delivery: this asserts on the
+    ///   **follower**, a real second coordinator on the far end of a real socket, that it never
+    ///   arrived.
+    /// - **Outcome B** — the first command *was* delivered, so the leader retains and eventually
+    ///   executes its obligation, and both peers converge on the same `command_seq`.
+    ///
+    /// There is no Outcome C.
+    func testLocalWorkCapacityIsRefusedBeforeDeliveryAndLeavesBothPeersAgreeingOverRealTls() async throws {
+        try await twoPairedPhones(leaderSessionWorkCapacity: 1) { leader, follower in
+            await leader.content.addLocal(SyncTestValues.hash(1))
+            await leader.content.addPeer(SyncTestValues.hash(1))
+            await follower.content.addLocal(SyncTestValues.hash(1))
+            // Park the leader's own pre-roll, so its single obligation stays outstanding.
+            await leader.player.gateCalls { if case .load = $0 { return true } else { return false } }
+
+            await leader.coordinator.playSynchronized(SyncTestValues.hash(1))
+            try await Self.expect("the PLAY crossed the real wire and the follower accepted it") {
+                await follower.coordinator.diagnostics.lastReceivedCommandSeq == 1
+            }
+            try await Self.expect("and the leader's own apply is parked, holding its obligation") {
+                await leader.coordinator.retainedWorkCount == 1
+            }
+
+            // The next authoritative command meets a full local-work ledger.
+            await leader.coordinator.pause()
+            try await Self.expect("the leader says why it stopped issuing") {
+                await leader.coordinator.diagnostics.syncState == .localOverload
+            }
+            let leaderDiagnostics = await leader.coordinator.diagnostics
+            XCTAssertEqual(leaderDiagnostics.workCapacityRefusedCount, 1)
+            XCTAssertTrue(leaderDiagnostics.outboundAuthorityLost)
+            XCTAssertEqual(leaderDiagnostics.nextCommandSeq, 2, "a refused candidate consumes no command_seq")
+
+            // Outcome A, proved on the far end of a real socket: the refused PAUSE is nowhere.
+            let followerDiagnostics = await follower.coordinator.diagnostics
+            XCTAssertEqual(followerDiagnostics.lastReceivedCommandSeq, 1,
+                           "the follower never received the command the leader refused to honour")
+            let followerCalls = await follower.player.calls
+            XCTAssertFalse(followerCalls.contains(.pause))
+
+            // Outcome B for the command that *was* delivered: the leader honours it and both agree.
+            await leader.player.releaseGate()
+            try await Self.expect("both peers started the delivered PLAY") {
+                let leaderStarted = await leader.player.calls.contains(.start)
+                let followerStarted = await follower.player.calls.contains(.start)
+                return leaderStarted && followerStarted
+            }
+            let finalLeader = await leader.coordinator.diagnostics
+            let finalFollower = await follower.coordinator.diagnostics
+            XCTAssertEqual(finalLeader.lastAppliedCommandSeq, 1,
+                           "the leader honoured the command it delivered — it did not abandon one it had sent")
+            XCTAssertEqual(finalLeader.lastAppliedCommandSeq, finalFollower.lastAppliedCommandSeq,
+                           "no Outcome C: the two peers applied exactly the same authoritative commands")
+        }
+    }
+
     // MARK: - ADR-024 Amendment A1 (the closure audit), over real TLS
 
     /// Amendment A1 Finding A over a **real authenticated TLS connection**: the pillion presses Play
@@ -308,7 +380,14 @@ final class SyncPlaybackTwoPeerTests: XCTestCase {
         /// Finding C's path without a fake standing in for the transport.
         let manager: ControlSessionManager
 
-        init(manager: ControlSessionManager, localPeerId: PeerId, monotonicNowUs: @escaping @Sendable () -> Int64) {
+        init(
+            manager: ControlSessionManager,
+            localPeerId: PeerId,
+            monotonicNowUs: @escaping @Sendable () -> Int64,
+            /// ADR-024 Amendment A11: injected only by the local-work-capacity scenario, which needs
+            /// the edge forced rather than raced against a real 120 ms scheduling lead.
+            sessionWorkCapacity: Int = Phase5GateBounds.defaultSessionWorkCapacity
+        ) {
             self.manager = manager
             let player = FakeSyncPlayer()
             self.player = player
@@ -321,7 +400,8 @@ final class SyncPlaybackTwoPeerTests: XCTestCase {
                 content: content,
                 sleeper: MonotonicDeadlineSleeper(monotonicNowUs: monotonicNowUs),
                 routeState: NeverTransitioningRoute(),
-                nextQueueItemId: { Ulid.generate() }
+                nextQueueItemId: { Ulid.generate() },
+                sessionWorkCapacity: sessionWorkCapacity
             )
         }
 
@@ -342,7 +422,10 @@ final class SyncPlaybackTwoPeerTests: XCTestCase {
         }
     }
 
-    private func twoPairedPhones(_ body: (SyncPeer, SyncPeer) async throws -> Void) async throws {
+    private func twoPairedPhones(
+        leaderSessionWorkCapacity: Int = Phase5GateBounds.defaultSessionWorkCapacity,
+        _ body: (SyncPeer, SyncPeer) async throws -> Void
+    ) async throws {
         let a = try TestSessions.unpairedPeer("aaaaaaaaaaaaaaaa", name: "A")
         let b = try TestSessions.unpairedPeer("bbbbbbbbbbbbbbbb", name: "B")
         let monotonic: @Sendable () -> Int64 = { Int64(DispatchTime.now().uptimeNanoseconds / 1_000) }
@@ -351,8 +434,14 @@ final class SyncPlaybackTwoPeerTests: XCTestCase {
         await sessionA.attach()
         await sessionB.attach()
 
-        let peerA = SyncPeer(manager: sessionA.manager, localPeerId: a.peerId, monotonicNowUs: monotonic)
-        let peerB = SyncPeer(manager: sessionB.manager, localPeerId: b.peerId, monotonicNowUs: monotonic)
+        let peerA = SyncPeer(
+            manager: sessionA.manager, localPeerId: a.peerId, monotonicNowUs: monotonic,
+            sessionWorkCapacity: leaderSessionWorkCapacity
+        )
+        let peerB = SyncPeer(
+            manager: sessionB.manager, localPeerId: b.peerId, monotonicNowUs: monotonic,
+            sessionWorkCapacity: leaderSessionWorkCapacity
+        )
         await peerA.prepare(monotonicNowUs: monotonic)
         await peerB.prepare(monotonicNowUs: monotonic)
 

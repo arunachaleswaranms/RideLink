@@ -570,12 +570,28 @@ extension SyncPlaybackCoordinator {
             startDeferredDrain(generation: generation)
         case .apply:
             guard let estimate else { return }
+            // **ADR-024 Amendment A11: a follower takes responsibility here, so capacity is taken
+            // here.** Before either sequence number moves — a command whose local work cannot be
+            // represented has not been accepted, and Amendment A1 Finding C's rule is that such a
+            // command does not spend its `command_seq` either. The honest answer is the existing
+            // halt-and-reconcile: the leader's next authoritative snapshot decides where ordering
+            // resumes. A follower has delivered nothing, so nothing diverges.
+            guard let reservation = reserveWork(generation: generation) else {
+                onWorkCapacityExhausted()
+                return
+            }
+            // Released **once**, on every path out of this case including a cancellation. Releasing
+            // it twice would be worse than leaking it: the scheduled action this apply may arm joins
+            // the same obligation, so a second release frees capacity a live armed effect still owns.
+            defer { releaseWork(reservation) }
             lastReceivedSeq = header.commandSeq
             lastAppliedSeq = header.commandSeq
             diagnostics.lastAppliedCommandSeq = header.commandSeq
             diagnostics.lastReceivedCommandSeq = header.commandSeq
             publishDiagnostics()
-            await applyAuthoritative(message, generation: generation, ride: ride, estimate: estimate)
+            await applyAuthoritative(
+                message, generation: generation, ride: ride, estimate: estimate, reservation: reservation
+            )
         }
     }
 
@@ -820,6 +836,14 @@ extension SyncPlaybackCoordinator {
                     onHeldRevisionMismatch()
                     return
                 }
+                // **ADR-024 Amendment A11**: a replay takes responsibility exactly as a first arrival
+                // does, so it takes capacity the same way — before the pop and before
+                // `lastAppliedSeq` moves. With none, the command stays exactly where it is: still
+                // head of the held stream, still owning its `command_seq`, re-attempted on the
+                // drain's own cadence. Nothing is abandoned and nothing is claimed.
+                guard let reservation = reserveWork(generation: generation) else { return }
+                // Exactly one release, on every path out of this case including a cancellation.
+                defer { releaseWork(reservation) }
                 deferredEvents.removeFirst()
                 let seq = heldHeader?.commandSeq
                 if let seq { lastAppliedSeq = seq }
@@ -830,7 +854,9 @@ extension SyncPlaybackCoordinator {
                 publishDiagnostics()
                 // Round 7: the ride the command was **admitted** under, replayed unchanged. The
                 // `estimate()` above suspends, so a fresh capture here would be precisely the defect.
-                await applyAuthoritative(message, generation: generation, ride: ride, estimate: estimate)
+                await applyAuthoritative(
+                    message, generation: generation, ride: ride, estimate: estimate, reservation: reservation
+                )
             case .queueSnapshot(let revision, let items, let currentIndex, _):
                 deferredEvents.removeFirst()
                 diagnostics.deferredCommandCount = deferredEvents.count
@@ -838,6 +864,10 @@ extension SyncPlaybackCoordinator {
                 publishDiagnostics()
                 await applyQueueSnapshot(revision: revision, items: items, currentIndex: currentIndex)
             case .playbackState(let fields, let generation, let reconciliation, let ride):
+                // Amendment A11, and this pass's own fresh-fix audit: the same shape as the clock and
+                // content pre-checks below. `restoreFromPlaybackState` re-appends this anchor when it
+                // cannot reserve, so popping it first would pop-fail-re-append in a tight loop.
+                guard hasWorkCapacity else { return }
                 // Independent review, Blocker 2A/2D: mirrors the `.command` case immediately above.
                 // A reconciliation that still needs full restoration must not be popped and applied
                 // (or, without this check, popped, found not-ready again inside
@@ -919,7 +949,9 @@ extension SyncPlaybackCoordinator {
                     switch outcome {
                     case .applied: onReconciliationApplied?(reconciliation, generation)
                     case .rejectedStale, .rejectedRole, .rejectedRide: onReconciliationCancelled?(reconciliation, generation)
-                    case .deferredClock, .deferredContent: break
+                    // Non-terminal: the anchor is retained, carrying this same obligation id, and
+                    // the drain will report on it. Amendment A11 adds the third for the same reason.
+                    case .deferredClock, .deferredContent, .deferredCapacity: break
                     }
                 }
             }
@@ -1160,26 +1192,33 @@ extension SyncPlaybackCoordinator {
         _ message: PlaybackMessage,
         generation: Int64,
         ride: RideAdmission,
-        estimate: SessionClockEstimate
+        estimate: SessionClockEstimate,
+        /// ADR-024 Amendment A11: the obligation the **caller** reserved when it took responsibility
+        /// for this command, threaded rather than re-taken. A replay must not mint a replacement
+        /// capacity any more than it may mint a replacement `RideAdmission`.
+        reservation: WorkReservation
     ) async {
         guard await stillCurrent(generation) else { return }
         guard stillCurrentNow(generation) else { return } // Amendment A5
         switch message {
         case .play(let header, let trackHash, let positionMs, let queueItemId):
             await applyPlay(header, trackHash: trackHash, queueItemId: queueItemId, positionMs: positionMs,
-                            generation: generation, estimate: estimate, ride: ride)
+                            generation: generation, estimate: estimate, ride: ride, reservation: reservation)
         case .pause(let header, let positionMs):
             await applyTransport(header, generation: generation, estimate: estimate, playing: false,
-                                 positionMs: positionMs, ride: ride)
+                                 positionMs: positionMs, ride: ride, reservation: reservation)
         case .resume(let header, let positionMs):
             await applyTransport(header, generation: generation, estimate: estimate, playing: true,
-                                 positionMs: positionMs, ride: ride)
+                                 positionMs: positionMs, ride: ride, reservation: reservation)
         case .seek(let header, let target):
-            await applySeek(header, targetPositionMs: target, generation: generation, estimate: estimate, ride: ride)
+            await applySeek(header, targetPositionMs: target, generation: generation, estimate: estimate,
+                            ride: ride, reservation: reservation)
         case .next(let header):
-            await applyStep(header, delta: 1, generation: generation, estimate: estimate, ride: ride)
+            await applyStep(header, delta: 1, generation: generation, estimate: estimate,
+                            ride: ride, reservation: reservation)
         case .previous(let header):
-            await applyStep(header, delta: -1, generation: generation, estimate: estimate, ride: ride)
+            await applyStep(header, delta: -1, generation: generation, estimate: estimate,
+                            ride: ride, reservation: reservation)
         default:
             break
         }
@@ -1214,7 +1253,9 @@ extension SyncPlaybackCoordinator {
         /// The ride lifetime that authorised the **operation this is a step of**, captured by the
         /// coordinator at that operation's admission and never re-read here (independent-review
         /// rounds 4 §17, 6 and 7). See `RideAdmission`.
-        ride: RideAdmission
+        ride: RideAdmission,
+        /// ADR-024 Amendment A11: the caller's obligation. See `applyAuthoritative`.
+        reservation: WorkReservation
     ) async -> StateSnapshotOutcome {
         // Amendment A3 Finding B: reached from `applyAuthoritative`, from `applyStep` and from
         // `restoreFromPlaybackState`, and `content.resolve` is real I/O on another actor. Proved on
@@ -1305,7 +1346,8 @@ extension SyncPlaybackCoordinator {
             publishDiagnostics()
             return .applied
         }
-        scheduleAt(header.effectiveAtSessionUs, estimate: estimate, generation: generation, token: token, steps: [.start])
+        scheduleAt(header.effectiveAtSessionUs, estimate: estimate, generation: generation, token: token,
+                   steps: [.start], reservation: reservation)
         return .applied
     }
 
@@ -1326,7 +1368,9 @@ extension SyncPlaybackCoordinator {
         estimate: SessionClockEstimate,
         playing: Bool,
         positionMs: Int64,
-        ride: RideAdmission
+        ride: RideAdmission,
+        /// ADR-024 Amendment A11: the caller's obligation. See `applyAuthoritative`.
+        reservation: WorkReservation
     ) async {
         guard await stillCurrent(generation) else { return }
         guard stillCurrentNow(generation) else { return } // Amendment A5
@@ -1345,7 +1389,8 @@ extension SyncPlaybackCoordinator {
         // position. As a step list, the fence is re-proved between them.
         scheduleAt(
             header.effectiveAtSessionUs, estimate: estimate, generation: generation, token: token,
-            steps: playing ? [.seek(positionMs), .start] : [.pause, .seek(positionMs)]
+            steps: playing ? [.seek(positionMs), .start] : [.pause, .seek(positionMs)],
+            reservation: reservation
         )
     }
 
@@ -1355,7 +1400,9 @@ extension SyncPlaybackCoordinator {
         targetPositionMs: Int64,
         generation: Int64,
         estimate: SessionClockEstimate,
-        ride: RideAdmission
+        ride: RideAdmission,
+        /// ADR-024 Amendment A11: the caller's obligation. See `applyAuthoritative`.
+        reservation: WorkReservation
     ) async {
         guard await stillCurrent(generation) else { return }
         guard stillCurrentNow(generation) else { return } // Amendment A5
@@ -1365,7 +1412,8 @@ extension SyncPlaybackCoordinator {
         timeline = timeline?.reanchored(positionMs: targetPositionMs, sessionUs: header.effectiveAtSessionUs)
         scheduleAt(
             header.effectiveAtSessionUs, estimate: estimate, generation: generation, token: token,
-            steps: [.seek(targetPositionMs)]
+            steps: [.seek(targetPositionMs)],
+            reservation: reservation
         )
     }
 
@@ -1377,7 +1425,9 @@ extension SyncPlaybackCoordinator {
         delta: Int,
         generation: Int64,
         estimate: SessionClockEstimate,
-        ride: RideAdmission
+        ride: RideAdmission,
+        /// ADR-024 Amendment A11: the caller's obligation. See `applyAuthoritative`.
+        reservation: WorkReservation
     ) async {
         // Amendment A3 Finding B: the highest-risk path in the phase, and it had no proof at all.
         // Everything below reads or writes *live* state — the shared queue, the selection, the
@@ -1418,13 +1468,15 @@ extension SyncPlaybackCoordinator {
             // local queue and its Now Playing metadata with it. Two steps, two proofs.
             scheduleAt(
                 header.effectiveAtSessionUs, estimate: estimate, generation: generation, token: token,
-                steps: [.stop, .clearSelection]
+                steps: [.stop, .clearSelection],
+                reservation: reservation
             )
             return
         }
         guard step.moved else { return }
         await applyPlay(header, trackHash: selected.trackHash, queueItemId: selected.queueItemId,
-                        positionMs: 0, generation: generation, estimate: estimate, ride: ride)
+                        positionMs: 0, generation: generation, estimate: estimate, ride: ride,
+                        reservation: reservation)
     }
 
     // MARK: - Scheduling
@@ -1441,9 +1493,16 @@ extension SyncPlaybackCoordinator {
         estimate: SessionClockEstimate,
         generation: Int64,
         token: Int64,
-        steps: [PlayerStep]
+        steps: [PlayerStep],
+        /// ADR-024 Amendment A11: the obligation this armed action belongs to, reserved at the
+        /// command's own admission. `enterPhase` runs here, **synchronously inside** the apply phase
+        /// that is still held, so the obligation can never be released between the apply deciding to
+        /// arm and the armed node existing. A false answer means a lifetime boundary has already
+        /// released it, so there is nothing left to arm.
+        reservation: WorkReservation
     ) {
-        guard admitChainNode(generation: generation) else { return }
+        guard stillCurrentNow(generation) else { return }
+        guard workLedger.enterPhase(reservation) else { return }
         let decision = ScheduledCommand.decide(
             effectiveAtSessionUs: effectiveAtSessionUs,
             nowLocalMonoUs: monotonicNowUs(),
@@ -1467,7 +1526,8 @@ extension SyncPlaybackCoordinator {
         let node = Task { [weak self] in
             await previous?.value
             await self?.runScheduledNode(
-                id: id, generation: generation, token: token, deadlineUs: deadlineUs, steps: steps
+                id: id, generation: generation, token: token, deadlineUs: deadlineUs, steps: steps,
+                reservation: reservation
             )
         }
         scheduledChain = node
@@ -1489,9 +1549,12 @@ extension SyncPlaybackCoordinator {
         generation: Int64,
         token: Int64,
         deadlineUs: Int64?,
-        steps: [PlayerStep]
+        steps: [PlayerStep],
+        reservation: WorkReservation
     ) async {
         defer { releaseChainNode(id) }
+        // Amendment A11: the scheduled phase is over, so the obligation is discharged.
+        defer { releaseWork(reservation) }
         guard !Task.isCancelled, await owns(generation: generation, token: token) else { return }
         guard ownsNow(generation: generation, token: token) else { return } // Amendment A5
         if let deadlineUs {
@@ -2021,6 +2084,28 @@ extension SyncPlaybackCoordinator {
             startDeferredDrain(generation: generation)
             return .deferredClock
         }
+        // **ADR-024 Amendment A11.** This restore's `applyPlay` can arm a scheduled start, which is
+        // retained local work, so it needs an obligation of its own — the command paths' obligations
+        // belong to their own commands. Taken here, immediately before the only call that can create
+        // that work and after both lifetimes have been proved, with no `await` between. When there
+        // is no capacity the snapshot is **retained**, not dropped: the drain re-attempts it and its
+        // reconciliation obligation stays live and owned.
+        guard let reservation = reserveWork(generation: generation) else {
+            guard stillCurrentNow(generation) else { return .rejectedStale }
+            guard rideStillLive(ride) else { return .rejectedRide }
+            deferredEvents.append(
+                .playbackState(fields, generation: generation, reconciliation: reconciliation, ride: ride)
+            )
+            diagnostics.deferredCommandCount = deferredEvents.count
+            publishDiagnostics()
+            startDeferredDrain(generation: generation)
+            return .deferredCapacity
+        }
+        // The apply phase's obligation, released exactly once on every path out of this function —
+        // including a cancellation, which is what stops a boundary-cancelled drain leaking capacity
+        // past its own `retire`. A scheduled start `applyPlay` arms joins this same obligation
+        // synchronously inside that call, so it keeps a phase of its own after this one leaves.
+        defer { releaseWork(reservation) }
         let header = PlaybackCommandHeader(
             commandSeq: fields.commandSeq, effectiveAtSessionUs: fields.atSessionUs, issuedBy: localPeerId,
             queueRevision: fields.queueRevision
@@ -2035,7 +2120,8 @@ extension SyncPlaybackCoordinator {
         // for the rest of the session, and ride 1's `manifest_revision`/`command_seq` were published
         // as accepted bookkeeping on the way past. `applyPlay` now says which, and this forwards it.
         let outcome = await applyPlay(header, trackHash: trackHash, queueItemId: queueItemId, positionMs: fields.positionMs,
-                                      generation: generation, estimate: estimate, playing: fields.playing, ride: ride)
+                                      generation: generation, estimate: estimate, playing: fields.playing, ride: ride,
+                                      reservation: reservation)
         guard outcome == .deferredContent else { return outcome }
         // A `.deferred*` result promises the obligation is **retained** and carries the same
         // reconciliation id, so retain it here rather than letting `applyPlay`'s own PROTOCOL §5

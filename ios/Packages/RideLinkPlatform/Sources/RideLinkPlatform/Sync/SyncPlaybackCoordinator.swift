@@ -338,6 +338,16 @@ public actor SyncPlaybackCoordinator {
     /// cancellation by nature, so a cancelled node still returns from such a call and carries on to
     /// its next statement. What stops it there is the generation each node captured.
     var sessionChainNodes: [Int64: Task<Void, Never>] = [:]
+
+    /// ADR-024 **Amendment A11**: the bound on retained local playback work, and the reason a
+    /// delivered authoritative command always has somewhere to land.
+    ///
+    /// Reserved *before* the command can be delivered (`issue` on the leader,
+    /// `admitAuthoritativeCommand` on a follower), spent by the apply node and by the scheduled node
+    /// that node arms, and released when both are done. Phase 8's first attempt counted live task
+    /// nodes and refused at node-creation time — which on the leader is *after* the frame reached the
+    /// peer — so an overflow abandoned authority the follower had already applied.
+    let workLedger: SessionWorkLedger
     private var nextChainNodeId: Int64 = 0
 
     /// Amendment A2 Findings A and C: an authoritative frame this device produced never reached the
@@ -440,7 +450,11 @@ public actor SyncPlaybackCoordinator {
         nextQueueItemId: @escaping @Sendable () -> String,
         inboundCapacity: Int = Phase5GateBounds.defaultInboundCapacity,
         deferredCommandCapacity: Int = Phase5GateBounds.defaultDeferredCommandCapacity,
-        outboundCapacity: Int = Phase5GateBounds.defaultOutboundCapacity
+        outboundCapacity: Int = Phase5GateBounds.defaultOutboundCapacity,
+        /// ADR-024 Amendment A11: how many local playback obligations may be outstanding at once.
+        /// Injectable for the same reason as every bound above — a test forces the edge at 1 or 2
+        /// rather than producing 256 commands.
+        sessionWorkCapacity: Int = Phase5GateBounds.defaultSessionWorkCapacity
     ) {
         self.monotonicNowUs = monotonicNowUs
         self.localPeerId = localPeerId
@@ -451,6 +465,7 @@ public actor SyncPlaybackCoordinator {
         self.routeState = routeState
         self.nextQueueItemId = nextQueueItemId
         self.deferredCommandCapacity = deferredCommandCapacity
+        workLedger = SessionWorkLedger(capacity: sessionWorkCapacity)
         inbound = Phase5FrameQueue(
             capacity: inboundCapacity,
             kindOf: { $0.kind },
@@ -651,6 +666,14 @@ public actor SyncPlaybackCoordinator {
         // Frames still queued outbound stay physically queued and become inert, because each carries
         // the generation that authorised it and `outboundUsable` refuses to write them.
         outboundAuthorityLost = false
+        // ADR-024 Amendment A11: and so does every local obligation, because the chains those
+        // obligations were spent on have just been retired above. Bounded by the generation that
+        // *ended* — `liveGeneration` is still the predecessor's here, refreshed only after this call
+        // returns — never a blanket clear, so a successor that has already reserved capacity keeps
+        // it. A node from the retired session that returns later releases an id the ledger no longer
+        // holds, which is a no-op and can never free a successor's capacity.
+        workLedger.retire(throughGeneration: liveGeneration)
+        publishRetainedWork()
         lastReceivedSeq = nil
         lastAppliedSeq = nil
         nextSeq = PlaybackBounds.firstCommandSeq
@@ -953,7 +976,13 @@ public actor SyncPlaybackCoordinator {
     /// manufacture the mirror image of the divergence this whole amendment is closing. Only work
     /// that was never delivered is abandoned. Recovery is a new session, which clears the latch in
     /// `resetForNewSession`.
-    func failClosedOutbound(generation: Int64) async {
+    /// - Parameter state: ADR-024 Amendment A11: what the rider is told. `.transportFailed` for
+    ///   every pre-existing caller — the write failed, or the ordered outbound path was full because
+    ///   the socket is not draining. `.localOverload` for the one caller where the transport was
+    ///   never asked: this device could not guarantee it could honour another command locally, so it
+    ///   refused the command before sending it. The posture is identical; calling them the same
+    ///   thing would not be true.
+    func failClosedOutbound(generation: Int64, state: SyncState = .transportFailed) async {
         // A dead session needs no latch: its authority is already gone, and latching would then
         // survive into the session that replaced it.
         guard generation == (await session.currentAuthGeneration()) else { return }
@@ -983,7 +1012,7 @@ public actor SyncPlaybackCoordinator {
         //
         // Recording the rate here rather than inside `restoreRate` is the same rule one level down:
         // the call below is now one player effect with no write behind it.
-        diagnostics.syncState = .transportFailed
+        diagnostics.syncState = state
         diagnostics.outboundAuthorityLost = true
         diagnostics.deferredCommandCount = 0
         diagnostics.localDriftMs = nil
@@ -999,13 +1028,20 @@ public actor SyncPlaybackCoordinator {
     /// See `applyChain`: the commit hook runs on `drainOutbound`'s single consumer, so doing the
     /// apply there would stall the outbound path behind a decoder pre-roll, and an unstructured
     /// `Task` preserves nothing at all about order — precisely the defect A1 Finding G was about.
-    func chainApply(generation: Int64, _ action: @escaping @Sendable () async -> Void) {
-        guard admitChainNode(generation: generation) else { return }
+    func chainApply(
+        generation: Int64,
+        /// ADR-024 Amendment A11: the capacity `issue` reserved **before** the frame could reach the
+        /// peer. Released when this node finishes — unless the node arms a scheduled action, which
+        /// joins the same obligation first, so the obligation outlives the apply exactly as far as
+        /// the audible effect it promised does.
+        reservation: WorkReservation,
+        _ action: @escaping @Sendable () async -> Void
+    ) {
         let previous = applyChain
         let id = claimChainNodeId()
         let node = Task { [weak self] in
             await previous?.value
-            await self?.runApplyNode(id: id, generation: generation, action: action)
+            await self?.runApplyNode(id: id, generation: generation, reservation: reservation, action: action)
         }
         applyChain = node
         trackChainNode(id, node)
@@ -1017,8 +1053,18 @@ public actor SyncPlaybackCoordinator {
     /// inside it — which is the whole defect. The cancellation check is cheap and prompt; the
     /// generation is what is *decisive*, because the node ahead may have been parked in a player call
     /// that ignored the cancellation entirely.
-    private func runApplyNode(id: Int64, generation: Int64, action: @Sendable () async -> Void) async {
+    private func runApplyNode(
+        id: Int64,
+        generation: Int64,
+        reservation: WorkReservation,
+        action: @Sendable () async -> Void
+    ) async {
         defer { releaseChainNode(id) }
+        // Amendment A11: the apply phase is over however it ended — applied, refused for a retired
+        // lifetime, or cancelled outright. A boundary may have released this obligation already, in
+        // which case this is a no-op on an id the ledger no longer holds and can never touch the
+        // reservation that replaced it.
+        defer { releaseWork(reservation) }
         guard !Task.isCancelled, await stillCurrent(generation) else { return }
         // Amendment A5: the proof above suspends, so the synchronous mirror is what makes reaching
         // `action` atomic with having proved it. `action` re-proves for itself as well (A3 Finding B).
@@ -1026,42 +1072,55 @@ public actor SyncPlaybackCoordinator {
         await action()
     }
 
-    /// Bounded work after the bounded wire queues. Overflow retires playback authority for this
-    /// connection; a new authenticated connection is required to establish it again.
-    func admitChainNode(generation: Int64) -> Bool {
-        guard stillCurrentNow(generation) else { return false }
-        guard sessionChainNodes.count >= Phase5GateBounds.defaultSessionWorkCapacity else { return true }
-        role = nil
-        syncEnabled = false
-        synchronizedModeEpoch += 1
-        epoch.supersede()
-        playRequestFence.supersede()
-        cancelTick()
-        deferredDrainTask?.cancel()
-        deferredDrainTask = nil
-        retireSessionChains()
-        discardDeferredEvents()
-        pendingPlay = nil
-        transferRequestedForToken = nil
-        pendingStateSnapshotReply = nil
-        timeline = nil
-        currentPlaybackIdentity = nil
-        rideAuthorityEpoch = 0
-        lastAppliedSeq = nil
-        lastReceivedSeq = nil
-        driftState = DriftController.reset()
-        diagnostics.role = nil
-        diagnostics.syncState = .transportFailed
-        diagnostics.lastAppliedCommandSeq = nil
-        diagnostics.lastReceivedCommandSeq = nil
-        diagnostics.currentTrackHash = nil
-        diagnostics.deferredCommandCount = 0
-        diagnostics.playbackRate = DriftController.rateNormal
-        publishDiagnostics()
-        // One terminal, absolute rate restoration; no coordinator writes follow the await.
-        Task { [player] in await player.setRate(DriftController.rateNormal) }
-        return false
+    /// Takes capacity for one local playback obligation, or answers `nil` (ADR-024 Amendment A11).
+    ///
+    /// **Every caller is somewhere the answer can still change what reaches the wire.** A `nil` here
+    /// is the whole point of the amendment: the leader has not sent anything yet, so it refuses the
+    /// command outright; a follower has not spent the `command_seq` yet, so it declares itself
+    /// desynchronised and lets the existing reconciliation repair it; a replay leaves the work where
+    /// it already is. None of them abandons authority the peer already holds, which is precisely
+    /// what Phase 8's first attempt did.
+    func reserveWork(generation: Int64) -> WorkReservation? {
+        let reservation = workLedger.reserve(generation: generation)
+        if reservation == nil { diagnostics.workCapacityRefusedCount += 1 }
+        publishRetainedWork()
+        return reservation
     }
+
+    func releaseWork(_ reservation: WorkReservation) {
+        workLedger.leavePhase(reservation)
+        publishRetainedWork()
+    }
+
+    /// Whether a reservation is *likely* to succeed — a pre-check, never an authority.
+    ///
+    /// This pass's own fresh-fix audit: `drainDeferredEvents`' `.playbackState` branch pops its item
+    /// **before** the apply that needs capacity, and the apply re-appends it when there is none. With
+    /// no pre-check the drain pops the same item, fails, re-appends and pops it again in a tight
+    /// loop — the exact shape the clock and content pre-checks above it already exist to prevent. It
+    /// is deliberately advisory: `reserveWork` is still what decides, so a reservation taken between
+    /// this check and that one merely costs one extra drain iteration rather than correctness.
+    var hasWorkCapacity: Bool { workLedger.liveCount < workLedger.capacity }
+
+    func publishRetainedWork() {
+        diagnostics.retainedWorkCount = workLedger.liveCount
+        diagnostics.peakRetainedWorkCount = max(diagnostics.peakRetainedWorkCount, workLedger.liveCount)
+        publishDiagnostics()
+    }
+
+    /// A follower could not take responsibility for more authoritative work (ADR-024 Amendment A11).
+    ///
+    /// The same explicit halt-and-reconcile posture as an ingress overflow or a held-stream overflow,
+    /// and for exactly the same reason: more authority is outstanding than this device can honestly
+    /// account for. **No sequence number is spent**, so the authoritative snapshot that reconciles us
+    /// decides where ordering resumes (Amendment A1 Finding C's rule). Deliberately *not* the
+    /// leader's fail-closed posture — a follower has delivered nothing and owes the peer nothing.
+    func onWorkCapacityExhausted() {
+        latchDesynchronized()
+    }
+
+    /// The bound a boundedness test reads: outstanding local obligations, never task objects.
+    var retainedWorkCount: Int { workLedger.liveCount }
 
     /// Reserves an identity for one chain node. Monotonic, so a retired node's own cleanup can never
     /// remove a node the *next* session created.
@@ -1146,6 +1205,22 @@ public actor SyncPlaybackCoordinator {
         guard stillCurrentNow(generation) else { return }
         // Round 7: `readyEstimate` above suspends too, and End Ride moves no control generation.
         guard rideStillLive(ride) else { return }
+        // **ADR-024 Amendment A11: capacity before delivery, in the same no-`await` block as the
+        // `command_seq` allocation and the hand-off to the wire.** This is the one placement that
+        // makes the invariant structural: the peer cannot come to rely on a command this device has
+        // no room left to honour, because the command is never stamped, never enqueued and never
+        // written. Phase 8's first attempt asked the same question at the *apply* node, which on
+        // this side of the pipeline is after the transport said yes.
+        guard let reservation = reserveWork(generation: generation) else {
+            // Deliberately the *existing* fail-closed posture rather than a new one: an authoritative
+            // operation this device produced did not reach the peer, which is precisely what
+            // `failClosedOutbound` is for. The state it publishes is `.localOverload` rather than
+            // `.transportFailed`, because the transport did not fail — nothing was ever offered to
+            // it. Sequence truth is untouched: a command that was never stamped leaves no gap, and
+            // every command already delivered keeps its local obligation and its `lastAppliedSeq`.
+            await failClosedOutbound(generation: generation, state: .localOverload)
+            return
+        }
         let seq = nextSeq
         let header = PlaybackCommandHeader(
             commandSeq: seq,
@@ -1159,14 +1234,17 @@ public actor SyncPlaybackCoordinator {
                 [weak self] outcome in
                 await self?.onCommandOutcome(
                     seq: seq, message: message, generation: generation, ride: ride, estimate: estimate,
-                    outcome: outcome
+                    reservation: reservation, outcome: outcome
                 )
             }
         )
         // Amendment A2 §6: a `command_seq` becomes authoritative exactly when the frame carrying it
         // enters the outbound authority pipeline, and not a moment earlier. A refused candidate
         // leaves no gap, because it was never assigned.
+        // Amendment A11: and its reservation goes straight back, so a refused admission cannot
+        // consume capacity. Repeated refusals therefore leave the bound exactly where it was.
         guard admitted else {
+            releaseWork(reservation)
             await onOutboundRefused(.authoritative, generation: generation)
             return
         }
@@ -1197,13 +1275,19 @@ public actor SyncPlaybackCoordinator {
         /// socket write, so reading a live ride here would be the same defect one layer out.
         ride: RideAdmission,
         estimate: SessionClockEstimate,
+        /// ADR-024 Amendment A11: the capacity `issue` took **before** this frame could be written.
+        /// Released on every branch that does not hand it to `chainApply` — an unsent frame owes no
+        /// local work — so a session of nothing but failed sends never consumes the bound.
+        reservation: WorkReservation,
         outcome: OutboundOutcome
     ) async {
         switch OutboundCommitGate.decide(authority: .authoritative, outcome: outcome) {
         case .abortFailClosed:
+            releaseWork(reservation)
             await failClosedOutbound(generation: generation)
             return
         case .abortQuiet:
+            releaseWork(reservation)
             return
         case .commit:
             break
@@ -1211,10 +1295,16 @@ public actor SyncPlaybackCoordinator {
         // Deliberately **not** gated on `outboundAuthorityLost`: this frame reached the peer, so the
         // peer will act on it, and the only consistent thing this device can do is act on it too.
         // The latch stops *new* authority; it does not un-send what was sent.
-        guard await stillCurrent(generation) else { return }
+        guard await stillCurrent(generation) else {
+            releaseWork(reservation)
+            return
+        }
         // Amendment A5: the two sequence numbers below are exactly what Finding A is about, reached
         // from the leader's side. No `await` between the synchronous proof and the writes.
-        guard stillCurrentNow(generation) else { return }
+        guard stillCurrentNow(generation) else {
+            releaseWork(reservation)
+            return
+        }
         // **Independent-review round 8's sweep, the leader's own half of Blocker B.** The transport
         // answers across the outbound consumer, an actor hop and a real socket write, and
         // `stillCurrent` above suspends again — so a ride boundary accepted in any of those windows
@@ -1227,6 +1317,7 @@ public actor SyncPlaybackCoordinator {
         // this device applied it, so nothing on this device may claim it did. Proved with no
         // `await` between the proof and the writes.
         guard rideStillLive(ride) else {
+            releaseWork(reservation)
             diagnostics.retiredRideAdmissionCount += 1
             publishDiagnostics()
             return
@@ -1238,8 +1329,12 @@ public actor SyncPlaybackCoordinator {
         diagnostics.lastAppliedCommandSeq = lastAppliedSeq
         diagnostics.lastReceivedCommandSeq = lastReceivedSeq
         publishDiagnostics()
-        chainApply(generation: generation) { [weak self] in
-            await self?.applyAuthoritative(message, generation: generation, ride: ride, estimate: estimate)
+        // Amendment A11: the reservation moves into the ordered apply, which is now guaranteed to
+        // be creatable — that guarantee *is* the fix. The node releases it when its work is done.
+        chainApply(generation: generation, reservation: reservation) { [weak self] in
+            await self?.applyAuthoritative(
+                message, generation: generation, ride: ride, estimate: estimate, reservation: reservation
+            )
         }
     }
 
@@ -1690,6 +1785,14 @@ enum StateSnapshotOutcome: Sendable, Equatable {
     /// from `.deferredClock`: nothing is enqueued into `deferredEvents`, because a content transfer
     /// completing is not a clock-readiness event the drain loop polls for.
     case deferredContent
+    /// ADR-024 Amendment A11: the reconciliation is genuinely needed and this device has no capacity
+    /// left to represent the local work it would create. The snapshot is retained in
+    /// `deferredEvents` carrying the same obligation id and re-attempted by the drain, exactly as
+    /// `.deferredClock` is — so ADR-028 Amendment A4's invariant ("every `deferred*` corresponds to
+    /// actual retained work carrying the same obligation id") holds here too. Distinct from
+    /// `.deferredClock` because the clock is fine and saying otherwise would send a future reader to
+    /// the estimator.
+    case deferredCapacity
     /// The snapshot's generation is no longer live — refused, nothing mutated.
     case rejectedStale
     /// This device is not a follower — refused, nothing mutated.

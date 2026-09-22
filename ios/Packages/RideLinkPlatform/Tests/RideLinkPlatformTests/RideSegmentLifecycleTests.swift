@@ -516,6 +516,9 @@ final class RideSegmentLifecycleTests: XCTestCase {
         // by `applyAuthoritative` itself, so the test captures it exactly where
         // `admitAuthoritativeCommand` does — before the suspension the gate below parks in.
         let ride = await sync.admitRide()
+        // ADR-024 Amendment A11: production reserves the obligation at the same admission point, so
+        // the test does too rather than letting the apply invent one.
+        let reservation = await sync.reserveWork(generation: generation)!
         // Armed immediately before the call, so the first generation read it takes — which is
         // `applyAuthoritative`'s own `stillCurrent` — is the one that parks.
         await session.armGenerationGate()
@@ -526,8 +529,10 @@ final class RideSegmentLifecycleTests: XCTestCase {
                 )),
                 generation: generation,
                 ride: ride,
-                estimate: estimate
+                estimate: estimate,
+                reservation: reservation
             )
+            await self.sync.releaseWork(reservation)
         }
         var parked = false
         for _ in 0 ..< 500 where !parked {
@@ -584,6 +589,8 @@ final class RideSegmentLifecycleTests: XCTestCase {
         let estimate = SessionClockEstimate(offsetToLeaderUs: 0, rttP95Us: 8_000, ready: true)
         // Round 7: captured at the admission, as production does.
         let ride = await sync.admitRide()
+        // ADR-024 Amendment A11: reserved where production's admission reserves it.
+        let reservation = await sync.reserveWork(generation: generation)!
         await session.armGenerationGate()
         let apply = Task {
             await self.sync.applyAuthoritative(
@@ -592,8 +599,10 @@ final class RideSegmentLifecycleTests: XCTestCase {
                 )),
                 generation: generation,
                 ride: ride,
-                estimate: estimate
+                estimate: estimate,
+                reservation: reservation
             )
+            await self.sync.releaseWork(reservation)
         }
         var parked = false
         for _ in 0 ..< 500 where !parked {

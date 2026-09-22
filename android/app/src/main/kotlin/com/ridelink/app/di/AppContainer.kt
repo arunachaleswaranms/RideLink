@@ -371,6 +371,7 @@ class AppContainer(
                             SyncState.SYNC_FAILED,
                             SyncState.DESYNCHRONIZED,
                             SyncState.TRANSPORT_FAILED,
+                            SyncState.LOCAL_OVERLOAD,
                         ),
                 )
             }

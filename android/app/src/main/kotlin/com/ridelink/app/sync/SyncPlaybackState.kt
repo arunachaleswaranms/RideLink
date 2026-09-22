@@ -82,6 +82,25 @@ enum class SyncState {
      * (ADR-004, FR-025), exactly as for every other failure in this enum.
      */
     TRANSPORT_FAILED,
+
+    /**
+     * ADR-024 **Amendment A11**: this device refused an authoritative command of its own because it
+     * could not guarantee the local capacity to honour it, and refused it **before** anything
+     * reached the peer.
+     *
+     * Deliberately not [TRANSPORT_FAILED]. The transport was never asked — it may be perfectly
+     * healthy — and a rider reading "transport failed" would go looking at the Wi-Fi. What failed is
+     * this device's own ordered work: more authoritative commands are outstanding, unapplied, than
+     * [com.ridelink.core.playback.Phase5GateBounds.DEFAULT_SESSION_WORK_CAPACITY] allows.
+     *
+     * The posture is identical to [TRANSPORT_FAILED]'s and shares its implementation: synchronised
+     * mode is left, correction stops, the rate returns to exactly 1.0, **local music keeps playing**
+     * (ADR-004, FR-025), and a new authenticated connection is what restores eligibility. What must
+     * *not* happen, and is the whole reason this state exists, is any rollback of authority the peer
+     * has already been given: every command already delivered keeps its local obligation and its
+     * place in `lastAppliedSeq`.
+     */
+    LOCAL_OVERLOAD,
 }
 
 /** What the ladder last decided, for the FR-023 diagnostics surface. */
@@ -291,6 +310,17 @@ data class SyncPlaybackDiagnostics(
      * [outboundAuthorityLost].
      */
     val outboundOverflowCount: Int = 0,
+    /**
+     * ADR-024 Amendment A11: how many times this device had no capacity left for one more local
+     * playback obligation. On a leader each one is a command that was **never sent**; on a follower
+     * each one is a command whose `command_seq` was **not spent**, answered by the existing
+     * halt-and-reconcile. Never a command the peer acted on and this device dropped.
+     */
+    val workCapacityRefusedCount: Int = 0,
+    /** ADR-024 Amendment A11: local playback obligations outstanding right now. */
+    val retainedWorkCount: Int = 0,
+    /** ADR-024 Amendment A11: the high-water mark of [retainedWorkCount] for this process. */
+    val peakRetainedWorkCount: Int = 0,
     /** How many frames have been accepted onto the one ordered outbound path. */
     val outboundEnqueuedCount: Int = 0,
     /**

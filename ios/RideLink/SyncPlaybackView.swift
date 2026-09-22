@@ -144,6 +144,8 @@ struct SyncPlaybackView: View {
         case .desynchronized: return "RESYNCHRONIZING — waiting for authoritative state; local playback continues"
         case .transportFailed:
             return "NOT DELIVERED — a command never reached the peer; synchronisation stopped, local playback continues"
+        case .localOverload:
+            return "OVERLOADED — this phone refused its own command before sending it; local playback continues"
         }
     }
 }

@@ -414,6 +414,118 @@ class SyncPlaybackTwoPeerTest {
             assertEquals(play.header.effectiveAtSessionUs, pair.followerStartSessionUs)
         }
 
+    // --- ADR-024 Amendment A11: local work capacity, across two real coordinators -----------------
+
+    /**
+     * **The two-peer statement of Amendment A11, and the explicit refutation of "Outcome C".**
+     *
+     * Phase 8 correctly found that bounded wire queues feed unbounded local apply/scheduled work.
+     * Its first fix refused at the point the work was created, which on a leader is reached from the
+     * outbound commit hook — **after** the authenticated transport accepted the frame. The follower
+     * therefore had the command and applied it while the leader cancelled its own apply and wiped
+     * `lastAppliedSeq`. Nothing on the wire could ever repair that, because nothing on the wire said
+     * anything had happened.
+     *
+     * This drives the boundary with two real coordinators and asserts the disjunction directly:
+     *
+     * - **Outcome A** — the command is refused *before* delivery: the follower never receives it,
+     *   the leader never applies it, and no `command_seq` is spent, so neither peer's ordering
+     *   truth has a hole in it.
+     * - **Outcome B** — the command was delivered: the leader retains and eventually executes the
+     *   corresponding local obligation, the follower executes the same command, and both converge.
+     *
+     * **There is no Outcome C.** The final assertions compare the two peers' `lastAppliedCommandSeq`
+     * and their actual player effects: a command the follower acted on that the leader abandoned
+     * would fail both.
+     *
+     * The leader's local-work bound is *injected* at 2 rather than raced at 256, and the deadline
+     * clock is frozen so the delivered commands genuinely retain their obligations. Nothing sleeps.
+     */
+    @Test
+    fun `local work capacity is refused before delivery and leaves both peers agreeing`() =
+        runTest(StandardTestDispatcher()) {
+            val pair = Pair(this, leaderSessionWorkCapacity = 2)
+            pair.connect()
+            pair.seedContent(1..1)
+            pair.leader.coordinator.playSynchronized(SyncTestValues.hash(1))
+            runCurrent()
+            val play =
+                pair.leader.session
+                    .sentOfType<PlaybackMessage.Play>()
+                    .single()
+            pair.advanceSessionTo(play.header.effectiveAtSessionUs)
+            runCurrent()
+            pair.clearPlayers()
+            pair.leader.session.sent
+                .clear()
+            pair.follower.session.sent
+                .clear()
+
+            // Two commands the leader can honour. The clock is not advanced, so each holds its
+            // obligation in an armed scheduled action.
+            pair.leader.coordinator.pause()
+            runCurrent()
+            pair.leader.coordinator.seek(1_000)
+            runCurrent()
+            val deliveredToFollower =
+                pair.follower.coordinator.diagnostics.value
+                    .lastReceivedCommandSeq
+            assertEquals(3L, deliveredToFollower, "the premise: the follower received both commands")
+
+            // The third meets a full local-work ledger on the leader.
+            pair.leader.coordinator.seek(2_000)
+            runCurrent()
+
+            // Outcome A, proved on the *follower* — a real second coordinator, not the leader's
+            // internals. The refused SEEK exists nowhere on the wire.
+            assertTrue(
+                pair.leader.session
+                    .sentOfType<PlaybackMessage.Seek>()
+                    .none { it.targetPositionMs == 2_000L },
+                "the refused command was never written",
+            )
+            assertEquals(
+                3L,
+                pair.follower.coordinator.diagnostics.value
+                    .lastReceivedCommandSeq,
+                "and the follower never received it",
+            )
+            assertEquals(
+                SyncState.LOCAL_OVERLOAD,
+                pair.leader.coordinator.diagnostics.value
+                    .syncState,
+                "the leader says why, and does not blame a transport that was never asked",
+            )
+
+            // Outcome B for everything that *was* delivered: both peers execute it and converge.
+            pair.advanceSessionTo(play.header.effectiveAtSessionUs + 4_000_000)
+            runCurrent()
+            val leaderDiagnostics = pair.leader.coordinator.diagnostics.value
+            val followerDiagnostics = pair.follower.coordinator.diagnostics.value
+            assertEquals(
+                3L,
+                leaderDiagnostics.lastAppliedCommandSeq,
+                "the leader honoured every command it delivered — it did not abandon one it had sent",
+            )
+            assertEquals(
+                leaderDiagnostics.lastAppliedCommandSeq,
+                followerDiagnostics.lastAppliedCommandSeq,
+                "no Outcome C: the two peers applied exactly the same authoritative commands",
+            )
+            assertEquals(
+                pair.leader.player.calls
+                    .filter { it !is FakeSyncPlayer.Call.SetRate },
+                pair.follower.player.calls
+                    .filter { it !is FakeSyncPlayer.Call.SetRate },
+                "and drove their players identically — the refused SEEK reached neither",
+            )
+            assertEquals(
+                0,
+                pair.leader.coordinator.retainedWorkCount,
+                "every obligation the leader took responsibility for is discharged",
+            )
+        }
+
     // --- ADR-024 Amendment A2: the peer never sees what the leader has not delivered ---------------
 
     /**
@@ -667,6 +779,8 @@ class SyncPlaybackTwoPeerTest {
         private val scope: TestScope,
         /** Injected only by the Amendment A2 scenarios, which need the outbound edge forced. */
         private val leaderOutboundCapacity: Int = 256,
+        /** Injected only by the Amendment A11 scenario, which needs the local-work edge forced. */
+        private val leaderSessionWorkCapacity: Int = 256,
     ) {
         val leaderClock = FakeMonotonicClock(nowUs = LEADER_START_US)
         val followerClock = FakeMonotonicClock(nowUs = LEADER_START_US - OFFSET_US)
@@ -680,8 +794,24 @@ class SyncPlaybackTwoPeerTest {
         init {
             val leaderSession = FakeSyncSession()
             val followerSession = FakeSyncSession()
-            leader = build(SyncTestValues.leaderPeerId, leaderSession, leaderClock, 100, leaderOutboundCapacity)
-            follower = build(SyncTestValues.followerPeerId, followerSession, followerClock, 500, 256)
+            leader =
+                build(
+                    peerId = SyncTestValues.leaderPeerId,
+                    session = leaderSession,
+                    clock = leaderClock,
+                    idBase = 100,
+                    outboundCapacity = leaderOutboundCapacity,
+                    sessionWorkCapacity = leaderSessionWorkCapacity,
+                )
+            follower =
+                build(
+                    peerId = SyncTestValues.followerPeerId,
+                    session = followerSession,
+                    clock = followerClock,
+                    idBase = 500,
+                    outboundCapacity = 256,
+                    sessionWorkCapacity = 256,
+                )
             leaderSession.forwardTo(followerSession)
             followerSession.forwardTo(leaderSession)
         }
@@ -693,6 +823,7 @@ class SyncPlaybackTwoPeerTest {
             clock: FakeMonotonicClock,
             idBase: Int,
             outboundCapacity: Int,
+            sessionWorkCapacity: Int,
         ): Peer {
             val player = FakeSyncPlayer()
             val content = FakeSyncContent()
@@ -709,6 +840,7 @@ class SyncPlaybackTwoPeerTest {
                     routeTransitioning = { false },
                     nextQueueItemId = { SyncTestValues.ulid(seed++) },
                     outboundCapacity = outboundCapacity,
+                    sessionWorkCapacity = sessionWorkCapacity,
                 )
             return Peer(peerId, session, player, content, coordinator)
         }

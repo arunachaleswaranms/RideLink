@@ -349,7 +349,10 @@ public final class ResyncCoordinator {
         )
         let outcome = await syncPlaybackCoordinator.onStateSnapshot(message, generation: generation, reconciliation: obligation)
         switch outcome {
-        case .applied, .deferredClock, .deferredContent:
+        // ADR-024 Amendment A11: `.deferredCapacity` is retained work carrying this same
+        // obligation id and re-attempted by the drain — identical treatment for the same reason
+        // `.deferredContent` gets it.
+        case .applied, .deferredClock, .deferredContent, .deferredCapacity:
             // §21: the *wire* round trip is satisfied either way — a snapshot for the live generation
             // arrived, so there is nothing left to request — even though `.deferredClock`/
             // `.deferredContent` mean reconciliation itself is not yet complete (that is

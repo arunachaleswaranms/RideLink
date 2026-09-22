@@ -127,6 +127,9 @@ fun rideSyncLabel(
                 SyncState.WAITING_FOR_CONTENT -> "Waiting for content"
                 SyncState.SYNCED -> "Synchronized"
                 SyncState.SYNC_FAILED -> "Sync failed — local music continues"
-                SyncState.DESYNCHRONIZED, SyncState.TRANSPORT_FAILED -> "Sync unavailable — local music continues"
+                SyncState.DESYNCHRONIZED,
+                SyncState.TRANSPORT_FAILED,
+                SyncState.LOCAL_OVERLOAD,
+                -> "Sync unavailable — local music continues"
             }
     }

@@ -66,7 +66,8 @@ struct RideLinkApp: App {
            ) {
             let presenter = SyncPlaybackPresenter(coordinator: sync) { [weak coordinator] diagnostics in
                 coordinator?.updateSyncAvailability(
-                    ![SyncState.syncFailed, .desynchronized, .transportFailed].contains(diagnostics.syncState)
+                    ![SyncState.syncFailed, .desynchronized, .transportFailed, .localOverload]
+                        .contains(diagnostics.syncState)
                 )
             }
             _syncPlayback = State(initialValue: presenter)

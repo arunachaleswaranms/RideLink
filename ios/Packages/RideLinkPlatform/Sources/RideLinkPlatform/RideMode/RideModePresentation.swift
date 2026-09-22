@@ -25,7 +25,7 @@ public enum RideModePresentation {
         case .waitingForContent: return "Waiting for content"
         case .synced: return "Synchronized"
         case .syncFailed: return "Sync failed — local music continues"
-        case .desynchronized, .transportFailed: return "Sync unavailable — local music continues"
+        case .desynchronized, .transportFailed, .localOverload: return "Sync unavailable — local music continues"
         }
     }
 

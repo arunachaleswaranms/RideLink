@@ -34,9 +34,11 @@ import com.ridelink.core.playback.QueueCommandHeader
 import com.ridelink.core.playback.QueueMessage
 import com.ridelink.core.playback.ScheduledCommand
 import com.ridelink.core.playback.ScheduledCommandDecision
+import com.ridelink.core.playback.SessionWorkLedger
 import com.ridelink.core.playback.SharedQueue
 import com.ridelink.core.playback.SharedQueueMutation
 import com.ridelink.core.playback.SharedQueueState
+import com.ridelink.core.playback.WorkReservation
 import com.ridelink.core.resync.ResyncMessage
 import com.ridelink.core.resync.ResyncPlaybackSnapshot
 import com.ridelink.core.resync.ResyncTransferInFlight
@@ -150,7 +152,24 @@ class SyncPlaybackCoordinator(
      * edge at 1 rather than producing 256 frames faster than a fake socket drains them.
      */
     outboundCapacity: Int = Phase5GateBounds.DEFAULT_OUTBOUND_CAPACITY,
+    /**
+     * ADR-024 Amendment A11: how many local playback obligations may be outstanding at once.
+     * Injectable for the same reason as every bound above — a test forces the edge at 1 or 2 rather
+     * than producing 256 commands.
+     */
+    sessionWorkCapacity: Int = Phase5GateBounds.DEFAULT_SESSION_WORK_CAPACITY,
 ) {
+    /**
+     * ADR-024 **Amendment A11**: the bound on retained local playback work, and the reason a
+     * delivered authoritative command always has somewhere to land.
+     *
+     * Reserved *before* the command can be delivered ([issue] on the leader,
+     * [admitAuthoritativeCommand] on a follower), spent by the apply node and by the scheduled node
+     * that node arms, and released when both are done. Phase 8's first attempt counted live task
+     * nodes and refused at node-creation time — which on the leader is *after* the frame reached the
+     * peer — so an overflow abandoned authority the follower had already applied.
+     */
+    private val workLedger = SessionWorkLedger(sessionWorkCapacity)
     private val _diagnostics = MutableStateFlow(SyncPlaybackDiagnostics())
     val diagnostics: StateFlow<SyncPlaybackDiagnostics> = _diagnostics.asStateFlow()
 
@@ -700,6 +719,17 @@ class SyncPlaybackCoordinator(
         DEFERRED_CLOCK,
 
         /**
+         * ADR-024 Amendment A11: the reconciliation is genuinely needed and this device has no
+         * capacity left to represent the local work it would create. The snapshot is retained in
+         * [DeferredEvent.PlaybackState] carrying the same obligation id and re-attempted by the
+         * drain, exactly as [DEFERRED_CLOCK] is — so ADR-028 Amendment A4's invariant ("every
+         * `DEFERRED_*` corresponds to actual retained work carrying the same obligation id") holds
+         * here too. Distinct from [DEFERRED_CLOCK] because the clock is fine and saying otherwise
+         * would send a future reader to the estimator.
+         */
+        DEFERRED_CAPACITY,
+
+        /**
          * Independent-review Blocker 2, section 22: the snapshot names a track this device does not
          * have locally. PROTOCOL §5 rule 4's existing Phase 4 transfer-request path already fires
          * (unchanged); the snapshot is retained in [DeferredEvent.PlaybackState] the same way a
@@ -1111,7 +1141,18 @@ class SyncPlaybackCoordinator(
      * delivered is abandoned. Recovery is a new session, which clears the latch in
      * [resetForNewSession].
      */
-    private fun failClosedOutbound(generation: Long) {
+    private fun failClosedOutbound(
+        generation: Long,
+        /**
+         * ADR-024 Amendment A11: what the rider is told. [SyncState.TRANSPORT_FAILED] for every
+         * pre-existing caller — the write failed, or the ordered outbound path was full because the
+         * socket is not draining. [SyncState.LOCAL_OVERLOAD] for the one caller where the transport
+         * was never asked: this device could not guarantee it could honour another command locally,
+         * so it refused the command before sending it. The posture is identical; calling them the
+         * same thing would not be true.
+         */
+        state: SyncState = SyncState.TRANSPORT_FAILED,
+    ) {
         // A dead session needs no latch: its authority is already gone, and latching would then
         // survive into the session that replaced it.
         if (generation != session.currentAuthGeneration) return
@@ -1131,7 +1172,7 @@ class SyncPlaybackCoordinator(
         scope.launch { restoreRate() }
         _diagnostics.update {
             it.copy(
-                syncState = SyncState.TRANSPORT_FAILED,
+                syncState = state,
                 outboundAuthorityLost = true,
                 deferredCommandCount = 0,
                 localDriftMs = null,
@@ -1151,69 +1192,98 @@ class SyncPlaybackCoordinator(
      */
     private fun chainApply(
         generation: Long,
+        /**
+         * ADR-024 Amendment A11: the capacity this apply spends, reserved by [issue] **before** the
+         * frame could reach the peer. Released when this node finishes — unless the node arms a
+         * scheduled action, which joins the same obligation first, so the obligation outlives the
+         * apply exactly as far as the audible effect it promised does.
+         */
+        reservation: WorkReservation,
         action: suspend () -> Unit,
     ) {
-        if (!admitChainNode(generation)) return
         val previous = applyChain
         applyChain =
             scope.launch(sessionChains) {
-                previous?.join()
-                // Amendment A3 Finding A: waiting for the node ahead is a suspension like any other,
-                // and an authentication boundary can land inside it — which is the whole defect. The
-                // cancellation check is cheap and prompt; the generation is what is *decisive*,
-                // because the node ahead may have been parked in a player call that ignored the
-                // cancellation entirely.
-                currentCoroutineContext().ensureActive()
-                if (!stillCurrent(generation)) return@launch
-                action()
+                try {
+                    previous?.join()
+                    // Amendment A3 Finding A: waiting for the node ahead is a suspension like any
+                    // other, and an authentication boundary can land inside it — which is the whole
+                    // defect. The cancellation check is cheap and prompt; the generation is what is
+                    // *decisive*, because the node ahead may have been parked in a player call that
+                    // ignored the cancellation entirely.
+                    currentCoroutineContext().ensureActive()
+                    if (!stillCurrent(generation)) return@launch
+                    action()
+                } finally {
+                    // Amendment A11: the apply phase is over however it ended — applied, refused for
+                    // a retired lifetime, or cancelled outright. A boundary may have released this
+                    // obligation already, in which case this is a no-op on an id the ledger no longer
+                    // holds and can never touch the reservation that replaced it.
+                    releaseWork(reservation)
+                }
             }
     }
 
-    /** The wire queue is bounded; its downstream apply and scheduled work must be bounded too. */
-    @Suppress("ReturnCount") // authority proof, capacity admission, then terminal overflow refusal
-    private fun admitChainNode(generation: Long): Boolean {
-        if (!stillCurrent(generation)) return false
-        if (sessionChains.children.count() < Phase5GateBounds.DEFAULT_SESSION_WORK_CAPACITY) return true
-        // No suspension: retire exactly the authority whose work exceeded the bound.
-        role = null
-        syncEnabled = false
-        synchronizedModeEpoch += 1
-        playbackFence.supersede()
-        playRequestFence.supersede()
-        tickJob?.cancel()
-        tickJob = null
-        deferredDrainJob?.cancel()
-        deferredDrainJob = null
-        sessionChains.cancel()
-        sessionChains = SupervisorJob(scope.coroutineContext[Job])
-        applyChain = null
-        scheduledChain = null
-        discardDeferredEvents()
-        pendingPlay = null
-        transferRequestedForToken = null
-        pendingStateSnapshotReply = null
-        timeline = null
-        currentPlaybackIdentity = null
-        rideAuthorityEpoch = 0
-        lastAppliedSeq = null
-        lastReceivedSeq = null
-        driftState = DriftController.reset()
-        _diagnostics.update {
-            it.copy(
-                role = null,
-                syncState = SyncState.TRANSPORT_FAILED,
-                lastAppliedCommandSeq = null,
-                lastReceivedCommandSeq = null,
-                currentTrackHash = null,
-                deferredCommandCount = 0,
-                playbackRate = DriftController.RATE_NORMAL,
-            )
+    /**
+     * Takes capacity for one local playback obligation, or answers `null` (ADR-024 Amendment A11).
+     *
+     * **Every caller is somewhere the answer can still change what reaches the wire.** A `null` here
+     * is the whole point of the amendment: the leader has not sent anything yet, so it refuses the
+     * command outright; a follower has not spent the `command_seq` yet, so it declares itself
+     * desynchronised and lets the existing reconciliation repair it; a replay leaves the work where
+     * it already is. None of them abandons authority the peer already holds, which is precisely what
+     * Phase 8's first attempt did.
+     */
+    private fun reserveWork(generation: Long): WorkReservation? {
+        val reservation = workLedger.reserve(generation)
+        if (reservation == null) {
+            _diagnostics.update { it.copy(workCapacityRefusedCount = it.workCapacityRefusedCount + 1) }
         }
-        scope.launch { restoreRate() }
-        return false
+        publishRetainedWork()
+        return reservation
+    }
+
+    private fun releaseWork(reservation: WorkReservation) {
+        workLedger.leavePhase(reservation)
+        publishRetainedWork()
+    }
+
+    /**
+     * Whether a reservation is *likely* to succeed — a pre-check, never an authority.
+     *
+     * This pass's own fresh-fix audit: [drainHeldPlaybackState] pops its item **before** the apply
+     * that needs capacity, and the apply re-appends it when there is none. With no pre-check the
+     * drain pops the same item, fails, re-appends and pops it again in a tight synchronous loop —
+     * the exact shape the clock and content pre-checks above it already exist to prevent. It is
+     * deliberately advisory: [reserveWork] is still what decides, so a reservation taken between
+     * this check and that one merely costs one extra drain iteration rather than correctness.
+     */
+    private fun hasWorkCapacity(): Boolean = workLedger.liveCount < workLedger.capacity
+
+    private fun publishRetainedWork() {
+        val live = workLedger.liveCount
+        _diagnostics.update {
+            it.copy(retainedWorkCount = live, peakRetainedWorkCount = maxOf(it.peakRetainedWorkCount, live))
+        }
+    }
+
+    /**
+     * A follower could not take responsibility for more authoritative work (ADR-024 Amendment A11).
+     *
+     * The same explicit halt-and-reconcile posture as an ingress overflow or a held-stream overflow,
+     * and for exactly the same reason: more authority is outstanding than this device can honestly
+     * account for. **No sequence number is spent**, so the authoritative snapshot that reconciles us
+     * decides where ordering resumes (Amendment A1 Finding C's rule). Deliberately *not* the
+     * leader's fail-closed posture — a follower has delivered nothing and owes the peer nothing.
+     */
+    private fun onWorkCapacityExhausted() {
+        latchDesynchronized()
     }
 
     internal val retainedChainNodeCount: Int get() = sessionChains.children.count()
+
+    /** The bound a boundedness test reads: outstanding local obligations, never task objects. */
+    internal val retainedWorkCount: Int get() = workLedger.liveCount
 
     // --- session lifecycle -------------------------------------------------------------------
 
@@ -1229,6 +1299,7 @@ class SyncPlaybackCoordinator(
         val heldReply = pendingStateSnapshotReply
         resetForNewSession()
         role = if (isLocalLeader) PlaybackRole.LEADER else PlaybackRole.FOLLOWER
+        establishedGeneration = session.currentAuthGeneration
         _diagnostics.update { it.copy(role = role, sessionGeneration = session.currentAuthGeneration) }
         tickJob = scope.launch { tickLoop(session.currentAuthGeneration) }
         flushPendingStateSnapshotReply(heldReply)
@@ -1275,6 +1346,17 @@ class SyncPlaybackCoordinator(
     private var pendingStateSnapshotReply: PendingStateSnapshotReply? = null
 
     /**
+     * The authenticated control generation this coordinator last **established** a role under.
+     *
+     * ADR-024 Amendment A11 needs it because [resetForNewSession] runs *before* the successor's role
+     * is installed, so `session.currentAuthGeneration` there is already the new lifetime — reading
+     * it would retire the successor's own reservations. Recorded when the role is installed, and
+     * compared rather than re-derived, which is this repository's standing rule for exactly this
+     * class of question.
+     */
+    private var establishedGeneration: Long? = null
+
+    /**
      * ADR-004: "A Wi-Fi drop does **not** interrupt music. Both phones keep playing; only
      * synchronisation pauses." Local audio is deliberately left alone here — what is torn down is
      * every *coordination* obligation: scheduled work is superseded, correction stops, and the rate
@@ -1286,6 +1368,9 @@ class SyncPlaybackCoordinator(
     }
 
     private fun resetForNewSession() {
+        // ADR-024 Amendment A11: which lifetime is ending, captured before anything below can move.
+        val retiringGeneration = establishedGeneration
+        establishedGeneration = null
         role = null
         syncEnabled = false
         // Round 8: a `STATE_REQUEST` held for a session that never arrived belongs to a lifetime
@@ -1320,6 +1405,16 @@ class SyncPlaybackCoordinator(
         // Frames still queued outbound stay physically queued and become inert, because each carries
         // the generation that authorised it and `outboundUsable` refuses to write them.
         outboundAuthorityLost = false
+        // ADR-024 Amendment A11: and so does every local obligation, because the chains those
+        // obligations were spent on have just been cancelled above. `retire` is bounded by the
+        // generation that *ended* — never a blanket clear — so a successor that has already
+        // reserved capacity (the ordering `handleConnected` permits) keeps it. A node from the
+        // retired session that returns later releases an id the ledger no longer holds, which is a
+        // no-op and can never free a successor's capacity.
+        if (retiringGeneration != null) {
+            workLedger.retire(throughGeneration = retiringGeneration)
+            publishRetainedWork()
+        }
         applyChain = null
         lastReceivedSeq = null
         lastAppliedSeq = null
@@ -1541,10 +1636,22 @@ class SyncPlaybackCoordinator(
         }
         val estimate = readyEstimate() ?: return
         var admitted = false
+        var capacityRefused = false
         commandMutex.withLock {
             if (!stillCurrent(generation) || outboundAuthorityLost) return
             // Round 7: `readyEstimate` above suspends, and End Ride moves no control generation.
             if (!rideStillLive(ride)) return
+            // **ADR-024 Amendment A11: capacity before delivery, in the same critical section as the
+            // `command_seq` allocation and the hand-off to the wire.** This is the one placement
+            // that makes the invariant structural: the peer cannot come to rely on a command this
+            // device has no room left to honour, because the command is never stamped, never
+            // enqueued and never written. Phase 8's first attempt asked the same question at the
+            // *apply* node, which on this side of the pipeline is after the transport said yes.
+            val reservation = reserveWork(generation)
+            if (reservation == null) {
+                capacityRefused = true
+                return@withLock
+            }
             val seq = nextSeq
             val header =
                 PlaybackCommandHeader(
@@ -1557,13 +1664,26 @@ class SyncPlaybackCoordinator(
             admitted =
                 enqueueOutbound(
                     Outbound(generation, OutboundAuthority.AUTHORITATIVE, Outbound.Frame.Playback(built)) { outcome ->
-                        onCommandOutcome(seq, built, generation, ride, estimate, outcome)
+                        onCommandOutcome(seq, built, generation, ride, estimate, reservation, outcome)
                     },
                 )
             // Amendment A2 §6: a `command_seq` becomes authoritative exactly when the frame carrying
             // it enters the outbound authority pipeline, and not a moment earlier. A refused
             // candidate leaves no gap, because it was never assigned.
-            if (admitted) nextSeq = seq + 1
+            // Amendment A11: and its reservation goes straight back, so a refused admission cannot
+            // consume capacity. Repeated refusals therefore leave the bound exactly where it was.
+            if (admitted) nextSeq = seq + 1 else releaseWork(reservation)
+        }
+        if (capacityRefused) {
+            // Amendment A11. Deliberately the *existing* fail-closed posture rather than a new one:
+            // an authoritative operation this device produced did not reach the peer, which is
+            // precisely what [failClosedOutbound] is for. The state it publishes is
+            // [SyncState.LOCAL_OVERLOAD] rather than [SyncState.TRANSPORT_FAILED], because the
+            // transport did not fail — nothing was ever offered to it. Sequence truth is untouched:
+            // a command that was never stamped leaves no gap, and every command already delivered
+            // keeps its local obligation and its place in `lastAppliedSeq`.
+            failClosedOutbound(generation, SyncState.LOCAL_OVERLOAD)
+            return
         }
         if (!admitted) {
             onOutboundRefused(OutboundAuthority.AUTHORITATIVE, generation)
@@ -1599,14 +1719,24 @@ class SyncPlaybackCoordinator(
          */
         ride: RideAdmission,
         estimate: SessionClockEstimate,
+        /**
+         * ADR-024 Amendment A11: the capacity [issue] took **before** this frame could be written.
+         * Released on every branch that does not hand it to [chainApply] — an unsent frame owes no
+         * local work — so a session of nothing but failed sends never consumes the bound.
+         */
+        reservation: WorkReservation,
         outcome: OutboundOutcome,
     ) {
         when (OutboundCommitGate.decide(OutboundAuthority.AUTHORITATIVE, outcome)) {
             OutboundCommit.ABORT_FAIL_CLOSED -> {
+                releaseWork(reservation)
                 failClosedOutbound(generation)
                 return
             }
-            OutboundCommit.ABORT_QUIET -> return
+            OutboundCommit.ABORT_QUIET -> {
+                releaseWork(reservation)
+                return
+            }
             OutboundCommit.COMMIT -> Unit
         }
         var committed = false
@@ -1630,11 +1760,16 @@ class SyncPlaybackCoordinator(
             lastAppliedSeq = maxOf(lastAppliedSeq ?: seq, seq)
             committed = true
         }
-        if (!committed) return
+        if (!committed) {
+            releaseWork(reservation)
+            return
+        }
         _diagnostics.update {
             it.copy(lastAppliedCommandSeq = lastAppliedSeq, lastReceivedCommandSeq = lastReceivedSeq)
         }
-        chainApply(generation) { applyAuthoritative(message, generation, ride, estimate) }
+        // Amendment A11: the reservation moves into the ordered apply, which is now guaranteed to be
+        // creatable — that guarantee *is* the fix. The node releases it when its work is done.
+        chainApply(generation, reservation) { applyAuthoritative(message, generation, ride, estimate, reservation) }
     }
 
     // --- user-facing actions (also the system media controls' path, brief §39) ------------------
@@ -2231,6 +2366,7 @@ class SyncPlaybackCoordinator(
      * the leader's replay of that same command was then correctly dropped as a duplicate. The
      * command was lost permanently, on a clock condition that resolves itself in milliseconds.
      */
+    @Suppress("ReturnCount") // one per retired-ride admission, plus Amendment A11's capacity refusal
     private suspend fun admitAuthoritativeCommand(
         message: PlaybackMessage,
         header: PlaybackCommandHeader,
@@ -2286,29 +2422,52 @@ class SyncPlaybackCoordinator(
                 startDeferredDrain(generation)
             }
             CommandAdmission.APPLY -> {
-                // Round 8, Blocker B: as the DEFER branch above, and this is the branch that
-                // publishes `lastAppliedSeq` — the field `PLAYBACK_STATE.command_seq` and
-                // `STATE_SNAPSHOT.command_seq` carry as "reflected in my authoritative playback
-                // state". [applyAuthoritative]'s own `rideStillLive` refusal is downstream of it and
-                // therefore too late to un-publish it.
-                val admitted =
-                    commandMutex.withLock {
-                        if (!rideStillLive(ride)) {
-                            false
-                        } else {
-                            lastReceivedSeq = header.commandSeq
-                            lastAppliedSeq = header.commandSeq
-                            true
-                        }
-                    }
-                if (!admitted) {
-                    onRetiredRideAdmission()
+                // **ADR-024 Amendment A11: a follower takes responsibility here, so capacity is taken
+                // here.** Before either sequence number moves — a command whose local work cannot be
+                // represented has not been accepted, and Amendment A1 Finding C's rule is that such a
+                // command does not spend its `command_seq` either. The honest answer is the existing
+                // halt-and-reconcile: the leader's next authoritative snapshot decides where ordering
+                // resumes. A follower has delivered nothing, so nothing diverges.
+                val reservation = reserveWork(generation)
+                if (reservation == null) {
+                    onWorkCapacityExhausted()
                     return
                 }
-                _diagnostics.update {
-                    it.copy(lastAppliedCommandSeq = header.commandSeq, lastReceivedCommandSeq = header.commandSeq)
+                // Released **once**, in the `finally` below, on every path out of this branch.
+                // Releasing it twice would be worse than leaking it: the scheduled action this apply
+                // may arm joins the same obligation, so a second release frees capacity a live armed
+                // effect still owns.
+                try {
+                    // Round 8, Blocker B: as the DEFER branch above, and this is the branch that
+                    // publishes `lastAppliedSeq` — the field `PLAYBACK_STATE.command_seq` and
+                    // `STATE_SNAPSHOT.command_seq` carry as "reflected in my authoritative playback
+                    // state". [applyAuthoritative]'s own `rideStillLive` refusal is downstream of it
+                    // and therefore too late to un-publish it.
+                    val admitted =
+                        commandMutex.withLock {
+                            if (!rideStillLive(ride)) {
+                                false
+                            } else {
+                                lastReceivedSeq = header.commandSeq
+                                lastAppliedSeq = header.commandSeq
+                                true
+                            }
+                        }
+                    if (!admitted) {
+                        onRetiredRideAdmission()
+                        return
+                    }
+                    _diagnostics.update {
+                        it.copy(lastAppliedCommandSeq = header.commandSeq, lastReceivedCommandSeq = header.commandSeq)
+                    }
+                    applyAuthoritative(message, generation, ride, requireNotNull(estimate), reservation)
+                } finally {
+                    // The apply phase is over. Any scheduled action it armed joined this obligation
+                    // synchronously before this line, so the obligation survives exactly as long as
+                    // the effect it promised. A cancellation here releases it too, which is what
+                    // stops a boundary-cancelled drain leaking capacity past its own `retire`.
+                    releaseWork(reservation)
                 }
-                applyAuthoritative(message, generation, ride, requireNotNull(estimate))
             }
         }
     }
@@ -2512,50 +2671,76 @@ class SyncPlaybackCoordinator(
             return DrainStep.STOP
         }
         val seq = heldHeader?.commandSeq
-        // The stream witness, the ride proof, the pop and the sequence write are **one** critical
-        // section, in that order.
-        //
-        // This pass's own fresh-fix audit found the first draft had the ride proof and the sequence
-        // write inside the lock but the witness *after* it — so a stream that shortened inside the
-        // lock acquisition left `lastAppliedSeq` advanced for a command that was never popped and
-        // never applied, which is the very defect this change exists to remove, reintroduced by the
-        // change itself. Three things can legitimately shorten the stream here
-        // ([latchDesynchronized], [applyPeerPlaybackState]'s supersede rule, [discardDeferredEvents]),
-        // so the witness has to come first, and it has to be inside the same lock as the write.
-        val verdict =
-            commandMutex.withLock {
-                when {
-                    heldStreamChanged(held) -> HeldCommandVerdict.MOVED
-                    !rideStillLive(held.ride) -> HeldCommandVerdict.RETIRED
-                    else -> {
-                        deferredEvents.removeFirst()
-                        if (seq != null) lastAppliedSeq = seq
-                        HeldCommandVerdict.APPLY
+        // **ADR-024 Amendment A11**: a replay takes responsibility exactly as a first arrival does,
+        // so it takes capacity the same way — before the pop and before `lastAppliedSeq` moves.
+        // With none, the command stays exactly where it is: still head of the held stream, still
+        // owning its `command_seq`, re-attempted on the drain's own cadence. Nothing is abandoned
+        // and nothing is claimed.
+        val reservation = reserveWork(held.generation) ?: return DrainStep.STOP
+        return applyHeldCommand(held, estimate, seq, reservation)
+    }
+
+    /**
+     * [drainHeldCommand]'s body once capacity is held, split out so the obligation has **one**
+     * release on every path (this pass's own fresh-fix audit: three explicit releases across three
+     * branches is how a double release gets written).
+     */
+    @Suppress("ReturnCount") // one per verdict
+    private suspend fun applyHeldCommand(
+        held: DeferredEvent.Command,
+        estimate: SessionClockEstimate,
+        seq: Long?,
+        reservation: WorkReservation,
+    ): DrainStep {
+        try {
+            // The stream witness, the ride proof, the pop and the sequence write are **one** critical
+            // section, in that order.
+            //
+            // Independent-review round 8's own fresh-fix audit found the first draft had the ride
+            // proof and the sequence write inside the lock but the witness *after* it — so a stream
+            // that shortened inside the lock acquisition left `lastAppliedSeq` advanced for a command
+            // that was never popped and never applied. Three things can legitimately shorten the
+            // stream here ([latchDesynchronized], [applyPeerPlaybackState]'s supersede rule,
+            // [discardDeferredEvents]), so the witness has to come first, inside the same lock as the
+            // write.
+            val verdict =
+                commandMutex.withLock {
+                    when {
+                        heldStreamChanged(held) -> HeldCommandVerdict.MOVED
+                        !rideStillLive(held.ride) -> HeldCommandVerdict.RETIRED
+                        else -> {
+                            deferredEvents.removeFirst()
+                            if (seq != null) lastAppliedSeq = seq
+                            HeldCommandVerdict.APPLY
+                        }
                     }
                 }
+            when (verdict) {
+                // Retired rather than left: an item behind this one may belong to a newer, still-live
+                // ride, and a dead head would wedge it (round 3, Blocker A). The witness above proved
+                // `held` is still the head, so this pops the item it means to.
+                HeldCommandVerdict.RETIRED -> {
+                    retireHeldRideEvent(held)
+                    return DrainStep.CONTINUE
+                }
+                HeldCommandVerdict.MOVED -> return DrainStep.STOP
+                HeldCommandVerdict.APPLY -> Unit
             }
-        when (verdict) {
-            // Retired rather than left: an item behind this one may belong to a newer, still-live
-            // ride, and a dead head would wedge it (round 3, Blocker A). The witness above proved
-            // `held` is still the head, so this pops the item it means to.
-            HeldCommandVerdict.RETIRED -> {
-                retireHeldRideEvent(held)
-                return DrainStep.CONTINUE
+            _diagnostics.update {
+                it.copy(
+                    lastAppliedCommandSeq = seq,
+                    deferredCommandCount = deferredEvents.size,
+                    recoveredCommandCount = it.recoveredCommandCount + 1,
+                    clockReady = true,
+                )
             }
-            HeldCommandVerdict.MOVED -> return DrainStep.STOP
-            HeldCommandVerdict.APPLY -> Unit
+            // Round 7: the ride the command was **admitted** under, replayed unchanged.
+            applyAuthoritative(held.message, held.generation, held.ride, estimate, reservation)
+            return DrainStep.CONTINUE
+        } finally {
+            // ADR-024 Amendment A11: exactly one release, on every path including cancellation.
+            releaseWork(reservation)
         }
-        _diagnostics.update {
-            it.copy(
-                lastAppliedCommandSeq = seq,
-                deferredCommandCount = deferredEvents.size,
-                recoveredCommandCount = it.recoveredCommandCount + 1,
-                clockReady = true,
-            )
-        }
-        // Round 7: the ride the command was **admitted** under, replayed unchanged.
-        applyAuthoritative(held.message, held.generation, held.ride, estimate)
-        return DrainStep.CONTINUE
     }
 
     /**
@@ -2587,6 +2772,10 @@ class SyncPlaybackCoordinator(
     private suspend fun drainHeldPlaybackState(held: DeferredEvent.PlaybackState): DrainStep {
         val estimate = estimate()
         if (estimate == null || !estimate.ready) return DrainStep.STOP
+        // Amendment A11, and this pass's own fresh-fix audit: the same shape as the clock and
+        // content pre-checks. `restoreFromPlaybackState` re-appends this anchor when it cannot
+        // reserve, so popping it first would pop-fail-re-append in a tight loop.
+        if (!hasWorkCapacity()) return DrainStep.STOP
         val heldTrackHash = held.message.trackHash
         if (heldTrackHash != null && content.resolve(heldTrackHash) == null) return DrainStep.STOP
         if (heldStreamChanged(held)) return DrainStep.STOP
@@ -2681,7 +2870,12 @@ class SyncPlaybackCoordinator(
             StateSnapshotOutcome.REJECTED_ROLE,
             StateSnapshotOutcome.REJECTED_RIDE,
             -> onReconciliationCancelled?.invoke(obligation, generation)
-            StateSnapshotOutcome.DEFERRED_CLOCK, StateSnapshotOutcome.DEFERRED_CONTENT -> Unit
+            // Non-terminal: the anchor is retained, carrying this same obligation id, and the
+            // drain will report on it. ADR-024 Amendment A11 adds the third for the same reason.
+            StateSnapshotOutcome.DEFERRED_CLOCK,
+            StateSnapshotOutcome.DEFERRED_CONTENT,
+            StateSnapshotOutcome.DEFERRED_CAPACITY,
+            -> Unit
         }
     }
 
@@ -2829,6 +3023,12 @@ class SyncPlaybackCoordinator(
          */
         ride: RideAdmission,
         estimate: SessionClockEstimate,
+        /**
+         * ADR-024 Amendment A11: the obligation the **caller** reserved when it took responsibility
+         * for this command, threaded rather than re-taken. A replay must not mint a replacement
+         * capacity any more than it may mint a replacement [RideAdmission].
+         */
+        reservation: WorkReservation,
     ) {
         if (!stillCurrent(generation)) return
         when (message) {
@@ -2841,6 +3041,7 @@ class SyncPlaybackCoordinator(
                     generation,
                     estimate,
                     ride = ride,
+                    reservation = reservation,
                 )
             is PlaybackMessage.Pause ->
                 applyTransport(
@@ -2850,6 +3051,7 @@ class SyncPlaybackCoordinator(
                     playing = false,
                     positionMs = message.positionMs,
                     ride = ride,
+                    reservation = reservation,
                 )
             is PlaybackMessage.Resume ->
                 applyTransport(
@@ -2859,12 +3061,14 @@ class SyncPlaybackCoordinator(
                     playing = true,
                     positionMs = message.positionMs,
                     ride = ride,
+                    reservation = reservation,
                 )
-            is PlaybackMessage.Seek -> applySeek(message.header, message.targetPositionMs, generation, estimate, ride)
+            is PlaybackMessage.Seek ->
+                applySeek(message.header, message.targetPositionMs, generation, estimate, ride, reservation)
             is PlaybackMessage.Next ->
-                applyStep(message.header, delta = 1, generation = generation, estimate = estimate, ride = ride)
+                applyStep(message.header, 1, generation, estimate, ride, reservation)
             is PlaybackMessage.Previous ->
-                applyStep(message.header, delta = -1, generation = generation, estimate = estimate, ride = ride)
+                applyStep(message.header, -1, generation, estimate, ride, reservation)
             else -> Unit
         }
     }
@@ -2901,6 +3105,8 @@ class SyncPlaybackCoordinator(
          * rounds 4 §17 and 7). See [RideAdmission].
          */
         ride: RideAdmission,
+        /** ADR-024 Amendment A11: the caller's obligation. See [applyAuthoritative]. */
+        reservation: WorkReservation,
     ): StateSnapshotOutcome {
         // Amendment A3 Finding B: reached from `applyAuthoritative`, from `applyStep` and from
         // `restoreFromPlaybackState`, and `content.resolve` is real I/O. Proved on entry so a Play
@@ -2981,7 +3187,7 @@ class SyncPlaybackCoordinator(
             markSynced()
             return StateSnapshotOutcome.APPLIED
         }
-        scheduleAt(header.effectiveAtSessionUs, estimate, generation, token, listOf(PlayerStep.Start))
+        scheduleAt(header.effectiveAtSessionUs, estimate, generation, token, listOf(PlayerStep.Start), reservation)
         return StateSnapshotOutcome.APPLIED
     }
 
@@ -3004,6 +3210,8 @@ class SyncPlaybackCoordinator(
         playing: Boolean,
         positionMs: Long,
         ride: RideAdmission,
+        /** ADR-024 Amendment A11: the caller's obligation. See [applyAuthoritative]. */
+        reservation: WorkReservation,
     ) {
         if (!stillCurrent(generation)) return
         // Independent-review round 4, §17: End Ride moves the ride lifetime without moving the
@@ -3019,7 +3227,7 @@ class SyncPlaybackCoordinator(
             } else {
                 listOf(PlayerStep.Pause, PlayerStep.Seek(positionMs))
             }
-        scheduleAt(header.effectiveAtSessionUs, estimate, generation, token, steps)
+        scheduleAt(header.effectiveAtSessionUs, estimate, generation, token, steps, reservation)
     }
 
     /** [applyTransport]'s proof, for the same reason and in the same position. */
@@ -3029,6 +3237,8 @@ class SyncPlaybackCoordinator(
         generation: Long,
         estimate: SessionClockEstimate,
         ride: RideAdmission,
+        /** ADR-024 Amendment A11: the caller's obligation. See [applyAuthoritative]. */
+        reservation: WorkReservation,
     ) {
         if (!stillCurrent(generation)) return
         if (!rideStillLive(ride)) return // round 4, §17; round 7 adds the second half
@@ -3040,6 +3250,7 @@ class SyncPlaybackCoordinator(
             generation,
             token,
             listOf(PlayerStep.Seek(targetPositionMs)),
+            reservation,
         )
     }
 
@@ -3055,6 +3266,8 @@ class SyncPlaybackCoordinator(
         generation: Long,
         estimate: SessionClockEstimate,
         ride: RideAdmission,
+        /** ADR-024 Amendment A11: the caller's obligation. See [applyAuthoritative]. */
+        reservation: WorkReservation,
     ) {
         // Amendment A3 Finding B: the highest-risk path in the phase, and it had no proof at all.
         // Everything below reads or writes *live* state — the shared queue, the selection, the
@@ -3095,6 +3308,7 @@ class SyncPlaybackCoordinator(
                 generation,
                 token,
                 listOf(PlayerStep.Stop, PlayerStep.ClearSelection),
+                reservation,
             )
             return
         }
@@ -3107,6 +3321,7 @@ class SyncPlaybackCoordinator(
             generation = generation,
             estimate = estimate,
             ride = ride,
+            reservation = reservation,
         )
     }
 
@@ -3124,8 +3339,17 @@ class SyncPlaybackCoordinator(
         generation: Long,
         token: Long,
         steps: List<PlayerStep>,
+        /**
+         * ADR-024 Amendment A11: the obligation this armed action belongs to, reserved at the
+         * command's own admission. [SessionWorkLedger.enterPhase] runs here, **synchronously inside**
+         * the apply phase that is still held, so the obligation can never be released between the
+         * apply deciding to arm and the armed node existing. A false answer means a lifetime boundary
+         * has already released it, so there is nothing left to arm.
+         */
+        reservation: WorkReservation,
     ) {
-        if (!admitChainNode(generation)) return
+        if (!stillCurrent(generation)) return
+        if (!workLedger.enterPhase(reservation)) return
         // Decided at *arm* time, as PROTOCOL §5 rule 2 requires: the lateness of a command is a fact
         // about when it arrived, not about when this device got round to it.
         val decision = ScheduledCommand.decide(effectiveAtSessionUs, monotonicNowUs(), estimate.offsetToLeaderUs)
@@ -3142,25 +3366,33 @@ class SyncPlaybackCoordinator(
         val previous = scheduledChain
         scheduledChain =
             scope.launch(sessionChains) {
-                previous?.join()
-                currentCoroutineContext().ensureActive()
-                if (!owns(generation, token)) return@launch
-                if (decision is ScheduledCommandDecision.Schedule) {
-                    sleeper.sleepUntil(decision.atLocalMonoUs)
+                try {
+                    previous?.join()
                     currentCoroutineContext().ensureActive()
-                    // **Amendment A3 Finding C: the ownership proof comes before the measurement.**
-                    // It used to come after. The player action itself was correctly refused, but a
-                    // Session-A deadline arriving after Session B authenticated still overwrote
-                    // Session B's `lastScheduleErrorUs` — the FR-023 figure a rider reads as "this
-                    // is how well the last synchronised command landed". "Diagnostics only" is not
-                    // an exemption: a superseded action has *zero* effects (A1 Finding F).
                     if (!owns(generation, token)) return@launch
-                    // The software scheduling error, measured rather than assumed. It says nothing
-                    // about audible alignment: the decoder, the mixer and two Bluetooth hops all sit
-                    // between this instant and a listener's ear (brief §23/§66).
-                    _diagnostics.update { it.copy(lastScheduleErrorUs = monotonicNowUs() - decision.atLocalMonoUs) }
+                    if (decision is ScheduledCommandDecision.Schedule) {
+                        sleeper.sleepUntil(decision.atLocalMonoUs)
+                        currentCoroutineContext().ensureActive()
+                        // **Amendment A3 Finding C: the ownership proof comes before the
+                        // measurement.** It used to come after. The player action itself was
+                        // correctly refused, but a Session-A deadline arriving after Session B
+                        // authenticated still overwrote Session B's `lastScheduleErrorUs` — the
+                        // FR-023 figure a rider reads as "this is how well the last synchronised
+                        // command landed". "Diagnostics only" is not an exemption: a superseded
+                        // action has *zero* effects (A1 Finding F).
+                        if (!owns(generation, token)) return@launch
+                        // The software scheduling error, measured rather than assumed. It says
+                        // nothing about audible alignment: the decoder, the mixer and two Bluetooth
+                        // hops all sit between this instant and a listener's ear (brief §23/§66).
+                        _diagnostics.update {
+                            it.copy(lastScheduleErrorUs = monotonicNowUs() - decision.atLocalMonoUs)
+                        }
+                    }
+                    if (runOwnedSteps(steps, generation, token)) markSynced()
+                } finally {
+                    // Amendment A11: the scheduled phase is over, so the obligation is discharged.
+                    releaseWork(reservation)
                 }
-                if (runOwnedSteps(steps, generation, token)) markSynced()
             }
     }
 
@@ -3819,46 +4051,99 @@ class SyncPlaybackCoordinator(
                 startDeferredDrain(generation)
                 return StateSnapshotOutcome.DEFERRED_CLOCK
             }
-        val header =
-            PlaybackCommandHeader(snapshot.commandSeq, snapshot.atSessionUs, localPeerId, snapshot.queueRevision)
-        // Independent-review round 5, Blocker 2A. This used to discard `applyPlay`'s result and
-        // return APPLIED unconditionally, on the reasoning that "resync's job is done the instant
-        // authoritative state is handed off". That is true of the *content* case and false of every
-        // other one: `applyPlay` early-returns when the control generation retires, when the
-        // playback epoch is superseded, and — the reachable one this closes — when the **ride**
-        // that authorised the reconciliation ends inside `content.resolve`. The obligation's owner
-        // was then told RECONCILED for state that was never applied, publishing ride 1's
-        // `command_seq`/`manifest_revision` as a convergence that never happened.
-        val outcome =
-            applyPlay(
-                header,
-                trackHash,
-                queueItemId,
-                snapshot.positionMs,
-                generation,
-                estimate,
-                playing = snapshot.playing,
-                ride = ride,
-            )
-        if (outcome != StateSnapshotOutcome.DEFERRED_CONTENT) return outcome
-        // A DEFERRED_* result promises the obligation is **retained** and carries the same
-        // reconciliation id, so retain it here rather than letting `applyPlay`'s own PROTOCOL §5
-        // rule 4 transfer request stand alone. In practice this is defence in depth --
-        // `onPeerPlaybackState` already proved content available before reaching here and holds it
-        // there when it is not -- so this covers only content disappearing inside the narrow window
-        // between those two resolves.
-        //
-        // Both lifetimes are re-proved immediately before the append, with no suspension between:
-        // `applyPlay` returned after `content.resolve`, and a boundary landing in that window would
-        // otherwise let a retired reconciliation into the live session's held stream.
-        if (!stillCurrent(generation)) return StateSnapshotOutcome.REJECTED_STALE
-        if (!rideStillLive(ride)) return StateSnapshotOutcome.REJECTED_RIDE
-        deferredEvents.addLast(DeferredEvent.PlaybackState(snapshot, generation, reconciliation, ride))
-        _diagnostics.update {
-            it.copy(deferredCommandCount = deferredEvents.size, pendingPlaybackReconciliationGeneration = generation)
+        // **ADR-024 Amendment A11.** This restore's `applyPlay` can arm a scheduled start, which is
+        // retained local work, so it needs an obligation of its own — the command paths' obligations
+        // belong to their own commands. Taken here, immediately before the only call that can create
+        // that work and after both lifetimes have been proved, with no suspension between. When
+        // there is no capacity the snapshot is **retained**, not dropped: the drain re-attempts it
+        // and its reconciliation obligation stays live and owned.
+        val reservation =
+            reserveWork(generation) ?: run {
+                if (!stillCurrent(generation)) return StateSnapshotOutcome.REJECTED_STALE
+                if (!rideStillLive(ride)) return StateSnapshotOutcome.REJECTED_RIDE
+                deferredEvents.addLast(DeferredEvent.PlaybackState(snapshot, generation, reconciliation, ride))
+                _diagnostics.update {
+                    it.copy(deferredCommandCount = deferredEvents.size, pendingPlaybackReconciliationGeneration = generation)
+                }
+                startDeferredDrain(generation)
+                return StateSnapshotOutcome.DEFERRED_CAPACITY
+            }
+        return restoreWithReservation(
+            snapshot = snapshot,
+            trackHash = trackHash,
+            queueItemId = queueItemId,
+            generation = generation,
+            reconciliation = reconciliation,
+            ride = ride,
+            estimate = estimate,
+            reservation = reservation,
+        )
+    }
+
+    /**
+     * [restoreFromPlaybackState]'s body once capacity is held, split out so the obligation has
+     * **one** release on every path — including a cancellation, which is what stops a
+     * boundary-cancelled drain leaking capacity past its own `retire`.
+     */
+    @Suppress("ReturnCount", "LongParameterList") // one early-out per lifetime re-proof
+    private suspend fun restoreWithReservation(
+        snapshot: PlaybackMessage.PlaybackStateSnapshot,
+        trackHash: ContentHash,
+        queueItemId: String,
+        generation: Long,
+        reconciliation: Long?,
+        ride: RideAdmission,
+        estimate: SessionClockEstimate,
+        reservation: WorkReservation,
+    ): StateSnapshotOutcome {
+        try {
+            val header =
+                PlaybackCommandHeader(snapshot.commandSeq, snapshot.atSessionUs, localPeerId, snapshot.queueRevision)
+            // Independent-review round 5, Blocker 2A. This used to discard `applyPlay`'s result and
+            // return APPLIED unconditionally, on the reasoning that "resync's job is done the instant
+            // authoritative state is handed off". That is true of the *content* case and false of every
+            // other one: `applyPlay` early-returns when the control generation retires, when the
+            // playback epoch is superseded, and — the reachable one this closes — when the **ride**
+            // that authorised the reconciliation ends inside `content.resolve`. The obligation's owner
+            // was then told RECONCILED for state that was never applied, publishing ride 1's
+            // `command_seq`/`manifest_revision` as a convergence that never happened.
+            val outcome =
+                applyPlay(
+                    header,
+                    trackHash,
+                    queueItemId,
+                    snapshot.positionMs,
+                    generation,
+                    estimate,
+                    playing = snapshot.playing,
+                    ride = ride,
+                    reservation = reservation,
+                )
+            if (outcome != StateSnapshotOutcome.DEFERRED_CONTENT) return outcome
+            // A DEFERRED_* result promises the obligation is **retained** and carries the same
+            // reconciliation id, so retain it here rather than letting `applyPlay`'s own PROTOCOL §5
+            // rule 4 transfer request stand alone. In practice this is defence in depth --
+            // `onPeerPlaybackState` already proved content available before reaching here and holds it
+            // there when it is not -- so this covers only content disappearing inside the narrow window
+            // between those two resolves.
+            //
+            // Both lifetimes are re-proved immediately before the append, with no suspension between:
+            // `applyPlay` returned after `content.resolve`, and a boundary landing in that window would
+            // otherwise let a retired reconciliation into the live session's held stream.
+            if (!stillCurrent(generation)) return StateSnapshotOutcome.REJECTED_STALE
+            if (!rideStillLive(ride)) return StateSnapshotOutcome.REJECTED_RIDE
+            deferredEvents.addLast(DeferredEvent.PlaybackState(snapshot, generation, reconciliation, ride))
+            _diagnostics.update {
+                it.copy(deferredCommandCount = deferredEvents.size, pendingPlaybackReconciliationGeneration = generation)
+            }
+            startDeferredDrain(generation)
+            return StateSnapshotOutcome.DEFERRED_CONTENT
+        } finally {
+            // ADR-024 Amendment A11: the apply phase is over. A scheduled start `applyPlay` armed
+            // joined this obligation synchronously inside that call, so this releases only this
+            // phase and the armed effect keeps its own.
+            releaseWork(reservation)
         }
-        startDeferredDrain(generation)
-        return StateSnapshotOutcome.DEFERRED_CONTENT
     }
 
     private fun publishQueue() {
