@@ -9,7 +9,6 @@ import com.ridelink.core.playback.SharedQueueItem
 import com.ridelink.core.resync.ResyncMessage
 import com.ridelink.core.resync.ResyncPlaybackSnapshot
 import com.ridelink.network.control.ControlEvent
-import com.ridelink.network.control.PairingPrompt
 import com.ridelink.network.control.TestSessions
 import com.ridelink.network.playback.PlaybackSink
 import com.ridelink.network.playback.QueueSink
@@ -109,7 +108,11 @@ class CrossPlatformInteropTest {
         manager.resync.sink = inbox
 
         // ARCHITECTURE §7.1's real burst over the real socket.
-        val estimate = await(60_000) { manager.clock.estimate.value?.takeIf { it.ready } }
+        val estimate =
+            await(60_000) {
+                manager.clock.estimate.value
+                    ?.takeIf { it.ready }
+            }
         report["clockReady"] = estimate != null
         report["rttP95Us"] = estimate?.rttP95Us ?: -1L
 
@@ -227,7 +230,10 @@ class CrossPlatformInteropTest {
             }
 
     /** Records what the iOS half sent, decoded by the **production** codecs on this side. */
-    private class InteropInbox : PlaybackSink, QueueSink, ResyncSink {
+    private class InteropInbox :
+        PlaybackSink,
+        QueueSink,
+        ResyncSink {
         @Volatile var queueDescription: String? = null
 
         @Volatile var playbackStateDescription: String? = null
@@ -241,8 +247,8 @@ class CrossPlatformInteropTest {
             val state = message as? PlaybackMessage.PlaybackStateSnapshot ?: return
             playbackStateDescription =
                 "seq=${state.commandSeq} rev=${state.queueRevision} track=${state.trackHash?.value ?: "none"} " +
-                    "item=${state.queueItemId ?: "none"} pos=${state.positionMs} playing=${state.playing} " +
-                    "at=${state.atSessionUs} gen=$generation"
+                "item=${state.queueItemId ?: "none"} pos=${state.positionMs} playing=${state.playing} " +
+                "at=${state.atSessionUs} gen=$generation"
         }
 
         override fun submit(
@@ -265,6 +271,7 @@ class CrossPlatformInteropTest {
     private companion object {
         const val POLL_MS = 25L
         const val RECONNECT_SETTLE_MS = 300L
+
         /** Mirrors `SyncTestValues.ulid(8)`/`hash(8)` on the Swift side: valid ULID, valid digest. */
         const val QUEUE_ITEM_ID = "01J9Z4M0Q7XK2V8R3T6Y1N0008"
         const val HASH = "sha256:" + "0000000000000000000000000000000000000000000000000000000000000008"
