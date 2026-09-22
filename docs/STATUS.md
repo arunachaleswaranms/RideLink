@@ -1,5 +1,11 @@
 # RideLink — Status
 
+Phase 8 continuation: the iOS reset-window regression now passes with all 641 Platform tests;
+345 Core tests, 1,062 Android unit tests, 50 emulator instrumentation tests, and both simulator
+builds passed. Interactive emulator/simulator integration remains NOT VERIFIED; the live
+[PR #6](https://github.com/arunachaleswaranms/RideLink/pull/6) is draft and unmerged.
+
+
 **Current update — 22 September 2026:** Phase 7 is independently reviewed and merged at
 `48b7a8e5d07fe52010d05c1893d3f914722d80f0`; post-merge Android/iOS CI is green.
 Phase 8 — Release Hardening & Software Integration — is in progress on a dedicated branch.

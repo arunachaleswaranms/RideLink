@@ -22,7 +22,9 @@ validation remains **DEFERRED — HARDWARE NOT AVAILABLE**.
 Fresh-fix checks: no external callback executes under the new log lock; snapshot readers retain
 independent values. Overflow does not wait for the parked decoder, mint successor ownership, or
 publish rejected work as applied. Chain-node ids remain monotonic, so old completion cannot erase
-a new node. The parked-apply test awaits the actual predecessor task, not a fixed number of yields.
+a new node. Existing ADR-024 Amendment A4 permits terminal absolute rate restoration to 1.0
+as a cleanup effect; it does not authorize any post-suspension coordinator mutation. This phase
+retains that baseline exception rather than claiming that cleanup makes no player calls. The parked-apply test awaits the actual predecessor task, not a fixed number of yields.
 A successor's apply task is also awaited before clearing the test's effect recording.
 
 ## Lifecycle and cross-feature coverage map
@@ -138,12 +140,12 @@ a test being listed above.
 | Gate | Current evidence |
 |---|---|
 | Android unit/static/build | 1,062 unit tests passed: app 264, audio 33, core 451, data 31, network 283. Full ktlint, detekt, lint, assembleDebug and assembleRelease passed with JDK 21 |
-| Android emulator | All 5 app instrumentation tests passed, including 20 activity recreation/foreground cycles; other module instrumented tests are included in the successful Gradle run |
+| Android emulator | 50 instrumentation tests passed on the API 36 emulator: app 5, audio 11, data 34. The app suite includes 20 activity recreation/foreground cycles |
 | iOS Core | 345 tests passed |
-| iOS Platform | 641 tests passed after the deterministic reset-window fix, including the real-TLS reconnect stress suite |
-| iOS Simulator builds | Debug rebuilt successfully after the reset fix; Release rebuild running. Previous Debug installed and launched; this is launch evidence only |
+| iOS Platform | 641 tests passed after the deterministic reset-window fix; a separate repeat of all 25 real-TLS reconnect stress tests also passed |
+| iOS Simulator builds | Debug and Release builds passed after the reset fix. Debug installed and launched; this is launch evidence only |
 | Interactive emulator ↔ simulator journey | NOT VERIFIED. The UI-control tool cannot attach to Simulator; launch/build success is not an interactive lifecycle pass |
-| GitHub Actions / PR | Draft [PR #6](https://github.com/arunachaleswaranms/RideLink/pull/6). At `1e6e889`, security run 35684841003 passed all five jobs and CI run 35684840900 passed Android but failed iOS at reconnect cycle 93. The reset fix is undergoing fresh exact-head validation |
+| GitHub Actions / PR | Draft [PR #6](https://github.com/arunachaleswaranms/RideLink/pull/6). At `1e6e889`, security run 35684841003 passed all five jobs and CI run 35684840900 passed Android but failed iOS at reconnect cycle 93. Fresh validation for the reset fix: [CI run 35712994331](https://github.com/arunachaleswaranms/RideLink/actions/runs/35712994331), [Security run 35712994259](https://github.com/arunachaleswaranms/RideLink/actions/runs/35712994259), source head `fcd58510d1ef31ec1a03cb6f26145512880f7fcf`. Consult the PR checks for the final head results |
 
 The interactive software gate is outstanding. This record does not claim Phase 8 software closure.
 
