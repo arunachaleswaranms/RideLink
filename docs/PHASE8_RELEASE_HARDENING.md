@@ -17,6 +17,7 @@ validation remains **DEFERRED — HARDWARE NOT AVAILABLE**.
 | Bounded wire queues feed unbounded task chains | Keep the injected deadline clock fixed and commit 300 PAUSE commands; iOS retains 300 live scheduled/apply tasks | Combined 256-node limit; overflow retires authority synchronously, invalidates original tokens and reports Sync unavailable. Local audio continues; new authenticated connection restores eligibility | Mirrored 1,000-command tests; parked non-cancellable load, fresh connection, successor track, then predecessor release. Original iOS test observed 300 > 256 |
 | Riding surface omits synchronization failure state | Ride Mode labels connection but provides no sync/content-wait/failure explanation | Derive a short label from existing sync diagnostics; connection loss takes precedence | Both presentation suites exhaust all sync states under disconnected/reconnecting |
 | Reconnect stress harness can advance before event forwarding completes | Its readiness check reads a generation published inside handleConnected before resync.onConnected has completed; a subsequent cycle can overtake that task | Track the completed forwarding generation in the test rig; report the exact pending cycle and dump state on timeout | Isolated 100-cycle test and the complete platform suite; no production timeout increased |
+| State request disappears during iOS connection reset | Park reset at the generation query after the pending slot is cleared; admit a request, then finish reset. Only the pre-reset candidate was flushed | Flush the newest original-generation candidate admitted before or during reset; existing generation proof still refuses retired requests | Three deterministic parked-reset tests: same-lifetime liveness, stale-only refusal followed by fresh liveness, and stale arrival cannot displace a live pre-reset request |
 
 Fresh-fix checks: no external callback executes under the new log lock; snapshot readers retain
 independent values. Overflow does not wait for the parked decoder, mint successor ownership, or
@@ -136,13 +137,15 @@ a test being listed above.
 
 | Gate | Current evidence |
 |---|---|
-| Android unit/static/build | Full unit run passed; ktlint passed. Follow-up detekt/lint/Debug/Release build passed after an explicit ReturnCount suppression for the three-outcome admission guard |
-| Android emulator | All 5 app instrumentation tests passed, including 20 activity recreation/foreground cycles; other module instrumented tests are included in the Gradle run |
-| iOS Core | 345 tests passed before the final shared-capacity constant addition; final run pending |
-| iOS Platform | Full run: 637 tests, zero failures after the forwarding completion latch; additional parked-apply fresh-fix test pending final verification |
-| iOS Simulator builds | Debug built and installed; launch returned a process id. Release/final Debug rebuild pending |
-| Interactive emulator ↔ simulator journey | Not yet verified. The UI-control tool could not attach to Simulator; launch/build success is not an interactive lifecycle pass |
-| Exact-head GitHub Actions / PR | Pending push and PR creation |
+| Android unit/static/build | 1,062 unit tests passed: app 264, audio 33, core 451, data 31, network 283. Full ktlint, detekt, lint, assembleDebug and assembleRelease passed with JDK 21 |
+| Android emulator | All 5 app instrumentation tests passed, including 20 activity recreation/foreground cycles; other module instrumented tests are included in the successful Gradle run |
+| iOS Core | 345 tests passed |
+| iOS Platform | 641 tests passed after the deterministic reset-window fix, including the real-TLS reconnect stress suite |
+| iOS Simulator builds | Debug rebuilt successfully after the reset fix; Release rebuild running. Previous Debug installed and launched; this is launch evidence only |
+| Interactive emulator ↔ simulator journey | NOT VERIFIED. The UI-control tool cannot attach to Simulator; launch/build success is not an interactive lifecycle pass |
+| GitHub Actions / PR | Draft [PR #6](https://github.com/arunachaleswaranms/RideLink/pull/6). At `1e6e889`, security run 35684841003 passed all five jobs and CI run 35684840900 passed Android but failed iOS at reconnect cycle 93. The reset fix is undergoing fresh exact-head validation |
+
+The interactive software gate is outstanding. This record does not claim Phase 8 software closure.
 
 ## Physical gates
 

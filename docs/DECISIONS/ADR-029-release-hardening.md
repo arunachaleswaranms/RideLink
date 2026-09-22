@@ -4,10 +4,11 @@ Date: 22 September 2026. Status: proposed for independent review with Phase 8.
 
 ## Context
 
-Phase 7 is the accepted baseline. Phase 8 tests exposed three concrete defects:
+Phase 7 is the accepted baseline. Phase 8 tests exposed four concrete defects:
 End Ride was rejected while the riding screen remained visible during recovery; production
 in-memory logs grew for the entire process lifetime; bounded wire queues fed unbounded
-apply/scheduled task chains. A frozen-deadline test retained 300 live tasks after 300 pauses.
+apply/scheduled task chains; an early state request arriving during iOS connection reset was
+retained but never answered. A frozen-deadline test retained 300 live tasks after 300 pauses.
 
 ## Decision
 
@@ -33,6 +34,11 @@ apply/scheduled task chains. A frozen-deadline test retained 300 live tasks afte
    a fresh id on reconnect. Authentication and recovery use SPKI trust, authentication
    generations and reconciliation identities, not an envelope id. STATUS problem 51 was a
    documentation mismatch; this decision changes no wire shape, codec, or handshake behavior.
+
+6. iOS connection setup considers requests admitted both before and during its suspended reset.
+   Select the newest original generation, clear the slot before replying, and prove that generation
+   against the established connection. No request acquires authority from current state. Three
+   gated regressions cover live admission and competing retired requests.
 
 ## Consequences and verification
 

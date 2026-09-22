@@ -576,23 +576,26 @@ public actor SyncPlaybackCoordinator {
         // Independent-review round 8's CI investigation: a `STATE_REQUEST` that reached
         // `enqueueStateSnapshotReply` before this session was established is answered here, once,
         // and only if it named *this* generation. See `PendingStateSnapshotReply`.
-        await flushPendingStateSnapshotReply(heldReply)
+        // Reset suspends. A request can arrive after it cleared the slot but before the role
+        // was installed. Retain the newest original generation from either admission window;
+        // a late predecessor request must not displace a live one captured before reset.
+        let reply: PendingStateSnapshotReply?
+        if let duringReset = pendingStateSnapshotReply, let beforeReset = heldReply {
+            reply = duringReset.generation >= beforeReset.generation ? duringReset : beforeReset
+        } else {
+            reply = pendingStateSnapshotReply ?? heldReply
+        }
+        await flushPendingStateSnapshotReply(reply)
     }
 
     /// PROTOCOL §10's `STATE_REQUEST` answered late, because it arrived early.
     ///
-    /// The request is captured by `handleConnected` **before** its `resetForNewSession()` — which
-    /// is deliberately the one thing that drops a request no session ever came for — and passed in
-    /// here, so the value being answered is the one that was held when this session began and not
-    /// whatever landed in the slot since. The generation is **compared, never re-read**: a request
-    /// authorised by a lifetime that has since retired is dropped here rather than answered with a
-    /// successor's state, which is ADR-028 Amendment A1's rule applied to a reply this device is
-    /// only now able to build.
+    /// `handleConnected` retains candidates from before and during reset, preserving their
+    /// original generations. Only the selected request's own generation can authorize a reply;
+    /// a retired request cannot borrow the successor's state. Clear the retained slot before
+    /// suspension so another caller cannot answer the same request twice.
     private func flushPendingStateSnapshotReply(_ held: PendingStateSnapshotReply?) async {
         guard let held else { return }
-        // Defence in depth: `resetForNewSession` above already cleared the slot, so nothing else can
-        // still be holding this request — but a future edit that moved the reset must not silently
-        // produce two answers.
         pendingStateSnapshotReply = nil
         guard held.generation == liveGeneration else {
             diagnostics.droppedStateSnapshotReplyCount += 1

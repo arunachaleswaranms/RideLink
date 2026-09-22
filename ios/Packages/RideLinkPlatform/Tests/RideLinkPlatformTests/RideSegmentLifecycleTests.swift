@@ -112,6 +112,76 @@ final class RideSegmentLifecycleTests: XCTestCase {
     /// The production End Ride path clears ride-segment playback identity — so a `STATE_SNAPSHOT`
     /// built in ride 2, before ride 2 has any authoritative playback of its own, cannot report
     /// ride 1's track.
+    func testStateRequestArrivingInsideConnectionResetIsAnsweredAfterResetCompletes() async {
+        await build()
+        await sync.handleLinkLost()
+        await session.setGeneration(2)
+        await session.armGenerationGate()
+        let connecting = Task { await self.sync.handleConnected(isLocalLeader: true) }
+        await expect("connection reset parked at generation read") { await self.session.isGenerationGateParked }
+        await sync.enqueueStateSnapshotReply(
+            generation: 2, leaderPeerId: SyncTestValues.leaderPeerId,
+            manifestRevision: 0, transfersInFlight: []
+        )
+        let held = await sync.diagnostics.heldStateSnapshotReplyCount
+        XCTAssertEqual(held, 1)
+        await session.releaseGenerationGate()
+        await connecting.value
+        await expect("request admitted during reset was answered") { await self.resyncChannel.sent.count == 1 }
+        await sync.shutdown()
+    }
+
+    func testRetiredRequestInsideResetCannotDisplaceALiveRequestHeldBeforeReset() async {
+        await build()
+        await sync.handleLinkLost()
+        await session.setGeneration(2)
+        await sync.enqueueStateSnapshotReply(
+            generation: 2, leaderPeerId: SyncTestValues.leaderPeerId,
+            manifestRevision: 0, transfersInFlight: []
+        )
+        await session.armGenerationGate()
+        let connecting = Task { await self.sync.handleConnected(isLocalLeader: true) }
+        await expect("reset parked") { await self.session.isGenerationGateParked }
+        await sync.enqueueStateSnapshotReply(
+            generation: 1, leaderPeerId: SyncTestValues.leaderPeerId,
+            manifestRevision: 99, transfersInFlight: []
+        )
+        await session.releaseGenerationGate()
+        await connecting.value
+        await expect("original live request answered") { await self.resyncChannel.sent.count == 1 }
+        let replies = await resyncChannel.sent
+        guard case .stateSnapshot(_, _, _, _, _, _, let revision, _) = replies.first else {
+            return XCTFail("missing snapshot")
+        }
+        XCTAssertEqual(revision, 0, "the retired request did not replace the retained live request")
+        await sync.shutdown()
+    }
+
+    func testRetiredRequestInsideResetIsDroppedAndTheFollowingLiveRequestStillWorks() async {
+        await build()
+        await sync.handleLinkLost()
+        await session.setGeneration(2)
+        await session.armGenerationGate()
+        let connecting = Task { await self.sync.handleConnected(isLocalLeader: true) }
+        await expect("reset parked") { await self.session.isGenerationGateParked }
+        await sync.enqueueStateSnapshotReply(
+            generation: 1, leaderPeerId: SyncTestValues.leaderPeerId,
+            manifestRevision: 99, transfersInFlight: []
+        )
+        await session.releaseGenerationGate()
+        await connecting.value
+        let dropped = await sync.diagnostics.droppedStateSnapshotReplyCount
+        let retiredReplies = await resyncChannel.sent
+        XCTAssertEqual(dropped, 1)
+        XCTAssertTrue(retiredReplies.isEmpty)
+        await sync.enqueueStateSnapshotReply(
+            generation: 2, leaderPeerId: SyncTestValues.leaderPeerId,
+            manifestRevision: 0, transfersInFlight: []
+        )
+        await expect("live request after retired refusal") { await self.resyncChannel.sent.count == 1 }
+        await sync.shutdown()
+    }
+
     func testEndRideClearsRideSegmentIdentityAndRideTwoCannotReportRideOnesTrack() async {
         await build()
         let trackX = SyncTestValues.hash(1)
