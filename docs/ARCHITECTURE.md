@@ -179,9 +179,17 @@ Phase 8 adds two End Ride recovery transitions (ADR-029): while reconnecting bac
 retires ride playback authority. It does not start another reconnect loop. After budget
 exhaustion, End Ride enters `ENDING` and uses the existing terminal teardown owner.
 
-Process diagnostics retain at most 1,024 events. Apply/scheduled playback work retains at
-most 256 live chain nodes per coordinator; overflow retires synchronization authority and
-reports Sync unavailable until a fresh authenticated connection. Local music continues.
+Process diagnostics retain at most 1,024 events.
+
+**Apply/scheduled playback work is bounded by a reservation taken before an authoritative command
+can be delivered** (ADR-024 Amendment A11, superseding ADR-029 decision 3). A leader takes it in the
+same critical section that allocates the `command_seq` and hands the frame to the ordered outbound
+path; a follower takes it before either sequence number moves. At most 256 local obligations are
+outstanding per coordinator, each spending at most one apply node and one scheduled node. A leader
+that cannot reserve refuses its **own command before sending it** and reports
+`SyncState.LOCAL_OVERLOAD`; a follower declares itself desynchronised without spending the
+`command_seq` and is repaired by PROTOCOL §10's existing reconciliation. **Authority the peer has
+already been given is never rolled back**, and local music continues in every case.
 
 
 ```

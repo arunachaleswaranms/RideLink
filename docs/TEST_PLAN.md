@@ -2,10 +2,22 @@
 
 ## Phase 8 release-hardening additions
 
-See [Phase 8 evidence](PHASE8_RELEASE_HARDENING.md) and ADR-029. Run the shared recovery
-FSM vectors, ReleaseLifecycleProperty, LogRetention, SyncPlaybackDeliveryAudit (including
-capacity and parked-apply successor tests), and SyncPlaybackDrift endurance tests on both
-platforms. Run ActivityOwnershipTest on an Android emulator: 20 background/foreground and
+See [Phase 8 evidence](PHASE8_RELEASE_HARDENING.md), ADR-029 and
+[ADR-024 Amendment A11](DECISIONS/ADR-024-synchronized-playback-integration.md#amendment-a11--22-september-2026--local-work-capacity-is-reserved-before-delivery-never-refused-after-it).
+Run the shared recovery FSM vectors, ReleaseLifecycleProperty, LogRetention, SessionWorkLedger,
+SyncPlaybackDeliveryAudit (including the local-work-capacity, send-failure, generation-boundary,
+ride-boundary, boundedness and below-capacity liveness regressions), SyncPlaybackTwoPeer (including
+the capacity-boundary two-peer regression, which asserts that a command the peer received is never
+abandoned locally) and SyncPlaybackDrift endurance tests on both platforms.
+
+**Cross-platform software integration.** Run `tools/crossplatform/run.sh`. It starts the Swift and
+Kotlin implementations as two processes joined by a real TCP socket carrying the real protocol and
+compares their reports: matching PROTOCOL §4.5 six-digit codes derived from each side's own TLS
+exporter, one agreed `session_id`, one ADR-010 leader, both clock estimators ready, each platform's
+codecs decoding the other's `PLAY`/`QUEUE_SNAPSHOT`/`STATE_REQUEST`/`STATE_SNAPSHOT`/`PLAYBACK_STATE`,
+and a reconnect that re-authenticates silently with a strictly greater generation. Both halves are
+inert in ordinary CI. It drives **no UI**, so it does not close the interactive
+emulator ↔ simulator journey, and it makes no Bluetooth, audio or physical-device claim. Run ActivityOwnershipTest on an Android emulator: 20 background/foreground and
 Activity recreation cycles must preserve the same application/session/music/sync owners.
 Run `python3.11 tools/audit_local_only.py` (or a newer Python) and Gitleaks. The security CI
 workflow additionally builds and analyzes Kotlin/Java and Swift and reviews PR dependencies.

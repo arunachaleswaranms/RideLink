@@ -14,7 +14,7 @@ validation remains **DEFERRED — HARDWARE NOT AVAILABLE**.
 |---|---|---|---|
 | End Ride does nothing during recovery | Ride Mode remains visible in reconnect/disconnected, but the pure FSM rejects EndRide in both states | Reconnect toward CONNECTED after ending a ride; exhausted recovery enters existing ENDING teardown. iOS observes the full FSM, including returnTo | Two shared vectors failed before the fix; mirrored 1,000-session lifecycle tests cover duplicate refusal, recovery destination and terminal restart |
 | Diagnostic retention grows indefinitely | Emit 100,000 events into the production sink used by both AppContainers; all remain retained | Latest 1,024 events only; chronological snapshots; synchronized reads/writes | Mirrored LogRetention tests; original implementation failed both count and retained-window assertions |
-| Bounded wire queues feed unbounded task chains | Keep the injected deadline clock fixed and commit 300 PAUSE commands; iOS retains 300 live scheduled/apply tasks | Combined 256-node limit; overflow retires authority synchronously, invalidates original tokens and reports Sync unavailable. Local audio continues; new authenticated connection restores eligibility | Mirrored 1,000-command tests; parked non-cancellable load, fresh connection, successor track, then predecessor release. Original iOS test observed 300 > 256 |
+| Bounded wire queues feed unbounded task chains | Keep the injected deadline clock fixed and commit 300 PAUSE commands; iOS retains 300 live scheduled/apply tasks | **Revised after independent review — see the round-2 section below.** Capacity is now *reserved* before an authoritative command can be delivered (ADR-024 Amendment A11), not refused at node creation. The 256 bound is unchanged | Mirrored single-coordinator and two-peer regressions; see the round-2 table |
 | Riding surface omits synchronization failure state | Ride Mode labels connection but provides no sync/content-wait/failure explanation | Derive a short label from existing sync diagnostics; connection loss takes precedence | Both presentation suites exhaust all sync states under disconnected/reconnecting |
 | Reconnect stress harness can advance before event forwarding completes | Its readiness check reads a generation published inside handleConnected before resync.onConnected has completed; a subsequent cycle can overtake that task | Track the completed forwarding generation in the test rig; report the exact pending cycle and dump state on timeout | Isolated 100-cycle test and the complete platform suite; no production timeout increased |
 | State request disappears during iOS connection reset | Park reset at the generation query after the pending slot is cleared; admit a request, then finish reset. Only the pre-reset candidate was flushed | Flush the newest original-generation candidate admitted before or during reset; existing generation proof still refuses retired requests | Three deterministic parked-reset tests: same-lifetime liveness, stale-only refusal followed by fresh liveness, and stale arrival cannot displace a live pre-reset request |
@@ -26,6 +26,95 @@ a new node. Existing ADR-024 Amendment A4 permits terminal absolute rate restora
 as a cleanup effect; it does not authorize any post-suspension coordinator mutation. This phase
 retains that baseline exception rather than claiming that cleanup makes no player calls. The parked-apply test awaits the actual predecessor task, not a fixed number of yields.
 A successor's apply task is also awaited before clearing the test's effect recording.
+
+## Independent review round 2 — the bounded-work decision, corrected
+
+The review accepted everything above except decision 3 of ADR-029, and it was right. Full reasoning
+is in [ADR-024 Amendment A11](DECISIONS/ADR-024-synchronized-playback-integration.md#amendment-a11--22-september-2026--local-work-capacity-is-reserved-before-delivery-never-refused-after-it)
+and [ADR-029 Amendment A1](DECISIONS/ADR-029-release-hardening.md#amendment-a1--22-september-2026--independent-review-the-bounded-work-decision-and-the-software-gate).
+
+**Root cause.** The chain-node limit asked the right question in the wrong place. The only thing that
+creates a leader's apply node is `onCommandOutcome` — the outbound consumer's commit hook, which runs
+*after* `send` returned true, so the follower already has the command. The overflow path then cleared
+`role`, `lastAppliedSeq`, `lastReceivedSeq`, the timeline and the ride-scoped identity, cancelled both
+chains and published `TRANSPORT_FAILED` for a transport that had just succeeded. Follower applies C;
+leader silently does not; session still authenticated; nothing on the wire can say so.
+
+**The fix.** `SessionWorkLedger` — pure, mirrored, in `core`/`RideLinkCore` — is the bound, still 256.
+Capacity is *reserved* where responsibility is taken, always upstream of the point the peer can rely
+on the command, and spent by the work that delivery obliges.
+
+| Path | Reserved at | A refusal there |
+|---|---|---|
+| Leader's own command | `issue`, in the same critical section as the `command_seq` allocation and the enqueue | Never stamped, never enqueued, never written. `failClosedOutbound` with `SyncState.LOCAL_OVERLOAD` |
+| Follower's inbound command | `admitAuthoritativeCommand`, before either sequence number moves | `latchDesynchronized()`; **no `command_seq` spent** |
+| A replay from the held stream | before the pop | The command stays where it is, retried on the drain's cadence |
+| A reconciliation restore | immediately before its one `applyPlay` | Retained with the same obligation id; `DEFERRED_CAPACITY` |
+
+A `WorkReservation` is an immutable `(id, generation)` token from a never-reused counter, so a
+release from a retired session names an id the ledger no longer holds and frees nothing. It is
+refcounted because one command's obligation spans an apply node and the scheduled node it arms;
+`enterPhase` runs synchronously inside the phase already held, so the count cannot reach zero in
+between, and every reservation has exactly one release site in a `finally`/`defer`.
+`retire(throughGeneration:)` is bounded by the generation that **ended**.
+
+`LOCAL_OVERLOAD` is a new `SyncState` rather than a reuse of `TRANSPORT_FAILED`: the posture and
+implementation are identical, but nothing was ever offered to the transport and a rider reading
+"transport failed" would go looking at the Wi-Fi.
+
+**Sequence semantics after the fix.** `nextSeq` is the next number this leader will stamp, and a
+capacity refusal precedes the stamp, so it leaves no gap. `lastReceivedSeq` means work taken
+responsibility for. `lastAppliedSeq` means work reflected in authoritative playback state. **Nothing
+in this change rolls either back**; only a retired control lifetime clears them, in
+`resetForNewSession`, as before.
+
+### Regressions
+
+| Property | Test |
+|---|---|
+| **Two peers, the boundary, no Outcome C** | `SyncPlaybackTwoPeerTest.local work capacity is refused before delivery and leaves both peers agreeing` (Android, two real coordinators on clocks 7.5 s apart) and `SyncPlaybackTwoPeerTests.testLocalWorkCapacityIsRefusedBeforeDeliveryAndLeavesBothPeersAgreeingOverRealTls` (iOS, two coordinators over a real authenticated TLS connection). Both assert the disjunction on the **follower**: the refused command reached it never, and every delivered command was honoured by both, with identical `lastAppliedCommandSeq` and identical player effects |
+| Refused/failed sends release capacity | `a refused send releases the capacity it reserved` / `testARefusedSendReleasesTheCapacityItReserved` — 20 consecutive failed sends leave the ledger empty, then a fresh connection makes ordinary progress |
+| Generation boundary with a send outstanding | `a generation boundary releases its own reservations and never a successor's` / `testAGenerationBoundaryReleasesItsOwnReservationsAndNeverASuccessors` — the send is parked strictly inside the write; the boundary releases exactly G1's; G1's late callback frees nothing of G2's and applies nothing |
+| Ride boundary | `a ride boundary refuses the parked command and releases its capacity` / `testARideBoundaryRefusesTheParkedCommandAndReleasesItsCapacity` — a command parked in its own pre-roll across End Ride + Start Ride never becomes ride 2's authority, and its capacity is returned |
+| Boundedness | `a thousand commands against a frozen deadline retain a bounded amount of work` / `testAThousandCommandsAgainstAFrozenDeadlineRetainABoundedAmountOfWork` — with the bound injected at 8, **maximum observed retained production obligations: 8** (`peakRetainedWorkCount`), maximum live chain nodes ≤ 16, exactly 8 frames on the wire. Measured on `SessionWorkLedger`, not on a fixture's recording list |
+| Same-lifetime liveness | `below capacity ordinary commands still deliver, commit and apply in order` / `testBelowCapacityOrdinaryCommandsStillDeliverCommitAndApplyInOrder` — `command_seq` 2, 3, 4 consecutive, applied in order, zero refusals |
+| The ledger itself | `SessionWorkLedgerTest` / `SessionWorkLedgerTests`, 8 mirrored cases each: hard bound, monotonic ids and ABA, double release, phase lifetime, `enterPhase` after retirement, generation-scoped retirement, `clear`, and a 10 000-step alternating run that never exceeds the bound and ends empty |
+
+**This pass's own fresh-fix audit found two defects in its own first draft**, both fixed before
+anything was pushed and both recorded in ADR-024 Amendment A11: a double release across three drain
+branches (worse than a leak — the armed effect still owns the obligation), and a drain storm where
+`restoreFromPlaybackState` re-appended an anchor the drain had already popped. Also checked and clear:
+reservation leak on every path, old-generation release touching a successor, callback under a lock
+(`reserveWork`/`releaseWork` are non-suspending and take none), outbound/apply/scheduled deadlock
+(the reserve is synchronous and adds no suspension), sequence gaps, request storms, and an unbounded
+reservation map.
+
+## Cross-platform software integration gate
+
+`tools/crossplatform/run.sh` runs the Swift and Kotlin implementations as **two processes on one
+machine joined by a real TCP socket carrying the real RideLink protocol**. Both halves
+(`RideLinkPlatformTests.CrossPlatformInteropTests`,
+`com.ridelink.network.interop.CrossPlatformInteropTest`) are inert unless the orchestrator supplies
+the shared report directory, so neither affects ordinary CI. Nothing between them is faked: every
+byte is produced and consumed by production code, and `tools/crossplatform/compare.py` makes the
+assertions neither implementation can make alone.
+
+Measured, three consecutive passes:
+
+| Established | Observed |
+|---|---|
+| Real TLS 1.3, mutual authentication, ECDSA P-256 identities issued by Kotlin's and Swift's own `IdentityIssuer`, pinned by `identity_spki_sha256` | handshake completed; one pin persisted per side |
+| **PROTOCOL §4.5's six digits, derived independently from each side's own TLS exporter** | identical every run (`114762 == 114762`). The assertion the protocol cannot make — §4.5 has two humans compare them — and the direct cross-platform statement of ADR-018 |
+| ADR-010 leadership and session identity | exactly one leader; both agree on one `session_id` |
+| ARCHITECTURE §7.1's real `PING`/`PONG` burst | both estimators ready; `rtt_p95` 1.9–2.9 ms over loopback |
+| Playback/queue/resync codec compatibility | `PLAY`, `QUEUE_SNAPSHOT`, `STATE_REQUEST`, `STATE_SNAPSHOT`, `PLAYBACK_STATE` encoded by one platform and decoded field-for-field by the other |
+| Reconnect and generation handling | silent re-authentication on the stored pin — **no second six-digit prompt on either side** — generation 1 → 2 on both, and a subsequent frame accepted under the successor generation |
+
+**What it does not establish.** No UI is driven and no app is launched, so the interactive
+emulator ↔ simulator journey is not claimed. Nothing here touches Bluetooth, audio, iPhone background
+behaviour or a physical device. The Kotlin half runs on the JVM against Conscrypt rather than on a
+device against Android's own TLS stack — the pre-existing limitation
+`test-results/phase1b-security-spike-20260827.md` records, neither closed nor hidden by this gate.
 
 ## Lifecycle and cross-feature coverage map
 
@@ -144,10 +233,13 @@ a test being listed above.
 | iOS Core | 345 tests passed |
 | iOS Platform | 641 tests passed after the deterministic reset-window fix; a separate repeat of all 25 real-TLS reconnect stress tests also passed |
 | iOS Simulator builds | Debug and Release builds passed after the reset fix. Debug installed and launched; this is launch evidence only |
-| Interactive emulator ↔ simulator journey | NOT VERIFIED. The UI-control tool cannot attach to Simulator; launch/build success is not an interactive lifecycle pass |
+| Cross-platform software integration | **PASS.** `tools/crossplatform/run.sh`: the Swift and Kotlin implementations as two processes joined by a real TCP socket carrying the real protocol. Three consecutive passes. See “Cross-platform software integration gate” below |
+| Interactive emulator ↔ simulator UI journey | **ENVIRONMENT LIMITATION — not a product failure.** The UI-control tool cannot attach to Simulator, so no interactive lifecycle pass is claimed. It is not folded into the hardware-deferred list: it is a tooling gap on this machine |
 | GitHub Actions / PR | Draft [PR #6](https://github.com/arunachaleswaranms/RideLink/pull/6). At `1e6e889`, security run 35684841003 passed all five jobs and CI run 35684840900 passed Android but failed iOS at reconnect cycle 93. Fresh validation for the reset fix: [CI run 35712994331](https://github.com/arunachaleswaranms/RideLink/actions/runs/35712994331), [Security run 35712994259](https://github.com/arunachaleswaranms/RideLink/actions/runs/35712994259), source head `fcd58510d1ef31ec1a03cb6f26145512880f7fcf`. Consult the PR checks for the final head results |
 
-The interactive software gate is outstanding. This record does not claim Phase 8 software closure.
+The cross-platform software gate is closed by a live two-implementation session; the interactive
+UI journey is an environment limitation and is stated as one. Software closure still requires
+independent review of the live PR and exact-head CI, which is what this record is submitted for.
 
 ## Physical gates
 

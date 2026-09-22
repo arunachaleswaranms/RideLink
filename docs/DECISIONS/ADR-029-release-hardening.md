@@ -53,3 +53,65 @@ The node bound is on live authoritative work, not a measurement of every runtime
 resident memory. A non-cancellable platform callback may remain suspended after authority is
 retired; correctness depends on its original lifetime proof when it returns. Tests must report
 those two facts separately. No simulator result closes a physical-device gate.
+
+---
+
+## Amendment A1 — 22 September 2026 — independent review: the bounded-work decision, and the software gate
+
+Status: accepted.
+
+### Decision 3 is superseded by ADR-024 Amendment A11
+
+Independent review confirmed that decision 3 above solved a real problem in a way that could
+**abandon authority the peer had already been given**. The chain-node limit was checked where the
+node is created, which on a leader is the outbound commit hook — after `send` returned true. Its
+overflow path then cleared `role`, `lastAppliedSeq`, `lastReceivedSeq`, the timeline and the
+ride-scoped identity for a command the follower was about to apply, and published
+`TRANSPORT_FAILED` for a transport that had just succeeded.
+
+The bound itself stays, and stays at 256. What moves is *where the question is asked*: capacity is
+now **reserved before an authoritative command can be delivered** and spent by the work that
+delivery obliges. [ADR-024 Amendment A11](ADR-024-synchronized-playback-integration.md#amendment-a11--22-september-2026--local-work-capacity-is-reserved-before-delivery-never-refused-after-it)
+is the decision; it also introduces `SyncState.LOCAL_OVERLOAD`, because a refusal that never offered
+anything to the transport must not be reported as a transport failure. Read decision 3 above as
+history.
+
+### The cross-platform software integration gate is closed
+
+Phase 8's own evidence recorded the interactive emulator ↔ simulator journey as NOT VERIFIED and
+left the software gate outstanding. Independent review was right that this is a *software* gate and
+may not be moved into hardware debt.
+
+`tools/crossplatform/run.sh` closes it by running the Swift and Kotlin implementations as **two
+processes on one machine joined by a real TCP socket carrying the real RideLink protocol** —
+`RideLinkPlatformTests.CrossPlatformInteropTests` and
+`com.ridelink.network.interop.CrossPlatformInteropTest`, both inert unless the orchestrator supplies
+the shared report directory. Neither is a vector comparison: every byte between them is produced and
+consumed by production code.
+
+It establishes, cross-language and cross-implementation:
+
+- a real TLS 1.3 handshake with mutual authentication between an ECDSA P-256 identity issued by
+  Kotlin's `IdentityIssuer` and one issued by Swift's, each pinned by `identity_spki_sha256`;
+- **PROTOCOL §4.5's six digits, derived independently from each side's own TLS exporter, are
+  identical** — the assertion the protocol structurally cannot make, because §4.5 has two humans
+  compare them out loud, and the direct cross-platform statement of ADR-018;
+- one agreed `session_id`, exactly one ADR-010 leader, and one pin persisted per side;
+- ARCHITECTURE §7.1's real `PING`/`PONG` burst converging on both estimators over the real socket;
+- `PLAY`, `QUEUE_SNAPSHOT`, `STATE_REQUEST`, `STATE_SNAPSHOT` and `PLAYBACK_STATE` encoded by one
+  platform's production codec and decoded field-for-field by the other's;
+- a link loss and reconnect that re-authenticates **silently** on the stored pin — no second
+  six-digit prompt on either side — and mints a strictly greater authentication generation on both,
+  with a subsequent frame accepted under the successor generation.
+
+**What it deliberately does not establish**, and must not be read as: no UI is driven and no app is
+launched, so the interactive emulator ↔ simulator journey remains an environment limitation rather
+than a passing gate; and nothing here touches Bluetooth, audio, iPhone background behaviour or a
+physical device. The Kotlin half also runs on the JVM against Conscrypt rather than on a device
+against Android's own TLS stack — the pre-existing limitation
+`docs/test-results/phase1b-security-spike-20260827.md` records, neither closed nor hidden by this
+gate.
+
+It is deliberately **not** in CI: it starts two toolchains and a real socket, and CI already runs
+both suites separately. It is a re-runnable local gate, recorded with its measured result in
+`docs/PHASE8_RELEASE_HARDENING.md`.
