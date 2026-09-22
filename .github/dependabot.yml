@@ -1,0 +1,29 @@
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 2
+    groups:
+      actions:
+        patterns: ['*']
+  - package-ecosystem: gradle
+    directory: /android
+    schedule:
+      interval: monthly
+    open-pull-requests-limit: 3
+    groups:
+      android-libraries:
+        patterns: ['androidx.*', 'org.jetbrains.kotlinx*']
+        update-types: [minor, patch]
+  - package-ecosystem: swift
+    directory: /ios/Packages/RideLinkPlatform
+    schedule:
+      interval: monthly
+    open-pull-requests-limit: 2
+    groups:
+      swift-packages:
+        patterns: ['*']
+        update-types: [minor, patch]
