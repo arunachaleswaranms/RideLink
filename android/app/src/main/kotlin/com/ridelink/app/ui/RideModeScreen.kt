@@ -50,7 +50,9 @@ fun RideModeScreen(
     coordinator: SessionCoordinator,
     musicCoordinator: MusicCoordinator,
     onPlayMusic: () -> Unit,
+    syncPlaybackCoordinator: com.ridelink.app.sync.SyncPlaybackCoordinator,
 ) {
+    val syncDiagnostics by syncPlaybackCoordinator.diagnostics.collectAsState()
     val fsmState by coordinator.state.collectAsState()
     val diagnostics by coordinator.controlDiagnostics.collectAsState()
     val voice by coordinator.voiceDiagnostics.collectAsState()
@@ -76,6 +78,8 @@ fun RideModeScreen(
             verticalArrangement = Arrangement.spacedBy(16.dp),
         ) {
             ConnectionBanner(ui.connectionHealth, ui.reconnectCount)
+
+            Text(rideSyncLabel(fsmState.status, syncDiagnostics.syncState))
 
             NowPlayingSummary(ui)
 

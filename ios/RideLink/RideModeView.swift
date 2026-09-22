@@ -22,6 +22,11 @@ struct RideModeView: View {
         ScrollView {
             VStack(spacing: 20) {
                 connectionBanner
+                Text(RideModePresentation.syncLabel(
+                    status: coordinator.state.status,
+                    syncState: syncPlayback?.diagnostics.syncState ?? .inactive
+                ))
+                .font(.caption)
                 nowPlayingSection
                 playbackControls
                 microphoneSection

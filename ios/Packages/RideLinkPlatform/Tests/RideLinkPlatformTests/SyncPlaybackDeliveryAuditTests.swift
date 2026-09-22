@@ -59,6 +59,65 @@ final class SyncPlaybackDeliveryAuditTests: XCTestCase {
         await coordinator.start()
     }
 
+    func testScheduledWorkStaysBoundedWhenTheClockDoesNotAdvance() async {
+        await build()
+        await leaderPlaying()
+        for _ in 0 ..< 1_000 {
+            await coordinator.pause()
+            await awaitOutboundQuiescent()
+        }
+        let retained = await coordinator.sessionChainNodes.count
+        XCTAssertLessThanOrEqual(retained, 256, "a frozen deadline cannot create an unbounded task chain")
+        let failed = await coordinator.diagnostics
+        XCTAssertEqual(failed.syncState, .transportFailed)
+        XCTAssertNil(failed.lastAppliedCommandSeq)
+        await session.setGeneration(2)
+        await coordinator.handleConnected(isLocalLeader: true)
+        await coordinator.playSynchronized(SyncTestValues.hash(1))
+        await expect("fresh authority after overflow") {
+            await self.coordinator.diagnostics.currentTrackHash == SyncTestValues.hash(1)
+        }
+
+    }
+
+    func testOverflowRetiresAParkedApplyWithoutLettingItsCleanupTouchFreshAuthority() async {
+        await build()
+        await leaderPlaying()
+        let oldTrack = SyncTestValues.hash(2)
+        let freshTrack = SyncTestValues.hash(3)
+        await content.addLocal(oldTrack)
+        await content.addPeer(oldTrack)
+        await player.gateCalls { if case .load = $0 { true } else { false } }
+        await coordinator.playSynchronized(oldTrack)
+        await expect("old load parked") { await self.player.isGateParked }
+        let oldApply = await coordinator.applyChain
+        for _ in 0 ..< 1_000 {
+            await coordinator.pause()
+            await awaitOutboundQuiescent()
+        }
+        let failed = await coordinator.diagnostics
+        XCTAssertEqual(failed.syncState, .transportFailed)
+        XCTAssertNil(failed.lastAppliedCommandSeq)
+        await session.setGeneration(2)
+        await coordinator.handleConnected(isLocalLeader: true)
+        await content.addLocal(freshTrack)
+        await content.addPeer(freshTrack)
+        await coordinator.playSynchronized(freshTrack)
+        await expect("successor established independently of parked predecessor") {
+            await self.coordinator.diagnostics.currentTrackHash == freshTrack
+        }
+        await awaitOutboundQuiescent()
+        let freshApply = await coordinator.applyChain
+        await freshApply?.value
+        await player.clearCalls()
+        await player.releaseGate()
+        await oldApply?.value
+        let after = await coordinator.diagnostics
+        XCTAssertEqual(after.currentTrackHash, freshTrack)
+        let effects = await player.calls
+        XCTAssertTrue(effects.isEmpty, "retired apply has no remaining player effects: \(effects)")
+    }
+
     override func tearDown() async throws {
         await session?.releaseSendGate()
         await player?.releaseGate()

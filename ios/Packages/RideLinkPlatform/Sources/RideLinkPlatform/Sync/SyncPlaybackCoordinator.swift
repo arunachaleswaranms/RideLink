@@ -997,6 +997,7 @@ public actor SyncPlaybackCoordinator {
     /// apply there would stall the outbound path behind a decoder pre-roll, and an unstructured
     /// `Task` preserves nothing at all about order — precisely the defect A1 Finding G was about.
     func chainApply(generation: Int64, _ action: @escaping @Sendable () async -> Void) {
+        guard admitChainNode(generation: generation) else { return }
         let previous = applyChain
         let id = claimChainNodeId()
         let node = Task { [weak self] in
@@ -1020,6 +1021,43 @@ public actor SyncPlaybackCoordinator {
         // `action` atomic with having proved it. `action` re-proves for itself as well (A3 Finding B).
         guard stillCurrentNow(generation) else { return }
         await action()
+    }
+
+    /// Bounded work after the bounded wire queues. Overflow retires playback authority for this
+    /// connection; a new authenticated connection is required to establish it again.
+    func admitChainNode(generation: Int64) -> Bool {
+        guard stillCurrentNow(generation) else { return false }
+        guard sessionChainNodes.count >= Phase5GateBounds.defaultSessionWorkCapacity else { return true }
+        role = nil
+        syncEnabled = false
+        synchronizedModeEpoch += 1
+        epoch.supersede()
+        playRequestFence.supersede()
+        cancelTick()
+        deferredDrainTask?.cancel()
+        deferredDrainTask = nil
+        retireSessionChains()
+        discardDeferredEvents()
+        pendingPlay = nil
+        transferRequestedForToken = nil
+        pendingStateSnapshotReply = nil
+        timeline = nil
+        currentPlaybackIdentity = nil
+        rideAuthorityEpoch = 0
+        lastAppliedSeq = nil
+        lastReceivedSeq = nil
+        driftState = DriftController.reset()
+        diagnostics.role = nil
+        diagnostics.syncState = .transportFailed
+        diagnostics.lastAppliedCommandSeq = nil
+        diagnostics.lastReceivedCommandSeq = nil
+        diagnostics.currentTrackHash = nil
+        diagnostics.deferredCommandCount = 0
+        diagnostics.playbackRate = DriftController.rateNormal
+        publishDiagnostics()
+        // One terminal, absolute rate restoration; no coordinator writes follow the await.
+        Task { [player] in await player.setRate(DriftController.rateNormal) }
+        return false
     }
 
     /// Reserves an identity for one chain node. Monotonic, so a retired node's own cleanup can never

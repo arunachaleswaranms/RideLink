@@ -48,6 +48,69 @@ class SyncPlaybackDeliveryAuditTest {
     private lateinit var coordinator: SyncPlaybackCoordinator
     private var idSeed = 700
 
+    @Test
+    fun `scheduled work is bounded and overflow retires authority until a fresh connection`() =
+        runTest(StandardTestDispatcher()) {
+            build(backgroundScope)
+            leaderPlaying(this)
+            repeat(1_000) {
+                coordinator.pause()
+                runCurrent()
+                assertTrue(coordinator.retainedChainNodeCount <= 256)
+            }
+            assertEquals(SyncState.TRANSPORT_FAILED, coordinator.diagnostics.value.syncState)
+            assertFalse(coordinator.isSynchronizedModeActive())
+            assertNull(coordinator.diagnostics.value.lastAppliedCommandSeq)
+            player.calls.clear()
+            clock.advanceBy(1_000_000)
+            runCurrent()
+            assertTrue(player.calls.none { it is FakeSyncPlayer.Call.Pause || it is FakeSyncPlayer.Call.Seek })
+            session.currentAuthGeneration = 2
+            session.emit(ControlEvent.Connected(SyncTestValues.leaderPeerId, SessionId("fresh"), true, 2))
+            runCurrent()
+            coordinator.playSynchronized(HASH_A)
+            runCurrent()
+            clock.advanceBy(LEAD_US)
+            runCurrent()
+            assertEquals(HASH_A, coordinator.diagnostics.value.currentTrackHash)
+        }
+
+    @Test
+    fun `overflow retires a parked apply without touching successor authority`() =
+        runTest(StandardTestDispatcher()) {
+            build(backgroundScope)
+            leaderPlaying(this)
+            val oldTrack = SyncTestValues.hash(2)
+            val freshTrack = SyncTestValues.hash(3)
+            content.localHashes.add(oldTrack.value)
+            content.peerHashes.add(oldTrack.value)
+            val gate = CompletableDeferred<Unit>()
+            player.gate = gate
+            player.gateOn = { it is FakeSyncPlayer.Call.Load }
+            coordinator.playSynchronized(oldTrack)
+            runCurrent()
+            assertTrue(player.calls.any { it is FakeSyncPlayer.Call.Load && it.contentHash == oldTrack })
+            repeat(1_000) {
+                coordinator.pause()
+                runCurrent()
+            }
+            assertEquals(SyncState.TRANSPORT_FAILED, coordinator.diagnostics.value.syncState)
+            player.gateOn = null
+            session.currentAuthGeneration = 2
+            session.emit(ControlEvent.Connected(SyncTestValues.leaderPeerId, SessionId("fresh"), true, 2))
+            runCurrent()
+            content.localHashes.add(freshTrack.value)
+            content.peerHashes.add(freshTrack.value)
+            coordinator.playSynchronized(freshTrack)
+            runCurrent()
+            assertEquals(freshTrack, coordinator.diagnostics.value.currentTrackHash)
+            player.calls.clear()
+            gate.complete(Unit)
+            runCurrent()
+            assertEquals(freshTrack, coordinator.diagnostics.value.currentTrackHash)
+            assertTrue(player.calls.isEmpty())
+        }
+
     private fun build(
         scope: CoroutineScope,
         outboundCapacity: Int = 256,

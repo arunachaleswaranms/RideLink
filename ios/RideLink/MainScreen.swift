@@ -145,9 +145,9 @@ struct MainScreen: View {
         // `fullScreenCover`'s binding is read-only by construction: the only way out is
         // `RideModeView`'s End Ride button, which goes through `coordinator.endRide()` and therefore
         // through `SessionFsm` — never a swipe-to-dismiss short-circuiting the FSM.
-        .onChange(of: coordinator.state.status) { _, status in
+        .onChange(of: coordinator.state) { _, state in
             rideModeVisible = RideModePresentation.nextRideModeVisibility(
-                previous: rideModeVisible, status: status, returnTo: coordinator.state.returnTo
+                previous: rideModeVisible, status: state.status, returnTo: state.returnTo
             )
         }
         .onAppear {

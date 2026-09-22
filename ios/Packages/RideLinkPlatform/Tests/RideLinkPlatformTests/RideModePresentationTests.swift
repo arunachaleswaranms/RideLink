@@ -8,6 +8,17 @@ import XCTest
 /// scenarios: connected, ride active, reconnecting, recovered, disconnected, playing, paused, mic
 /// muted/unmuted, PTT mode, intercom disabled, audio-route degraded.
 final class RideModePresentationTests: XCTestCase {
+    func testEverySyncStateIsOverriddenByLossOfConnection() {
+        let states: [SyncState] = [.inactive, .clockUnready, .waitingForQueue, .scheduled,
+                                   .waitingForContent, .synced, .syncFailed, .desynchronized, .transportFailed]
+        for state in states {
+            XCTAssertEqual(RideModePresentation.syncLabel(status: .disconnected, syncState: state), "Waiting for peer")
+            XCTAssertEqual(RideModePresentation.syncLabel(status: .reconnecting, syncState: state), "Synchronizing when connection returns")
+        }
+        XCTAssertEqual(RideModePresentation.syncLabel(status: .rideActive, syncState: .synced), "Synchronized")
+        XCTAssertEqual(RideModePresentation.syncLabel(status: .rideActive, syncState: .waitingForContent), "Waiting for content")
+    }
+
     // MARK: - Connection health
 
     func testConnectedReadsAsHealthy() {

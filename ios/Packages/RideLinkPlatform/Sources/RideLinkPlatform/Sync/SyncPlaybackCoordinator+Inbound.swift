@@ -1443,6 +1443,7 @@ extension SyncPlaybackCoordinator {
         token: Int64,
         steps: [PlayerStep]
     ) {
+        guard admitChainNode(generation: generation) else { return }
         let decision = ScheduledCommand.decide(
             effectiveAtSessionUs: effectiveAtSessionUs,
             nowLocalMonoUs: monotonicNowUs(),

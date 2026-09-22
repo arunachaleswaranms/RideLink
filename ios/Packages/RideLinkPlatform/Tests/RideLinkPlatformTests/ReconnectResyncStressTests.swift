@@ -57,6 +57,7 @@ final class ReconnectResyncStressTests: XCTestCase {
         let content: FakeSyncContent
         let catalogue: FakeCatalogue
         let routeState: FakeRouteState
+        var forwardedGeneration: Int64?
 
         init(peer: TestPeer, clock: SharedTestClock) {
             testPeer = peer
@@ -98,6 +99,7 @@ final class ReconnectResyncStressTests: XCTestCase {
                     Task { @MainActor in
                         await sync.handleConnected(isLocalLeader: isLocalLeader)
                         await resync.onConnected(isLeader: isLocalLeader, generation: authGeneration)
+                        self.forwardedGeneration = authGeneration
                     }
                 }
             }
@@ -205,6 +207,7 @@ final class ReconnectResyncStressTests: XCTestCase {
             let aAdopted = await a.sync.diagnostics.sessionGeneration
             let bAdopted = await b.sync.diagnostics.sessionGeneration
             return aAdopted == aLive && bAdopted == bLive
+                && a.forwardedGeneration == aLive && b.forwardedGeneration == bLive
         }
     }
 
@@ -260,7 +263,14 @@ final class ReconnectResyncStressTests: XCTestCase {
             // A pending STATE_REQUEST must never straddle a cycle boundary: either it resolved (the
             // real leader answered it) or the generation moved on and the gate's own comparison
             // makes the old one unreachable — never both an outstanding flag *and* a stuck request.
-            try await poll(timeoutSeconds: 30) { !a.resync.diagnostics.requestPending && !b.resync.diagnostics.requestPending }
+            do {
+                try await poll(timeoutSeconds: 30, "reconciliation complete, cycle \(cycle)") {
+                    !a.resync.diagnostics.requestPending && !b.resync.diagnostics.requestPending
+                }
+            } catch {
+                await dumpRig("pending reconciliation cycle \(cycle)", a: a, b: b)
+                throw error
+            }
         }
 
         XCTAssertEqual(cycles + 1, connectedCount(a.session), "each cycle must produce exactly one .connected event on the leader")
@@ -819,7 +829,14 @@ final class ReconnectResyncStressTests: XCTestCase {
 
         for cycle in 1...cycles {
             try await reconnectCycle(a: a, b: b, aPort: aPort)
-            try await poll(timeoutSeconds: 30) { !a.resync.diagnostics.requestPending && !b.resync.diagnostics.requestPending }
+            do {
+                try await poll(timeoutSeconds: 30, "reconciliation complete, cycle \(cycle)") {
+                    !a.resync.diagnostics.requestPending && !b.resync.diagnostics.requestPending
+                }
+            } catch {
+                await dumpRig("pending reconciliation cycle \(cycle)", a: a, b: b)
+                throw error
+            }
             if cycle.isMultiple(of: 10) {
                 // A stale-generation delivery every ten cycles, to give `rejections`/`droppedRetiredGeneration`
                 // real, repeated traffic to (not) accumulate unboundedly from.

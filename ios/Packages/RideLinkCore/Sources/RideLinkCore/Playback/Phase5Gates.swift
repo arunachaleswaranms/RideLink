@@ -186,6 +186,8 @@ public enum Phase5GateBounds {
     /// it means the control socket is not draining. Reaching it is now an explicit refusal that
     /// fails an authoritative operation closed rather than a counter nobody consults.
     public static let defaultOutboundCapacity = 256
+    /// Combined live apply and scheduled task nodes downstream of the wire queues.
+    public static let defaultSessionWorkCapacity = 256
 }
 
 // MARK: - ADR-024 Amendment A2 (the second Phase 5 closure audit)

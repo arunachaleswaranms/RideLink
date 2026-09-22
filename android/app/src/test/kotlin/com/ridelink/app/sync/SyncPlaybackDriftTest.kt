@@ -91,6 +91,37 @@ class SyncPlaybackDriftTest {
     }
 
     @Test
+    fun `two and a half virtual hours retain one correction deadline and drain every report`() =
+        runTest(StandardTestDispatcher()) {
+            build(backgroundScope)
+            startPlaying(this)
+            repeat(1_800) { cycle ->
+                val nextTick = clock.pendingDeadlines.single()
+                val drift = if (cycle % 2 == 0) 50L else 0L
+                routeTransitioning = cycle % 17 == 0
+                player.setState(
+                    PlayerState(positionMs = (nextTick - ANCHOR_US) / 1_000 + drift, durationMs = 10_000_000, playing = true),
+                )
+                clock.advanceTo(nextTick)
+                runCurrent()
+                val diagnostics = coordinator.diagnostics.value
+                assertEquals(cycle + 1, diagnostics.correctionTickCount)
+                assertEquals(0, diagnostics.hardSeekCount)
+                assertEquals(0, diagnostics.deferredCommandCount)
+                assertEquals(diagnostics.outboundEnqueuedCount, diagnostics.outboundAttemptCount)
+                assertEquals(1, clock.pendingDeadlines.size)
+                // These are test recordings, not application retention.
+                player.calls.clear()
+                session.sent.clear()
+                session.sentGenerations.clear()
+            }
+            assertEquals(9_000_000_000L, clock.nowUs() - ANCHOR_US)
+            coordinator.leaveSynchronizedMode()
+            runCurrent()
+            assertEquals(SyncState.INACTIVE, coordinator.diagnostics.value.syncState)
+        }
+
+    @Test
     fun `a tick reports our own position against the authoritative timeline`() =
         runTest(StandardTestDispatcher()) {
             build(backgroundScope)

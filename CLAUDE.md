@@ -213,6 +213,14 @@ resume are deferred, but the chunk and page framing keep both possible.
 
 ## Current phase
 
+**Phase 8 — Release Hardening & Software Integration is in progress.** Phase 7 was
+independently reviewed, merged at `48b7a8e5d07fe52010d05c1893d3f914722d80f0`, and its
+post-merge CI passed. The current evidence and remaining gates are in
+`docs/PHASE8_RELEASE_HARDENING.md`; the Phase 7 narrative below is historical.
+No physical iPhone is available: hardware gates remain **DEFERRED — HARDWARE NOT AVAILABLE**.
+
+### Historical Phase 7 implementation notes
+
 **Phase 7 — Ride Mode and resilience. Software closure is implemented on the feature branch;
 physical ride qualification is explicitly deferred — hardware not available.** `STATE_REQUEST`/
 `STATE_SNAPSHOT` close the previously-recorded gap (STATUS.md problem 42) exactly per PROTOCOL §10's

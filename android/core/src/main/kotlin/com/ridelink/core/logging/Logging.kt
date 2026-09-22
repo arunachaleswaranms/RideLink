@@ -41,12 +41,21 @@ fun interface LogSink {
     fun emit(event: LogEvent)
 }
 
+/** Process-owned diagnostics: a bounded, chronological snapshot, never an authoritative ledger. */
 class InMemoryLogSink : LogSink {
-    private val _events = mutableListOf<LogEvent>()
-    val events: List<LogEvent> get() = _events.toList()
+    private val lock = Any()
+    private val retained = ArrayDeque<LogEvent>()
+    val events: List<LogEvent> get() = synchronized(lock) { retained.toList() }
 
     override fun emit(event: LogEvent) {
-        _events.add(event)
+        synchronized(lock) {
+            if (retained.size == MAX_EVENTS) retained.removeFirst()
+            retained.addLast(event)
+        }
+    }
+
+    private companion object {
+        const val MAX_EVENTS = 1_024
     }
 }
 

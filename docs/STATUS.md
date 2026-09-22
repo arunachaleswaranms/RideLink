@@ -1,5 +1,14 @@
 # RideLink — Status
 
+**Current update — 22 September 2026:** Phase 7 is independently reviewed and merged at
+`48b7a8e5d07fe52010d05c1893d3f914722d80f0`; post-merge Android/iOS CI is green.
+Phase 8 — Release Hardening & Software Integration — is in progress on a dedicated branch.
+See [the Phase 8 audit and evidence](PHASE8_RELEASE_HARDENING.md) for the current work,
+validation and exact next gate. All older “current phase”/“next task” statements below are
+historical records. Phase 8 is not software-closed until the live PR is independently reviewed.
+Physical validation remains **DEFERRED — HARDWARE NOT AVAILABLE**.
+
+
 **Updated:** 20 September 2026 — **a third independent review of the Phase 7 PR accepted §2ay's
 resync-obligation fixes and found one more confirmed blocker, in two reachable orderings, both fixed**
 ([ADR-028 Amendment A5](DECISIONS/ADR-028-ride-mode-and-state-resynchronization.md#amendment-a5--20-september-2026--independent-review-round-6-one-confirmed-blocker-two-reachable-orderings-of-it-fixed),

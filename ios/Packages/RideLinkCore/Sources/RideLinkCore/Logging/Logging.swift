@@ -43,22 +43,30 @@ public protocol LogSink: Sendable {
     func emit(_ event: LogEvent)
 }
 
+/// Process-owned diagnostics. The ring retains the latest 1,024 events in chronological order.
 public final class InMemoryLogSink: LogSink, @unchecked Sendable {
     private let lock = NSLock()
     private var storage: [LogEvent] = []
+    private var next = 0
+    private let capacity = 1_024
 
     public init() {}
 
     public var events: [LogEvent] {
         lock.lock()
         defer { lock.unlock() }
-        return storage
+        return Array(storage[next...]) + Array(storage[..<next])
     }
 
     public func emit(_ event: LogEvent) {
         lock.lock()
         defer { lock.unlock() }
-        storage.append(event)
+        if storage.count < capacity {
+            storage.append(event)
+        } else {
+            storage[next] = event
+            next = (next + 1) % capacity
+        }
     }
 }
 

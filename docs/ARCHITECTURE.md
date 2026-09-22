@@ -174,6 +174,16 @@ the mapping is recorded in [ADR-008](DECISIONS/ADR-008-requirement-conflict-reso
 
 ### 3.1 Legal transitions
 
+Phase 8 adds two End Ride recovery transitions (ADR-029): while reconnecting back to
+`RIDE_ACTIVE`, End Ride keeps `RECONNECTING` but changes `returnTo` to `CONNECTED` and
+retires ride playback authority. It does not start another reconnect loop. After budget
+exhaustion, End Ride enters `ENDING` and uses the existing terminal teardown owner.
+
+Process diagnostics retain at most 1,024 events. Apply/scheduled playback work retains at
+most 256 live chain nodes per coordinator; overflow retires synchronization authority and
+reports Sync unavailable until a fresh authenticated connection. Local music continues.
+
+
 ```
 IDLE ──────────► DISCOVERING ──────► PAIRING ──────► CONNECTING
   ▲                   │                  │                │

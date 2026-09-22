@@ -30,6 +30,16 @@ import kotlin.test.assertTrue
  * rendering (brief: "state logic should remain testable independently from rendering").
  */
 class RideModeUiStateTest {
+    @Test
+    fun `every sync state is overridden by loss of connection`() {
+        com.ridelink.app.sync.SyncState.entries.forEach { sync ->
+            assertEquals("Waiting for peer", rideSyncLabel(SessionStatus.DISCONNECTED, sync))
+            assertEquals("Synchronizing when connection returns", rideSyncLabel(SessionStatus.RECONNECTING, sync))
+        }
+        assertEquals("Synchronized", rideSyncLabel(SessionStatus.RIDE_ACTIVE, com.ridelink.app.sync.SyncState.SYNCED))
+        assertEquals("Waiting for content", rideSyncLabel(SessionStatus.RIDE_ACTIVE, com.ridelink.app.sync.SyncState.WAITING_FOR_CONTENT))
+    }
+
     // --- screen visibility (ARCHITECTURE §3 rule 1) -------------------------------------------------
 
     @Test

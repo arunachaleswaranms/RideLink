@@ -122,6 +122,37 @@ final class SyncPlaybackDriftTests: XCTestCase {
         XCTFail("the cadence tick never completed")
     }
 
+    func testTwoAndAHalfVirtualHoursKeepCorrectionAndOutboundWorkBounded() async {
+        await startPlaying()
+        for cycle in 0 ..< 1_800 {
+            await awaitTickArmed()
+            let deadlines = clock.pendingDeadlines()
+            XCTAssertEqual(deadlines.count, 1, "cycle \(cycle)")
+            guard let next = deadlines.first else { return XCTFail("missing correction deadline") }
+            let before = await coordinator.diagnostics.correctionTickCount
+            await routeState.set(cycle % 17 == 0)
+            let drift: Int64 = cycle % 2 == 0 ? 50 : 0
+            await player.setState(PlayerState(
+                positionMs: (next - anchorUs) / 1_000 + drift,
+                durationMs: 10_000_000, playing: true
+            ))
+            clock.advance(to: next)
+            await expect("endurance correction tick") {
+                await self.coordinator.diagnostics.correctionTickCount > before
+            }
+            await awaitOutboundQuiescent()
+            let diagnostics = await coordinator.diagnostics
+            XCTAssertEqual(diagnostics.correctionTickCount, cycle + 1)
+            XCTAssertEqual(diagnostics.hardSeekCount, 0)
+            XCTAssertEqual(diagnostics.deferredCommandCount, 0)
+            XCTAssertEqual(diagnostics.outboundEnqueuedCount, diagnostics.outboundAttemptCount)
+            await player.clearCalls()
+            await session.clearSent()
+        }
+        XCTAssertEqual(clock.now() - anchorUs, 9_000_000_000)
+        await coordinator.shutdown()
+    }
+
     func testATickReportsOurOwnPositionAgainstTheAuthoritativeTimeline() async {
         await startPlaying()
         await tick(driftMs: 0)

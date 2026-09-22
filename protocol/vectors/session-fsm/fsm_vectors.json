@@ -1,6 +1,8 @@
 {
   "_comment": "Golden vectors for the pure session state machine (ARCHITECTURE §3, TEST_PLAN §2). State is represented as {status, returnTo}; returnTo is only meaningful when status=RECONNECTING and records which state the reconnect attempt is trying to return to (ARCHITECTURE §3 rule 1). Events carry no platform types.",
   "legal_transitions": [
+    { "name": "end-ride-during-recovery-keeps-recovery-but-retires-ride", "from": { "status": "RECONNECTING", "returnTo": "RIDE_ACTIVE" }, "event": { "kind": "EndRide" }, "to": { "status": "RECONNECTING", "returnTo": "CONNECTED" } },
+    { "name": "end-ride-after-budget-exhaustion-ends-session", "from": { "status": "DISCONNECTED" }, "event": { "kind": "EndRide" }, "to": { "status": "ENDING" }, "effects": ["RELEASE_AUDIO_AND_STOP_FOREGROUND_SERVICE"] },
     { "name": "idle-to-discovering",            "from": { "status": "IDLE" },                                    "event": { "kind": "StartDiscovery" },              "to": { "status": "DISCOVERING" } },
     { "name": "discovering-cancel-to-idle",     "from": { "status": "DISCOVERING" },                             "event": { "kind": "CancelDiscovery" },             "to": { "status": "IDLE" } },
     { "name": "discovering-to-pairing",         "from": { "status": "DISCOVERING" },                             "event": { "kind": "PeerSelected" },                "to": { "status": "PAIRING" } },

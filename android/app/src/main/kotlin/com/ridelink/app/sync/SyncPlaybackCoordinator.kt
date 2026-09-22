@@ -1153,6 +1153,7 @@ class SyncPlaybackCoordinator(
         generation: Long,
         action: suspend () -> Unit,
     ) {
+        if (!admitChainNode(generation)) return
         val previous = applyChain
         applyChain =
             scope.launch(sessionChains) {
@@ -1167,6 +1168,52 @@ class SyncPlaybackCoordinator(
                 action()
             }
     }
+
+    /** The wire queue is bounded; its downstream apply and scheduled work must be bounded too. */
+    @Suppress("ReturnCount") // authority proof, capacity admission, then terminal overflow refusal
+    private fun admitChainNode(generation: Long): Boolean {
+        if (!stillCurrent(generation)) return false
+        if (sessionChains.children.count() < Phase5GateBounds.DEFAULT_SESSION_WORK_CAPACITY) return true
+        // No suspension: retire exactly the authority whose work exceeded the bound.
+        role = null
+        syncEnabled = false
+        synchronizedModeEpoch += 1
+        playbackFence.supersede()
+        playRequestFence.supersede()
+        tickJob?.cancel()
+        tickJob = null
+        deferredDrainJob?.cancel()
+        deferredDrainJob = null
+        sessionChains.cancel()
+        sessionChains = SupervisorJob(scope.coroutineContext[Job])
+        applyChain = null
+        scheduledChain = null
+        discardDeferredEvents()
+        pendingPlay = null
+        transferRequestedForToken = null
+        pendingStateSnapshotReply = null
+        timeline = null
+        currentPlaybackIdentity = null
+        rideAuthorityEpoch = 0
+        lastAppliedSeq = null
+        lastReceivedSeq = null
+        driftState = DriftController.reset()
+        _diagnostics.update {
+            it.copy(
+                role = null,
+                syncState = SyncState.TRANSPORT_FAILED,
+                lastAppliedCommandSeq = null,
+                lastReceivedCommandSeq = null,
+                currentTrackHash = null,
+                deferredCommandCount = 0,
+                playbackRate = DriftController.RATE_NORMAL,
+            )
+        }
+        scope.launch { restoreRate() }
+        return false
+    }
+
+    internal val retainedChainNodeCount: Int get() = sessionChains.children.count()
 
     // --- session lifecycle -------------------------------------------------------------------
 
@@ -3078,6 +3125,7 @@ class SyncPlaybackCoordinator(
         token: Long,
         steps: List<PlayerStep>,
     ) {
+        if (!admitChainNode(generation)) return
         // Decided at *arm* time, as PROTOCOL §5 rule 2 requires: the lateness of a command is a fact
         // about when it arrived, not about when this device got round to it.
         val decision = ScheduledCommand.decide(effectiveAtSessionUs, monotonicNowUs(), estimate.offsetToLeaderUs)

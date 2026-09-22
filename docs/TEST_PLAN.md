@@ -1,5 +1,17 @@
 # RideLink — Test Plan
 
+## Phase 8 release-hardening additions
+
+See [Phase 8 evidence](PHASE8_RELEASE_HARDENING.md) and ADR-029. Run the shared recovery
+FSM vectors, ReleaseLifecycleProperty, LogRetention, SyncPlaybackDeliveryAudit (including
+capacity and parked-apply successor tests), and SyncPlaybackDrift endurance tests on both
+platforms. Run ActivityOwnershipTest on an Android emulator: 20 background/foreground and
+Activity recreation cycles must preserve the same application/session/music/sync owners.
+Run `python3.11 tools/audit_local_only.py` (or a newer Python) and Gitleaks. The security CI
+workflow additionally builds and analyzes Kotlin/Java and Swift and reviews PR dependencies.
+These gates supplement, rather than replace, the integration and physical matrix below.
+
+
 **Status:** baseline for Phases 1–2b. Last updated 4 September 2026 (Phase 2b — the two new
 intercom/`AUDIO_STATE` vector sets, §3.1b's "what the intercom lifecycle does and does not prove",
 and the IA-01…IA-03 / AF-01…AF-10 lines redrawn between policy and platform). Previously 28 August

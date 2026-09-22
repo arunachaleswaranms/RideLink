@@ -15,6 +15,20 @@ import RideLinkCore
 /// presentation mapping in shape, not in code — Kotlin/Compose and Swift/SwiftUI share no UI layer
 /// (CLAUDE.md rule 1).
 public enum RideModePresentation {
+    /// A late sync publication must never imply synchronized playback while the link is down.
+    public static func syncLabel(status: SessionStatus, syncState: SyncState) -> String {
+        if status == .reconnecting { return "Synchronizing when connection returns" }
+        guard status == .connected || status == .rideActive else { return "Waiting for peer" }
+        switch syncState {
+        case .inactive: return "Local music"
+        case .clockUnready, .waitingForQueue, .scheduled: return "Synchronizing"
+        case .waitingForContent: return "Waiting for content"
+        case .synced: return "Synchronized"
+        case .syncFailed: return "Sync failed — local music continues"
+        case .desynchronized, .transportFailed: return "Sync unavailable — local music continues"
+        }
+    }
+
     // MARK: - Connection (FR-018's tri-state indicator)
 
     public enum ConnectionHealth: Sendable, Equatable {

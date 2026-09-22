@@ -201,7 +201,13 @@ object SessionFsm {
                 if (s == SessionStatus.CONNECTED) FsmState(SessionStatus.RIDE_ACTIVE) else null
 
             is SessionEvent.EndRide ->
-                if (s == SessionStatus.RIDE_ACTIVE) FsmState(SessionStatus.CONNECTED) else null
+                when {
+                    s == SessionStatus.RIDE_ACTIVE -> FsmState(SessionStatus.CONNECTED)
+                    s == SessionStatus.RECONNECTING && state.returnTo == SessionStatus.RIDE_ACTIVE ->
+                        FsmState(SessionStatus.RECONNECTING, SessionStatus.CONNECTED)
+                    s == SessionStatus.DISCONNECTED -> FsmState(SessionStatus.ENDING)
+                    else -> null
+                }
 
             is SessionEvent.LinkLost ->
                 when {
