@@ -228,14 +228,14 @@ a test being listed above.
 
 | Gate | Current evidence |
 |---|---|
-| Android unit/static/build | 1,062 unit tests passed: app 264, audio 33, core 451, data 31, network 283. Full ktlint, detekt, lint, assembleDebug and assembleRelease passed with JDK 21 |
+| Android unit/static/build | Round 2: 1,093 unit tests passed (app 273, audio 33, core 459, data 31, network 297). Full ktlint, detekt, lint, assembleDebug and assembleRelease passed with JDK 21. The suite was additionally re-run four times, three with `--rerun-tasks`. One run taken immediately after the 2-minute emulator suite showed a transient double failure (`PairingSessionIntegrationTest`, `VoiceControllerIntercomTest` — both real-socket/real-timing suites); neither reproduced in five targeted re-runs of those two classes nor in the four subsequent full runs, and both are unrelated to this pass's changes. Recorded rather than discarded |
 | Android emulator | 50 instrumentation tests passed on the API 36 emulator: app 5, audio 11, data 34. The app suite includes 20 activity recreation/foreground cycles |
-| iOS Core | 345 tests passed |
-| iOS Platform | 641 tests passed after the deterministic reset-window fix; a separate repeat of all 25 real-TLS reconnect stress tests also passed |
-| iOS Simulator builds | Debug and Release builds passed after the reset fix. Debug installed and launched; this is launch evidence only |
+| iOS Core | Round 2: 353 tests passed |
+| iOS Platform | Round 2: 647 tests, 0 failures, 1 skipped — the skip is the interop gate's iOS half, which is inert without the orchestrator |
+| iOS Simulator builds | Round 2: Debug and Release unsigned simulator builds passed |
 | Cross-platform software integration | **PASS.** `tools/crossplatform/run.sh`: the Swift and Kotlin implementations as two processes joined by a real TCP socket carrying the real protocol. Three consecutive passes. See “Cross-platform software integration gate” below |
 | Interactive emulator ↔ simulator UI journey | **ENVIRONMENT LIMITATION — not a product failure.** The UI-control tool cannot attach to Simulator, so no interactive lifecycle pass is claimed. It is not folded into the hardware-deferred list: it is a tooling gap on this machine |
-| GitHub Actions / PR | Draft [PR #6](https://github.com/arunachaleswaranms/RideLink/pull/6). At `1e6e889`, security run 35684841003 passed all five jobs and CI run 35684840900 passed Android but failed iOS at reconnect cycle 93. Fresh validation for the reset fix: [CI run 35712994331](https://github.com/arunachaleswaranms/RideLink/actions/runs/35712994331), [Security run 35712994259](https://github.com/arunachaleswaranms/RideLink/actions/runs/35712994259), source head `fcd58510d1ef31ec1a03cb6f26145512880f7fcf`. Consult the PR checks for the final head results |
+| GitHub Actions / PR | Draft [PR #6](https://github.com/arunachaleswaranms/RideLink/pull/6). Round 1 history: at `1e6e889` security run 35684841003 passed all five jobs while CI run 35684840900 failed iOS at reconnect cycle 93; the reset fix was validated by CI run 35712994331 and Security run 35712994259 at `fcd5851`. Round 2's first push (`6463eff`) passed iOS and failed Android on ktlint in the new interop test — a local full-gate run had aborted at an earlier task and never reached ktlint, which is why CI caught it and this record says so. **Consult the PR checks for the exact-head result**; this document deliberately names no run id for its own head, because recording one would require a commit that changes it |
 
 The cross-platform software gate is closed by a live two-implementation session; the interactive
 UI journey is an environment limitation and is stated as one. Software closure still requires
