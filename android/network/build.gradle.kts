@@ -56,6 +56,14 @@ tasks.withType<Test> {
             .resolve("protocol/vectors")
             .absolutePath,
     )
+    // Phase 8's cross-platform interop gate (`tools/crossplatform/run.sh`) passes the shared
+    // report directory as a Gradle property rather than an environment variable, because a test
+    // worker inherits the *daemon's* environment and the daemon long outlives one invocation.
+    // Absent — every ordinary run — `CrossPlatformInteropTest` returns immediately.
+    (project.findProperty("rideLinkCrossDir") as String?)?.let { crossDir ->
+        environment("RIDELINK_CROSS_DIR", crossDir)
+        outputs.upToDateWhen { false }
+    }
     testLogging {
         events("passed", "skipped", "failed")
         // FULL, not the default SHORT: a CI failure whose assertion message is truncated to
