@@ -288,7 +288,7 @@ instead of a yield budget (it failed once under full-suite load, reading between
 |---|---|
 | End Ride preserving all deferred events | no — partition test: reconciliation retired and cancelled |
 | old reconciliation surviving into Ride 2 | no — same test; it never reports applied |
-| accepted command retained forever | **found on iOS** (drain cadence lost after the first hold in a session); fixed, regression added |
+| accepted command retained forever | **found on iOS** (drain cadence lost after the first hold in a session); fixed, regression added. The first version of that fix cleared its running flag on a separate actor hop after the loop returned, so a hold landing in that hop still got no cadence; the flag is now cleared by a `defer` in the actor-isolated loop, in the same step that observes the empty stream |
 | drain tight loop when capacity unavailable | no — one wait per cadence pass, none without time |
 | duplicate apply after snapshot supersession | no — F: one `select` |
 | `lastReceivedSeq` rolled back | no — A/B/C |

@@ -699,24 +699,22 @@ extension SyncPlaybackCoordinator {
         let run = deferredDrainRun
         deferredDrainRunning = true
         deferredDrainTask = Task { [weak self] in
-            await self?.runDeferredDrain(generation: generation)
-            await self?.deferredDrainEnded(run: run)
+            await self?.runDeferredDrain(generation: generation, run: run)
         }
     }
 
-    private func runDeferredDrain(generation: Int64) async {
+    /// Actor-isolated, so the `defer` clears the flag in the same actor step that decided to stop —
+    /// an empty stream is observed synchronously by `hasDeferredWork` — rather than on a later hop a
+    /// newly held command could land before. Only the run that is still current may clear it: a
+    /// cancelled predecessor returning after a successor started must not clear the successor's.
+    private func runDeferredDrain(generation: Int64, run: Int64) async {
+        defer { if run == deferredDrainRun { deferredDrainRunning = false } }
         while await hasDeferredWork(generation: generation) {
             await sleeper.sleep(untilLocalMonoUs: monotonicNowUs() + Phase5GateBounds.deferredRetryIntervalUs)
             if Task.isCancelled { return }
             guard await stillCurrent(generation) else { return }
             await drainDeferredEvents()
         }
-    }
-
-    /// Only the run that is still current may say the drain stopped: a cancelled predecessor that
-    /// returns after a successor started must not clear the successor's flag.
-    private func deferredDrainEnded(run: Int64) {
-        if run == deferredDrainRun { deferredDrainRunning = false }
     }
 
     func hasDeferredWork(generation: Int64) async -> Bool {

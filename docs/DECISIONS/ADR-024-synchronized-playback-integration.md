@@ -2278,8 +2278,9 @@ it. Local Ride retirement is not one.
 - *iOS drain liveness.* `startDeferredDrain` treated "the task is not cancelled" as "the drain is
   running", but a loop that ended because the stream emptied leaves a finished, uncancelled task —
   so every later hold in the session got no 100 ms retry cadence and waited for the 5 s tick. End
-  Ride's kept debt relies on this drain. It now tracks a run token (Android's `isActive` never had
-  the defect; a parity test pins both).
+  Ride's kept debt relies on this drain. It now tracks a run token, cleared by a `defer` inside the
+  actor-isolated loop so no hold can land between "stopped" and "flag cleared" (Android's
+  `isActive` never had the defect; a parity test pins both).
 - *Sequence truth after supersession.* A snapshot at `command_seq == lastReceivedSeq` adopted
   nothing, so after it superseded (or reconciled past) an accepted C1 and its state was represented,
   `lastAppliedSeq` still said C1 had never applied. `representAuthoritativeSequence` raises applied

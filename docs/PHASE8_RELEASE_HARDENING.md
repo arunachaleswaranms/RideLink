@@ -38,7 +38,7 @@ as applied before the apply could refuse it).
 | iOS Core | 353 passed |
 | iOS Platform | 661 executed, 0 failures, 1 skipped (the interop half that needs the orchestrator); includes all 16 real-TLS two-peer tests |
 | iOS simulator builds | Unsigned Debug and Release: `** BUILD SUCCEEDED **` |
-| Cross-platform | `tools/crossplatform/run.sh`: GATE PASSED 3 consecutive times, 17/17 comparisons each (pairing code, pins, leader, session_id, READY clocks, PLAY/QUEUE_SNAPSHOT/STATE_REQUEST/STATE_SNAPSHOT, silent reconnect 1 → 2, successor PLAYBACK_STATE) |
+| Cross-platform | `tools/crossplatform/run.sh`: GATE PASSED 4 times (the last on the final source), 17/17 comparisons each (pairing code, pins, leader, session_id, READY clocks, PLAY/QUEUE_SNAPSHOT/STATE_REQUEST/STATE_SNAPSHOT, silent reconnect 1 → 2, successor PLAYBACK_STATE) |
 | Local security | Gitleaks over git history: 222 commits, no leaks. Local-only policy: 309 production files, 0 findings. (A `gitleaks dir` scan of the working tree reports 22 hits, all in the untracked SwiftPM checkout of GRDB's vendored SQLite sources under `.build/`, none in repository content) |
 | GitHub CI/security | Exact pushed-head run IDs are supplied with the PR handoff |
 
