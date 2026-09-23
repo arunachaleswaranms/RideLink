@@ -1,6 +1,7 @@
 package com.ridelink.app.sync
 
 import com.ridelink.app.sync.SyncPlaybackTwoPeerTest.Companion.LEADER_START_US
+import com.ridelink.core.playback.PlaybackTimeline
 import com.ridelink.core.resync.ResyncMessage
 import com.ridelink.core.resync.ResyncPlaybackSnapshot
 import kotlinx.coroutines.CompletableDeferred
@@ -63,10 +64,9 @@ class SyncPlaybackDeliveredAuthorityTest {
                 .next()
         }
         if (successor) {
-            pair.follower.coordinator.rideEpochs
-                .next()
-            pair.follower.coordinator.rideEpochs
-                .next()
+            val follower = pair.follower.coordinator
+            follower.endRideSegment(follower.rideEpochs.next())
+            follower.rideEpochs.next()
             pair.leader.coordinator.playSynchronized(SyncTestValues.hash(2))
             runCurrent()
             assertEquals(2, pair.follower.coordinator.diagnostics.value.lastReceivedCommandSeq)
@@ -85,6 +85,9 @@ class SyncPlaybackDeliveredAuthorityTest {
             val expectedSeq = if (successor) 2L else 1L
             assertEquals(expectedSeq, peer.coordinator.diagnostics.value.lastReceivedCommandSeq)
             assertEquals(expectedSeq, peer.coordinator.diagnostics.value.lastAppliedCommandSeq)
+            assertEquals(expectedSeq, authorityField(peer.coordinator, "lastReceivedSeq"))
+            assertEquals(expectedSeq, authorityField(peer.coordinator, "lastAppliedSeq"))
+            assertEquals(if (successor) origin + 2 else origin, authorityField(peer.coordinator, "rideAuthorityEpoch"))
             val expectedHash = SyncTestValues.hash(if (successor) 2 else 1)
             assertEquals(expectedHash, peer.coordinator.diagnostics.value.currentTrackHash)
             assertEquals(
@@ -98,6 +101,7 @@ class SyncPlaybackDeliveredAuthorityTest {
         }
         assertTrue(origin < pair.leader.coordinator.rideEpochs.current)
         assertEquals(pair.leader.coordinator.queueState.value, pair.follower.coordinator.queueState.value)
+        assertMatchingTimelines(pair.leader.coordinator, pair.follower.coordinator)
         assertEquals(1, pair.leader.session.currentAuthGeneration)
         assertEquals(1, pair.follower.session.currentAuthGeneration)
     }
@@ -218,6 +222,16 @@ class SyncPlaybackDeliveredAuthorityTest {
                 assertEquals(0, peer.coordinator.retainedWorkCount)
             }
         }
+
+    private fun assertMatchingTimelines(
+        leader: SyncPlaybackCoordinator,
+        follower: SyncPlaybackCoordinator,
+    ) {
+        val leaderTimeline = authorityField(leader, "timeline") as PlaybackTimeline
+        val followerTimeline = authorityField(follower, "timeline") as PlaybackTimeline
+        // Playback generation is a local token; all authoritative timeline fields must agree.
+        assertEquals(leaderTimeline.copy(generation = 0), followerTimeline.copy(generation = 0))
+    }
 
     /** Read-only invariant inspection without adding production APIs solely for tests. */
     private fun authorityField(
