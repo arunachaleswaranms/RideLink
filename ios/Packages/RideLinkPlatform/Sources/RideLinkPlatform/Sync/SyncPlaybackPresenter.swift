@@ -1,7 +1,6 @@
 import Foundation
 import Observation
 import RideLinkCore
-import RideLinkPlatform
 
 /// The `@MainActor`, `@Observable` face of `RideLinkPlatform.SyncPlaybackCoordinator`.
 ///
