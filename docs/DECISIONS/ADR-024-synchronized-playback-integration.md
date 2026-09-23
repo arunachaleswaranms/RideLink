@@ -2219,3 +2219,79 @@ tokens and protects all successor state. No wire change or disconnect is introdu
 The [complete pipeline, alternatives, product semantics and regression audit](../PHASE8_DELIVERED_AUTHORITY.md)
 records why this is the smallest V1 correction, including intentional audible completion
 after End Ride and the separate successor reconciliation path.
+
+## Amendment A13 — 23 September 2026 — an accepted clock-held command is distributed debt
+
+Amendment A12 made delivered authority outlive its local ride, and applied that to the immediate
+paths: the leader's SENT and a follower's immediate apply. It created `DeliveredAuthority` **too
+late** for the follower's third path. A command a follower accepts while its session clock is
+untrusted advances `lastReceivedSeq` in `admitAuthoritativeCommand`'s DEFER branch and is retained
+in `deferredEvents` — and the retained form was the same `DeferredEvent.command` a still-cancellable
+candidate would have had. `DeliveredAuthority` was only minted when the drain eventually handed it
+to `applyAuthoritative`, so until then every ride rule applied to it: End Ride's
+`leaveSynchronizedMode(preserveDistributed: true)` called `discardDeferredEvents()`, and the drain's
+top-of-loop and adjacent-to-pop `rideStillLive` proofs retired it. The leader had represented C1,
+the follower had taken responsibility for C1, and the follower discarded C1 because its user ended
+the ride. Reproduced on both platforms against the reviewed head `47dd2ac` before any change.
+
+**Decision.** The follower's authority transition is the `lastReceivedSeq` write, not the apply.
+
+1. **Structural type.** `DeferredEvent.command` is replaced by `acceptedCommand(AcceptedCommand)`
+   (Kotlin: `DeferredEvent.AcceptedCommand`) carrying `message`, the admitting `generation`, the
+   `originalRide` and the `commandSeq` `lastReceivedSeq` took. It is constructed in exactly one
+   place, adjacent to that write. There is no other command case, so nothing can be retained as a
+   command without having been accepted.
+2. **Provenance is not cancellation authority.** `DeferredEvent` separates `provenanceRide` (the ride
+   that admitted it) from `cancellingRide` (the ride whose retirement cancels it). An accepted
+   command and a queue snapshot have no `cancellingRide`; a held `PLAYBACK_STATE`/`STATE_SNAPSHOT`
+   anchor keeps ADR-028 A3–A7's ride cancellation unchanged. Every ride-retirement check reads
+   `cancellingRide`, so a future edit cannot re-apply `rideStillLive` to distributed debt by reading
+   the provenance field.
+3. **End Ride partitions the held stream.** `retireRideScopedDeferredEvents` removes exactly the
+   events with a `cancellingRide` — each reconciliation among them still gets its terminal
+   `onReconciliationCancelled` — and keeps accepted commands and queue snapshots in their original
+   order; the drain that owns them keeps running. Queue snapshots are kept because they are
+   control-generation authority (ADR-024 A8) and dropping one in front of a kept command would change
+   that command's meaning. "Play locally", control-generation retirement and fail-closed still use
+   the whole-stream `discardDeferredEvents`.
+4. **Successor protection moves to the same predicate as A12.** `distributedObligationSuperseded`
+   (a strictly newer ride has *established* the standing state, or applied truth is past this
+   command) is what `mayRepresent` checks for delivered work and what the drain checks adjacent to
+   the pop. The ordered stream makes the pre-pop case unreachable (nothing overtakes held work), so
+   it is fail-closed defence; the reachable successor race is after the pop, in the apply's own
+   suspensions, where `mayRepresent` refuses it. A nominal Start Ride establishes nothing and
+   supersedes nothing.
+5. **Two bounds, two owners.** Retained debt is bounded by `deferredCommandCapacity` (16) through
+   `PendingCommandGate`; an overflow latches desynchronisation and reconciles. It holds no
+   `SessionWorkLedger` reservation while waiting for its clock; the reservation (256) is taken before
+   the pop, as A11 placed it, so a clock-held command never starves local apply capacity.
+
+**Legitimate terminal routes for an accepted held command**, and only these: represented by the
+drain; superseded by authoritative state whose `command_seq` covers it (PROTOCOL §5's existing
+supersession rule, now counted as `supersededHeldCommandCount`); refused by the desynchronisation
+latch (overflow, ingress loss, or a held revision mismatch), which raises the existing
+`STATE_REQUEST`/`STATE_SNAPSHOT` reconciliation; or dying with the control generation that admitted
+it. Local Ride retirement is not one.
+
+**Three defects found while building the regressions, all fixed:**
+
+- *iOS drain liveness.* `startDeferredDrain` treated "the task is not cancelled" as "the drain is
+  running", but a loop that ended because the stream emptied leaves a finished, uncancelled task —
+  so every later hold in the session got no 100 ms retry cadence and waited for the 5 s tick. End
+  Ride's kept debt relies on this drain. It now tracks a run token (Android's `isActive` never had
+  the defect; a parity test pins both).
+- *Sequence truth after supersession.* A snapshot at `command_seq == lastReceivedSeq` adopted
+  nothing, so after it superseded (or reconciled past) an accepted C1 and its state was represented,
+  `lastAppliedSeq` still said C1 had never applied. `representAuthoritativeSequence` raises applied
+  truth monotonically, only where the snapshot's state is actually represented.
+- *Accounting.* A held command waiting for capacity incremented `workCapacityRefusedCount`, which is
+  documented as "a command whose `command_seq` was not spent"; the drain now pre-checks capacity and
+  counts `heldCommandCapacityWaitCount`, once per cadence pass (which is also what makes a busy loop
+  observable). Android's drain published the popped `seq` as `lastAppliedCommandSeq` before the apply
+  could still refuse it; it now publishes only from representation.
+
+No wire change, no protocol field, no vector: the retained type, End Ride partition and diagnostics
+are local ownership. The earlier round-7/8 regressions that asserted a held **accepted** command is
+discarded on ride retirement asserted the blocker; they now assert completion with original ride
+provenance (never relabelled) and applied truth only at representation. The pipeline trace, every
+exit, and the regression names are in [`PHASE8_DELIVERED_AUTHORITY.md`](../PHASE8_DELIVERED_AUTHORITY.md#amendment-a13--accepted-clock-held-commands).

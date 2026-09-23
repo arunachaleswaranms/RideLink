@@ -10,6 +10,24 @@ ride-boundary, boundedness and below-capacity liveness regressions), SyncPlaybac
 the capacity-boundary two-peer regression, which asserts that a command the peer received is never
 abandoned locally) and SyncPlaybackDrift endurance tests on both platforms.
 
+**Delivered and accepted authority across End Ride** ([ADR-024 A12](DECISIONS/ADR-024-synchronized-playback-integration.md#amendment-a12--23-september-2026--delivered-authority-outlives-its-local-ride)
+and [A13](DECISIONS/ADR-024-synchronized-playback-integration.md#amendment-a13--23-september-2026--an-accepted-clock-held-command-is-distributed-debt)).
+Run iOS `SyncPlaybackTwoPeerTests` (real TLS) and `SyncPlaybackAcceptedObligationTests`, and Android
+`SyncPlaybackDeliveredAuthorityTest` and `SyncPlaybackAcceptedObligationTest`. A13's cases, mirrored:
+A — a follower's clock-held, **accepted** C1 survives its own End Ride and completes on both peers,
+asserting by name that "L applied C1, F accepted C1, F discarded C1" never holds; B — the same across
+End + a nominal Start, keeping Ride-1 provenance; C — genuine Ride-2 C2 established while C1 is parked
+after its pop wins, with C1 changing no identity, timeline, ride owner, epoch token, diagnostics,
+player step or sequence floor; D — G1's held command dies with G1 and G2 progresses from its own
+`command_seq` 1; E — clock-ready but capacity-starved, C1 stays at the head, one wait per retry pass,
+no spin, no refusal counted, exact release once; F — a snapshot covering C1's `command_seq`
+supersedes it (counted, never ride-retired, applied once) and `lastAppliedSeq` follows the represented
+snapshot; plus End Ride's stream partition (accepted debt and queue state kept in order, held
+reconciliation cancelled), the retry cadence for a second hold in one session, and the held stream's
+own bound across End Ride. The round-7/8 cases in §3.1c that expected a held **accepted** command to
+be discarded on ride retirement are superseded by A13: they now expect completion with original
+provenance and applied truth only at representation.
+
 **Cross-platform software integration.** Run `tools/crossplatform/run.sh`. It starts the Swift and
 Kotlin implementations as two processes joined by a real TCP socket carrying the real protocol and
 compares their reports: matching PROTOCOL §4.5 six-digit codes derived from each side's own TLS

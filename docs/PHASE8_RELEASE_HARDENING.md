@@ -8,6 +8,52 @@ This is the current audit record; STATUS's older implementation-pass narratives 
 Software closure requires independent review of the live PR and exact-head CI. Physical
 validation remains **DEFERRED — HARDWARE NOT AVAILABLE**.
 
+## Accepted clock-held commands — 23 September 2026
+
+Review at `47dd2aca888c574304aeaa6f4afdabadda134128` found the delivered-authority model applied
+too late on one follower path: a command accepted while the clock was untrusted advanced
+`lastReceivedSeq` and was retained as ordinary ride-local work, so End Ride and the drain's ride
+proofs discarded it after the leader had represented it.
+[ADR-024 Amendment A13](DECISIONS/ADR-024-synchronized-playback-integration.md#amendment-a13--23-september-2026--an-accepted-clock-held-command-is-distributed-debt)
+makes the retained form a structural `AcceptedCommand` whose ride is provenance only, has End Ride
+retire only ride-scoped held anchors, and shares A12's successor test. The full trace, every
+terminal exit and the regression names are in
+[the delivered-authority audit](PHASE8_DELIVERED_AUTHORITY.md#amendment-a13--accepted-clock-held-commands).
+No protocol, vector, dependency, security-workflow or cross-platform-gate change.
+
+Every new regression failed against unmodified `47dd2ac` production for the stated reason first
+(two-peer A/B: "End Ride must not erase an accepted distributed obligation" and "L applied C1, F
+accepted C1, and F discarded C1"). Building them found three further defects, all fixed: iOS lost
+the 100 ms drain cadence after a session's first hold; a represented snapshot at
+`command_seq == lastReceivedSeq` left `lastAppliedSeq` behind on both platforms; and a held command
+waiting for capacity was counted as a refused admission (Android also published the popped `seq`
+as applied before the apply could refuse it).
+
+| Gate | Evidence (AUTOMATED, local, final source) |
+|---|---|
+| Targeted repeats | iOS `SyncPlaybackAcceptedObligationTests` + `SyncPlaybackTwoPeerTests` + `RideSegmentLifecycleTests` 20× (50 tests each, 0 failing iterations); Android `SyncPlaybackAcceptedObligationTest` + `SyncPlaybackDeliveredAuthorityTest` + `ResyncRecoveryTest` 10× with `--rerun` (0 failing) |
+| Android unit | 1,089 passed, 0 failed, counted from JUnit XML: core 459, app 282, network 284, audio 33, data 31 (`:core:test` and `test`, `--rerun-tasks`). The project defines no release unit-test task |
+| Android static/build | ktlint, detekt, lint, assembleDebug and assembleRelease passed with JDK 21, `--rerun-tasks` |
+| Android instrumentation | 50 passed on the API 36 emulator: app 5, audio 11, data 34 |
+| iOS Core | 353 passed |
+| iOS Platform | 661 executed, 0 failures, 1 skipped (the interop half that needs the orchestrator); includes all 16 real-TLS two-peer tests |
+| iOS simulator builds | Unsigned Debug and Release: `** BUILD SUCCEEDED **` |
+| Cross-platform | `tools/crossplatform/run.sh`: GATE PASSED 3 consecutive times, 17/17 comparisons each (pairing code, pins, leader, session_id, READY clocks, PLAY/QUEUE_SNAPSHOT/STATE_REQUEST/STATE_SNAPSHOT, silent reconnect 1 → 2, successor PLAYBACK_STATE) |
+| Local security | Gitleaks over git history: 222 commits, no leaks. Local-only policy: 309 production files, 0 findings. (A `gitleaks dir` scan of the working tree reports 22 hits, all in the untracked SwiftPM checkout of GRDB's vendored SQLite sources under `.build/`, none in repository content) |
+| GitHub CI/security | Exact pushed-head run IDs are supplied with the PR handoff |
+
+Recorded rather than discarded: one full iOS run hung in
+`TransferManagerTests.testABindThatCompletesAfterCloseNeverPublishesItsListener` (Phase 4 transfer
+binding, untouched here) and was killed; it did not recur in 20 watchdog-guarded runs of that suite
+or in two later full runs. The same interrupted run failed
+`testDeliveredApplyParkedAcrossEndRideCompletesWithOriginalProvenance` once (0/30 in isolation):
+its fixed yield budget let the parked apply resume between two separate actor reads under load; it
+now waits on the outcome. SwiftLint/SwiftFormat are not installed on this machine and are not CI
+gates.
+
+Physical gates remain **DEFERRED — HARDWARE NOT AVAILABLE**. This blocker was software and is
+closed in software.
+
 ## Delivered-authority follow-up — 23 September 2026
 
 The remaining review blocker was independent of capacity: after successful delivery,
