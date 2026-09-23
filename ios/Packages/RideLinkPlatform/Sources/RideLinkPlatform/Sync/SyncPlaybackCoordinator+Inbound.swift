@@ -179,7 +179,7 @@ extension SyncPlaybackCoordinator {
             let position = pending.positionMs
             // Round 7: the **press's** ride, not a fresh capture. This is the one authoritative
             // command whose authorising instant is genuinely older than the function issuing it.
-            await issue(ride: pending.ride) { header in
+            await issue(ride: pending.ride, origin: .retainedPlay) { header in
                 .play(header: header, trackHash: hash, positionMs: position, queueItemId: itemId)
             }
         }
@@ -1087,7 +1087,7 @@ extension SyncPlaybackCoordinator {
             await resolvePendingPlay()
             return
         }
-        await issue(ride: ride) { stamped in Self.restamp(message, with: stamped) }
+        await issue(ride: ride, origin: .peerIntent) { stamped in Self.restamp(message, with: stamped) }
     }
 
     /// The same message, carrying the leader's authoritative header instead of the intent's.

@@ -38,18 +38,26 @@ public protocol SyncPlaybackGate {
 }
 
 /// Bridges `MusicCoordinator`'s gate to the coordinator that owns synchronisation.
+///
+/// **ADR-024 Amendment A14: every answer comes from `SyncPlaybackCoordinator.transportOwnership`,
+/// the coordinator's own synchronous mirror of `syncEnabled && role != nil`.** It used to come from
+/// `SyncPlaybackPresenter`, which reconstructed it from published diagnostics as
+/// `role != nil && syncState != .inactive` — equivalent only while nothing could report scheduling
+/// after synchronised mode ended. Once an already-distributed obligation was allowed to finish after
+/// End Ride (Amendment A13), its `.scheduled`/`.synced` made that expression true again, the
+/// lock-screen Pause was intercepted, and a fresh synchronised `PAUSE` went out with the ride over.
+/// `SyncState` is diagnostics; it is not read here at all.
+///
+/// The read is synchronous — `MusicCoordinator`'s callers, `MPRemoteCommandCenter`'s handlers
+/// included, cannot await an actor — and it is only the *first* of two answers. The forwarded press
+/// is admitted by `SyncPlaybackCoordinator.admitLocalTransport`, which re-proves ownership where the
+/// authority is created, so a press that races a boundary is refused there.
 @MainActor
 public struct SyncPlaybackGateAdapter: SyncPlaybackGate {
     let sync: SyncPlaybackCoordinator
-    /// Read synchronously so the gate can answer without suspending — `MusicCoordinator`'s callers
-    /// (including `MPRemoteCommandCenter`'s handlers) are synchronous and cannot await an actor.
-    let isActive: () -> Bool
-    let role: () -> PlaybackRole?
 
-    public init(sync: SyncPlaybackCoordinator, isActive: @escaping () -> Bool, role: @escaping () -> PlaybackRole?) {
+    public init(sync: SyncPlaybackCoordinator) {
         self.sync = sync
-        self.isActive = isActive
-        self.role = role
     }
 
     public func interceptPlay() -> Bool {
@@ -67,22 +75,34 @@ public struct SyncPlaybackGateAdapter: SyncPlaybackGate {
     public func interceptPrevious() -> Bool { forward { await $0.previous() } }
 
     public func interceptTrackEnded() -> Bool {
-        guard isActive() else { return false }
-        // Only the ADR-010 leader may decide what plays next. A follower still *intercepts* — it
-        // must not advance its own queue — and then does nothing, waiting for the leader's
-        // authoritative NEXT. That is not a stall, it is the single serialisation point doing its
-        // job. The role is read here, on the main actor, rather than inside the task below: it is a
-        // non-`Sendable` closure and cannot cross into one.
-        guard role() == .leader else { return true }
-        return forward { await $0.next() }
+        // One read, so ownership and role come from the same instant: the role travels inside the
+        // synchronised case and cannot be paired with a different read's ownership.
+        switch sync.transportOwnership.current {
+        case .local:
+            // Phase 3: `MusicCoordinator` advances its own local queue.
+            return false
+        case .synchronized(.follower):
+            // Only the ADR-010 leader may decide what plays next. A follower still *intercepts* — it
+            // must not advance its own queue — and then does nothing, waiting for the leader's
+            // authoritative NEXT. That is not a stall, it is the single serialisation point doing
+            // its job.
+            return true
+        case .synchronized(.leader):
+            dispatch { await $0.next() }
+            return true
+        }
+    }
+
+    private func forward(_ action: @escaping @Sendable (SyncPlaybackCoordinator) async -> Void) -> Bool {
+        guard sync.transportOwnership.current.isSynchronizedModeActive else { return false }
+        dispatch(action)
+        return true
     }
 
     /// Only `sync` — an actor, and so `Sendable` — crosses into the task. Nothing else here is,
     /// which is exactly what Swift 6 strict concurrency is for.
-    private func forward(_ action: @escaping @Sendable (SyncPlaybackCoordinator) async -> Void) -> Bool {
-        guard isActive() else { return false }
+    private func dispatch(_ action: @escaping @Sendable (SyncPlaybackCoordinator) async -> Void) {
         let coordinator = sync
         Task { await action(coordinator) }
-        return true
     }
 }

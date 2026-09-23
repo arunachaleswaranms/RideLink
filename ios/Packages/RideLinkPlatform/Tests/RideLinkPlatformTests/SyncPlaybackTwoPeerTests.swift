@@ -72,6 +72,15 @@ final class SyncPlaybackTwoPeerTests: XCTestCase {
 
     func testAFollowersIntentComesBackAsTheLeadersAuthoritativeCommandOverRealTls() async throws {
         try await twoPairedPhones { leader, follower in
+            // ADR-024 Amendment A14: the follower's Pause is synchronised only while synchronised mode
+            // owns its controls. Its user starts it on a track neither phone holds: the press adds the
+            // track to the shared queue and then waits, spending no command_seq.
+            await follower.coordinator.playSynchronized(SyncTestValues.hash(9))
+            try await Self.expect("the follower's queue add converged on both peers") {
+                let leaderRevision = await leader.coordinator.queueState.revision
+                let followerRevision = await follower.coordinator.queueState.revision
+                return leaderRevision == 1 && followerRevision == 1
+            }
             await follower.coordinator.pause()
 
             // The follower changed no audio of its own (ARCHITECTURE §5's optimistic-feedback rule);
@@ -723,6 +732,15 @@ final class SyncPlaybackTwoPeerTests: XCTestCase {
             try await Self.expect("both peers hold two items") {
                 await follower.coordinator.queueState.revision == 2
             }
+            // ADR-024 Amendment A14: the SEEK and NEXT below are local presses, synchronised only while
+            // synchronised mode owns each phone's controls. Each user starts it on a track neither phone
+            // holds, so neither press issues anything; the track joins the end of the queue and
+            // `items[0]` is still the one removed.
+            await leader.coordinator.playSynchronized(SyncTestValues.hash(9))
+            try await Self.expect("both peers hold the third item") {
+                await follower.coordinator.queueState.revision == 3
+            }
+            await follower.coordinator.playSynchronized(SyncTestValues.hash(9))
 
             // Both users act at once, from both ends. Genuinely concurrent — unstructured tasks
             // racing into the two actors and out onto one real socket.

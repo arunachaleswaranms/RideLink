@@ -491,6 +491,11 @@ final class SyncPlaybackDeliveryAuditTests: XCTestCase {
     func testARefusedFollowerIntentIsCountedButNeverFailsTheSessionClosed() async {
         await build(outboundCapacity: Self.wedgeCapacity)
         await connect(asLeader: false)
+        // ADR-024 Amendment A14: the wedge and the NEXT below are local presses, synchronised only
+        // while synchronised mode owns the controls. The follower's user starts it on a track this
+        // phone cannot play yet; its queue-add intent drains before the wedge is built.
+        await coordinator.playSynchronized(SyncTestValues.hash(9))
+        await awaitOutboundQuiescent()
         await wedgeOutbound()
 
         await coordinator.next()
