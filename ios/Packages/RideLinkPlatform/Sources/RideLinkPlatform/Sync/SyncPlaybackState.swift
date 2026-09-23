@@ -200,6 +200,18 @@ public struct SyncPlaybackDiagnostics: Sendable, Equatable {
     /// authorised by the ride it was admitted under — surfaced rather than dropped silently, and a
     /// reconciliation among them receives its terminal cancellation.
     public var retiredRideDeferredCount = 0
+    /// ADR-024 Amendment A13: how many **accepted** held commands left the held stream because
+    /// authoritative state already accounted for them — a `PLAYBACK_STATE`/`STATE_SNAPSHOT` whose
+    /// `command_seq` covers them, or newer established ride authority — rather than by being applied.
+    ///
+    /// Distinct from `retiredRideDeferredCount`, which an accepted command can never enter: local
+    /// Ride retirement is not cancellation authority for distributed debt.
+    public var supersededHeldCommandCount = 0
+    /// ADR-024 Amendment A13: drain passes on which an **accepted**, clock-ready held command stayed
+    /// held because `SessionWorkLedger` had no capacity to represent it. A wait, not a refusal: its
+    /// `command_seq` is already spent, so it is deliberately not `workCapacityRefusedCount`. One per
+    /// drain pass, and the retry cadence paces the passes — so a busy loop would be visible here.
+    public var heldCommandCapacityWaitCount = 0
     /// Independent-review round 8: how many authoritative operations were refused **at their own
     /// admission or commit point** because the ride lifetime that admitted them retired inside a
     /// suspension the admission had to take.

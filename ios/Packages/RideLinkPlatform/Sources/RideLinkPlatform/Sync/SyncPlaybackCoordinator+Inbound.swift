@@ -560,8 +560,13 @@ extension SyncPlaybackCoordinator {
         case .overflow:
             onHoldOverflow()
         case .defer_:
+            // ADR-024 Amendment A13: **this** is where a clock-held command becomes accepted
+            // distributed debt — the `lastReceivedSeq` write below — so its retained form says so,
+            // in the same synchronous step, with that exact `command_seq`.
             lastReceivedSeq = header.commandSeq
-            deferredEvents.append(.command(message, generation: generation, ride: ride))
+            deferredEvents.append(.acceptedCommand(AcceptedCommand(
+                message: message, generation: generation, originalRide: ride, commandSeq: header.commandSeq
+            )))
             diagnostics.lastReceivedCommandSeq = header.commandSeq
             diagnostics.deferredCommandCount = deferredEvents.count
             if !diagnostics.ingressDesynchronized { diagnostics.syncState = .clockUnready }
@@ -637,7 +642,7 @@ extension SyncPlaybackCoordinator {
     private func refuseHeldIncrementalCommands() {
         let before = deferredEvents.count
         deferredEvents.removeAll { held in
-            if case .command = held { return true }
+            if case .acceptedCommand = held { return true }
             return false
         }
         let refused = before - deferredEvents.count
@@ -682,17 +687,36 @@ extension SyncPlaybackCoordinator {
     /// Re-checks the clock on a short cadence while commands wait, so a held `PLAY` becomes audible
     /// as soon as the estimator recovers rather than at the next 5 s position-report tick. One loop
     /// at a time, ended by the session boundary or by the buffer emptying.
+    ///
+    /// ADR-024 Amendment A13's fresh-fix audit: "running" is `deferredDrainRunning`, not "the task is
+    /// not cancelled". A loop that ended because the stream emptied leaves a *finished*, uncancelled
+    /// task behind, and treating that as live gave every later hold in the same session no retry
+    /// cadence at all — it waited for the 5 s position-report tick. End Ride's retained debt relies
+    /// on this drain, so it must start whenever none is running. Android's `isActive` is the mirror.
     func startDeferredDrain(generation: Int64) {
-        if let existing = deferredDrainTask, !existing.isCancelled { return }
+        if deferredDrainRunning, let existing = deferredDrainTask, !existing.isCancelled { return }
+        deferredDrainRun &+= 1
+        let run = deferredDrainRun
+        deferredDrainRunning = true
         deferredDrainTask = Task { [weak self] in
-            guard let self else { return }
-            while await self.hasDeferredWork(generation: generation) {
-                await self.sleeper.sleep(untilLocalMonoUs: self.monotonicNowUs() + Phase5GateBounds.deferredRetryIntervalUs)
-                if Task.isCancelled { return }
-                guard await self.stillCurrent(generation) else { return }
-                await self.drainDeferredEvents()
-            }
+            await self?.runDeferredDrain(generation: generation)
+            await self?.deferredDrainEnded(run: run)
         }
+    }
+
+    private func runDeferredDrain(generation: Int64) async {
+        while await hasDeferredWork(generation: generation) {
+            await sleeper.sleep(untilLocalMonoUs: monotonicNowUs() + Phase5GateBounds.deferredRetryIntervalUs)
+            if Task.isCancelled { return }
+            guard await stillCurrent(generation) else { return }
+            await drainDeferredEvents()
+        }
+    }
+
+    /// Only the run that is still current may say the drain stopped: a cancelled predecessor that
+    /// returns after a successor started must not clear the successor's flag.
+    private func deferredDrainEnded(run: Int64) {
+        if run == deferredDrainRun { deferredDrainRunning = false }
     }
 
     func hasDeferredWork(generation: Int64) async -> Bool {
@@ -743,10 +767,12 @@ extension SyncPlaybackCoordinator {
             //
             // This is the case an append-time proof alone cannot cover, and it is the reachable one:
             // `SessionCoordinator.endRide()` publishes its ride epoch synchronously and hands
-            // `leaveSynchronizedMode` — the only thing that empties this stream, and the only thing
-            // that moves `synchronizedModeEpoch` — to `launchInSession`. So between an accepted End
-            // Ride and its cleanup actually running, a ride-1 event is still sitting here, with its
-            // own `synchronizedModeEpoch` unchanged. Only the `rideEpoch` half sees it.
+            // `leaveSynchronizedMode` — the only thing that retires this stream's ride-scoped work,
+            // and the only thing that moves `synchronizedModeEpoch` — to `launchInSession`. So
+            // between an accepted End Ride and its cleanup actually running, a ride-1 event is still
+            // sitting here, with its own `synchronizedModeEpoch` unchanged. Only the `rideEpoch` half
+            // sees it. (Since ADR-024 Amendment A13 this applies to ride-scoped anchors only; an
+            // accepted command has no `cancellingRide`.)
             //
             // The item is popped rather than left, and the loop continues: a later item may have been
             // admitted under a newer, still-live ride, and leaving a dead one at the head would wedge
@@ -757,7 +783,11 @@ extension SyncPlaybackCoordinator {
             // taken before the clock read, the content resolve and the generation proofs below, all
             // of which suspend — so each branch re-proves the *same* retained admission immediately
             // before it pops and books the item. See `retireHeldRideEvent`.
-            if let ride = held.ride, !rideStillLive(ride) {
+            //
+            // **ADR-024 Amendment A13: `cancellingRide`, not the event's provenance.** An accepted
+            // command has none — its ride is provenance only — so this check can never retire
+            // distributed debt; its successor test is `distributedObligationSuperseded`, below.
+            if let ride = held.cancellingRide, !rideStillLive(ride) {
                 retireHeldRideEvent(held)
                 continue
             }
@@ -784,7 +814,7 @@ extension SyncPlaybackCoordinator {
             //   role, clock readiness, content availability and ordering below and in the apply path;
             //   nothing is bypassed here except a flag that was never about authoritative state.
             if playbackDesynchronized || queueDesynchronized {
-                if case .command = held { return }
+                if case .acceptedCommand = held { return }
             }
             guard await stillCurrent(held.generation) else {
                 // Independent-review round 4, Blocker 2: a retained reconciliation thrown away here
@@ -801,7 +831,8 @@ extension SyncPlaybackCoordinator {
             guard stillCurrentNow(held.generation) else { return }
             guard deferredEvents.count == heldCount else { return }
             switch held {
-            case .command(let message, let generation, let ride):
+            case .acceptedCommand(let accepted):
+                let message = accepted.message, generation = accepted.generation
                 guard let estimate = await estimate(), estimate.ready else { return }
                 // Amendment A5 Finding A's shape one function along: `estimate()` suspends and the
                 // very next statements index, remove from and write the held stream.
@@ -824,8 +855,20 @@ extension SyncPlaybackCoordinator {
                 // one may belong to a newer, still-live ride, so leaving a dead head would wedge it
                 // exactly as independent-review round 3's Blocker A did. No `await` from here to the
                 // writes below.
-                guard rideStillLive(ride) else {
-                    retireHeldRideEvent(held)
+                //
+                // **ADR-024 Amendment A13 replaced the proof, not the position.** This command
+                // already advanced `lastReceivedSeq`; the leader has, or will, represent it. So its
+                // original ride having ended is not a reason to drop it — that was the defect — and
+                // the question adjacent to the pop is the one `mayRepresent` asks of delivered work:
+                // has newer *established* authority already superseded it? The ordered stream makes
+                // that unreachable here in practice (nothing overtakes held work), so this is
+                // fail-closed defence; the reachable successor race is after the pop, where
+                // `mayRepresent` refuses it. A superseded command is popped, counted, and the drain
+                // continues — never left to wedge the stream.
+                guard !distributedObligationSuperseded(
+                    originalRide: accepted.originalRide, commandSeq: accepted.commandSeq
+                ) else {
+                    retireSupersededAcceptedCommand()
                     continue
                 }
                 let heldHeader = Self.headerOf(message)
@@ -840,12 +883,20 @@ extension SyncPlaybackCoordinator {
                 // `lastAppliedSeq` moves. With none, the command stays exactly where it is: still
                 // head of the held stream, still owning its `command_seq`, re-attempted on the
                 // drain's own cadence. Nothing is abandoned and nothing is claimed.
-                guard let reservation = reserveWork(generation: generation) else { return }
+                //
+                // ADR-024 Amendment A13: an accepted command waiting for capacity is **waiting**, not
+                // refused — its `command_seq` is already spent — so the advisory pre-check keeps the
+                // wait out of `workCapacityRefusedCount`, and the wait is counted as what it is: once
+                // per drain pass, which the retry cadence paces, never a spin.
+                guard hasWorkCapacity, let reservation = reserveWork(generation: generation) else {
+                    diagnostics.heldCommandCapacityWaitCount += 1
+                    publishDiagnostics()
+                    return
+                }
                 // Exactly one release, on every path out of this case including a cancellation.
                 defer { releaseWork(reservation) }
                 deferredEvents.removeFirst()
-                let seq = heldHeader?.commandSeq
-                diagnostics.lastAppliedCommandSeq = lastAppliedSeq
+                // Popping is not representation: `lastAppliedSeq` moves in `representDelivered`.
                 diagnostics.deferredCommandCount = deferredEvents.count
                 diagnostics.recoveredCommandCount += 1
                 diagnostics.clockReady = true
@@ -853,8 +904,11 @@ extension SyncPlaybackCoordinator {
                 // Round 7: the ride the command was **admitted** under, replayed unchanged. The
                 // `estimate()` above suspends, so a fresh capture here would be precisely the defect.
                 await applyAuthoritative(
-                    message, generation: generation, ride: ride, estimate: estimate, reservation: reservation,
-                    delivered: seq.map { DeliveredAuthority(ride: ride, commandSeq: $0, reservation: reservation) }
+                    message, generation: generation, ride: accepted.originalRide, estimate: estimate,
+                    reservation: reservation,
+                    delivered: DeliveredAuthority(
+                        ride: accepted.originalRide, commandSeq: accepted.commandSeq, reservation: reservation
+                    )
                 )
             case .queueSnapshot(let revision, let items, let currentIndex, _):
                 deferredEvents.removeFirst()
@@ -974,6 +1028,7 @@ extension SyncPlaybackCoordinator {
     /// dead head in place would wedge everything behind it, which is independent-review round 3's
     /// Blocker A reintroduced by the fix written to prevent a different defect.
     private func retireHeldRideEvent(_ held: DeferredEvent) {
+        assert(held.cancellingRide != nil, "an accepted command is never retired by its ride")
         deferredEvents.removeFirst()
         diagnostics.deferredCommandCount = deferredEvents.count
         diagnostics.retiredRideDeferredCount += 1
@@ -981,6 +1036,17 @@ extension SyncPlaybackCoordinator {
         if let obligation = held.reconciliation {
             onReconciliationCancelled?(obligation, held.generation)
         }
+    }
+
+    /// Pops an accepted command at the head of the held stream because newer established authority
+    /// already accounts for it (ADR-024 Amendment A13). Synchronous; the caller proved the head and
+    /// the supersession with no `await` between. Counted as superseded — never "recovered" (it was
+    /// applied to nothing) and never "retired by ride" (that is not its cancellation authority).
+    private func retireSupersededAcceptedCommand() {
+        deferredEvents.removeFirst()
+        diagnostics.deferredCommandCount = deferredEvents.count
+        diagnostics.supersededHeldCommandCount += 1
+        publishDiagnostics()
     }
 
     /// A follower's playback intent, arriving at the leader (ADR-024 §3). The leader validates,
@@ -1958,10 +2024,16 @@ extension SyncPlaybackCoordinator {
         }
         // Anything held for the clock that the snapshot already accounts for is superseded by it —
         // the authoritative state is strictly newer than the command that produced it.
+        //
+        // ADR-024 Amendment A13: this is the authoritative-state route by which an **accepted**
+        // command may end without being applied — decided by `command_seq`, never by a ride — and it
+        // is counted, not silent.
+        let heldBefore = deferredEvents.count
         deferredEvents.removeAll { held in
-            guard case .command(let message, _, _) = held else { return false }
-            return (Self.headerOf(message)?.commandSeq ?? 0) <= commandSeq
+            guard let seq = held.acceptedCommandSeq else { return false }
+            return seq <= commandSeq
         }
+        diagnostics.supersededHeldCommandCount += heldBefore - deferredEvents.count
         diagnostics.lastAppliedCommandSeq = lastAppliedSeq
         diagnostics.lastReceivedCommandSeq = lastReceivedSeq
         diagnostics.deferredCommandCount = deferredEvents.count
@@ -2033,12 +2105,14 @@ extension SyncPlaybackCoordinator {
             if outcome == .applied {
                 playbackDesynchronized = false
                 publishDesynchronized()
+                representAuthoritativeSequence(commandSeq)
             }
             return outcome
         }
         guard let active = timeline, fields.trackHash == active.trackHash else { return .applied }
         timeline = active.reanchored(positionMs: fields.positionMs, sessionUs: fields.atSessionUs, playing: fields.playing)
         driftState = DriftController.reset()
+        representAuthoritativeSequence(commandSeq)
         return .applied
     }
 
@@ -2160,6 +2234,23 @@ extension SyncPlaybackCoordinator {
         publishDiagnostics()
         startDeferredDrain(generation: generation)
         return .deferredContent
+    }
+
+    /// Authoritative state at `commandSeq` is now **represented** here, so applied truth is at least
+    /// that (ADR-024 Amendment A13, found by its Regression F).
+    ///
+    /// Adoption above advances both floors only when the snapshot is newer than `lastReceivedSeq`.
+    /// When this device had already *accepted* the command the snapshot accounts for — a held C1 the
+    /// supersession rule has just removed, or one the desynchronisation latch refused — the snapshot's
+    /// `command_seq` equals `lastReceivedSeq`, adoption moved nothing, and once the restoration or
+    /// re-anchor represented that state `lastAppliedSeq` still said the command had never applied.
+    /// Called only where the state is actually represented, and monotone, so it can neither publish
+    /// unrepresented work nor roll applied truth back.
+    func representAuthoritativeSequence(_ commandSeq: Int64) {
+        guard lastAppliedSeq.map({ commandSeq > $0 }) ?? true else { return }
+        lastAppliedSeq = commandSeq
+        diagnostics.lastAppliedCommandSeq = commandSeq
+        publishDiagnostics()
     }
 
     static let positionReportIntervalUs: Int64 = PlaybackBounds.positionReportIntervalMs * 1_000

@@ -250,8 +250,17 @@ public actor SyncPlaybackCoordinator {
         guard let delivered else { return rideStillLive(ride) }
         return delivered.ride == ride && workLedger.isLive(delivered.reservation)
             && stillCurrentNow(delivered.reservation.generation)
-            && rideAuthorityEpoch <= ride.rideEpoch
-            && (lastAppliedSeq ?? 0) <= delivered.commandSeq
+            && !distributedObligationSuperseded(originalRide: ride, commandSeq: delivered.commandSeq)
+    }
+
+    /// Whether newer **established** authority has already superseded a distributed obligation:
+    /// a strictly newer ride owns the playback state standing here, or applied truth is already past
+    /// this command. The one successor test for delivered debt, shared by `mayRepresent` and the
+    /// drain's pre-pop check on an `AcceptedCommand` (ADR-024 Amendment A13). A merely *nominal*
+    /// newer ride — a Start Ride that has established nothing — does not move `rideAuthorityEpoch`,
+    /// so it supersedes nothing.
+    func distributedObligationSuperseded(originalRide: RideAdmission, commandSeq: Int64) -> Bool {
+        rideAuthorityEpoch > originalRide.rideEpoch || (lastAppliedSeq ?? 0) > commandSeq
     }
 
     /// State and effect ownership exist before publishing applied truth. A future deadline need
@@ -317,6 +326,10 @@ public actor SyncPlaybackCoordinator {
     /// never survives into a session that did not admit it.
     var pendingStateSnapshotReply: PendingStateSnapshotReply?
     var deferredDrainTask: Task<Void, Never>?
+    /// Whether `deferredDrainTask`'s loop is still running, and which start owns that answer — see
+    /// `startDeferredDrain` (ADR-024 Amendment A13's fresh-fix audit).
+    var deferredDrainRunning = false
+    var deferredDrainRun: Int64 = 0
     let deferredCommandCapacity: Int
 
     /// The tail of the **scheduled-action chain** (Amendment A1 Finding G).
@@ -1528,9 +1541,25 @@ public actor SyncPlaybackCoordinator {
         let cancelled = pendingPlay == nil ? 0 : 1
         pendingPlay = nil
         transferRequestedForToken = nil
-        discardDeferredEvents()
-        deferredDrainTask?.cancel()
-        deferredDrainTask = nil
+        // ADR-024 Amendment A13: End Ride retires what its ride can cancel and nothing else. An
+        // accepted command already advanced `lastReceivedSeq`, so it is distributed debt and stays
+        // held — and so does the queue state in front of or between such commands, which is
+        // control-generation authority and whose loss would change a kept command's meaning.
+        // "Play locally" is the user leaving synchronised playback on this device, not a ride
+        // boundary, and keeps its pre-existing whole-stream discard.
+        if preserveDistributed {
+            retireRideScopedDeferredEvents()
+        } else {
+            discardDeferredEvents()
+        }
+        if let kept = deferredEvents.first {
+            // The drain that owns the kept debt keeps running (or starts); it is bounded by
+            // `deferredCommandCapacity` and ends with the generation or an empty stream.
+            startDeferredDrain(generation: kept.generation)
+        } else {
+            deferredDrainTask?.cancel()
+            deferredDrainTask = nil
+        }
         if !keepDelivered { timeline = nil }
         // Independent review, Race 7 (mirroring Android's identical finding): leaving synchronised
         // mode is the user genuinely ending authoritative playback, not a control-lifetime blip —
@@ -1550,7 +1579,7 @@ public actor SyncPlaybackCoordinator {
         diagnostics.currentTrackHash = currentPlaybackIdentity?.trackHash
         diagnostics.localDriftMs = nil
         diagnostics.peerDriftMs = nil
-        diagnostics.deferredCommandCount = 0
+        diagnostics.deferredCommandCount = deferredEvents.count
         diagnostics.playbackRate = DriftController.rateNormal
         diagnostics.cancelledPendingPlayCount += cancelled
         publishDiagnostics()
@@ -1583,9 +1612,11 @@ public actor SyncPlaybackCoordinator {
     /// in it that it was **discarded** (independent-review round 4, Blocker 2).
     ///
     /// The one place `deferredEvents` is emptied wholesale, so a cancellation cannot be forgotten at
-    /// one of the four callers that legitimately do this — `leaveSynchronizedMode` (End Ride, "Play
-    /// locally"), `resetForNewSession` (a control-lifetime boundary, including a terminal teardown's
+    /// one of the four callers that legitimately do this — `leaveSynchronizedMode` for "Play
+    /// locally", `resetForNewSession` (a control-lifetime boundary, including a terminal teardown's
     /// link loss), `failClosedOutbound`, and `drainDeferredEvents` finding its generation retired.
+    /// End Ride does **not** empty the stream: since ADR-024 Amendment A13 it uses
+    /// `retireRideScopedDeferredEvents`, which keeps accepted commands and queue state.
     /// Each retained anchor reports its own obligation id and the generation that authorised it;
     /// nothing is inferred from the buffer merely becoming empty, which is the inference round 3
     /// already had to remove once.
@@ -1598,6 +1629,23 @@ public actor SyncPlaybackCoordinator {
         let discarded = deferredEvents
         deferredEvents.removeAll()
         for event in discarded {
+            guard let obligation = event.reconciliation else { continue }
+            onReconciliationCancelled?(obligation, event.generation)
+        }
+    }
+
+    /// End Ride's retirement of the held stream (ADR-024 Amendment A13): removes exactly the events
+    /// whose `cancellingRide` is set — ride-scoped `PLAYBACK_STATE`/`STATE_SNAPSHOT` anchors, each of
+    /// whose reconciliation obligations gets its terminal cancellation here, as before — and keeps
+    /// accepted commands and control-generation queue state **in their original order**.
+    ///
+    /// Not a blanket "never clear": a control-generation boundary (`resetForNewSession`), a fail-
+    /// closed latch and "Play locally" still use `discardDeferredEvents`.
+    func retireRideScopedDeferredEvents() {
+        guard deferredEvents.contains(where: { $0.cancellingRide != nil }) else { return }
+        let retired = deferredEvents.filter { $0.cancellingRide != nil }
+        deferredEvents.removeAll { $0.cancellingRide != nil }
+        for event in retired {
             guard let obligation = event.reconciliation else { continue }
             onReconciliationCancelled?(obligation, event.generation)
         }
@@ -1710,8 +1758,10 @@ struct Phase5Outbound: Sendable {
 /// authority they established then made ride 1's own (correctly superseded-refusing) late cleanup
 /// stand down. See `RideAdmission`.
 enum DeferredEvent: Sendable {
-    /// A `PLAY`/`PAUSE`/`RESUME`/`SEEK`/`NEXT`/`PREVIOUS` the order gate accepted.
-    case command(PlaybackMessage, generation: Int64, ride: RideAdmission)
+    /// A `PLAY`/`PAUSE`/`RESUME`/`SEEK`/`NEXT`/`PREVIOUS` this follower has **accepted** — see
+    /// `AcceptedCommand`. There is deliberately no other command case: nothing enters the held stream
+    /// as a command without `lastReceivedSeq` already naming it (ADR-024 Amendment A13).
+    case acceptedCommand(AcceptedCommand)
     /// PROTOCOL §9's authoritative queue state, held so it cannot change a held command's meaning.
     ///
     /// **Deliberately the one case with no `RideAdmission`** (independent-review round 7's queue
@@ -1739,28 +1789,83 @@ enum DeferredEvent: Sendable {
 
     var generation: Int64 {
         switch self {
-        case .command(_, let generation, _): return generation
+        case .acceptedCommand(let accepted): return accepted.generation
         case .queueSnapshot(_, _, _, let generation): return generation
         case .playbackState(_, let generation, _, _): return generation
         }
     }
 
-    /// The ride lifetime that admitted this event, or nil for the one case that is not ride-scoped.
-    var ride: RideAdmission? {
+    /// The ride lifetime that admitted this event, as **provenance** — or nil for the one case that
+    /// is not ride-scoped. Never a cancellation test on its own: see `cancellingRide`.
+    var provenanceRide: RideAdmission? {
         switch self {
-        case .command(_, _, let ride): return ride
+        case .acceptedCommand(let accepted): return accepted.originalRide
         case .queueSnapshot: return nil
         case .playbackState(_, _, _, let ride): return ride
         }
     }
 
+    /// The ride whose retirement **cancels** this event, or nil when local Ride retirement is not
+    /// cancellation authority for it (ADR-024 Amendment A13).
+    ///
+    /// - An accepted command is distributed debt: its ride is provenance only. It ends by being
+    ///   represented, by authoritative supersession, by explicit reconciliation, or with its control
+    ///   generation — never because this device's ride ended.
+    /// - A queue snapshot is control-generation state (see its case), so it has no ride at all.
+    /// - A held `PLAYBACK_STATE` — including a `STATE_SNAPSHOT` reconciliation — is a ride-scoped
+    ///   anchor under ADR-028 A3–A7, and its ride still cancels it.
+    var cancellingRide: RideAdmission? {
+        switch self {
+        case .acceptedCommand, .queueSnapshot: return nil
+        case .playbackState(_, _, _, let ride): return ride
+        }
+    }
+
+    /// The `command_seq` of an accepted command this event still owes, if it is one.
+    var acceptedCommandSeq: Int64? {
+        if case .acceptedCommand(let accepted) = self { return accepted.commandSeq }
+        return nil
+    }
+
     /// The reconciliation obligation this held event owes a terminal result to, if any.
     var reconciliation: Int64? {
         switch self {
-        case .command, .queueSnapshot: return nil
+        case .acceptedCommand, .queueSnapshot: return nil
         case .playbackState(_, _, let reconciliation, _): return reconciliation
         }
     }
+}
+
+/// An authoritative command a follower has **accepted from the authenticated stream but not yet
+/// represented** — accepted distributed debt (ADR-024 Amendment A13).
+///
+/// A follower takes responsibility for a command at the instant `lastReceivedSeq` advances, which
+/// for a clock-held command is `admitAuthoritativeCommand`'s `.defer_` branch — not when the drain
+/// eventually hands it to `applyAuthoritative`. The leader has, or will, represent the same command,
+/// so from that instant this device's End Ride can no more revoke it than the leader's End Ride can
+/// revoke a command whose transport returned SENT (Amendment A12's `DeliveredAuthority`). The
+/// representation that retained this used to be the same one a still-cancellable candidate had, so
+/// `drainDeferredEvents` and `leaveSynchronizedMode` applied `rideStillLive` to it and threw it away.
+///
+/// Constructed in exactly one place, immediately after the `lastReceivedSeq` write that makes it
+/// true, and `commandSeq` is that same value — structurally, not by inference from the message.
+///
+/// **Two distinct bounds, two distinct owners.** The retained debt is bounded by
+/// `deferredCommandCapacity` through `PendingCommandGate` (an overflow latches desynchronisation and
+/// reconciles, never grows). It holds **no** `SessionWorkLedger` reservation while it waits for its
+/// clock: that ledger bounds local apply/scheduled work, which does not exist until the drain pops
+/// it, so the reservation is taken then — before the pop — exactly as Amendment A11 placed it.
+struct AcceptedCommand: Sendable {
+    let message: PlaybackMessage
+    /// The authenticated control generation that admitted the frame. Its retirement is the one
+    /// local event that ends this obligation without representing or reconciling it.
+    let generation: Int64
+    /// The ride live when the command was admitted: **provenance**, stamped by `representDelivered`
+    /// into `rideAuthorityEpoch` and compared for successor protection. Never re-captured and never a
+    /// cancellation test.
+    let originalRide: RideAdmission
+    /// The value `lastReceivedSeq` took when this device accepted the command.
+    let commandSeq: Int64
 }
 
 /// PROTOCOL §10's `STATE_REQUEST`, retained because it arrived before this device's own

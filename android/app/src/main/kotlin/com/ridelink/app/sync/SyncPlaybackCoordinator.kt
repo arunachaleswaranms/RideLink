@@ -421,9 +421,21 @@ class SyncPlaybackCoordinator(
         return delivered.ride == ride &&
             workLedger.isLive(delivered.reservation) &&
             stillCurrent(delivered.reservation.generation) &&
-            rideAuthorityEpoch <= ride.rideEpoch &&
-            (lastAppliedSeq ?: 0) <= delivered.commandSeq
+            !distributedObligationSuperseded(ride, delivered.commandSeq)
     }
+
+    /**
+     * Whether newer **established** authority has already superseded a distributed obligation: a
+     * strictly newer ride owns the playback state standing here, or applied truth is already past
+     * this command. The one successor test for delivered debt, shared by [mayRepresent] and the
+     * drain's pre-pop check on a [DeferredEvent.AcceptedCommand] (ADR-024 Amendment A13). A merely
+     * *nominal* newer ride — a Start Ride that has established nothing — does not move
+     * [rideAuthorityEpoch], so it supersedes nothing.
+     */
+    private fun distributedObligationSuperseded(
+        originalRide: RideAdmission,
+        commandSeq: Long,
+    ): Boolean = rideAuthorityEpoch > originalRide.rideEpoch || (lastAppliedSeq ?: 0) > commandSeq
 
     /** Publish applied truth only once the authoritative state and effect ownership exist. */
     private fun representDelivered(
@@ -807,17 +819,55 @@ class SyncPlaybackCoordinator(
         abstract val generation: Long
 
         /**
-         * Independent-review round 7: the ride that admitted this event, or null for the one case
-         * that is not ride-scoped. Stored with the work, compared at replay, never re-derived.
+         * Independent-review round 7: the ride that admitted this event, as **provenance** — or null
+         * for the one case that is not ride-scoped. Stored with the work, compared at replay, never
+         * re-derived, and never a cancellation test on its own: see [cancellingRide].
          */
-        open val ride: RideAdmission? get() = null
+        open val provenanceRide: RideAdmission? get() = null
 
-        /** A `PLAY`/`PAUSE`/`RESUME`/`SEEK`/`NEXT`/`PREVIOUS` the order gate accepted. */
-        data class Command(
+        /**
+         * The ride whose retirement **cancels** this event, or null when local Ride retirement is not
+         * cancellation authority for it (ADR-024 Amendment A13). An [AcceptedCommand] is distributed
+         * debt and a [QueueSnapshot] is control-generation state, so both are null; a held
+         * [PlaybackState] — including a `STATE_SNAPSHOT` reconciliation — is a ride-scoped anchor
+         * under ADR-028 A3–A7, and its ride still cancels it.
+         */
+        open val cancellingRide: RideAdmission? get() = null
+
+        /**
+         * A `PLAY`/`PAUSE`/`RESUME`/`SEEK`/`NEXT`/`PREVIOUS` this follower has **accepted from the
+         * authenticated stream but not yet represented** — accepted distributed debt (ADR-024
+         * Amendment A13).
+         *
+         * A follower takes responsibility at the instant `lastReceivedSeq` advances, which for a
+         * clock-held command is [admitAuthoritativeCommand]'s DEFER branch, not when the drain later
+         * hands it to [applyAuthoritative]. The leader has, or will, represent the same command, so
+         * from that instant this device's End Ride can no more revoke it than the leader's End Ride
+         * can revoke a command whose transport returned SENT ([DeliveredAuthority]). There is
+         * deliberately no other command case: it is constructed in exactly one place, in the same
+         * critical section as that `lastReceivedSeq` write, and [commandSeq] is that same value.
+         *
+         * **Two bounds, two owners.** The retained debt is bounded by `deferredCommandCapacity`
+         * through [PendingCommandGate] (an overflow latches desynchronisation and reconciles). It
+         * holds **no** `SessionWorkLedger` reservation while it waits for its clock — that ledger
+         * bounds local apply/scheduled work, which does not exist until the drain pops it, so the
+         * reservation is taken then, before the pop, exactly as Amendment A11 placed it.
+         *
+         * @param generation the authenticated control generation that admitted the frame; its
+         *   retirement is the one local event that ends this obligation without representing or
+         *   reconciling it.
+         * @param originalRide provenance only — stamped into [rideAuthorityEpoch] when represented and
+         *   compared for successor protection, never re-captured and never a cancellation test.
+         * @param commandSeq the value `lastReceivedSeq` took when this device accepted the command.
+         */
+        data class AcceptedCommand(
             val message: PlaybackMessage,
             override val generation: Long,
-            override val ride: RideAdmission,
-        ) : DeferredEvent()
+            val originalRide: RideAdmission,
+            val commandSeq: Long,
+        ) : DeferredEvent() {
+            override val provenanceRide: RideAdmission get() = originalRide
+        }
 
         /**
          * PROTOCOL §9's authoritative queue state, held so it cannot change a held command's meaning.
@@ -853,8 +903,11 @@ class SyncPlaybackCoordinator(
             val message: PlaybackMessage.PlaybackStateSnapshot,
             override val generation: Long,
             val reconciliation: Long? = null,
-            override val ride: RideAdmission,
-        ) : DeferredEvent()
+            val ride: RideAdmission,
+        ) : DeferredEvent() {
+            override val provenanceRide: RideAdmission get() = ride
+            override val cancellingRide: RideAdmission get() = ride
+        }
     }
 
     /**
@@ -862,7 +915,8 @@ class SyncPlaybackCoordinator(
      * it that it was **discarded** (independent-review round 4, Blocker 2).
      *
      * The one place [deferredEvents] is emptied wholesale, so a cancellation cannot be forgotten at
-     * one of the four callers that legitimately do this. Each retained anchor reports its own
+     * one of the callers that legitimately do this. End Ride is not one of them: since ADR-024
+     * Amendment A13 it uses [retireRideScopedDeferredEvents]. Each retained anchor reports its own
      * obligation id and the generation that authorised it; nothing is inferred from the buffer merely
      * becoming empty, which is the inference round 3 already had to remove once.
      *
@@ -874,6 +928,27 @@ class SyncPlaybackCoordinator(
         val discarded = deferredEvents.toList()
         deferredEvents.clear()
         discarded.forEach { event ->
+            if (event is DeferredEvent.PlaybackState) {
+                event.reconciliation?.let { onReconciliationCancelled?.invoke(it, event.generation) }
+            }
+        }
+    }
+
+    /**
+     * End Ride's retirement of the held stream (ADR-024 Amendment A13): removes exactly the events
+     * whose [DeferredEvent.cancellingRide] is set — ride-scoped `PLAYBACK_STATE`/`STATE_SNAPSHOT`
+     * anchors, each of whose reconciliation obligations gets its terminal cancellation here, as
+     * before — and keeps accepted commands and control-generation queue state **in their original
+     * order**.
+     *
+     * Not a blanket "never clear": a control-generation boundary ([resetForNewSession]), a fail-closed
+     * latch and "Play locally" still use [discardDeferredEvents].
+     */
+    private fun retireRideScopedDeferredEvents() {
+        val retired = deferredEvents.filter { it.cancellingRide != null }
+        if (retired.isEmpty()) return
+        deferredEvents.removeAll { it.cancellingRide != null }
+        retired.forEach { event ->
             if (event is DeferredEvent.PlaybackState) {
                 event.reconciliation?.let { onReconciliationCancelled?.invoke(it, event.generation) }
             }
@@ -1008,7 +1083,7 @@ class SyncPlaybackCoordinator(
     /** See [latchDesynchronized]. Counted, never silently dropped. */
     private fun refuseHeldIncrementalCommands() {
         val before = deferredEvents.size
-        deferredEvents.removeAll { it is DeferredEvent.Command }
+        deferredEvents.removeAll { it is DeferredEvent.AcceptedCommand }
         val refused = before - deferredEvents.size
         if (refused == 0) return
         _diagnostics.update {
@@ -2178,9 +2253,22 @@ class SyncPlaybackCoordinator(
         val cancelled = if (pendingPlay != null) 1 else 0
         pendingPlay = null
         transferRequestedForToken = null
-        discardDeferredEvents()
-        deferredDrainJob?.cancel()
-        deferredDrainJob = null
+        // ADR-024 Amendment A13: End Ride retires what its ride can cancel and nothing else. An
+        // accepted command already advanced `lastReceivedSeq`, so it is distributed debt and stays
+        // held — and so does the queue state in front of or between such commands, which is
+        // control-generation authority and whose loss would change a kept command's meaning. "Play
+        // locally" is the user leaving synchronised playback on this device, not a ride boundary, and
+        // keeps its pre-existing whole-stream discard.
+        if (preserveDistributed) retireRideScopedDeferredEvents() else discardDeferredEvents()
+        val kept = deferredEvents.firstOrNull()
+        if (kept != null) {
+            // The drain that owns the kept debt keeps running (or starts); it is bounded by
+            // `deferredCommandCapacity` and ends with the generation or an empty stream.
+            startDeferredDrain(kept.generation)
+        } else {
+            deferredDrainJob?.cancel()
+            deferredDrainJob = null
+        }
         if (!keepDelivered) timeline = null
         // Leaving synchronised mode is the user genuinely ending authoritative playback, not a
         // control-lifetime blip -- unlike `resetForNewSession`, this is a legitimate place for
@@ -2201,7 +2289,7 @@ class SyncPlaybackCoordinator(
                 currentTrackHash = currentPlaybackIdentity?.trackHash,
                 localDriftMs = null,
                 peerDriftMs = null,
-                deferredCommandCount = 0,
+                deferredCommandCount = deferredEvents.size,
                 // The held reconciliation was just discarded with the rest of `deferredEvents`, so
                 // the obligation genuinely no longer exists. It did not *converge* — which is why
                 // [ResyncCoordinator] learns about convergence from [onReconciliationApplied] and
@@ -2449,7 +2537,10 @@ class SyncPlaybackCoordinator(
                     onRetiredRideAdmission()
                     return
                 }
-                deferredEvents.addLast(DeferredEvent.Command(message, generation, ride))
+                // ADR-024 Amendment A13: the `lastReceivedSeq` write above is where a clock-held command
+                // becomes accepted distributed debt, so its retained form says so, with that exact
+                // `command_seq`. Nothing suspends between the write and this append.
+                deferredEvents.addLast(DeferredEvent.AcceptedCommand(message, generation, ride, header.commandSeq))
                 _diagnostics.update {
                     it.copy(
                         lastReceivedCommandSeq = header.commandSeq,
@@ -2654,12 +2745,16 @@ class SyncPlaybackCoordinator(
             // taken before the content resolve and the sequence-number lock each branch below takes,
             // both of which suspend — so each branch re-proves the *same* retained admission
             // immediately before it pops and books the item. See [retireHeldRideEvent].
-            val heldRide = held.ride
-            if (heldRide != null && !rideStillLive(heldRide)) {
+            //
+            // **ADR-024 Amendment A13: [DeferredEvent.cancellingRide], not the event's provenance.**
+            // An accepted command has none — its ride is provenance only — so this check can never
+            // retire distributed debt; its successor test is [distributedObligationSuperseded].
+            val cancellingRide = held.cancellingRide
+            if (cancellingRide != null && !rideStillLive(cancellingRide)) {
                 retireHeldRideEvent(held)
                 continue
             }
-            if ((playbackDesynchronized || queueDesynchronized) && held is DeferredEvent.Command) return
+            if ((playbackDesynchronized || queueDesynchronized) && held is DeferredEvent.AcceptedCommand) return
             if (!stillCurrent(held.generation)) {
                 discardDeferredEvents()
                 _diagnostics.update { it.copy(deferredCommandCount = 0) }
@@ -2667,7 +2762,7 @@ class SyncPlaybackCoordinator(
             }
             val step =
                 when (held) {
-                    is DeferredEvent.Command -> drainHeldCommand(held)
+                    is DeferredEvent.AcceptedCommand -> drainHeldCommand(held)
                     is DeferredEvent.QueueSnapshot -> drainHeldQueueSnapshot(held)
                     is DeferredEvent.PlaybackState -> drainHeldPlaybackState(held)
                 }
@@ -2691,7 +2786,7 @@ class SyncPlaybackCoordinator(
      * outside the lock: retiring a held event reports a reconciliation outcome, and a callback must
      * never run under [commandMutex].
      */
-    private enum class HeldCommandVerdict { APPLY, RETIRED, MOVED }
+    private enum class HeldCommandVerdict { APPLY, SUPERSEDED, MOVED }
 
     /**
      * One held authoritative command, replayed once the clock it was waiting for is trustworthy.
@@ -2704,7 +2799,7 @@ class SyncPlaybackCoordinator(
      * this device has already told the wire is reflected in its authoritative playback state.
      */
     @Suppress("ReturnCount") // one early-out per precondition; naming each is the point
-    private suspend fun drainHeldCommand(held: DeferredEvent.Command): DrainStep {
+    private suspend fun drainHeldCommand(held: DeferredEvent.AcceptedCommand): DrainStep {
         val estimate = estimate()
         if (estimate == null || !estimate.ready) return DrainStep.STOP
         if (heldStreamChanged(held)) return DrainStep.STOP
@@ -2715,14 +2810,22 @@ class SyncPlaybackCoordinator(
             onHeldRevisionMismatch()
             return DrainStep.STOP
         }
-        val seq = heldHeader?.commandSeq
         // **ADR-024 Amendment A11**: a replay takes responsibility exactly as a first arrival does,
         // so it takes capacity the same way — before the pop and before `lastAppliedSeq` moves.
         // With none, the command stays exactly where it is: still head of the held stream, still
         // owning its `command_seq`, re-attempted on the drain's own cadence. Nothing is abandoned
         // and nothing is claimed.
-        val reservation = reserveWork(held.generation) ?: return DrainStep.STOP
-        return applyHeldCommand(held, estimate, seq, reservation)
+        //
+        // ADR-024 Amendment A13: an accepted command waiting for capacity is **waiting**, not
+        // refused — its `command_seq` is already spent — so the advisory pre-check keeps the wait out
+        // of `workCapacityRefusedCount`, and the wait is counted as what it is: once per drain pass,
+        // which the retry cadence paces, never a spin.
+        val reservation = if (hasWorkCapacity()) reserveWork(held.generation) else null
+        if (reservation == null) {
+            _diagnostics.update { it.copy(heldCommandCapacityWaitCount = it.heldCommandCapacityWaitCount + 1) }
+            return DrainStep.STOP
+        }
+        return applyHeldCommand(held, estimate, reservation)
     }
 
     /**
@@ -2732,9 +2835,8 @@ class SyncPlaybackCoordinator(
      */
     @Suppress("ReturnCount") // one per verdict
     private suspend fun applyHeldCommand(
-        held: DeferredEvent.Command,
+        held: DeferredEvent.AcceptedCommand,
         estimate: SessionClockEstimate,
-        seq: Long?,
         reservation: WorkReservation,
     ): DrainStep {
         try {
@@ -2748,11 +2850,22 @@ class SyncPlaybackCoordinator(
             // stream here ([latchDesynchronized], [applyPeerPlaybackState]'s supersede rule,
             // [discardDeferredEvents]), so the witness has to come first, inside the same lock as the
             // write.
+            //
+            // **ADR-024 Amendment A13 replaced the ride proof, not its position.** This command already
+            // advanced `lastReceivedSeq`, so its original ride having ended is not a reason to drop it
+            // — that was the defect. The question adjacent to the pop is the one [mayRepresent] asks
+            // of delivered work: has newer *established* authority already superseded it? The ordered
+            // stream makes that unreachable here in practice (nothing overtakes held work), so this
+            // is fail-closed defence; the reachable successor race is after the pop, inside the
+            // apply's own suspensions, where [mayRepresent] refuses it.
             val verdict =
                 commandMutex.withLock {
                     when {
                         heldStreamChanged(held) -> HeldCommandVerdict.MOVED
-                        !rideStillLive(held.ride) -> HeldCommandVerdict.RETIRED
+                        distributedObligationSuperseded(held.originalRide, held.commandSeq) -> {
+                            deferredEvents.removeFirst()
+                            HeldCommandVerdict.SUPERSEDED
+                        }
                         else -> {
                             deferredEvents.removeFirst()
                             HeldCommandVerdict.APPLY
@@ -2760,32 +2873,40 @@ class SyncPlaybackCoordinator(
                     }
                 }
             when (verdict) {
-                // Retired rather than left: an item behind this one may belong to a newer, still-live
-                // ride, and a dead head would wedge it (round 3, Blocker A). The witness above proved
-                // `held` is still the head, so this pops the item it means to.
-                HeldCommandVerdict.RETIRED -> {
-                    retireHeldRideEvent(held)
+                // Popped rather than left: an item behind this one may be live, and a dead head would
+                // wedge it (round 3, Blocker A). Counted as superseded — never "recovered" (it was
+                // applied to nothing) and never "retired by ride" (that is not its authority).
+                HeldCommandVerdict.SUPERSEDED -> {
+                    _diagnostics.update {
+                        it.copy(
+                            deferredCommandCount = deferredEvents.size,
+                            supersededHeldCommandCount = it.supersededHeldCommandCount + 1,
+                        )
+                    }
                     return DrainStep.CONTINUE
                 }
                 HeldCommandVerdict.MOVED -> return DrainStep.STOP
                 HeldCommandVerdict.APPLY -> Unit
             }
+            // Popping is not representation: `lastAppliedCommandSeq` moves in [representDelivered].
+            // (ADR-024 Amendment A13's fresh-fix audit: this used to publish the popped `seq` here,
+            // before the apply could still refuse it.)
             _diagnostics.update {
                 it.copy(
-                    lastAppliedCommandSeq = seq,
                     deferredCommandCount = deferredEvents.size,
                     recoveredCommandCount = it.recoveredCommandCount + 1,
                     clockReady = true,
                 )
             }
-            // Round 7: the ride the command was **admitted** under, replayed unchanged.
+            // Round 7: the ride the command was **admitted** under, replayed unchanged — as
+            // provenance of the accepted obligation it now discharges.
             applyAuthoritative(
                 held.message,
                 held.generation,
-                held.ride,
+                held.originalRide,
                 estimate,
                 reservation,
-                seq?.let { DeliveredAuthority(held.ride, it, reservation) },
+                DeliveredAuthority(held.originalRide, held.commandSeq, reservation),
             )
             return DrainStep.CONTINUE
         } finally {
@@ -4010,6 +4131,7 @@ class SyncPlaybackCoordinator(
          */
         ride: RideAdmission,
     ): StateSnapshotOutcome {
+        var supersededHeld = 0
         commandMutex.withLock {
             // Independent-review round 4, §17: the ride that authorised this reconciliation, which
             // End Ride ends without moving the control generation. Stated **once**, here, and
@@ -4028,15 +4150,22 @@ class SyncPlaybackCoordinator(
             }
             // Anything held for the clock that the snapshot already accounts for is superseded by
             // it — the authoritative state is strictly newer than the command that produced it.
+            //
+            // ADR-024 Amendment A13: this is the authoritative-state route by which an **accepted**
+            // command may end without being applied — decided by `command_seq`, never by a ride — and
+            // it is counted, not silent.
+            val heldBefore = deferredEvents.size
             deferredEvents.removeAll { held ->
-                held is DeferredEvent.Command && (headerOf(held.message)?.commandSeq ?: 0) <= snapshot.commandSeq
+                held is DeferredEvent.AcceptedCommand && held.commandSeq <= snapshot.commandSeq
             }
+            supersededHeld = heldBefore - deferredEvents.size
         }
         _diagnostics.update {
             it.copy(
                 lastAppliedCommandSeq = lastAppliedSeq,
                 lastReceivedCommandSeq = lastReceivedSeq,
                 deferredCommandCount = deferredEvents.size,
+                supersededHeldCommandCount = it.supersededHeldCommandCount + supersededHeld,
             )
         }
         if (needsFullPlaybackRestore()) {
@@ -4047,6 +4176,7 @@ class SyncPlaybackCoordinator(
             if (outcome == StateSnapshotOutcome.APPLIED) {
                 playbackDesynchronized = false
                 publishDesynchronized()
+                representAuthoritativeSequence(snapshot.commandSeq)
                 // The precise completion signal [ResyncCoordinator] watches for (Blocker 2E) —
                 // published even when `playbackDesynchronized` was already false, e.g. the
                 // ordinary-reconnect case where only `timeline == null` triggered the restore.
@@ -4063,7 +4193,27 @@ class SyncPlaybackCoordinator(
                 playing = snapshot.playing,
             )
         driftState = DriftController.reset()
+        representAuthoritativeSequence(snapshot.commandSeq)
         return StateSnapshotOutcome.APPLIED
+    }
+
+    /**
+     * Authoritative state at [commandSeq] is now **represented** here, so applied truth is at least
+     * that (ADR-024 Amendment A13, found by its Regression F).
+     *
+     * Adoption in [applyPeerPlaybackState] advances both floors only when the snapshot is newer than
+     * `lastReceivedSeq`. When this device had already *accepted* the command the snapshot accounts
+     * for — a held C1 the supersession rule has just removed, or one the desynchronisation latch
+     * refused — the snapshot's `command_seq` equals `lastReceivedSeq`, adoption moved nothing, and
+     * once the restoration or re-anchor represented that state `lastAppliedSeq` still said the
+     * command had never applied. Called only where the state is actually represented, and monotone,
+     * so it can neither publish unrepresented work nor roll applied truth back.
+     */
+    private fun representAuthoritativeSequence(commandSeq: Long) {
+        val applied = lastAppliedSeq
+        if (applied != null && commandSeq <= applied) return
+        lastAppliedSeq = commandSeq
+        _diagnostics.update { it.copy(lastAppliedCommandSeq = commandSeq) }
     }
 
     /** The playback half of Amendment A1's reconciliation. See [onPeerPlaybackState]. */

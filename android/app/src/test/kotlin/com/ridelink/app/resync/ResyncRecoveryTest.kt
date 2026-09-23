@@ -1522,32 +1522,25 @@ class ResyncRecoveryTest {
     // --- Independent-review round 8 (bookkeeping is owned by the caller, not by the apply path) ---
 
     /**
-     * **Round 8's Android audit, stated as an executable claim rather than as prose.**
+     * **Round 8's Android audit, stated as an executable claim rather than as prose — restated by
+     * ADR-024 Amendment A13.**
      *
-     * The iOS blocker is a *retained* event whose ride retires while the drain is parked in a
-     * suspension after its own first ride proof — so the drain pops it, writes `lastAppliedSeq`,
-     * publishes `lastAppliedCommandSeq` and counts a recovery, and only then does the apply path
-     * refuse it. Reaching that on iOS needs one specific thing: a ride epoch that has moved while
-     * the held stream still contains work admitted under the older one. `SessionCoordinator
-     * .endRide()` gives iOS exactly that, because it mints the epoch synchronously and hands
-     * `leaveSynchronizedMode` — the only thing that empties the stream — to `launchInSession`.
+     * The iOS blocker round 8 guarded is a *ride-scoped* retained event whose ride retires while the
+     * drain is parked after its own first ride proof, so the drain books it before the apply refuses
+     * it. That needs "ride epoch moved, ride-scoped work still queued", and on Android
+     * `SessionCoordinator.endRide()` makes it unreachable: `endRideSegment`, `leaveSynchronizedMode`
+     * and the held stream's ride retirement all run synchronously, one statement after
+     * `nextRideEpoch()`.
      *
-     * **On Android that state is unreachable, and this test is why.** `SessionCoordinator.endRide()`
-     * calls `endRideSegment` on the same thread, one statement after `nextRideEpoch()`, with no
-     * suspension between; `endRideSegment` calls `leaveSynchronizedMode()` synchronously; and
-     * `leaveSynchronizedMode` calls `discardDeferredEvents()` synchronously. So the epoch moving and
-     * the stream emptying are one indivisible step, and "ride epoch moved, retained ride-1 work
-     * still queued" never exists here.
-     *
-     * The guards added to [SyncPlaybackCoordinator.drainDeferredEvents] and
-     * [SyncPlaybackCoordinator.admitAuthoritativeCommand] on this platform are therefore structural
-     * parity, not a bug fix — the same posture `RideEpochBox` already takes, and for the same stated
-     * reason: safety that rests on two statements happening to be synchronous is an undocumented
-     * accident until something asserts it. This test is that assertion. If a future change makes any
-     * link in that chain asynchronous, the window opens on Android too and this fails first.
+     * Round 8 phrased that as "End Ride empties the held stream", which also threw away a held
+     * command this follower had already **accepted** — `lastReceivedSeq` had advanced and the leader
+     * had represented it. That discard was the Phase 8 blocker. An accepted command's ride is
+     * provenance, not cancellation authority, so it has no drain window to close. What this now
+     * asserts, still with no `runCurrent()` after the call: the epoch moved, nothing ride-scoped
+     * survived, the accepted debt did — and it then completes as ride-1 work.
      */
     @Test
-    fun `an end ride empties the held stream in the same step that moves the ride epoch`() =
+    fun `an end ride retires ride-scoped held work in the same step that moves the ride epoch and keeps accepted debt`() =
         runTest(StandardTestDispatcher()) {
             val pair = ResyncTestPair(this)
             pair.connect(generation = 1)
@@ -1570,23 +1563,33 @@ class ResyncRecoveryTest {
                 pair.follower.sync.diagnostics.value.deferredCommandCount,
                 "nothing was retained, so this proves nothing about retained work",
             )
+            assertEquals(1, pair.follower.sync.diagnostics.value.lastReceivedCommandSeq, "the held command was accepted")
             val epochBefore = pair.follower.sync.rideEpochs.current
 
             // The real production End Ride, and nothing else.
             followerSession.endRide()
 
-            // **Both facts, observed with no `runCurrent()` between them and the call above.** A
-            // coroutine dispatched by `endRide` has not run at this point, so anything true here is
-            // true because it happened synchronously inside that call.
+            // **All three facts, observed with no `runCurrent()` between them and the call above.**
             assertTrue(
                 pair.follower.sync.rideEpochs.current > epochBefore,
                 "the ride epoch did not move — this test is no longer observing an End Ride",
             )
             assertEquals(
-                0,
+                1,
                 pair.follower.sync.diagnostics.value.deferredCommandCount,
-                "the held stream outlived the epoch move: the iOS drain window is now reachable here",
+                "End Ride erased a command this follower had already accepted",
             )
+            assertEquals(0, pair.follower.sync.diagnostics.value.retiredRideDeferredCount)
+
+            // The accepted debt completes once the clock is trusted, as ride 1's work.
+            pair.follower.syncSession.setClock(
+                SessionClockEstimate(offsetToLeaderUs = 0, rttP95Us = 8_000, ready = true),
+            )
+            pair.followerClock.advanceBy(DEFERRED_RETRY_US * 4)
+            runCurrent()
+            assertEquals(1, pair.follower.sync.diagnostics.value.lastAppliedCommandSeq)
+            assertEquals(SyncTestValues.hash(1), pair.follower.sync.diagnostics.value.currentTrackHash)
+            assertEquals(0, pair.follower.sync.diagnostics.value.deferredCommandCount)
         }
 
     /**

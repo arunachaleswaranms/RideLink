@@ -781,6 +781,8 @@ class SyncPlaybackTwoPeerTest {
         private val leaderOutboundCapacity: Int = 256,
         /** Injected only by the Amendment A11 scenario, which needs the local-work edge forced. */
         private val leaderSessionWorkCapacity: Int = 256,
+        /** Injected only by ADR-024 Amendment A13's capacity-wait scenario, on the follower side. */
+        private val followerSessionWorkCapacity: Int = 256,
     ) {
         val leaderClock = FakeMonotonicClock(nowUs = LEADER_START_US)
         val followerClock = FakeMonotonicClock(nowUs = LEADER_START_US - OFFSET_US)
@@ -810,7 +812,7 @@ class SyncPlaybackTwoPeerTest {
                     clock = followerClock,
                     idBase = 500,
                     outboundCapacity = 256,
-                    sessionWorkCapacity = 256,
+                    sessionWorkCapacity = followerSessionWorkCapacity,
                 )
             leaderSession.forwardTo(followerSession)
             followerSession.forwardTo(leaderSession)

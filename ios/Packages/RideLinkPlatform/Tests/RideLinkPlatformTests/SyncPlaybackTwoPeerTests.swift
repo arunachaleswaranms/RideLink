@@ -375,6 +375,213 @@ final class SyncPlaybackTwoPeerTests: XCTestCase {
         }
     }
 
+    // MARK: - ADR-024 Amendment A13: a clock-held command is already accepted distributed authority
+
+    /// **Regression A.** F accepts C1 over the real wire while its clock is untrusted, so C1 advances
+    /// `lastReceivedSeq` and is retained. F's user then ends the ride, and no other ride starts. The
+    /// pre-fix End Ride emptied the held stream: L applied C1, F had taken responsibility for C1, and
+    /// F discarded it — the terminal state this test forbids by name.
+    func testClockHeldAcceptedC1SurvivesFollowerEndRideAndCompletesOnBothPeersOverRealTls() async throws {
+        try await clockHeldAcceptedCommand(startAnotherRide: false)
+    }
+
+    /// **Regression B.** As A, and F then starts Ride 2, which establishes no playback authority.
+    /// C1 still completes, keeps its original Ride-1 provenance, and is never relabelled Ride 2.
+    func testClockHeldAcceptedC1SurvivesEndAndNominalStartWithOriginalProvenanceOverRealTls() async throws {
+        try await clockHeldAcceptedCommand(startAnotherRide: true)
+    }
+
+    private func clockHeldAcceptedCommand(startAnotherRide: Bool) async throws {
+        try await twoPairedPhones { leader, follower in
+            let hash = SyncTestValues.hash(1)
+            await leader.content.addLocal(hash)
+            await leader.content.addPeer(hash)
+            await follower.content.addLocal(hash)
+            _ = await leader.coordinator.rideEpochs.next()
+            let followerOrigin = await follower.coordinator.rideEpochs.next()
+            await follower.clock.set(untrusted: true)
+
+            await leader.coordinator.playSynchronized(hash)
+            try await Self.expect("F accepted C1 and retained it for its clock") {
+                let received = await follower.coordinator.lastReceivedSeq
+                let held = await follower.coordinator.deferredEvents.count
+                return received == 1 && held == 1
+            }
+            try await Self.expect("L represented and started C1") {
+                let applied = await leader.coordinator.lastAppliedSeq
+                let started = await leader.player.calls.contains(.start)
+                let retained = await leader.coordinator.retainedWorkCount
+                return applied == 1 && started && retained == 0
+            }
+            let appliedWhileHeld = await follower.coordinator.lastAppliedSeq
+            XCTAssertNil(appliedWhileHeld, "accepted is not represented: F has not applied C1 yet")
+            let callsWhileHeld = await follower.player.calls
+            XCTAssertFalse(callsWhileHeld.contains(.select(hash)), "F executed C1 before its clock was trusted")
+            XCTAssertFalse(callsWhileHeld.contains(.start))
+
+            let end = await follower.coordinator.rideEpochs.next()
+            _ = await follower.coordinator.endRideSegment(rideEpoch: end)
+            if startAnotherRide { _ = await follower.coordinator.rideEpochs.next() }
+            let receivedAfterEnd = await follower.coordinator.lastReceivedSeq
+            XCTAssertEqual(receivedAfterEnd, 1, "End Ride never rolls back what F took responsibility for")
+            let heldAfterEnd = await follower.coordinator.deferredEvents.count
+            XCTAssertEqual(heldAfterEnd, 1, "End Ride must not erase an accepted distributed obligation")
+
+            await follower.clock.set(untrusted: false)
+            try await Self.expect("F represented and executed C1 after its clock recovered") {
+                let applied = await follower.coordinator.lastAppliedSeq
+                let started = await follower.player.calls.contains(.start)
+                let retained = await follower.coordinator.retainedWorkCount
+                let held = await follower.coordinator.deferredEvents.count
+                return applied == 1 && started && retained == 0 && held == 0
+            }
+
+            try await Self.assertNoLeaderAppliedFollowerAcceptedFollowerDiscarded(leader, follower, seq: 1)
+            for peer in [leader, follower] {
+                let received = await peer.coordinator.lastReceivedSeq
+                let applied = await peer.coordinator.lastAppliedSeq
+                XCTAssertEqual(received, 1)
+                XCTAssertEqual(applied, 1)
+                let current = await peer.coordinator.diagnostics.currentTrackHash
+                XCTAssertEqual(current, hash)
+                let lastLoad = await peer.player.calls.compactMap { call -> ContentHash? in
+                    if case .load(let hash) = call { return hash }; return nil
+                }.last
+                XCTAssertEqual(lastLoad, hash, "actual player effects reflect C1")
+            }
+            let owner = await follower.coordinator.rideAuthorityEpoch
+            XCTAssertEqual(owner, followerOrigin, "C1 keeps Ride-1 provenance; a nominal Ride 2 cannot relabel it")
+            let leaderTimeline = await leader.coordinator.timeline
+            let followerTimeline = await follower.coordinator.timeline
+            XCTAssertEqual(leaderTimeline?.trackHash, followerTimeline?.trackHash)
+            XCTAssertEqual(leaderTimeline?.anchorSessionUs, followerTimeline?.anchorSessionUs)
+            XCTAssertEqual(leaderTimeline?.anchorPositionMs, followerTimeline?.anchorPositionMs)
+            let generation = await follower.coordinator.liveGeneration
+            let healthy = await follower.coordinator.stillCurrent(generation)
+            XCTAssertTrue(healthy, "the authenticated generation stays healthy across End Ride")
+            let retiredByRide = await follower.coordinator.diagnostics.retiredRideDeferredCount
+            XCTAssertEqual(retiredByRide, 0, "an accepted command is never retired by local Ride expiry")
+        }
+    }
+
+    /// **Regression C.** Genuine Ride-2 authority wins over the Ride-1 obligation.
+    ///
+    /// The held stream is ordered, so nothing authoritative can overtake a *retained* C1 (ADR-024
+    /// A2 Finding D): C2 or a snapshot arriving while C1 is held is held behind it. The reachable
+    /// successor ordering is therefore C1's own first suspension after it leaves the stream — its
+    /// `content.resolve`, before it has represented anything — with genuine C2 arriving on the
+    /// inbound consumer and establishing Ride 2 there. C1 then resumes and may change nothing.
+    func testGenuineRide2AuthorityEstablishedBeforeHeldC1RepresentsWinsOnBothPeersOverRealTls() async throws {
+        try await twoPairedPhones { leader, follower in
+            let old = SyncTestValues.hash(1), new = SyncTestValues.hash(2)
+            for hash in [old, new] {
+                await leader.content.addLocal(hash)
+                await leader.content.addPeer(hash)
+                await follower.content.addLocal(hash)
+                await leader.coordinator.enqueue(hash)
+            }
+            try await Self.expect("queue replicated") { await follower.coordinator.queueState.items.count == 2 }
+            _ = await leader.coordinator.rideEpochs.next()
+            let followerOrigin = await follower.coordinator.rideEpochs.next()
+            await follower.clock.set(untrusted: true)
+            await leader.coordinator.playSynchronized(old)
+            try await Self.expect("F accepted and retained C1") {
+                let received = await follower.coordinator.lastReceivedSeq
+                let held = await follower.coordinator.deferredEvents.count
+                return received == 1 && held == 1
+            }
+            try await Self.expect("L completed C1") {
+                let applied = await leader.coordinator.lastAppliedSeq
+                let retained = await leader.coordinator.retainedWorkCount
+                return applied == 1 && retained == 0
+            }
+            for peer in [leader, follower] {
+                let end = await peer.coordinator.rideEpochs.next()
+                _ = await peer.coordinator.endRideSegment(rideEpoch: end)
+                _ = await peer.coordinator.rideEpochs.next()
+            }
+            let followerRide2 = await follower.coordinator.rideEpochs.current
+
+            // C1 leaves the held stream and parks before representing anything.
+            await follower.content.armResolveGate { true }
+            await follower.clock.set(untrusted: false)
+            try await Self.expect("C1 popped and parked inside its content resolve") {
+                let parked = await follower.content.isResolveGateParked
+                let held = await follower.coordinator.deferredEvents.count
+                return parked && held == 0
+            }
+            let appliedWhileParked = await follower.coordinator.lastAppliedSeq
+            XCTAssertNil(appliedWhileParked, "C1 has not represented anything yet")
+
+            await leader.coordinator.playSynchronized(new)
+            try await Self.expect("genuine Ride-2 C2 established on both peers") {
+                let leaderApplied = await leader.coordinator.lastAppliedSeq
+                let followerApplied = await follower.coordinator.lastAppliedSeq
+                let followerStarted = await follower.player.calls.contains(.start)
+                let leaderRetained = await leader.coordinator.retainedWorkCount
+                return leaderApplied == 2 && followerApplied == 2 && followerStarted && leaderRetained == 0
+            }
+            try await Self.expect("F's C2 work completed; only parked C1 remains") {
+                await follower.coordinator.retainedWorkCount == 1
+            }
+            let ownerBefore = await follower.coordinator.rideAuthorityEpoch
+            XCTAssertEqual(ownerBefore, followerRide2, "C2 established Ride 2 ownership")
+            let identityBefore = await follower.coordinator.currentPlaybackIdentity
+            let timelineBefore = await follower.coordinator.timeline
+            let syncEpochBefore = await follower.coordinator.synchronizedModeEpoch
+            let trackBefore = await follower.coordinator.diagnostics.currentTrackHash
+            let tokenBefore = await follower.coordinator.currentEpochToken
+            let callsBefore = await follower.player.calls
+
+            await follower.content.releaseResolveGate()
+            try await Self.expect("C1 finished and released its exact reservation") {
+                await follower.coordinator.retainedWorkCount == 0
+            }
+            let identityAfter = await follower.coordinator.currentPlaybackIdentity
+            let timelineAfter = await follower.coordinator.timeline
+            let ownerAfter = await follower.coordinator.rideAuthorityEpoch
+            let syncEpochAfter = await follower.coordinator.synchronizedModeEpoch
+            let trackAfter = await follower.coordinator.diagnostics.currentTrackHash
+            let tokenAfter = await follower.coordinator.currentEpochToken
+            let callsAfter = await follower.player.calls
+            XCTAssertEqual(identityAfter, identityBefore, "C1 overwrote C2's playback identity")
+            XCTAssertEqual(timelineAfter, timelineBefore, "C1 overwrote C2's timeline")
+            XCTAssertEqual(ownerAfter, ownerBefore, "C1 overwrote C2's ride authority")
+            XCTAssertEqual(syncEpochAfter, syncEpochBefore, "C1 moved synchronised-mode state")
+            XCTAssertEqual(trackAfter, trackBefore, "C1 altered current-track diagnostics")
+            XCTAssertEqual(tokenAfter, tokenBefore, "C1 superseded C2's playback epoch")
+            XCTAssertEqual(callsAfter, callsBefore, "C1 dispatched stale player steps")
+            XCTAssertNotEqual(ownerAfter, followerOrigin)
+            for peer in [leader, follower] {
+                let received = await peer.coordinator.lastReceivedSeq
+                let applied = await peer.coordinator.lastAppliedSeq
+                XCTAssertEqual(received, 2, "sequence truth rolled backwards")
+                XCTAssertEqual(applied, 2, "sequence truth rolled backwards")
+                let current = await peer.coordinator.diagnostics.currentTrackHash
+                XCTAssertEqual(current, new)
+                let retained = await peer.coordinator.retainedWorkCount
+                XCTAssertEqual(retained, 0)
+            }
+            let leaderTimeline = await leader.coordinator.timeline
+            XCTAssertEqual(leaderTimeline?.trackHash, timelineAfter?.trackHash)
+            XCTAssertEqual(leaderTimeline?.anchorSessionUs, timelineAfter?.anchorSessionUs)
+        }
+    }
+
+    /// The one terminal state ADR-024 Amendment A13 forbids, stated as a predicate rather than implied
+    /// by several equalities: the issuer represented `seq`, the peer took responsibility for `seq`,
+    /// and the peer holds no representation of it and no retained obligation that could produce one.
+    private static func assertNoLeaderAppliedFollowerAcceptedFollowerDiscarded(
+        _ leader: SyncPeer, _ follower: SyncPeer, seq: Int64
+    ) async throws {
+        let leaderApplied = await leader.coordinator.lastAppliedSeq ?? 0
+        let followerReceived = await follower.coordinator.lastReceivedSeq ?? 0
+        let followerApplied = await follower.coordinator.lastAppliedSeq ?? 0
+        let stillOwed = await follower.coordinator.deferredEvents.contains { $0.acceptedCommandSeq == seq }
+        let discarded = leaderApplied >= seq && followerReceived >= seq && followerApplied < seq && !stillOwed
+        XCTAssertFalse(discarded, "L applied C\(seq), F accepted C\(seq), and F discarded C\(seq)")
+    }
+
     // MARK: - ADR-024 Amendment A11, over real TLS
 
     /// **The two-peer statement of Amendment A11, over a real authenticated TLS connection, and the
@@ -603,6 +810,7 @@ final class SyncPlaybackTwoPeerTests: XCTestCase {
         /// Finding C's path without a fake standing in for the transport.
         let manager: ControlSessionManager
         let transport: OutcomeGateChannel
+        let clock = ClockReadinessOverride()
 
         init(
             manager: ControlSessionManager,
@@ -622,7 +830,7 @@ final class SyncPlaybackTwoPeerTests: XCTestCase {
             coordinator = SyncPlaybackCoordinator(
                 monotonicNowUs: monotonicNowUs,
                 localPeerId: localPeerId,
-                session: OutcomeGateSession(base: base, channel: transport),
+                session: OutcomeGateSession(base: base, channel: transport, clock: clock),
                 player: player,
                 content: content,
                 sleeper: MonotonicDeadlineSleeper(monotonicNowUs: monotonicNowUs),
@@ -761,9 +969,22 @@ private actor OutcomeGateChannel: SyncPlaybackChannel {
 private struct OutcomeGateSession: SyncSessionPort {
     let base: any SyncSessionPort
     let channel: any SyncPlaybackChannel
+    let clock: ClockReadinessOverride
     func currentAuthGeneration() async -> Int64 { await base.currentAuthGeneration() }
-    func sessionClockEstimate() async -> SessionClockEstimate? { await base.sessionClockEstimate() }
+    func sessionClockEstimate() async -> SessionClockEstimate? {
+        let measured = await base.sessionClockEstimate()
+        guard await clock.untrusted, let measured else { return measured }
+        return SessionClockEstimate(offsetToLeaderUs: measured.offsetToLeaderUs, rttP95Us: measured.rttP95Us, ready: false)
+    }
     func rttP95Us() async -> Int64? { await base.rttP95Us() }
+}
+
+/// Test-only: reports the real estimator's own measurement as not yet trustworthy, which is the
+/// production condition (a fresh or stepped window) that makes a follower hold an accepted command.
+/// The offset, the wire and the drain cadence stay real; only readiness is withheld.
+private actor ClockReadinessOverride {
+    private(set) var untrusted = false
+    func set(untrusted value: Bool) { untrusted = value }
 }
 
 private actor SnapshotResult {
