@@ -285,6 +285,10 @@ final class SyncPlaybackSessionStateAuditTests: XCTestCase {
         // …and recovers the instant the estimator does, through the deferred drain's own retry.
         await setClock(ready: true)
         await awaitDeferredRecovery()
+        // Popping the held command is admission; applied truth now waits for its state mutation.
+        await expect("the recovered command is represented in playback state") {
+            await self.coordinator.lastAppliedSeq == 3
+        }
         applied = await coordinator.lastAppliedSeq
         XCTAssertEqual(applied, 3, "the held command recovered")
         let remaining = await coordinator.deferredEvents.count

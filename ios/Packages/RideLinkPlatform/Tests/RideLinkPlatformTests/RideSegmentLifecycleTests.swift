@@ -88,7 +88,9 @@ final class RideSegmentLifecycleTests: XCTestCase {
         await content.addPeer(track)
         await sync.playSynchronized(track)
         for _ in 0 ..< 200 {
-            if await sync.diagnostics.currentTrackHash == track { return }
+            let represented = await sync.diagnostics.currentTrackHash == track
+            let completed = await sync.retainedWorkCount == 0
+            if represented && completed { return }
             clock.advance(to: clock.now() + 100_000)
             await settle(5)
         }
@@ -633,7 +635,7 @@ final class RideSegmentLifecycleTests: XCTestCase {
     /// Deterministic rather than load-dependent: the resolve gate parks the apply at exactly the
     /// suspension that matters, End Ride runs while it is provably parked, and the gate is then
     /// released. No sleeps and no repetition are needed to reach the ordering.
-    func testAnApplyParkedAcrossEndRideWritesNothingBack() async {
+    func testDeliveredApplyParkedAcrossEndRideCompletesWithOriginalProvenance() async {
         await build()
         let track = SyncTestValues.hash(40)
         await content.addLocal(track)
@@ -665,6 +667,10 @@ final class RideSegmentLifecycleTests: XCTestCase {
         let callsWhileParked = await player.calls
         XCTAssertFalse(callsWhileParked.contains(.select(track)), "parked after the player was touched — too late to be applyPlay's resolve")
 
+        let receivedBeforeResolve = await sync.lastReceivedSeq
+        let appliedBeforeResolve = await sync.lastAppliedSeq
+        XCTAssertEqual(receivedBeforeResolve, 1, "SENT is responsibility, even before local content resolves")
+        XCTAssertNil(appliedBeforeResolve, "SENT alone does not represent playback state")
         await endRide()
         let clearedByEndRide = await sync.diagnostics.currentTrackHash
         XCTAssertNil(clearedByEndRide, "End Ride clears ride-segment identity")
@@ -674,11 +680,13 @@ final class RideSegmentLifecycleTests: XCTestCase {
         await settle()
 
         let afterRelease = await sync.diagnostics.currentTrackHash
-        XCTAssertNil(afterRelease, "an apply authorised before End Ride wrote its track back afterwards")
+        XCTAssertEqual(afterRelease, track, "delivered authority is still owed within this control session")
         let identity = await sync.currentPlaybackIdentity
-        XCTAssertNil(identity, "…including the ride-segment identity a STATE_SNAPSHOT would report")
+        XCTAssertEqual(identity?.trackHash, track)
         let timeline = await sync.timeline
-        XCTAssertNil(timeline, "…and the synchronised timeline End Ride had retired")
+        XCTAssertEqual(timeline?.trackHash, track)
+        let owner = await sync.rideAuthorityEpoch
+        XCTAssertEqual(owner, 1, "original ride provenance survives delivery; End Ride cannot relabel it")
     }
 
     // MARK: - Independent-review round 5, Blocker 1
@@ -862,11 +870,13 @@ final class RideSegmentLifecycleTests: XCTestCase {
         await settle()
 
         let identity = await sync.currentPlaybackIdentity
-        XCTAssertNil(identity, "ride 1's stale Y survived, mislabelled as ride 2's authority: \(String(describing: identity))")
+        XCTAssertEqual(identity?.trackHash, trackY, "Y was delivered and still owns a pending scheduled effect")
         let hash = await sync.diagnostics.currentTrackHash
-        XCTAssertNil(hash, "…and a STATE_SNAPSHOT would still report it")
+        XCTAssertEqual(hash, trackY)
         let timeline = await sync.timeline
-        XCTAssertNil(timeline, "…including a live playback epoch/timeline Y should never have reached")
+        XCTAssertEqual(timeline?.trackHash, trackY)
+        let owner = await sync.rideAuthorityEpoch
+        XCTAssertEqual(owner, 1, "the delivered debt must not become Ride 2 authority")
         XCTAssertEqual(0, lifecycle.supersededEndRideCount, "ride 1's cleanup must not have been fooled into standing down")
     }
 
@@ -965,7 +975,9 @@ final class RideSegmentLifecycleTests: XCTestCase {
                 await settle()
 
                 let identity = await sync.currentPlaybackIdentity
-                XCTAssertNil(identity, "cycle \(cycle): Regression 1 — ride 1's stale op survived as ride 2's authority")
+                XCTAssertEqual(identity?.trackHash, trackY)
+                let owner = await sync.rideAuthorityEpoch
+                XCTAssertEqual(owner, 1, "cycle \(cycle): delivered obligation preserves original ride")
                 XCTAssertEqual(0, lifecycle.supersededEndRideCount, "cycle \(cycle)")
             } else {
                 let endRideEpoch = lifecycle.nextRideEpoch()

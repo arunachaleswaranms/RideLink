@@ -403,6 +403,46 @@ class SyncPlaybackCoordinator(
         val rideEpoch: Long,
     )
 
+    /** Successful delivery changes cancellation authority, never original ride provenance. */
+    private data class DeliveredAuthority(
+        val ride: RideAdmission,
+        val commandSeq: Long,
+        val reservation: WorkReservation,
+    )
+
+    // Metadata only: at most one entry per live ledger reservation, never another work queue.
+    private val deliveredEffects = mutableMapOf<Long, Pair<DeliveredAuthority, Long>>()
+
+    private fun mayRepresent(
+        ride: RideAdmission,
+        delivered: DeliveredAuthority?,
+    ): Boolean {
+        if (delivered == null) return rideStillLive(ride)
+        return delivered.ride == ride &&
+            workLedger.isLive(delivered.reservation) &&
+            stillCurrent(delivered.reservation.generation) &&
+            rideAuthorityEpoch <= ride.rideEpoch &&
+            (lastAppliedSeq ?: 0) <= delivered.commandSeq
+    }
+
+    /** Publish applied truth only once the authoritative state and effect ownership exist. */
+    private fun representDelivered(
+        delivered: DeliveredAuthority?,
+        token: Long,
+    ) {
+        if (delivered == null) return
+        recordRideAuthority(delivered.ride.rideEpoch)
+        deliveredEffects[delivered.reservation.id] = delivered to token
+        lastAppliedSeq = maxOf(lastAppliedSeq ?: 0, delivered.commandSeq)
+        _diagnostics.update { it.copy(lastAppliedCommandSeq = lastAppliedSeq) }
+    }
+
+    private val hasDeliveredPlayback: Boolean
+        get() =
+            deliveredEffects.values.any { (authority, token) ->
+                token == currentEpochToken && workLedger.isLive(authority.reservation)
+            }
+
     private var driftState: DriftState = DriftController.reset()
     private var tickJob: Job? = null
 
@@ -1245,6 +1285,7 @@ class SyncPlaybackCoordinator(
 
     private fun releaseWork(reservation: WorkReservation) {
         workLedger.leavePhase(reservation)
+        if (!workLedger.isLive(reservation)) deliveredEffects.remove(reservation.id)
         publishRetainedWork()
     }
 
@@ -1413,6 +1454,7 @@ class SyncPlaybackCoordinator(
         // no-op and can never free a successor's capacity.
         if (retiringGeneration != null) {
             workLedger.retire(throughGeneration = retiringGeneration)
+            deliveredEffects.entries.removeAll { !workLedger.isLive(it.value.first.reservation) }
             publishRetainedWork()
         }
         applyChain = null
@@ -1695,11 +1737,9 @@ class SyncPlaybackCoordinator(
     /**
      * The leader's own command, once the transport has answered (Amendment A2 Findings A and C).
      *
-     * The leader is the assigner, so its own command cannot be lost between accepting and applying
-     * it — there is no inbound path that could replay it, because an authoritative command arriving
-     * at the leader is a role violation. Received and applied therefore still move together here;
-     * A1 Finding D's split matters on the receiving side. What changed is *when*: only on
-     * [OutboundOutcome.SENT], because a command the follower never received is not a command.
+     * SENT establishes received truth and a session-owned [DeliveredAuthority]. Applied truth
+     * moves only when the ordered apply represents the command with playback effect ownership.
+     * End Ride cannot revoke the peer's copy; generation retirement still ends the obligation.
      *
      * The apply itself goes through the leader's ordered [applyChain] rather than running on the
      * outbound consumer, so a decoder pre-roll cannot stall the wire. The leader applies its own
@@ -1745,19 +1785,11 @@ class SyncPlaybackCoordinator(
             // the peer will act on it, and the only consistent thing this device can do is act on it
             // too. The latch stops *new* authority; it does not un-send what was sent.
             if (!stillCurrent(generation)) return@withLock
-            // **Independent-review round 8's sweep, the leader's own half of Blocker B.** The
-            // transport answers across the outbound consumer and a real socket write, and this lock
-            // suspends again — so a ride boundary accepted in any of those windows leaves the
-            // control generation untouched and the proof above passing. The writes below would then
-            // publish this `command_seq` as applied while [chainApply]'s [applyAuthoritative]
-            // refused it as REJECTED_RIDE. The frame did reach the peer and this deliberately does
-            // not un-send it, but nothing on this device applied it, so nothing here may claim it
-            // did.
-            if (!rideStillLive(ride)) return@withLock
+            // SENT is an obligation owned by this authenticated session, even if the ride
+            // that issued it ended during the write. The ride remains immutable provenance.
             // maxOf, not assignment: these commit on the outbound consumer, in send order, and a
             // monotone write says the same thing without depending on that ordering twice over.
             lastReceivedSeq = maxOf(lastReceivedSeq ?: seq, seq)
-            lastAppliedSeq = maxOf(lastAppliedSeq ?: seq, seq)
             committed = true
         }
         if (!committed) {
@@ -1769,7 +1801,10 @@ class SyncPlaybackCoordinator(
         }
         // Amendment A11: the reservation moves into the ordered apply, which is now guaranteed to be
         // creatable — that guarantee *is* the fix. The node releases it when its work is done.
-        chainApply(generation, reservation) { applyAuthoritative(message, generation, ride, estimate, reservation) }
+        val delivered = DeliveredAuthority(ride, seq, reservation)
+        chainApply(generation, reservation) {
+            applyAuthoritative(message, generation, ride, estimate, reservation, delivered)
+        }
     }
 
     // --- user-facing actions (also the system media controls' path, brief §39) ------------------
@@ -2119,7 +2154,7 @@ class SyncPlaybackCoordinator(
             _diagnostics.update { it.copy(staleRideLifecycleCount = it.staleRideLifecycleCount + 1) }
             return RideBoundaryOutcome.SUPERSEDED_BY_LIVE_RIDE_AUTHORITY
         }
-        leaveSynchronizedMode()
+        leaveSynchronizedMode(preserveDistributed = true)
         return RideBoundaryOutcome.CLEARED
     }
 
@@ -2127,12 +2162,16 @@ class SyncPlaybackCoordinator(
      * Leaves synchronised mode without ending the control session: local playback continues exactly
      * as a Phase 3 ride, correction stops and the rate goes back to exactly 1.0 (brief §38).
      */
-    fun leaveSynchronizedMode() {
-        // First statement: everything below retires synchronised-mode state, and an apply already in
-        // flight must be refused before it can write any of it back.
+    fun leaveSynchronizedMode() = leaveSynchronizedMode(preserveDistributed = false)
+
+    private fun leaveSynchronizedMode(preserveDistributed: Boolean) {
+        val keepDelivered = preserveDistributed && hasDeliveredPlayback
+        // Retire local candidates and reconciliation. End Ride cannot revoke a delivered effect:
+        // preserve its original playback token/state while its reserved obligation is live.
+        // This is not successor ownership, and no cleanup is deferred behind the player.
         synchronizedModeEpoch += 1
         syncEnabled = false
-        playbackFence.supersede()
+        if (!keepDelivered) playbackFence.supersede()
         // Amendment A1 Finding E: leaving synchronised mode cancels the retained Play. A transfer
         // completing afterwards must not start music the user has stopped asking for.
         playRequestFence.supersede()
@@ -2142,14 +2181,14 @@ class SyncPlaybackCoordinator(
         discardDeferredEvents()
         deferredDrainJob?.cancel()
         deferredDrainJob = null
-        timeline = null
+        if (!keepDelivered) timeline = null
         // Leaving synchronised mode is the user genuinely ending authoritative playback, not a
         // control-lifetime blip -- unlike `resetForNewSession`, this is a legitimate place for
         // ride-segment identity to clear too.
-        currentPlaybackIdentity = null
+        if (!keepDelivered) currentPlaybackIdentity = null
         // Nothing is established any more, so no ride owns authority. Kept in lockstep with
         // `currentPlaybackIdentity` above -- the two answer "what is standing" and "whose it is".
-        rideAuthorityEpoch = 0
+        if (!keepDelivered) rideAuthorityEpoch = 0
         driftState = DriftController.reset()
         scope.launch { restoreRate() }
         _diagnostics.update {
@@ -2449,7 +2488,6 @@ class SyncPlaybackCoordinator(
                                 false
                             } else {
                                 lastReceivedSeq = header.commandSeq
-                                lastAppliedSeq = header.commandSeq
                                 true
                             }
                         }
@@ -2458,9 +2496,16 @@ class SyncPlaybackCoordinator(
                         return
                     }
                     _diagnostics.update {
-                        it.copy(lastAppliedCommandSeq = header.commandSeq, lastReceivedCommandSeq = header.commandSeq)
+                        it.copy(lastReceivedCommandSeq = header.commandSeq)
                     }
-                    applyAuthoritative(message, generation, ride, requireNotNull(estimate), reservation)
+                    applyAuthoritative(
+                        message,
+                        generation,
+                        ride,
+                        requireNotNull(estimate),
+                        reservation,
+                        DeliveredAuthority(ride, header.commandSeq, reservation),
+                    )
                 } finally {
                     // The apply phase is over. Any scheduled action it armed joined this obligation
                     // synchronously before this line, so the obligation survives exactly as long as
@@ -2710,7 +2755,6 @@ class SyncPlaybackCoordinator(
                         !rideStillLive(held.ride) -> HeldCommandVerdict.RETIRED
                         else -> {
                             deferredEvents.removeFirst()
-                            if (seq != null) lastAppliedSeq = seq
                             HeldCommandVerdict.APPLY
                         }
                     }
@@ -2735,7 +2779,14 @@ class SyncPlaybackCoordinator(
                 )
             }
             // Round 7: the ride the command was **admitted** under, replayed unchanged.
-            applyAuthoritative(held.message, held.generation, held.ride, estimate, reservation)
+            applyAuthoritative(
+                held.message,
+                held.generation,
+                held.ride,
+                estimate,
+                reservation,
+                seq?.let { DeliveredAuthority(held.ride, it, reservation) },
+            )
             return DrainStep.CONTINUE
         } finally {
             // ADR-024 Amendment A11: exactly one release, on every path including cancellation.
@@ -3029,6 +3080,7 @@ class SyncPlaybackCoordinator(
          * capacity any more than it may mint a replacement [RideAdmission].
          */
         reservation: WorkReservation,
+        delivered: DeliveredAuthority? = null,
     ) {
         if (!stillCurrent(generation)) return
         when (message) {
@@ -3042,6 +3094,7 @@ class SyncPlaybackCoordinator(
                     estimate,
                     ride = ride,
                     reservation = reservation,
+                    delivered = delivered,
                 )
             is PlaybackMessage.Pause ->
                 applyTransport(
@@ -3052,6 +3105,7 @@ class SyncPlaybackCoordinator(
                     positionMs = message.positionMs,
                     ride = ride,
                     reservation = reservation,
+                    delivered = delivered,
                 )
             is PlaybackMessage.Resume ->
                 applyTransport(
@@ -3062,13 +3116,14 @@ class SyncPlaybackCoordinator(
                     positionMs = message.positionMs,
                     ride = ride,
                     reservation = reservation,
+                    delivered = delivered,
                 )
             is PlaybackMessage.Seek ->
-                applySeek(message.header, message.targetPositionMs, generation, estimate, ride, reservation)
+                applySeek(message.header, message.targetPositionMs, generation, estimate, ride, reservation, delivered)
             is PlaybackMessage.Next ->
-                applyStep(message.header, 1, generation, estimate, ride, reservation)
+                applyStep(message.header, 1, generation, estimate, ride, reservation, delivered)
             is PlaybackMessage.Previous ->
-                applyStep(message.header, -1, generation, estimate, ride, reservation)
+                applyStep(message.header, -1, generation, estimate, ride, reservation, delivered)
             else -> Unit
         }
     }
@@ -3107,13 +3162,14 @@ class SyncPlaybackCoordinator(
         ride: RideAdmission,
         /** ADR-024 Amendment A11: the caller's obligation. See [applyAuthoritative]. */
         reservation: WorkReservation,
+        delivered: DeliveredAuthority? = null,
     ): StateSnapshotOutcome {
         // Amendment A3 Finding B: reached from `applyAuthoritative`, from `applyStep` and from
         // `restoreFromPlaybackState`, and `content.resolve` is real I/O. Proved on entry so a Play
         // that only *starts* after a boundary does no work, and again below because the resolve
         // suspends.
         if (!stillCurrent(generation)) return StateSnapshotOutcome.REJECTED_STALE
-        if (!rideStillLive(ride)) return StateSnapshotOutcome.REJECTED_RIDE
+        if (!mayRepresent(ride, delivered)) return StateSnapshotOutcome.REJECTED_RIDE
         // Independent-review Blocker 2B: this is the authoritative track identity the instant this
         // PLAY is accepted, regardless of whether content resolves locally right now -- PROTOCOL §5
         // rule 4 already treats a content-pending PLAY as the authoritative state to report
@@ -3128,6 +3184,7 @@ class SyncPlaybackCoordinator(
         recordRideAuthority(ride.rideEpoch)
         val playable = content.resolve(trackHash)
         if (!stillCurrent(generation)) return StateSnapshotOutcome.REJECTED_STALE
+        if (!mayRepresent(ride, delivered)) return StateSnapshotOutcome.REJECTED_RIDE
         if (playable == null) {
             // PROTOCOL §5 rule 4: do not start, request the transfer, let the leader reschedule.
             _diagnostics.update { it.copy(syncState = SyncState.WAITING_FOR_CONTENT, currentTrackHash = trackHash) }
@@ -3146,12 +3203,15 @@ class SyncPlaybackCoordinator(
         // put all of them back. Synchronous, adjacent to the writes: ADR-024 Amendment A5's rule
         // applied to the third lifetime. Android writes `currentPlaybackIdentity` above rather than
         // here (a deliberate pre-existing divergence — see its own comment), so it is guarded twice.
-        if (!rideStillLive(ride)) return StateSnapshotOutcome.REJECTED_RIDE
+        if (!mayRepresent(ride, delivered)) return StateSnapshotOutcome.REJECTED_RIDE
         val token = playbackFence.begin()
         currentEpochToken = token
         driftState = DriftController.reset()
         _queueState.update { SharedQueue.select(it, queueItemId) }
         timeline = PlaybackTimeline(trackHash, queueItemId, positionMs, header.effectiveAtSessionUs, playing, generation = token)
+        currentPlaybackIdentity = PlaybackIdentity(trackHash, queueItemId)
+        recordRideAuthority(ride.rideEpoch)
+        representDelivered(delivered, token)
         // A new epoch retires a previous sync failure outright: fresh timeline, fresh drift state,
         // fresh seek budget. Nothing from the failed epoch is still in force to keep reporting.
         _diagnostics.update {
@@ -3181,6 +3241,7 @@ class SyncPlaybackCoordinator(
                 StateSnapshotOutcome.REJECTED_STALE
             }
         }
+        if (!owns(generation, token)) return StateSnapshotOutcome.REJECTED_STALE
         // A snapshot-restored track that the authority says is paused is loaded and left alone:
         // there is no instant to schedule, because nothing is about to become audible.
         if (!playing) {
@@ -3212,11 +3273,12 @@ class SyncPlaybackCoordinator(
         ride: RideAdmission,
         /** ADR-024 Amendment A11: the caller's obligation. See [applyAuthoritative]. */
         reservation: WorkReservation,
+        delivered: DeliveredAuthority? = null,
     ) {
         if (!stillCurrent(generation)) return
         // Independent-review round 4, §17: End Ride moves the ride lifetime without moving the
         // control generation, so the proof above does not cover it.
-        if (!rideStillLive(ride)) return
+        if (!mayRepresent(ride, delivered)) return
         val token = currentEpochToken
         timeline = timeline?.copy(anchorPositionMs = positionMs, anchorSessionUs = header.effectiveAtSessionUs, playing = playing)
         // Amendment A4 Finding A: these are two effects, and they used to sit inside one lambda
@@ -3227,6 +3289,7 @@ class SyncPlaybackCoordinator(
             } else {
                 listOf(PlayerStep.Pause, PlayerStep.Seek(positionMs))
             }
+        representDelivered(delivered, token)
         scheduleAt(header.effectiveAtSessionUs, estimate, generation, token, steps, reservation)
     }
 
@@ -3239,11 +3302,13 @@ class SyncPlaybackCoordinator(
         ride: RideAdmission,
         /** ADR-024 Amendment A11: the caller's obligation. See [applyAuthoritative]. */
         reservation: WorkReservation,
+        delivered: DeliveredAuthority? = null,
     ) {
         if (!stillCurrent(generation)) return
-        if (!rideStillLive(ride)) return // round 4, §17; round 7 adds the second half
+        if (!mayRepresent(ride, delivered)) return // round 4, §17; round 7 adds the second half
         val token = currentEpochToken
         timeline = timeline?.copy(anchorPositionMs = targetPositionMs, anchorSessionUs = header.effectiveAtSessionUs)
+        representDelivered(delivered, token)
         scheduleAt(
             header.effectiveAtSessionUs,
             estimate,
@@ -3268,6 +3333,7 @@ class SyncPlaybackCoordinator(
         ride: RideAdmission,
         /** ADR-024 Amendment A11: the caller's obligation. See [applyAuthoritative]. */
         reservation: WorkReservation,
+        delivered: DeliveredAuthority? = null,
     ) {
         // Amendment A3 Finding B: the highest-risk path in the phase, and it had no proof at all.
         // Everything below reads or writes *live* state — the shared queue, the selection, the
@@ -3283,7 +3349,7 @@ class SyncPlaybackCoordinator(
         // playback epoch over the one `leaveSynchronizedMode` had just superseded — then schedules
         // `Stop`/`ClearSelection`, which the new token makes owned, so it reaches the player. End
         // Ride's whole contract is that local playback continues (FR-025).
-        if (!rideStillLive(ride)) return
+        if (!mayRepresent(ride, delivered)) return
         val step = SharedQueue.step(_queueState.value, delta)
         _queueState.value = step.state
         publishQueue()
@@ -3302,6 +3368,7 @@ class SyncPlaybackCoordinator(
             // Amendment A4 Finding C: `stop` used to mean "stop the player **and** clear the local
             // queue", composed inside `MusicCoordinator` after the player call. Two steps, two
             // proofs, so a retired stop can never clear the live session's selection.
+            representDelivered(delivered, token)
             scheduleAt(
                 header.effectiveAtSessionUs,
                 estimate,
@@ -3312,7 +3379,10 @@ class SyncPlaybackCoordinator(
             )
             return
         }
-        if (!step.moved) return
+        if (!step.moved) {
+            representDelivered(delivered, currentEpochToken)
+            return
+        }
         applyPlay(
             header,
             selected.trackHash,
@@ -3322,6 +3392,7 @@ class SyncPlaybackCoordinator(
             estimate = estimate,
             ride = ride,
             reservation = reservation,
+            delivered = delivered,
         )
     }
 
@@ -3634,7 +3705,7 @@ class SyncPlaybackCoordinator(
                     OutboundAuthority.ADVISORY,
                     Outbound.Frame.Playback(
                         PlaybackMessage.PlaybackStateSnapshot(
-                            commandSeq = lastAppliedSeq ?: (nextSeq - 1).coerceAtLeast(0),
+                            commandSeq = lastAppliedSeq ?: 0,
                             queueRevision = _queueState.value.revision,
                             trackHash = active?.trackHash,
                             queueItemId = active?.queueItemId,
@@ -3721,7 +3792,7 @@ class SyncPlaybackCoordinator(
             val snapshot =
                 ResyncMessage.StateSnapshot(
                     leaderPeerId = leaderPeerId,
-                    commandSeq = lastAppliedSeq ?: (nextSeq - 1).coerceAtLeast(0),
+                    commandSeq = lastAppliedSeq ?: 0,
                     queueRevision = queue.revision,
                     playback =
                         ResyncPlaybackSnapshot(

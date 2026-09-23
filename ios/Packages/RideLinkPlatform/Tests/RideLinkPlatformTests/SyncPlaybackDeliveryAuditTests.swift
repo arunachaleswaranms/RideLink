@@ -90,6 +90,9 @@ final class SyncPlaybackDeliveryAuditTests: XCTestCase {
         await expect("both obligations outstanding") { await self.coordinator.retainedWorkCount == 2 }
         let delivered = await session.playbackMessages().count
         XCTAssertEqual(delivered, 2, "the premise: both commands are genuinely on the wire")
+        await expect("both delivered commands are represented, not merely queued for apply") {
+            await self.coordinator.lastAppliedSeq == 3
+        }
         let before = await coordinator.diagnostics
 
         // The third meets a full ledger.
@@ -204,6 +207,8 @@ final class SyncPlaybackDeliveryAuditTests: XCTestCase {
             await awaitOutboundQuiescent()
             let held = await coordinator.retainedWorkCount
             XCTAssertLessThanOrEqual(held, 8, "the ledger is the bound, and it holds")
+            let deliveredMetadata = await coordinator.deliveredEffects.count
+            XCTAssertLessThanOrEqual(deliveredMetadata, held, "debt metadata cannot outgrow its reserved ledger")
             let nodes = await coordinator.sessionChainNodes.count
             peakNodes = max(peakNodes, nodes)
             XCTAssertLessThanOrEqual(nodes, 2 * 8, "each obligation owns at most one apply and one scheduled node")
@@ -219,14 +224,9 @@ final class SyncPlaybackDeliveryAuditTests: XCTestCase {
         XCTAssertEqual(diagnostics.workCapacityRefusedCount, 1)
     }
 
-    /// **Capacity ownership respects the ride lifetime too.**
-    ///
-    /// A command admitted under ride 1, parked inside its own pre-roll across an accepted End Ride
-    /// and a Start Ride, must not become ride 2's authority — ADR-028 Amendments A5–A7's rule, which
-    /// A11 must not weaken. What A11 adds is the second half: the obligation that command reserved
-    /// is **released** when its apply is refused, so a ride boundary cannot leak the bound one
-    /// command at a time until the next ride cannot issue anything.
-    func testARideBoundaryRefusesTheParkedCommandAndReleasesItsCapacity() async {
+    /// A delivered obligation keeps its original provenance and releases its exact capacity only
+    /// after its scheduled effect completes, even when End/Start occurs inside the player load.
+    func testARideBoundaryCompletesTheDeliveredCommandAndReleasesItsCapacity() async {
         await build(sessionWorkCapacity: 2)
         await leaderPlaying()
         let oldTrack = SyncTestValues.hash(2)
@@ -247,11 +247,12 @@ final class SyncPlaybackDeliveryAuditTests: XCTestCase {
 
         await player.clearCalls()
         await player.releaseGate()
+        clock.advance(to: clock.now() + Self.leadUs * 4)
         await settle()
 
-        await expect("a refused apply hands its capacity back") { await self.coordinator.retainedWorkCount == 0 }
+        await expect("a completed obligation hands its capacity back") { await self.coordinator.retainedWorkCount == 0 }
         let calls = await player.calls
-        XCTAssertFalse(calls.contains(.start), "ride 1's parked command never became ride 2's authority")
+        XCTAssertTrue(calls.contains(.start), "delivery must be honoured despite local ride retirement")
 
         // The freed capacity is genuinely reusable by the ride that follows.
         await content.addLocal(freshTrack)

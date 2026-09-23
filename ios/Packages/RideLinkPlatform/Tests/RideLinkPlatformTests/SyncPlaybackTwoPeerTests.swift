@@ -137,7 +137,7 @@ final class SyncPlaybackTwoPeerTests: XCTestCase {
             await leader.coordinator.pause()
 
             try await Self.expect("the leader observed the failed write") {
-                await leader.coordinator.diagnostics.outboundFailedCount > 0
+                await leader.coordinator.diagnostics.outboundAuthorityLost
             }
             let diagnostics = await leader.coordinator.diagnostics
             XCTAssertTrue(diagnostics.outboundAuthorityLost, "the failure is explicit, never a counter nobody reads")
@@ -149,6 +149,229 @@ final class SyncPlaybackTwoPeerTests: XCTestCase {
             let followerDiagnostics = await follower.coordinator.diagnostics
             XCTAssertEqual(followerDiagnostics.lastAppliedCommandSeq, followerAppliedBefore,
                            "the follower is exactly where the leader is")
+        }
+    }
+
+    func testNoOutcomeDDeliveredRide1PlayCompletesOnBothPeersAfterEndAndStartOverRealTls() async throws {
+        try await deliveredRideBoundary(restart: true, successor: false)
+    }
+
+    func testNoOutcomeDEndRideWithoutAnotherStartStillHonoursDeliveredPlayOverRealTls() async throws {
+        try await deliveredRideBoundary(restart: false, successor: false)
+    }
+
+    func testRide2CommandAdmittedWhileC1IsParkedWinsOnBothPeersOverRealTls() async throws {
+        try await deliveredRideBoundary(restart: true, successor: true)
+    }
+
+    private func deliveredRideBoundary(restart: Bool, successor: Bool) async throws {
+        try await twoPairedPhones { leader, follower in
+            let hash = SyncTestValues.hash(1)
+            await leader.content.addLocal(hash)
+            await leader.content.addPeer(hash)
+            await follower.content.addLocal(hash)
+            let newer = SyncTestValues.hash(2)
+            await leader.content.addLocal(newer)
+            await leader.content.addPeer(newer)
+            await follower.content.addLocal(newer)
+            // Both tracks already share one revision, so C2 cannot change C1's queue context.
+            await leader.coordinator.enqueue(hash)
+            await leader.coordinator.enqueue(newer)
+            try await Self.expect("both peers hold the two-track queue") {
+                await follower.coordinator.queueState.items.count == 2
+            }
+            let origin = await leader.coordinator.rideEpochs.next()
+            _ = await follower.coordinator.rideEpochs.next()
+            await leader.player.gateCalls { if case .load = $0 { true } else { false } }
+            await leader.coordinator.playSynchronized(hash)
+            try await Self.expect("C1 local apply parked inside player load") { await leader.player.isGateParked }
+            try await Self.expect("F actually accepted and played C1") {
+                let received = await follower.coordinator.lastReceivedSeq
+                let started = await follower.player.calls.contains(.start)
+                return received == 1 && started
+            }
+            let ending = await leader.coordinator.rideEpochs.next()
+            _ = await leader.coordinator.endRideSegment(rideEpoch: ending)
+            if restart { _ = await leader.coordinator.rideEpochs.next() }
+            if successor {
+                let followerEnd = await follower.coordinator.rideEpochs.next()
+                _ = await follower.coordinator.endRideSegment(rideEpoch: followerEnd)
+                _ = await follower.coordinator.rideEpochs.next()
+                await leader.coordinator.playSynchronized(newer)
+                try await Self.expect("C2 delivered while L remains parked in C1") {
+                    await follower.coordinator.lastReceivedSeq == 2
+                }
+                let appliedWhileParked = await leader.coordinator.lastAppliedSeq
+                XCTAssertEqual(appliedWhileParked, 1, "SENT C2 is accepted, not yet represented locally")
+            }
+            await leader.player.releaseGate()
+            try await Self.expect("C1 local work completed") { await leader.coordinator.retainedWorkCount == 0 }
+            if successor {
+                try await Self.expect("both peers completed C2") {
+                    let a = await leader.coordinator.retainedWorkCount
+                    let b = await follower.coordinator.retainedWorkCount
+                    return a == 0 && b == 0
+                }
+            }
+            let calls = await leader.player.calls
+            XCTAssertTrue(calls.contains(.start), "No Outcome D: F applied C1; L cannot refuse solely because Ride 1 ended")
+            for peer in [leader, follower] {
+                let received = await peer.coordinator.lastReceivedSeq
+                let applied = await peer.coordinator.lastAppliedSeq
+                let current = await peer.coordinator.diagnostics.currentTrackHash
+                XCTAssertEqual(received, successor ? 2 : 1)
+                XCTAssertEqual(applied, successor ? 2 : 1)
+                XCTAssertEqual(current, successor ? newer : hash)
+                let peerCalls = await peer.player.calls
+                let lastLoad = peerCalls.compactMap { call -> ContentHash? in
+                    if case .load(let hash) = call { return hash }; return nil
+                }.last
+                XCTAssertEqual(lastLoad, successor ? newer : hash)
+                let receivedDiagnostic = await peer.coordinator.diagnostics.lastReceivedCommandSeq
+                let appliedDiagnostic = await peer.coordinator.diagnostics.lastAppliedCommandSeq
+                XCTAssertEqual(receivedDiagnostic, received)
+                XCTAssertEqual(appliedDiagnostic, applied)
+            }
+            let owner = await leader.coordinator.rideAuthorityEpoch
+            XCTAssertEqual(owner, successor ? origin + 2 : origin, "only C2 can establish Ride 2 ownership")
+            let leaderQueue = await leader.coordinator.queueState
+            let followerQueue = await follower.coordinator.queueState
+            XCTAssertEqual(leaderQueue, followerQueue)
+            let leaderTimeline = await leader.coordinator.timeline
+            let followerTimeline = await follower.coordinator.timeline
+            XCTAssertEqual(leaderTimeline?.trackHash, followerTimeline?.trackHash)
+            XCTAssertEqual(leaderTimeline?.anchorSessionUs, followerTimeline?.anchorSessionUs)
+            let healthy = await leader.coordinator.stillCurrent(await leader.coordinator.liveGeneration)
+            XCTAssertTrue(healthy, "End Ride leaves the authenticated generation healthy")
+        }
+    }
+
+    /// A later command cannot overtake the issuer's apply chain. The separate authenticated
+    /// resync consumer CAN establish successor state while an older player call is suspended.
+    /// Exercise that reachable path, with C2 and its snapshot both coming from the real leader.
+    func testRide2SnapshotEstablishesAuthorityBeforeC1ReturnsAndOldCompletionChangesNothingOverRealTls() async throws {
+        try await twoPairedPhones { leader, follower in
+            let old = SyncTestValues.hash(1), new = SyncTestValues.hash(2)
+            for hash in [old, new] {
+                await leader.content.addLocal(hash)
+                await leader.content.addPeer(hash)
+                await follower.content.addLocal(hash)
+                await leader.coordinator.enqueue(hash)
+            }
+            try await Self.expect("queue replicated") { await follower.coordinator.queueState.items.count == 2 }
+            _ = await leader.coordinator.rideEpochs.next()
+            _ = await follower.coordinator.rideEpochs.next()
+            await follower.player.gateCalls { $0 == .load(old) }
+            await leader.coordinator.playSynchronized(old)
+            try await Self.expect("F's accepted C1 is in a real player suspension") { await follower.player.isGateParked }
+            try await Self.expect("L completed C1") { await leader.coordinator.retainedWorkCount == 0 }
+            for peer in [leader, follower] {
+                let end = await peer.coordinator.rideEpochs.next()
+                _ = await peer.coordinator.endRideSegment(rideEpoch: end)
+                _ = await peer.coordinator.rideEpochs.next()
+            }
+            await leader.coordinator.playSynchronized(new)
+            try await Self.expect("leader completed genuine Ride 2 C2") {
+                let applied = await leader.coordinator.lastAppliedSeq
+                let held = await leader.coordinator.retainedWorkCount
+                return applied == 2 && held == 0
+            }
+            await leader.player.setState(PlayerState(positionMs: 0, durationMs: 200_000, playing: true))
+            // An ingress loss is what requests full reconciliation in production. Resync has
+            // its own consumer, so this does not wait behind the suspended playback consumer.
+            await follower.coordinator.latchDesynchronized()
+            let result = SnapshotResult()
+            let sink = SnapshotTestSink { message, generation in
+                let outcome = await follower.coordinator.onStateSnapshot(message, generation: generation, reconciliation: 77)
+                await result.record(outcome)
+            }
+            await follower.manager.resyncRelay().setSink(sink)
+            await leader.coordinator.setResyncChannel(ControlSessionResyncChannel(manager: leader.manager))
+            await leader.coordinator.enqueueStateSnapshotReply(
+                generation: await leader.coordinator.liveGeneration,
+                leaderPeerId: await leader.coordinator.localPeerId, manifestRevision: 0, transfersInFlight: []
+            )
+            try await Self.expect("real TLS snapshot established C2 before old load returned") { await result.applied }
+            try await Self.expect("C2's player effect completed while only C1 remains parked") {
+                let held = await follower.coordinator.retainedWorkCount
+                let started = await follower.player.calls.contains(.start)
+                return held == 1 && started
+            }
+            let identity = await follower.coordinator.currentPlaybackIdentity
+            let timeline = await follower.coordinator.timeline
+            let owner = await follower.coordinator.rideAuthorityEpoch
+            let mode = await follower.coordinator.synchronizedModeEpoch
+            let reconciliation = await follower.coordinator.deferredEvents.compactMap { $0.reconciliation }
+            // A real pending play, waiting for unavailable content, must survive the old return.
+            await follower.coordinator.playSynchronized(SyncTestValues.hash(3))
+            let pending = await follower.coordinator.pendingPlay?.token
+            XCTAssertNotNil(pending)
+            XCTAssertEqual(identity?.trackHash, new)
+            XCTAssertEqual(owner, 3)
+            let callsBefore = await follower.player.calls
+            await follower.player.releaseGate()
+            try await Self.expect("old reservation released; snapshot scheduling also completed") {
+                await follower.coordinator.retainedWorkCount == 0
+            }
+            let identityAfter = await follower.coordinator.currentPlaybackIdentity
+            let timelineAfter = await follower.coordinator.timeline
+            let ownerAfter = await follower.coordinator.rideAuthorityEpoch
+            let modeAfter = await follower.coordinator.synchronizedModeEpoch
+            let pendingAfter = await follower.coordinator.pendingPlay?.token
+            let reconciliationAfter = await follower.coordinator.deferredEvents.compactMap { $0.reconciliation }
+            let currentHash = await follower.coordinator.diagnostics.currentTrackHash
+            XCTAssertEqual(identityAfter, identity)
+            XCTAssertEqual(timelineAfter, timeline)
+            XCTAssertEqual(ownerAfter, owner)
+            XCTAssertEqual(modeAfter, mode)
+            XCTAssertEqual(pendingAfter, pending)
+            XCTAssertEqual(reconciliationAfter, reconciliation)
+            XCTAssertEqual(currentHash, new)
+            let callsAfter = await follower.player.calls
+            XCTAssertEqual(callsAfter, callsBefore, "old C1 dispatched no seek/start after successor authority")
+            for peer in [leader, follower] {
+                let received = await peer.coordinator.lastReceivedSeq
+                let applied = await peer.coordinator.lastAppliedSeq
+                XCTAssertEqual(received, 2)
+                XCTAssertEqual(applied, 2)
+            }
+        }
+    }
+
+    func testTransportSentAfterEndRideKeepsOriginalObligationOverRealTls() async throws {
+        try await twoPairedPhones { leader, follower in
+            let hash = SyncTestValues.hash(1)
+            await leader.content.addLocal(hash)
+            await leader.content.addPeer(hash)
+            await follower.content.addLocal(hash)
+            let origin = await leader.coordinator.rideEpochs.next()
+            await leader.transport.arm()
+            await leader.coordinator.playSynchronized(hash)
+            try await Self.expect("TLS write succeeded but SENT callback is parked") { await leader.transport.parked }
+            try await Self.expect("F accepted and applied the frame before L received its outcome") {
+                await follower.player.calls.contains(.start)
+            }
+            let receivedBefore = await leader.coordinator.lastReceivedSeq
+            let appliedBefore = await leader.coordinator.lastAppliedSeq
+            XCTAssertNil(receivedBefore)
+            XCTAssertNil(appliedBefore, "delivery outcome has not represented a local apply yet")
+            let end = await leader.coordinator.rideEpochs.next()
+            _ = await leader.coordinator.endRideSegment(rideEpoch: end)
+            _ = await leader.coordinator.rideEpochs.next()
+            await leader.transport.release()
+            try await Self.expect("issuer completed its exact delivered obligation") {
+                let started = await leader.player.calls.contains(.start)
+                let retained = await leader.coordinator.retainedWorkCount
+                return started && retained == 0
+            }
+            for peer in [leader, follower] {
+                let received = await peer.coordinator.lastReceivedSeq
+                let applied = await peer.coordinator.lastAppliedSeq
+                XCTAssertEqual(received, 1)
+                XCTAssertEqual(applied, 1)
+            }
+            let owner = await leader.coordinator.rideAuthorityEpoch
+            XCTAssertEqual(owner, origin)
         }
     }
 
@@ -365,7 +588,7 @@ final class SyncPlaybackTwoPeerTests: XCTestCase {
         let deadline = Date().addingTimeInterval(20)
         while Date() < deadline {
             if await condition() { return }
-            try await Task.sleep(nanoseconds: 20_000_000)
+            await Task.yield()
         }
         XCTFail("timed out waiting for: \(description)")
     }
@@ -379,6 +602,7 @@ final class SyncPlaybackTwoPeerTests: XCTestCase {
         /// make the relay's `send` genuinely answer false, which is the only honest way to reach
         /// Finding C's path without a fake standing in for the transport.
         let manager: ControlSessionManager
+        let transport: OutcomeGateChannel
 
         init(
             manager: ControlSessionManager,
@@ -392,10 +616,13 @@ final class SyncPlaybackTwoPeerTests: XCTestCase {
             let player = FakeSyncPlayer()
             self.player = player
             content = FakeSyncContent()
+            let base = ControlSessionSyncPort(manager: manager)
+            let transport = OutcomeGateChannel(base: base.channel)
+            self.transport = transport
             coordinator = SyncPlaybackCoordinator(
                 monotonicNowUs: monotonicNowUs,
                 localPeerId: localPeerId,
-                session: ControlSessionSyncPort(manager: manager),
+                session: OutcomeGateSession(base: base, channel: transport),
                 player: player,
                 content: content,
                 sleeper: MonotonicDeadlineSleeper(monotonicNowUs: monotonicNowUs),
@@ -500,4 +727,54 @@ final class SyncPlaybackTwoPeerTests: XCTestCase {
 /// route transition is Phase 2b state a loopback socket has no way to produce.
 private struct NeverTransitioningRoute: SyncRouteStatePort {
     func isRouteTransitioning() async -> Bool { false }
+}
+
+/// Test-only suspension at the return from a real authenticated write. Bytes, generation binding
+/// and follower dispatch are production TLS; only delivery of the successful outcome is gated.
+private actor OutcomeGateChannel: SyncPlaybackChannel {
+    let base: any SyncPlaybackChannel
+    private var armed = false
+    private var continuation: CheckedContinuation<Void, Never>?
+    var parked: Bool { continuation != nil }
+    init(base: any SyncPlaybackChannel) { self.base = base }
+    func arm() { armed = true }
+    func release() {
+        armed = false
+        let held = continuation
+        continuation = nil
+        held?.resume()
+    }
+    func setPlaybackSink(_ sink: (any PlaybackSink)?) async { await base.setPlaybackSink(sink) }
+    func setQueueSink(_ sink: (any QueueSink)?) async { await base.setQueueSink(sink) }
+    func send(_ message: QueueMessage, authorizingGeneration: Int64) async -> Bool {
+        await base.send(message, authorizingGeneration: authorizingGeneration)
+    }
+    func send(_ message: PlaybackMessage, authorizingGeneration: Int64) async -> Bool {
+        let sent = await base.send(message, authorizingGeneration: authorizingGeneration)
+        if sent, armed, case .play = message {
+            await withCheckedContinuation { continuation = $0 }
+        }
+        return sent
+    }
+}
+
+private struct OutcomeGateSession: SyncSessionPort {
+    let base: any SyncSessionPort
+    let channel: any SyncPlaybackChannel
+    func currentAuthGeneration() async -> Int64 { await base.currentAuthGeneration() }
+    func sessionClockEstimate() async -> SessionClockEstimate? { await base.sessionClockEstimate() }
+    func rttP95Us() async -> Int64? { await base.rttP95Us() }
+}
+
+private actor SnapshotResult {
+    var applied = false
+    func record(_ outcome: StateSnapshotOutcome) { applied = outcome == .applied }
+}
+
+private struct SnapshotTestSink: ResyncSink {
+    let receive: @Sendable (ResyncMessage, Int64) async -> Void
+    init(_ receive: @escaping @Sendable (ResyncMessage, Int64) async -> Void) { self.receive = receive }
+    func submit(_ message: ResyncMessage, generation: Int64) {
+        Task { await receive(message, generation) }
+    }
 }

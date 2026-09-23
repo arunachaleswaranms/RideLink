@@ -242,6 +242,35 @@ public actor SyncPlaybackCoordinator {
         synchronizedModeEpoch == admission.synchronizedModeEpoch && rideEpochs.current == admission.rideEpoch
     }
 
+    // Metadata for already-reserved work, never a second queue. At most one entry per live
+    // reservation; final release and control-generation retirement remove the exact entries.
+    var deliveredEffects: [Int64: (authority: DeliveredAuthority, token: Int64)] = [:]
+
+    func mayRepresent(_ ride: RideAdmission, delivered: DeliveredAuthority?) -> Bool {
+        guard let delivered else { return rideStillLive(ride) }
+        return delivered.ride == ride && workLedger.isLive(delivered.reservation)
+            && stillCurrentNow(delivered.reservation.generation)
+            && rideAuthorityEpoch <= ride.rideEpoch
+            && (lastAppliedSeq ?? 0) <= delivered.commandSeq
+    }
+
+    /// State and effect ownership exist before publishing applied truth. A future deadline need
+    /// not have fired: lastApplied describes the authoritative timeline, not audible completion.
+    func representDelivered(_ delivered: DeliveredAuthority?, token: Int64) {
+        guard let delivered else { return }
+        recordRideAuthority(admittedRideEpoch: delivered.ride.rideEpoch)
+        deliveredEffects[delivered.reservation.id] = (delivered, token)
+        lastAppliedSeq = max(lastAppliedSeq ?? 0, delivered.commandSeq)
+        diagnostics.lastAppliedCommandSeq = lastAppliedSeq
+        publishDiagnostics()
+    }
+
+    var hasDeliveredPlayback: Bool {
+        deliveredEffects.values.contains {
+            $0.token == currentEpochToken && workLedger.isLive($0.authority.reservation)
+        }
+    }
+
     var driftState = DriftController.reset()
     private var tickTask: Task<Void, Never>?
 
@@ -673,6 +702,7 @@ public actor SyncPlaybackCoordinator {
         // it. A node from the retired session that returns later releases an id the ledger no longer
         // holds, which is a no-op and can never free a successor's capacity.
         workLedger.retire(throughGeneration: liveGeneration)
+        deliveredEffects = deliveredEffects.filter { workLedger.isLive($0.value.authority.reservation) }
         publishRetainedWork()
         lastReceivedSeq = nil
         lastAppliedSeq = nil
@@ -1089,6 +1119,7 @@ public actor SyncPlaybackCoordinator {
 
     func releaseWork(_ reservation: WorkReservation) {
         workLedger.leavePhase(reservation)
+        if !workLedger.isLive(reservation) { deliveredEffects.removeValue(forKey: reservation.id) }
         publishRetainedWork()
     }
 
@@ -1255,11 +1286,9 @@ public actor SyncPlaybackCoordinator {
 
     /// The leader's own command, once the transport has answered (Amendment A2 Findings A and C).
     ///
-    /// The leader is the assigner, so its own command cannot be lost between accepting and applying
-    /// it — there is no inbound path that could replay it, because an authoritative command arriving
-    /// at the leader is a role violation. Received and applied therefore still move together here;
-    /// A1 Finding D's split matters on the receiving side. What changed is *when*: only on `.sent`,
-    /// because a command the follower never received is not a command.
+    /// SENT establishes received truth and a session-owned DeliveredAuthority. Applied truth moves
+    /// only when the ordered apply represents that command in playback state with effect ownership.
+    /// End Ride cannot revoke the peer's copy; generation retirement still ends this obligation.
     ///
     /// The apply itself goes through the leader's ordered `applyChain` rather than running on the
     /// outbound consumer, so a decoder pre-roll cannot stall the wire. The leader applies its own
@@ -1305,35 +1334,20 @@ public actor SyncPlaybackCoordinator {
             releaseWork(reservation)
             return
         }
-        // **Independent-review round 8's sweep, the leader's own half of Blocker B.** The transport
-        // answers across the outbound consumer, an actor hop and a real socket write, and
-        // `stillCurrent` above suspends again — so a ride boundary accepted in any of those windows
-        // leaves the control generation untouched and both proofs above passing. The two writes
-        // below would then publish this `command_seq` as applied while `chainApply`'s
-        // `applyAuthoritative` refused it as `.rejectedRide`: the same false bookkeeping as the
-        // receiving side's, reached from the issuing side.
-        //
-        // The frame did reach the peer, and this deliberately does not un-send it — but nothing on
-        // this device applied it, so nothing on this device may claim it did. Proved with no
-        // `await` between the proof and the writes.
-        guard rideStillLive(ride) else {
-            releaseWork(reservation)
-            diagnostics.retiredRideAdmissionCount += 1
-            publishDiagnostics()
-            return
-        }
+        // SENT transfers the cancellation decision from the local ride to the authenticated
+        // session. Keep the original ride as provenance; never recapture the currently live ride.
+        let delivered = DeliveredAuthority(ride: ride, commandSeq: seq, reservation: reservation)
         // max, not assignment: these commit on the outbound consumer, in send order, and a monotone
         // write says the same thing without depending on that ordering twice over.
         lastReceivedSeq = max(lastReceivedSeq ?? seq, seq)
-        lastAppliedSeq = max(lastAppliedSeq ?? seq, seq)
-        diagnostics.lastAppliedCommandSeq = lastAppliedSeq
         diagnostics.lastReceivedCommandSeq = lastReceivedSeq
         publishDiagnostics()
         // Amendment A11: the reservation moves into the ordered apply, which is now guaranteed to
         // be creatable — that guarantee *is* the fix. The node releases it when its work is done.
         chainApply(generation: generation, reservation: reservation) { [weak self] in
             await self?.applyAuthoritative(
-                message, generation: generation, ride: ride, estimate: estimate, reservation: reservation
+                message, generation: generation, ride: ride, estimate: estimate, reservation: reservation,
+                delivered: delivered
             )
         }
     }
@@ -1490,18 +1504,24 @@ public actor SyncPlaybackCoordinator {
             publishDiagnostics()
             return .supersededByLiveRideAuthority
         }
-        await leaveSynchronizedMode()
+        await leaveSynchronizedMode(preserveDistributed: true)
         return .cleared
     }
 
     /// Leaves synchronised mode without ending the control session: local playback continues exactly
     /// as a Phase 3 ride, correction stops and the rate goes back to exactly 1.0 (brief §38).
     public func leaveSynchronizedMode() async {
-        // First statement: everything below retires synchronised-mode state, and an apply already in
-        // flight must be refused before it can write any of it back.
+        await leaveSynchronizedMode(preserveDistributed: false)
+    }
+
+    private func leaveSynchronizedMode(preserveDistributed: Bool) async {
+        let keepDelivered = preserveDistributed && hasDeliveredPlayback
+        // Retire local candidates and reconciliation. End Ride alone cannot revoke a delivered
+        // effect: preserve its original playback token/state while that reserved obligation is live.
+        // This is not successor ownership, and no cleanup is deferred behind the player.
         synchronizedModeEpoch += 1
         syncEnabled = false
-        epoch.supersede()
+        if !keepDelivered { epoch.supersede() }
         // Amendment A1 Finding E: leaving synchronised mode cancels the retained Play. A transfer
         // completing afterwards must not start music the user has stopped asking for.
         playRequestFence.supersede()
@@ -1511,23 +1531,23 @@ public actor SyncPlaybackCoordinator {
         discardDeferredEvents()
         deferredDrainTask?.cancel()
         deferredDrainTask = nil
-        timeline = nil
+        if !keepDelivered { timeline = nil }
         // Independent review, Race 7 (mirroring Android's identical finding): leaving synchronised
         // mode is the user genuinely ending authoritative playback, not a control-lifetime blip —
         // unlike `resetForNewSession`, which deliberately preserves `currentPlaybackIdentity` across
         // a reconnect (Blocker 2B), this is a legitimate place for ride-segment identity to clear
         // too. Without this, a stale track hash from an already-ended synchronised session would
         // still be reported by the next `enqueueStateSnapshotReply` as if still authoritative.
-        currentPlaybackIdentity = nil
+        if !keepDelivered { currentPlaybackIdentity = nil }
         // Nothing is established any more, so no ride owns authority. Kept in lockstep with
         // `currentPlaybackIdentity` above — the two answer "what is standing" and "whose it is", and
         // they must never disagree.
-        rideAuthorityEpoch = 0
+        if !keepDelivered { rideAuthorityEpoch = 0 }
         driftState = DriftController.reset()
         // Amendment A6 Finding B, swept: the identical post-`restoreRate` write shape, in the second
         // of that call's three callers. Every write first, the unfenced player effect last.
         diagnostics.syncState = .inactive
-        diagnostics.currentTrackHash = nil
+        diagnostics.currentTrackHash = currentPlaybackIdentity?.trackHash
         diagnostics.localDriftMs = nil
         diagnostics.peerDriftMs = nil
         diagnostics.deferredCommandCount = 0
@@ -1819,4 +1839,12 @@ struct PlaybackStateSnapshotFields: Sendable {
     let positionMs: Int64
     let playing: Bool
     let atSessionUs: Int64
+}
+
+/// Successful delivery is irreversible within this control generation. The original ride is
+/// provenance, not cancellation authority. The reservation bounds every retained obligation.
+struct DeliveredAuthority: Sendable, Equatable {
+    let ride: RideAdmission
+    let commandSeq: Int64
+    let reservation: WorkReservation
 }

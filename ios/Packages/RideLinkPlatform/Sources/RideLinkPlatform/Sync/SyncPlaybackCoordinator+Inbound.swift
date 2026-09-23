@@ -362,7 +362,7 @@ extension SyncPlaybackCoordinator {
         }
         let message = ResyncMessage.stateSnapshot(
             leaderPeerId: leaderPeerId,
-            commandSeq: lastAppliedSeq ?? max(nextSeq - 1, 0),
+            commandSeq: lastAppliedSeq ?? 0,
             queueRevision: queueState.revision,
             playback: playback,
             queueItems: queueState.items,
@@ -585,12 +585,11 @@ extension SyncPlaybackCoordinator {
             // the same obligation, so a second release frees capacity a live armed effect still owns.
             defer { releaseWork(reservation) }
             lastReceivedSeq = header.commandSeq
-            lastAppliedSeq = header.commandSeq
-            diagnostics.lastAppliedCommandSeq = header.commandSeq
             diagnostics.lastReceivedCommandSeq = header.commandSeq
             publishDiagnostics()
             await applyAuthoritative(
-                message, generation: generation, ride: ride, estimate: estimate, reservation: reservation
+                message, generation: generation, ride: ride, estimate: estimate, reservation: reservation,
+                delivered: DeliveredAuthority(ride: ride, commandSeq: header.commandSeq, reservation: reservation)
             )
         }
     }
@@ -846,7 +845,6 @@ extension SyncPlaybackCoordinator {
                 defer { releaseWork(reservation) }
                 deferredEvents.removeFirst()
                 let seq = heldHeader?.commandSeq
-                if let seq { lastAppliedSeq = seq }
                 diagnostics.lastAppliedCommandSeq = lastAppliedSeq
                 diagnostics.deferredCommandCount = deferredEvents.count
                 diagnostics.recoveredCommandCount += 1
@@ -855,7 +853,8 @@ extension SyncPlaybackCoordinator {
                 // Round 7: the ride the command was **admitted** under, replayed unchanged. The
                 // `estimate()` above suspends, so a fresh capture here would be precisely the defect.
                 await applyAuthoritative(
-                    message, generation: generation, ride: ride, estimate: estimate, reservation: reservation
+                    message, generation: generation, ride: ride, estimate: estimate, reservation: reservation,
+                    delivered: seq.map { DeliveredAuthority(ride: ride, commandSeq: $0, reservation: reservation) }
                 )
             case .queueSnapshot(let revision, let items, let currentIndex, _):
                 deferredEvents.removeFirst()
@@ -1196,29 +1195,30 @@ extension SyncPlaybackCoordinator {
         /// ADR-024 Amendment A11: the obligation the **caller** reserved when it took responsibility
         /// for this command, threaded rather than re-taken. A replay must not mint a replacement
         /// capacity any more than it may mint a replacement `RideAdmission`.
-        reservation: WorkReservation
+        reservation: WorkReservation,
+        delivered: DeliveredAuthority? = nil
     ) async {
         guard await stillCurrent(generation) else { return }
         guard stillCurrentNow(generation) else { return } // Amendment A5
         switch message {
         case .play(let header, let trackHash, let positionMs, let queueItemId):
             await applyPlay(header, trackHash: trackHash, queueItemId: queueItemId, positionMs: positionMs,
-                            generation: generation, estimate: estimate, ride: ride, reservation: reservation)
+                            generation: generation, estimate: estimate, ride: ride, reservation: reservation, delivered: delivered)
         case .pause(let header, let positionMs):
             await applyTransport(header, generation: generation, estimate: estimate, playing: false,
-                                 positionMs: positionMs, ride: ride, reservation: reservation)
+                                 positionMs: positionMs, ride: ride, reservation: reservation, delivered: delivered)
         case .resume(let header, let positionMs):
             await applyTransport(header, generation: generation, estimate: estimate, playing: true,
-                                 positionMs: positionMs, ride: ride, reservation: reservation)
+                                 positionMs: positionMs, ride: ride, reservation: reservation, delivered: delivered)
         case .seek(let header, let target):
             await applySeek(header, targetPositionMs: target, generation: generation, estimate: estimate,
-                            ride: ride, reservation: reservation)
+                            ride: ride, reservation: reservation, delivered: delivered)
         case .next(let header):
             await applyStep(header, delta: 1, generation: generation, estimate: estimate,
-                            ride: ride, reservation: reservation)
+                            ride: ride, reservation: reservation, delivered: delivered)
         case .previous(let header):
             await applyStep(header, delta: -1, generation: generation, estimate: estimate,
-                            ride: ride, reservation: reservation)
+                            ride: ride, reservation: reservation, delivered: delivered)
         default:
             break
         }
@@ -1255,7 +1255,8 @@ extension SyncPlaybackCoordinator {
         /// rounds 4 §17, 6 and 7). See `RideAdmission`.
         ride: RideAdmission,
         /// ADR-024 Amendment A11: the caller's obligation. See `applyAuthoritative`.
-        reservation: WorkReservation
+        reservation: WorkReservation,
+        delivered: DeliveredAuthority? = nil
     ) async -> StateSnapshotOutcome {
         // Amendment A3 Finding B: reached from `applyAuthoritative`, from `applyStep` and from
         // `restoreFromPlaybackState`, and `content.resolve` is real I/O on another actor. Proved on
@@ -1268,6 +1269,7 @@ extension SyncPlaybackCoordinator {
         // Amendment A5: `epoch.begin()` below retires whatever playback epoch is current, which is
         // A3 Finding C's catastrophe — so the proof adjacent to it has to be the synchronous one.
         guard stillCurrentNow(generation) else { return .rejectedStale }
+        guard mayRepresent(ride, delivered: delivered) else { return .rejectedRide }
         guard let playable else {
             // PROTOCOL §5 rule 4: do not start, request the transfer, let the leader reschedule.
             diagnostics.syncState = .waitingForContent
@@ -1292,7 +1294,7 @@ extension SyncPlaybackCoordinator {
         // across an accepted End Ride *and* a further accepted Start Ride could still pass it. The
         // `rideEpoch` half catches exactly that: any accepted Start or End Ride since admission moves
         // `rideEpochs.current` synchronously, with no window. See `rideStillLive`.
-        guard rideStillLive(ride) else { return .rejectedRide }
+        guard mayRepresent(ride, delivered: delivered) else { return .rejectedRide }
         let token = epoch.begin()
         currentEpochToken = token
         driftState = DriftController.reset()
@@ -1312,6 +1314,7 @@ extension SyncPlaybackCoordinator {
         // Independent-review round 6: stamped with the **admitted** ride epoch, not a fresh
         // `rideEpochs.current` read — see `recordRideAuthority`.
         recordRideAuthority(admittedRideEpoch: ride.rideEpoch)
+        representDelivered(delivered, token: token)
         diagnostics.currentTrackHash = trackHash
         diagnostics.hardSeekCount = 0
         diagnostics.lastCorrection = .none
@@ -1339,6 +1342,8 @@ extension SyncPlaybackCoordinator {
             // same reason — `synchronizedModeEpoch` alone lags an accepted-but-uncleaned End Ride.
             return stillCurrentNow(generation) && !rideStillLive(ride) ? .rejectedRide : .rejectedStale
         }
+        guard await owns(generation: generation, token: token),
+              ownsNow(generation: generation, token: token) else { return .rejectedStale }
         // A snapshot-restored track that the authority says is paused is loaded and left alone:
         // there is no instant to schedule, because nothing is about to become audible.
         guard playing else {
@@ -1370,7 +1375,8 @@ extension SyncPlaybackCoordinator {
         positionMs: Int64,
         ride: RideAdmission,
         /// ADR-024 Amendment A11: the caller's obligation. See `applyAuthoritative`.
-        reservation: WorkReservation
+        reservation: WorkReservation,
+        delivered: DeliveredAuthority? = nil
     ) async {
         guard await stillCurrent(generation) else { return }
         guard stillCurrentNow(generation) else { return } // Amendment A5
@@ -1379,9 +1385,10 @@ extension SyncPlaybackCoordinator {
         //
         // Independent-review round 6: the `rideEpoch` half closes the window `synchronizedModeEpoch`
         // alone leaves open while an accepted End Ride's cleanup is still parked — see `rideStillLive`.
-        guard rideStillLive(ride) else { return }
+        guard mayRepresent(ride, delivered: delivered) else { return }
         let token = currentEpochToken
         timeline = timeline?.reanchored(positionMs: positionMs, sessionUs: header.effectiveAtSessionUs, playing: playing)
+        representDelivered(delivered, token: token)
         // Amendment A4 Finding A: these are two effects, and they used to sit inside one closure
         // behind one ownership proof. `player.pause()` suspends — the hop to `MusicCoordinator` and
         // on to the player is two actor boundaries — so a Session-A `PAUSE` firing as the boundary
@@ -1402,14 +1409,16 @@ extension SyncPlaybackCoordinator {
         estimate: SessionClockEstimate,
         ride: RideAdmission,
         /// ADR-024 Amendment A11: the caller's obligation. See `applyAuthoritative`.
-        reservation: WorkReservation
+        reservation: WorkReservation,
+        delivered: DeliveredAuthority? = nil
     ) async {
         guard await stillCurrent(generation) else { return }
         guard stillCurrentNow(generation) else { return } // Amendment A5
         // round 4, §17; round 6 adds the second half — see `applyTransport`.
-        guard rideStillLive(ride) else { return }
+        guard mayRepresent(ride, delivered: delivered) else { return }
         let token = currentEpochToken
         timeline = timeline?.reanchored(positionMs: targetPositionMs, sessionUs: header.effectiveAtSessionUs)
+        representDelivered(delivered, token: token)
         scheduleAt(
             header.effectiveAtSessionUs, estimate: estimate, generation: generation, token: token,
             steps: [.seek(targetPositionMs)],
@@ -1427,7 +1436,8 @@ extension SyncPlaybackCoordinator {
         estimate: SessionClockEstimate,
         ride: RideAdmission,
         /// ADR-024 Amendment A11: the caller's obligation. See `applyAuthoritative`.
-        reservation: WorkReservation
+        reservation: WorkReservation,
+        delivered: DeliveredAuthority? = nil
     ) async {
         // Amendment A3 Finding B: the highest-risk path in the phase, and it had no proof at all.
         // Everything below reads or writes *live* state — the shared queue, the selection, the
@@ -1446,7 +1456,7 @@ extension SyncPlaybackCoordinator {
         // the player. End Ride's whole contract is that local playback continues (FR-025).
         //
         // Independent-review round 6: the `rideEpoch` half too — see `applyTransport`.
-        guard rideStillLive(ride) else { return }
+        guard mayRepresent(ride, delivered: delivered) else { return }
         let step = SharedQueue.step(state: queueState, delta: delta)
         queueState = step.state
         publishQueue()
@@ -1462,6 +1472,7 @@ extension SyncPlaybackCoordinator {
             // too, and it is this ride's. An older ride's End Ride boundary must not reach past it.
             // Round 6: stamped with the admitted ride epoch, not a fresh live read.
             recordRideAuthority(admittedRideEpoch: ride.rideEpoch)
+            representDelivered(delivered, token: token)
             // Amendment A4 Finding C: `stop` used to mean "stop the player **and** clear the local
             // queue", composed inside `MusicCoordinator` across the player's own suspension — so a
             // Session-A stop returning after Session B had materialised a track cleared Session B's
@@ -1473,10 +1484,13 @@ extension SyncPlaybackCoordinator {
             )
             return
         }
-        guard step.moved else { return }
+        guard step.moved else {
+            representDelivered(delivered, token: currentEpochToken)
+            return
+        }
         await applyPlay(header, trackHash: selected.trackHash, queueItemId: selected.queueItemId,
                         positionMs: 0, generation: generation, estimate: estimate, ride: ride,
-                        reservation: reservation)
+                        reservation: reservation, delivered: delivered)
     }
 
     // MARK: - Scheduling
@@ -1820,7 +1834,7 @@ extension SyncPlaybackCoordinator {
             generation: generation,
             authority: .advisory,
             frame: .playback(.playbackState(
-                commandSeq: lastAppliedSeq ?? max(nextSeq - 1, 0),
+                commandSeq: lastAppliedSeq ?? 0,
                 queueRevision: queueState.revision,
                 trackHash: timeline?.trackHash,
                 queueItemId: timeline?.queueItemId,

@@ -8,6 +8,47 @@ This is the current audit record; STATUS's older implementation-pass narratives 
 Software closure requires independent review of the live PR and exact-head CI. Physical
 validation remains **DEFERRED — HARDWARE NOT AVAILABLE**.
 
+## Delivered-authority follow-up — 23 September 2026
+
+The remaining review blocker was independent of capacity: after successful delivery,
+End Ride could retire the issuer's local apply while the peer remained authorised to
+execute the command. [The full pipeline/design audit](PHASE8_DELIVERED_AUTHORITY.md)
+evaluates both distributed debt and a distributed End Ride boundary, defines the chosen
+control-generation-owned `DeliveredAuthority`, and names every new regression. Original
+ride provenance and the exact pre-delivery reservation travel through both existing chains.
+No protocol, dependency, security workflow or cross-platform gate was changed.
+
+The two-peer **No Outcome D** regressions reproduce the defect against reviewed production
+head `5b32de5`: the follower applies C1, but the issuer permanently refuses its local effect
+after End Ride. Both platforms pass with the fix. Tests additionally cover nominal Ride 2
+without authority, no subsequent Start, C2 admitted while C1 is parked, genuine C2 snapshot
+restoration before C1 returns, and transport SENT returning after End Ride. iOS uses real
+paired/authenticated TLS. The successor restoration tests let C2's actual player effect
+complete before releasing C1 and assert that C1 dispatches no further player steps.
+
+| Gate | Follow-up evidence (AUTOMATED) |
+|---|---|
+| Android unit tests | 1,081 unique tests passed: app 274, audio 33, core 459, data 31, network 284, counted from JUnit XML. Both Debug and Release unit tasks passed |
+| Android static/build | Full ktlint, detekt, lint, assembleDebug and assembleRelease passed with JDK 21 |
+| Android instrumentation | 50 passed on API 36: app 5, audio 11, data 34; no physical-device claim |
+| iOS Core | 353 tests passed |
+| iOS Platform | 652 executed, zero failures, one skipped (standalone cross-platform half requires the orchestrator); all 13 real-TLS two-peer tests also passed separately |
+| iOS simulator builds | Unsigned Debug and Release passed |
+| Cross-platform | `tools/crossplatform/run.sh` passed. Real TLS/SAS/pins/session/leader, READY clock estimates, all command/queue/state fields, and silent pinned reconnect passed. Measured READY RTT p95: iOS 7,518 µs, Android 9,568 µs. Both generations advanced 1 → 2. Existing transcript remains byte/field compatible; no codec/schema/vector changes |
+| Local security | Gitleaks found no leaks; local-only policy checked 309 production files with zero findings |
+| GitHub CI/security | Exact pushed-head CI and Security run IDs are supplied in the final handoff. The required jobs remain Android, iOS, Gitleaks, local-only policy, CodeQL Java/Kotlin, CodeQL Swift and Dependency Review |
+
+Validation exposed fixture assumptions that equated acceptance/metadata with completed
+playback. Those fixtures now wait for actual representation/completion; reconciliation and
+completed-ride cleanup assertions remain. Kotlin reconciliation fixtures also align the
+follower's independent fake clock to the leader deadline before asserting completed baseline
+playback. One earlier full iOS run hit an unrelated real-TLS reconnect-stress `notReady`
+timeout while builds ran concurrently; the complete suite subsequently passed without any
+change to that stress test. No test was disabled or threshold weakened.
+
+The older validation ledger below records previous review rounds; this section is the
+current local software evidence. Independent review and exact-head checks remain required.
+
 ## Changes and defect evidence
 
 | Defect | Reproduction and root cause | Fix | Regression |
@@ -75,7 +116,7 @@ in this change rolls either back**; only a retired control lifetime clears them,
 | **Two peers, the boundary, no Outcome C** | `SyncPlaybackTwoPeerTest.local work capacity is refused before delivery and leaves both peers agreeing` (Android, two real coordinators on clocks 7.5 s apart) and `SyncPlaybackTwoPeerTests.testLocalWorkCapacityIsRefusedBeforeDeliveryAndLeavesBothPeersAgreeingOverRealTls` (iOS, two coordinators over a real authenticated TLS connection). Both assert the disjunction on the **follower**: the refused command reached it never, and every delivered command was honoured by both, with identical `lastAppliedCommandSeq` and identical player effects |
 | Refused/failed sends release capacity | `a refused send releases the capacity it reserved` / `testARefusedSendReleasesTheCapacityItReserved` — 20 consecutive failed sends leave the ledger empty, then a fresh connection makes ordinary progress |
 | Generation boundary with a send outstanding | `a generation boundary releases its own reservations and never a successor's` / `testAGenerationBoundaryReleasesItsOwnReservationsAndNeverASuccessors` — the send is parked strictly inside the write; the boundary releases exactly G1's; G1's late callback frees nothing of G2's and applies nothing |
-| Ride boundary | `a ride boundary refuses the parked command and releases its capacity` / `testARideBoundaryRefusesTheParkedCommandAndReleasesItsCapacity` — a command parked in its own pre-roll across End Ride + Start Ride never becomes ride 2's authority, and its capacity is returned |
+| Ride boundary (corrected in follow-up) | `a ride boundary completes the delivered command and releases its capacity` / `testARideBoundaryCompletesTheDeliveredCommandAndReleasesItsCapacity` — a delivered command finishes with its original ride provenance and releases its reservation. The old cancellation assertion was the remaining divergence blocker; see [the two-peer follow-up](PHASE8_DELIVERED_AUTHORITY.md) |
 | Boundedness | `a thousand commands against a frozen deadline retain a bounded amount of work` / `testAThousandCommandsAgainstAFrozenDeadlineRetainABoundedAmountOfWork` — with the bound injected at 8, **maximum observed retained production obligations: 8** (`peakRetainedWorkCount`), maximum live chain nodes ≤ 16, exactly 8 frames on the wire. Measured on `SessionWorkLedger`, not on a fixture's recording list |
 | Same-lifetime liveness | `below capacity ordinary commands still deliver, commit and apply in order` / `testBelowCapacityOrdinaryCommandsStillDeliverCommitAndApplyInOrder` — `command_seq` 2, 3, 4 consecutive, applied in order, zero refusals |
 | The ledger itself | `SessionWorkLedgerTest` / `SessionWorkLedgerTests`, 8 mirrored cases each: hard bound, monotonic ids and ABA, double release, phase lifetime, `enterPhase` after retirement, generation-scoped retirement, `clear`, and a 10 000-step alternating run that never exceeds the bound and ends empty |

@@ -1,5 +1,15 @@
 # RideLink — Status
 
+**23 September 2026 — Phase 8 delivered-authority follow-up.** The remaining review blocker
+was local ride retirement cancelling an already-delivered command while the authenticated
+peer could still execute it. The narrow correction distinguishes candidate RideAdmission
+from a post-delivery, control-generation-owned obligation, retaining original ride provenance
+and the exact pre-delivery reservation. See the [pipeline and regression audit](PHASE8_DELIVERED_AUTHORITY.md)
+and [validation evidence](PHASE8_RELEASE_HARDENING.md). PR #6 remains unmerged and requires
+independent review at the final pushed head. Physical gates remain **DEFERRED — HARDWARE NOT AVAILABLE**.
+
+The dated entries below are historical.
+
 **Phase 8, independent review round 2 — 22 September 2026.** The review returned
 REQUEST CHANGES on one architectural blocker and one open gate. Both are closed on this branch.
 

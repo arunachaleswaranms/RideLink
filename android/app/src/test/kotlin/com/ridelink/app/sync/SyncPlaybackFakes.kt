@@ -76,6 +76,9 @@ class FakeSyncSession : SyncSessionPort {
     var combinedWireLog: MutableList<Any>? = null
 
     private var forward: FakeSyncSession? = null
+    var sentOutcomeGate: kotlinx.coroutines.CompletableDeferred<Unit>? = null
+    var isSentOutcomeParked = false
+        private set
 
     override val playback: PlaybackChannelPort =
         object : PlaybackChannelPort {
@@ -112,6 +115,11 @@ class FakeSyncSession : SyncSessionPort {
         sentGenerations.add(currentAuthGeneration)
         combinedWireLog?.add(message)
         deliver()
+        if (message is PlaybackMessage.Play && sentOutcomeGate != null) {
+            isSentOutcomeParked = true
+            sentOutcomeGate?.await()
+            isSentOutcomeParked = false
+        }
         return true
     }
 

@@ -440,7 +440,7 @@ class ResyncRecoveryTest {
      * passed **vacuously** by parking somewhere harmless.
      */
     @Test
-    fun `an apply parked across End Ride writes nothing back`() =
+    fun `a delivered apply parked across End Ride completes its distributed obligation`() =
         runTest(StandardTestDispatcher()) {
             val pair = ResyncTestPair(this)
             pair.connect(generation = 1)
@@ -471,6 +471,8 @@ class ResyncRecoveryTest {
                 "parked after the player was touched — too late to be applyPlay's resolve: ${pair.leader.player.calls}",
             )
 
+            assertEquals(1, pair.leader.sync.diagnostics.value.lastReceivedCommandSeq)
+            assertNull(pair.leader.sync.diagnostics.value.lastAppliedCommandSeq, "SENT alone does not represent playback state")
             session.endRide()
             runCurrent()
             assertNull(pair.leader.sync.diagnostics.value.currentTrackHash, "End Ride clears ride-segment identity")
@@ -480,10 +482,16 @@ class ResyncRecoveryTest {
             pair.leaderClock.advanceBy(LEAD_US)
             runCurrent()
 
-            assertNull(
+            assertEquals(
+                SyncTestValues.hash(1),
                 pair.leader.sync.diagnostics.value.currentTrackHash,
-                "an apply authorised before End Ride wrote its track back afterwards",
+                "delivered authority still belongs to the authenticated session after End Ride",
             )
+            assertTrue(
+                pair.leader.player.calls
+                    .contains(FakeSyncPlayer.Call.Start),
+            )
+            assertEquals(0, pair.leader.sync.retainedWorkCount)
         }
 
     // --- Independent-review round 4, Blocker 1 ----------------------------------------------------
@@ -617,6 +625,7 @@ class ResyncRecoveryTest {
             pair.leader.sync.playSynchronized(SyncTestValues.hash(1))
             runCurrent()
             pair.leaderClock.advanceBy(LEAD_US)
+            pair.followerClock.advanceTo(pair.leaderClock.nowUs())
             runCurrent()
 
             pair.follower.syncSession.setClock(null)
@@ -917,6 +926,7 @@ class ResyncRecoveryTest {
             pair.leader.sync.playSynchronized(SyncTestValues.hash(1))
             runCurrent()
             pair.leaderClock.advanceBy(LEAD_US)
+            pair.followerClock.advanceTo(pair.leaderClock.nowUs())
             runCurrent()
 
             // Park the follower's reconciliation inside `onPeerPlaybackState`'s own content check —
@@ -1237,6 +1247,7 @@ class ResyncRecoveryTest {
         pair.leader.sync.playSynchronized(SyncTestValues.hash(1))
         runCurrent()
         pair.leaderClock.advanceBy(LEAD_US)
+        pair.followerClock.advanceTo(pair.leaderClock.nowUs())
         runCurrent()
         assertEquals(1L, pair.follower.sync.diagnostics.value.lastAppliedCommandSeq, "cycle $cycle")
 
@@ -1375,6 +1386,7 @@ class ResyncRecoveryTest {
             pair.leader.sync.playSynchronized(SyncTestValues.hash(1))
             runCurrent()
             pair.leaderClock.advanceBy(LEAD_US)
+            pair.followerClock.advanceTo(pair.leaderClock.nowUs())
             runCurrent()
 
             // The leader moves on with the Phase 5 wire severed, so the follower's only route to the

@@ -218,6 +218,12 @@ class SyncPlaybackDeliveryAuditTest {
                 coordinator.pause()
                 runCurrent()
                 assertTrue(coordinator.retainedWorkCount <= 8, "the ledger is the bound, and it holds")
+                val debt =
+                    SyncPlaybackCoordinator::class.java.getDeclaredField("deliveredEffects").let {
+                        it.isAccessible = true
+                        it.get(coordinator) as Map<*, *>
+                    }
+                assertTrue(debt.size <= coordinator.retainedWorkCount, "debt metadata cannot outgrow its reserved ledger")
                 assertTrue(
                     coordinator.retainedChainNodeCount <= 2 * 8,
                     "each obligation owns at most one apply node and one scheduled node",
@@ -235,22 +241,9 @@ class SyncPlaybackDeliveryAuditTest {
             assertEquals(1, coordinator.diagnostics.value.workCapacityRefusedCount)
         }
 
-    /**
-     * **Capacity ownership respects the ride lifetime too.**
-     *
-     * A command admitted under ride 1, parked inside its own pre-roll across an accepted End Ride
-     * and a Start Ride, must not become ride 2's authority — that is ADR-028 Amendments A5–A7's
-     * rule, and this proves Amendment A11 did not weaken it. What A11 adds is the second half: the
-     * obligation that command reserved is **released** when its apply is refused, so a ride boundary
-     * cannot leak the bound one command at a time until the next ride cannot issue anything.
-     *
-     * The command was delivered before ride 1 ended, and the existing protocol consequence is
-     * unchanged and deliberate: `onCommandOutcome`'s ride proof refuses to publish it as applied, so
-     * `lastAppliedSeq` does not move and the leader's own re-statement of it under ride 2 is not a
-     * duplicate (ADR-028 Amendment A7's rule). Nothing is rolled back and nothing is invented.
-     */
+    /** A delivered obligation keeps its provenance and releases capacity after its effect completes. */
     @Test
-    fun `a ride boundary refuses the parked command and releases its capacity`() =
+    fun `a ride boundary completes the delivered command and releases its capacity`() =
         runTest(StandardTestDispatcher()) {
             build(backgroundScope, sessionWorkCapacity = 2)
             leaderPlaying(this)
@@ -275,16 +268,17 @@ class SyncPlaybackDeliveryAuditTest {
 
             player.calls.clear()
             gate.complete(Unit)
+            clock.advanceTo(clock.nowUs() + LEAD_US * 4)
             runCurrent()
 
             assertEquals(
                 0,
                 coordinator.retainedWorkCount,
-                "a refused apply hands its capacity back — a ride boundary must not leak the bound",
+                "a completed obligation hands its capacity back",
             )
             assertTrue(
-                player.calls.none { it == FakeSyncPlayer.Call.Start },
-                "and ride 1's parked command never became ride 2's authority",
+                player.calls.any { it == FakeSyncPlayer.Call.Start },
+                "delivery must be honoured despite local ride retirement",
             )
             assertTrue(ride2 > 0)
 

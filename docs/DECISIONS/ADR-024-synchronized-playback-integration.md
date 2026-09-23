@@ -2204,3 +2204,18 @@ code in it.
    the drain pops the item *before* calling it — so with the ledger full the drain popped, failed,
    re-appended and popped the same item again in a tight synchronous loop. The clock and content
    pre-checks above it exist for exactly this shape; capacity now has one too.
+
+
+## Amendment A12 — 23 September 2026 — delivered authority outlives its local ride
+
+Successful authenticated delivery creates a control-generation-owned local obligation.
+The original `RideAdmission` remains provenance; End Ride is not a control boundary and
+cannot silently cancel authority already held by the peer. `DeliveredAuthority` carries
+the exact A11 reservation and command sequence through apply; pending effect metadata is
+bounded by that same ledger. Applied sequence truth advances at playback-state/effect
+representation, not at SENT. Newer established authority still supersedes old playback
+tokens and protects all successor state. No wire change or disconnect is introduced.
+
+The [complete pipeline, alternatives, product semantics and regression audit](../PHASE8_DELIVERED_AUTHORITY.md)
+records why this is the smallest V1 correction, including intentional audible completion
+after End Ride and the separate successor reconciliation path.

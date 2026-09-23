@@ -766,7 +766,7 @@ class SyncPlaybackTwoPeerTest {
      * One peer: its own coordinator, its own fakes and — crucially — **its own clock**, offset from
      * the other's.
      */
-    private class Peer(
+    internal class Peer(
         val localPeerId: PeerId,
         val session: FakeSyncSession,
         val player: FakeSyncPlayer,
@@ -775,7 +775,7 @@ class SyncPlaybackTwoPeerTest {
     )
 
     /** Two coordinators joined so each one's `send` becomes the other's `deliver`. */
-    private inner class Pair(
+    internal inner class Pair(
         private val scope: TestScope,
         /** Injected only by the Amendment A2 scenarios, which need the outbound edge forced. */
         private val leaderOutboundCapacity: Int = 256,
@@ -934,7 +934,7 @@ class SyncPlaybackTwoPeerTest {
         }
     }
 
-    private companion object {
+    internal companion object {
         val SESSION_ID =
             com.ridelink.core.model
                 .SessionId("two-peer")
