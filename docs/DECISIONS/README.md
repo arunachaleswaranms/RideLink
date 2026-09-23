@@ -90,3 +90,5 @@ dated `## Amendment An` section — appropriate when the decision stands and a d
 — or write a superseding ADR and set the old one's status to `Superseded by ADR-nnn`. Either way
 the original reasoning stays readable, and an "Alternatives considered" row that names a
 now-withdrawn option keeps its historical value only if the current status is unambiguous.
+
+- [ADR-029 — Release hardening](ADR-029-release-hardening.md): recovery End Ride, bounded logs/task chains, and session-id documentation correction (proposed).

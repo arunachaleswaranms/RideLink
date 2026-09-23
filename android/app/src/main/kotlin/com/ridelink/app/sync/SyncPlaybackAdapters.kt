@@ -132,7 +132,17 @@ internal class MonotonicDeadlineSleeper(
     }
 }
 
-/** Bridges [MusicCoordinator]'s gate to the coordinator that owns synchronisation. */
+/**
+ * Bridges [MusicCoordinator]'s gate to the coordinator that owns synchronisation.
+ *
+ * ADR-024 Amendment A14: every answer is [SyncPlaybackCoordinator.isSynchronizedModeActive] —
+ * `syncEnabled && role != null`, read synchronously from the coordinator itself — and never anything
+ * derived from [SyncPlaybackCoordinator.diagnostics]' `syncState`, which may legitimately report
+ * SCHEDULED or SYNCED while an already-distributed obligation finishes after End Ride. (iOS had to
+ * be changed to match: its presenter reconstructed ownership from diagnostics.) The read is only the
+ * first of two answers: the forwarded press is admitted by the coordinator's own
+ * `admitLocalTransport`, so a press that races End Ride is refused where the authority is created.
+ */
 internal class SyncPlaybackGateAdapter(
     private val scope: CoroutineScope,
     private val sync: SyncPlaybackCoordinator,

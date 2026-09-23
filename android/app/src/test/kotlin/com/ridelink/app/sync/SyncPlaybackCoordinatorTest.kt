@@ -252,6 +252,11 @@ class SyncPlaybackCoordinatorTest {
         runTest(StandardTestDispatcher()) {
             build(backgroundScope)
             connect(this, asLeader = false)
+            // ADR-024 Amendment A14: a local press is synchronised only while synchronised mode owns
+            // the controls. The follower's user starts it on a track this phone cannot play yet, so
+            // the press is retained behind the queue and puts no playback frame on the wire.
+            coordinator.playSynchronized(SyncTestValues.hash(9))
+            runCurrent()
             coordinator.pause()
             runCurrent()
             val sent = session.sentOfType<PlaybackMessage.Pause>().single()

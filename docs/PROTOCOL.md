@@ -84,7 +84,7 @@ Every control frame is an object with a fixed envelope and a type-specific `payl
 |---|---|---|---|
 | `v` | int | yes | Protocol **major** version. Mismatch ⇒ refuse the session with `ERROR/version_mismatch`. |
 | `type` | string | yes | Message type (§4–§9). Unknown types are **ignored, logged, not fatal** — this is the forward-compatibility rule. |
-| `session_id` | ULID string | yes | Identifies one connected session. Regenerated on every fresh `CONNECTING`, **preserved across `RECONNECTING`**. |
+| `session_id` | ULID string | yes | Identifies one connected session. Fresh for every authenticated connection, including reconnects; not an authority or resume token (ADR-029). |
 | `sender_id` | 16-hex string | yes | Durable `peer_id`, assigned at pairing. Before pairing completes, the sender's provisional `peer_id` proposal (§4.5). |
 | `msg_id` | ULID string | yes | Unique per message. Used for ack correlation and duplicate suppression. |
 | `seq` | uint64 | yes | Per-sender monotonic counter, starts at 1 per session. Gaps are detectable; duplicates are droppable. |
@@ -1354,7 +1354,11 @@ bulk connection and the requester deletes its `.part`.
 
 ## 10. Reconnect and reconciliation
 
-`session_id` survives a reconnect; that is what distinguishes resuming from starting over.
+Each handshake establishes a fresh `session_id`, including reconnects. Ride continuity is
+local coordinator state; retained work carries the original authentication generation and ride
+lifetime. A received envelope's `session_id` is not a resume or authentication capability.
+This corrects the earlier draft to match both production handshakes (STATUS problem 51,
+[ADR-029](DECISIONS/ADR-029-release-hardening.md)); no wire field or handshake behavior changes.
 
 ```
 link lost ──► RECONNECTING          (local playback CONTINUES; sync suspended)
@@ -1362,7 +1366,7 @@ link lost ──► RECONNECTING          (local playback CONTINUES; sync suspen
     ├─ rediscover peer via mDNS, or reuse last known host:port
     ├─ TLS + SPKI pin check (no pairing, no SAS — trust already exists)
     ├─ resolve duplicate connections (§4.2) — both peers retry at once, so this is normal
-    ├─ HELLO { session_id = <previous> }  ⇒  resume, not restart
+    ├─ HELLO / HELLO_ACK establish a fresh authenticated connection
     ├─ re-run clock sync from scratch (11 samples) — the old offset is stale
     ├─ STATE_REQUEST  ──►  STATE_SNAPSHOT
     ├─ re-request the manifest if `manifest_revision` differs (§8.1) — from the beginning

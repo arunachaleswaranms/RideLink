@@ -219,6 +219,8 @@ private fun syncStateLabel(state: SyncState): String =
         SyncState.DESYNCHRONIZED -> "RESYNCHRONIZING — waiting for authoritative state; local playback continues"
         SyncState.TRANSPORT_FAILED ->
             "NOT DELIVERED — a command never reached the peer; synchronisation stopped, local playback continues"
+        SyncState.LOCAL_OVERLOAD ->
+            "OVERLOADED — this phone refused its own command before sending it; local playback continues"
     }
 
 private const val HASH_PREFIX_CHARS = 8

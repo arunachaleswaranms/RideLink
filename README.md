@@ -22,10 +22,13 @@ subscription and no telemetry — the app is expected to work with mobile data s
 
 ## Status
 
-**Phases 1a, 1b, 2a, 2b, 3, 4 and 5 are implementation-complete. Phase 6 software closure is
-implemented on its feature branch; physical qualification is deferred because the complete iPhone
-and Bluetooth helmet/TWS chain is unavailable.** The overall "2 Intercom" milestone is **not**
-complete — its hardware gates have not run. Phase 7 (Ride Mode + resilience) has not started.
+**Phase 7 is independently reviewed and merged** at
+`48b7a8e5d07fe52010d05c1893d3f914722d80f0`. Phase 8 — Release Hardening & Software
+Integration — is in progress on `phase8/release-hardening`; see the
+[Phase 8 evidence and audit](docs/PHASE8_RELEASE_HARDENING.md).
+Physical qualification remains **DEFERRED — HARDWARE NOT AVAILABLE**.
+The software test results do not establish audible sync, Bluetooth behavior, battery life,
+thermal performance, or real iPhone background/lock behavior.
 
 Phase 1b's two open security risks are closed with measurements rather than argument: a
 hand-encoded self-signed X.509 certificate that Apple's parser, BoringSSL and OpenSSL all accept,

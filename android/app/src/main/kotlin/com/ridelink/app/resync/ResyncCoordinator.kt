@@ -334,7 +334,14 @@ class ResyncCoordinator(
         deferredReconciliation = DeferredReconciliation(obligation, generation, message)
         val outcome = syncPlaybackCoordinator.onStateSnapshot(message, generation, obligation)
         when (outcome) {
-            StateSnapshotOutcome.APPLIED, StateSnapshotOutcome.DEFERRED_CLOCK, StateSnapshotOutcome.DEFERRED_CONTENT -> {
+            StateSnapshotOutcome.APPLIED,
+            StateSnapshotOutcome.DEFERRED_CLOCK,
+            StateSnapshotOutcome.DEFERRED_CONTENT,
+            // ADR-024 Amendment A11: retained for local work capacity, carrying this same
+            // obligation id, and re-attempted by the drain — identical treatment for the same
+            // reason `DEFERRED_CONTENT` gets it.
+            StateSnapshotOutcome.DEFERRED_CAPACITY,
+            -> {
                 // §21: the **wire** round trip is satisfied by any of the three — a snapshot for the
                 // live generation arrived, so there is nothing left to request.
                 //

@@ -174,6 +174,24 @@ the mapping is recorded in [ADR-008](DECISIONS/ADR-008-requirement-conflict-reso
 
 ### 3.1 Legal transitions
 
+Phase 8 adds two End Ride recovery transitions (ADR-029): while reconnecting back to
+`RIDE_ACTIVE`, End Ride keeps `RECONNECTING` but changes `returnTo` to `CONNECTED` and
+retires ride playback authority. It does not start another reconnect loop. After budget
+exhaustion, End Ride enters `ENDING` and uses the existing terminal teardown owner.
+
+Process diagnostics retain at most 1,024 events.
+
+**Apply/scheduled playback work is bounded by a reservation taken before an authoritative command
+can be delivered** (ADR-024 Amendment A11, superseding ADR-029 decision 3). A leader takes it in the
+same critical section that allocates the `command_seq` and hands the frame to the ordered outbound
+path; a follower takes it before either sequence number moves. At most 256 local obligations are
+outstanding per coordinator, each spending at most one apply node and one scheduled node. A leader
+that cannot reserve refuses its **own command before sending it** and reports
+`SyncState.LOCAL_OVERLOAD`; a follower declares itself desynchronised without spending the
+`command_seq` and is repaired by PROTOCOL §10's existing reconciliation. **Authority the peer has
+already been given is never rolled back**, and local music continues in every case.
+
+
 ```
 IDLE ──────────► DISCOVERING ──────► PAIRING ──────► CONNECTING
   ▲                   │                  │                │
@@ -731,6 +749,20 @@ Android: `ExoPlayer` prepared and paused at `position_ms`, released at the deadl
 iOS: `AVAudioPlayerNode.scheduleSegment(at: AVAudioTime(hostTime:))` — the engine starts it in
 the render thread, which is materially more precise than a timer callback.
 
+**Who owns the transport controls** ([ADR-024 Amendment A14](DECISIONS/ADR-024-synchronized-playback-integration.md#amendment-a14--23-september-2026--finishing-distributed-authority-never-reopens-local-transport-ownership)).
+Every local control — lock screen, Control Center, `MediaSession`, the in-app music controls and
+Ride Mode — goes to `MusicCoordinator`, which asks its synchronised gate first. The gate answers from
+one fact, `syncEnabled && role != nil`: set by an explicit activation (local Play-synced, an
+authoritative command accepted from the leader, the leader serving a follower's intent) and cleared by
+every exit (End Ride, Play locally, fail-closed, a control-lifetime reset). It is **never** derived from
+`SyncState`: an obligation already delivered or accepted before End Ride may finish after it and report
+SCHEDULED/SYNCED, and the role survives End Ride with the control connection, so neither is evidence
+that a fresh press may become synchronised authority. The coordinator enforces the same fact again
+where a fresh local command is admitted and stamped, because a press can race a boundary and the
+synchronised-playback cards call the coordinator directly. iOS reads it synchronously from a lock-backed
+mirror the coordinator writes in the same actor step (`TransportOwnershipBox`); Android reads the
+coordinator's `@Volatile` fields.
+
 ### 7.3 Drift correction
 
 Two independent crystals will diverge (typically 10–50 ppm ⇒ 36–180 ms/hour), so measure and
@@ -1006,7 +1038,8 @@ ios/
     │
     └── RideLinkPlatform/             # Apple frameworks — one target
         └── Sources/RideLinkPlatform/{Discovery/, Control/, Security/, Transfer/,
-                                      Voice/, Player/, Route/, Library/}
+                                      Voice/, Player/, Route/, Library/, Sync/,
+                                      Coexistence/, RideMode/}
 ```
 
 `RideLinkCore`'s import allowlist is **`Foundation` and `CryptoKit` only.** Forbidden: `UIKit`,
@@ -1028,7 +1061,11 @@ and `app.sync.SyncPlaybackCoordinator`. iOS mirrors each in `RideLinkCore.Playba
 `RideLinkCore.Sync`, `RideLinkCore.Protocol` and `RideLinkPlatform.Control` — with
 `SyncPlaybackCoordinator` in **`RideLinkPlatform`, not the app target**, because the app target has
 no test target and its Android twin is unit-tested. Only the adapters over `MusicCoordinator` stay in
-the app.
+the app. Since [ADR-024 Amendment A14](DECISIONS/ADR-024-synchronized-playback-integration.md#amendment-a14--23-september-2026--finishing-distributed-authority-never-reopens-local-transport-ownership),
+and for the same reason, `SyncPlaybackGate`, its one implementation `SyncPlaybackGateAdapter` and
+`SyncPlaybackPresenter` live in `RideLinkPlatform/Sync/` as well: the gate's answer is authorisation,
+and it has to be exercised for real. The adapters that touch the app's `MusicCoordinator`,
+`SharedLibraryCoordinator` and `SessionCoordinator` remain in the app.
 
 `network.control.ControlRelays` also appeared in Phase 5: the five message-family relays
 (`VOICE_*`, `AUDIO_STATE`, `MANIFEST_*`, `TRANSFER_*`, Phase 5) were five near-identical

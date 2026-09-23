@@ -1,7 +1,6 @@
 import Foundation
 import Observation
 import RideLinkCore
-import RideLinkPlatform
 
 /// The `@MainActor`, `@Observable` face of `RideLinkPlatform.SyncPlaybackCoordinator`.
 ///
@@ -10,11 +9,15 @@ import RideLinkPlatform
 /// actor observable. This holds the two values a view renders and forwards every action; it decides
 /// nothing itself, which is why it has no state of its own beyond the last published snapshot.
 ///
-/// It also gives `SyncPlaybackGateAdapter` its two **synchronous** reads. `MusicCoordinator`'s
-/// callers — including `MPRemoteCommandCenter`'s handlers — are synchronous and cannot await an
-/// actor, so "is a synchronised session in force, and what is our role" has to be answerable without
-/// suspending. Both are published by the coordinator itself on every change, so this mirror can
-/// never disagree with it for longer than one hop.
+/// **It is not where transport authority comes from** (ADR-024 Amendment A14). It used to be: it
+/// gave `SyncPlaybackGateAdapter` "is a synchronised session in force" as
+/// `diagnostics.role != nil && diagnostics.syncState != .inactive`, a reconstruction from display
+/// fields. That stopped being equivalent to the coordinator's own `syncEnabled && role != nil` the
+/// moment an already-distributed obligation was allowed to finish after End Ride (Amendment A13):
+/// the role survives End Ride on purpose, and the finishing command reports `.scheduled`/`.synced`,
+/// so the reconstruction said "synchronised" with synchronised mode over. The gate now reads
+/// `SyncPlaybackCoordinator.transportOwnership` directly, and `isSynchronizedModeActive` below reads
+/// the same mirror — a copy of one source, never derived from `diagnostics`.
 @MainActor
 @Observable
 public final class SyncPlaybackPresenter {
@@ -41,14 +44,13 @@ public final class SyncPlaybackPresenter {
         }
     }
 
-    /// Whether a synchronised session currently owns transport control (brief §39/§40). Derived from
-    /// the last published diagnostics rather than awaited, for the reason this type's doc comment
-    /// gives: the gate's callers are synchronous.
-    public var isSynchronizedModeActive: Bool {
-        diagnostics.role != nil && diagnostics.syncState != .inactive
-    }
-
-    public var role: PlaybackRole? { diagnostics.role }
+    /// Whether a synchronised session currently owns transport control (brief §39/§40), read
+    /// synchronously from the coordinator's own mirror (ADR-024 Amendment A14) — never from
+    /// `diagnostics`, whose `syncState` may legitimately say `.scheduled` or `.synced` while an old
+    /// obligation finishes with synchronised mode already ended, and whose `role` survives End Ride.
+    ///
+    /// Not observed by SwiftUI: it is read on demand, and nothing renders it.
+    public var isSynchronizedModeActive: Bool { coordinator.transportOwnership.current.isSynchronizedModeActive }
 
     public func playSynchronized(_ contentHash: ContentHash) {
         Task { await coordinator.playSynchronized(contentHash) }
@@ -61,6 +63,11 @@ public final class SyncPlaybackPresenter {
     public func removeFromQueue(_ queueItemId: String) {
         Task { await coordinator.removeFromQueue(queueItemId) }
     }
+
+    // The synchronised-playback controls. Each is a fresh local press, so the coordinator admits it
+    // only while a synchronised session owns transport control (ADR-024 Amendment A14) and drops it
+    // otherwise — a press here never becomes synchronised authority merely because a role exists.
+    // Local music is `MusicCoordinator`'s, through its gate.
 
     public func pause() { Task { await coordinator.pause() } }
 

@@ -1,5 +1,64 @@
 # RideLink — Test Plan
 
+## Phase 8 release-hardening additions
+
+See [Phase 8 evidence](PHASE8_RELEASE_HARDENING.md), ADR-029 and
+[ADR-024 Amendment A11](DECISIONS/ADR-024-synchronized-playback-integration.md#amendment-a11--22-september-2026--local-work-capacity-is-reserved-before-delivery-never-refused-after-it).
+Run the shared recovery FSM vectors, ReleaseLifecycleProperty, LogRetention, SessionWorkLedger,
+SyncPlaybackDeliveryAudit (including the local-work-capacity, send-failure, generation-boundary,
+ride-boundary, boundedness and below-capacity liveness regressions), SyncPlaybackTwoPeer (including
+the capacity-boundary two-peer regression, which asserts that a command the peer received is never
+abandoned locally) and SyncPlaybackDrift endurance tests on both platforms.
+
+**Delivered and accepted authority across End Ride** ([ADR-024 A12](DECISIONS/ADR-024-synchronized-playback-integration.md#amendment-a12--23-september-2026--delivered-authority-outlives-its-local-ride)
+and [A13](DECISIONS/ADR-024-synchronized-playback-integration.md#amendment-a13--23-september-2026--an-accepted-clock-held-command-is-distributed-debt)).
+Run iOS `SyncPlaybackTwoPeerTests` (real TLS) and `SyncPlaybackAcceptedObligationTests`, and Android
+`SyncPlaybackDeliveredAuthorityTest` and `SyncPlaybackAcceptedObligationTest`. A13's cases, mirrored:
+A — a follower's clock-held, **accepted** C1 survives its own End Ride and completes on both peers,
+asserting by name that "L applied C1, F accepted C1, F discarded C1" never holds; B — the same across
+End + a nominal Start, keeping Ride-1 provenance; C — genuine Ride-2 C2 established while C1 is parked
+after its pop wins, with C1 changing no identity, timeline, ride owner, epoch token, diagnostics,
+player step or sequence floor; D — G1's held command dies with G1 and G2 progresses from its own
+`command_seq` 1; E — clock-ready but capacity-starved, C1 stays at the head, one wait per retry pass,
+no spin, no refusal counted, exact release once; F — a snapshot covering C1's `command_seq`
+supersedes it (counted, never ride-retired, applied once) and `lastAppliedSeq` follows the represented
+snapshot; plus End Ride's stream partition (accepted debt and queue state kept in order, held
+reconciliation cancelled), the retry cadence for a second hold in one session, and the held stream's
+own bound across End Ride. The round-7/8 cases in §3.1c that expected a held **accepted** command to
+be discarded on ride retirement are superseded by A13: they now expect completion with original
+provenance and applied truth only at representation.
+
+**Transport ownership after distributed debt** ([ADR-024 A14](DECISIONS/ADR-024-synchronized-playback-integration.md#amendment-a14--23-september-2026--finishing-distributed-authority-never-reopens-local-transport-ownership)).
+Run iOS `SyncPlaybackTransportOwnershipTests` and Android `SyncPlaybackTransportOwnershipTest`, which
+use the **real** `SyncPlaybackGateAdapter` (and, on iOS, the real `SyncPlaybackPresenter`). A — a
+follower's accepted, clock-held C1 finishes after End Ride (SCHEDULED, a parked start, SYNCED) and
+ownership stays local on every reader, while the published snapshots satisfy the pre-A14 derivation
+`role != nil && syncState != .inactive`; the leader's delivered C1 likewise. B — after that, the real
+gate returns false for Play, Pause, Seek, Next, Previous and TrackEnded, and nothing is enqueued, sent
+or played. C — a local Pause/Next is declined by the gate (Phase 3's path) and all five coordinator
+entry points called directly refuse fresh authority. D — a nominal Start Ride, a surviving role and
+SYNCED together are still local; Play-synced reopens ownership and Pause/Seek/Next are intercepted
+again. E — `role != nil` with ownership off after End Ride and after the debt completes. F — every
+publication after End Ride carries local ownership and End Ride is mirrored before it is published.
+Plus: a press intercepted immediately before End Ride is refused at admission, and a fresh leader
+command after End Ride is still accepted and still activates. The five iOS and four Android existing
+tests that issued transport commands in a never-activated session now start synchronised playback
+first (Play-synced on a track neither phone holds), assertions unchanged.
+
+**Cross-platform software integration.** Run `tools/crossplatform/run.sh`. It starts the Swift and
+Kotlin implementations as two processes joined by a real TCP socket carrying the real protocol and
+compares their reports: matching PROTOCOL §4.5 six-digit codes derived from each side's own TLS
+exporter, one agreed `session_id`, one ADR-010 leader, both clock estimators ready, each platform's
+codecs decoding the other's `PLAY`/`QUEUE_SNAPSHOT`/`STATE_REQUEST`/`STATE_SNAPSHOT`/`PLAYBACK_STATE`,
+and a reconnect that re-authenticates silently with a strictly greater generation. Both halves are
+inert in ordinary CI. It drives **no UI**, so it does not close the interactive
+emulator ↔ simulator journey, and it makes no Bluetooth, audio or physical-device claim. Run ActivityOwnershipTest on an Android emulator: 20 background/foreground and
+Activity recreation cycles must preserve the same application/session/music/sync owners.
+Run `python3.11 tools/audit_local_only.py` (or a newer Python) and Gitleaks. The security CI
+workflow additionally builds and analyzes Kotlin/Java and Swift and reviews PR dependencies.
+These gates supplement, rather than replace, the integration and physical matrix below.
+
+
 **Status:** baseline for Phases 1–2b. Last updated 4 September 2026 (Phase 2b — the two new
 intercom/`AUDIO_STATE` vector sets, §3.1b's "what the intercom lifecycle does and does not prove",
 and the IA-01…IA-03 / AF-01…AF-10 lines redrawn between policy and platform). Previously 28 August

@@ -1,5 +1,6 @@
 package com.ridelink.app.ui
 
+import com.ridelink.app.sync.SyncState
 import com.ridelink.core.audiopolicy.IntercomPolicy
 import com.ridelink.core.audiopolicy.MediaQuality
 import com.ridelink.core.audiopolicy.TransmissionGate
@@ -109,4 +110,26 @@ private fun intercomModeLabel(policy: IntercomPolicy): String =
         is TransmissionGate.Vox -> "Voice-activated"
         TransmissionGate.Ptt -> "Push-to-talk"
         TransmissionGate.Disabled -> "Intercom off"
+    }
+
+/** Connection loss always outranks a possibly late playback-status publication. */
+fun rideSyncLabel(
+    status: SessionStatus,
+    syncState: SyncState,
+): String =
+    when {
+        status == SessionStatus.RECONNECTING -> "Synchronizing when connection returns"
+        status != SessionStatus.RIDE_ACTIVE && status != SessionStatus.CONNECTED -> "Waiting for peer"
+        else ->
+            when (syncState) {
+                SyncState.INACTIVE -> "Local music"
+                SyncState.CLOCK_UNREADY, SyncState.WAITING_FOR_QUEUE, SyncState.SCHEDULED -> "Synchronizing"
+                SyncState.WAITING_FOR_CONTENT -> "Waiting for content"
+                SyncState.SYNCED -> "Synchronized"
+                SyncState.SYNC_FAILED -> "Sync failed — local music continues"
+                SyncState.DESYNCHRONIZED,
+                SyncState.TRANSPORT_FAILED,
+                SyncState.LOCAL_OVERLOAD,
+                -> "Sync unavailable — local music continues"
+            }
     }

@@ -77,8 +77,33 @@ public actor SyncPlaybackCoordinator {
     /// The authoritative replicated queue. `LocalQueue` is untouched and still owns local-only rides.
     public internal(set) var queueState = SharedQueueState()
 
-    var role: PlaybackRole?
-    var syncEnabled = false
+    /// ADR-024 Amendment A14: both of these feed `transportOwnership`, and their `didSet` is the only
+    /// place it is written — so no assignment anywhere in this actor can change who owns transport
+    /// control without the synchronous mirror changing in the same isolated step.
+    var role: PlaybackRole? {
+        didSet { transportOwnership.store(currentTransportOwnership) }
+    }
+
+    /// **The** transport-authority fact: whether a synchronised session owns this phone's transport
+    /// controls. Set by an explicit activation — the local user's Play-synced press, an authoritative
+    /// command accepted from the leader, or a follower's intent served by the leader — and cleared by
+    /// every exit: End Ride, Play locally, fail-closed and a control-lifetime reset. Nothing that
+    /// merely *finishes* already-distributed work sets it (ADR-024 Amendment A14).
+    var syncEnabled = false {
+        didSet { transportOwnership.store(currentTransportOwnership) }
+    }
+
+    /// The synchronous mirror of `currentTransportOwnership`, for the one reader that cannot await
+    /// this actor: `SyncPlaybackGateAdapter`, answering `MPRemoteCommandCenter` and the in-app
+    /// controls. See `TransportOwnershipBox`.
+    public nonisolated let transportOwnership = TransportOwnershipBox()
+
+    /// The one derivation of transport ownership. `isSynchronizedModeActive()` and the mirror both
+    /// read this, so the answer cannot be computed two ways.
+    var currentTransportOwnership: TransportOwnership {
+        guard syncEnabled, let role else { return .local }
+        return .synchronized(role)
+    }
 
     /// The authentication generation this actor has been *told* is live, mirrored locally
     /// (ADR-024 Amendment A4 Finding D).
@@ -242,6 +267,44 @@ public actor SyncPlaybackCoordinator {
         synchronizedModeEpoch == admission.synchronizedModeEpoch && rideEpochs.current == admission.rideEpoch
     }
 
+    // Metadata for already-reserved work, never a second queue. At most one entry per live
+    // reservation; final release and control-generation retirement remove the exact entries.
+    var deliveredEffects: [Int64: (authority: DeliveredAuthority, token: Int64)] = [:]
+
+    func mayRepresent(_ ride: RideAdmission, delivered: DeliveredAuthority?) -> Bool {
+        guard let delivered else { return rideStillLive(ride) }
+        return delivered.ride == ride && workLedger.isLive(delivered.reservation)
+            && stillCurrentNow(delivered.reservation.generation)
+            && !distributedObligationSuperseded(originalRide: ride, commandSeq: delivered.commandSeq)
+    }
+
+    /// Whether newer **established** authority has already superseded a distributed obligation:
+    /// a strictly newer ride owns the playback state standing here, or applied truth is already past
+    /// this command. The one successor test for delivered debt, shared by `mayRepresent` and the
+    /// drain's pre-pop check on an `AcceptedCommand` (ADR-024 Amendment A13). A merely *nominal*
+    /// newer ride — a Start Ride that has established nothing — does not move `rideAuthorityEpoch`,
+    /// so it supersedes nothing.
+    func distributedObligationSuperseded(originalRide: RideAdmission, commandSeq: Int64) -> Bool {
+        rideAuthorityEpoch > originalRide.rideEpoch || (lastAppliedSeq ?? 0) > commandSeq
+    }
+
+    /// State and effect ownership exist before publishing applied truth. A future deadline need
+    /// not have fired: lastApplied describes the authoritative timeline, not audible completion.
+    func representDelivered(_ delivered: DeliveredAuthority?, token: Int64) {
+        guard let delivered else { return }
+        recordRideAuthority(admittedRideEpoch: delivered.ride.rideEpoch)
+        deliveredEffects[delivered.reservation.id] = (delivered, token)
+        lastAppliedSeq = max(lastAppliedSeq ?? 0, delivered.commandSeq)
+        diagnostics.lastAppliedCommandSeq = lastAppliedSeq
+        publishDiagnostics()
+    }
+
+    var hasDeliveredPlayback: Bool {
+        deliveredEffects.values.contains {
+            $0.token == currentEpochToken && workLedger.isLive($0.authority.reservation)
+        }
+    }
+
     var driftState = DriftController.reset()
     private var tickTask: Task<Void, Never>?
 
@@ -288,6 +351,10 @@ public actor SyncPlaybackCoordinator {
     /// never survives into a session that did not admit it.
     var pendingStateSnapshotReply: PendingStateSnapshotReply?
     var deferredDrainTask: Task<Void, Never>?
+    /// Whether `deferredDrainTask`'s loop is still running, and which start owns that answer — see
+    /// `startDeferredDrain` (ADR-024 Amendment A13's fresh-fix audit).
+    var deferredDrainRunning = false
+    var deferredDrainRun: Int64 = 0
     let deferredCommandCapacity: Int
 
     /// The tail of the **scheduled-action chain** (Amendment A1 Finding G).
@@ -338,6 +405,16 @@ public actor SyncPlaybackCoordinator {
     /// cancellation by nature, so a cancelled node still returns from such a call and carries on to
     /// its next statement. What stops it there is the generation each node captured.
     var sessionChainNodes: [Int64: Task<Void, Never>] = [:]
+
+    /// ADR-024 **Amendment A11**: the bound on retained local playback work, and the reason a
+    /// delivered authoritative command always has somewhere to land.
+    ///
+    /// Reserved *before* the command can be delivered (`issue` on the leader,
+    /// `admitAuthoritativeCommand` on a follower), spent by the apply node and by the scheduled node
+    /// that node arms, and released when both are done. Phase 8's first attempt counted live task
+    /// nodes and refused at node-creation time — which on the leader is *after* the frame reached the
+    /// peer — so an overflow abandoned authority the follower had already applied.
+    let workLedger: SessionWorkLedger
     private var nextChainNodeId: Int64 = 0
 
     /// Amendment A2 Findings A and C: an authoritative frame this device produced never reached the
@@ -440,7 +517,11 @@ public actor SyncPlaybackCoordinator {
         nextQueueItemId: @escaping @Sendable () -> String,
         inboundCapacity: Int = Phase5GateBounds.defaultInboundCapacity,
         deferredCommandCapacity: Int = Phase5GateBounds.defaultDeferredCommandCapacity,
-        outboundCapacity: Int = Phase5GateBounds.defaultOutboundCapacity
+        outboundCapacity: Int = Phase5GateBounds.defaultOutboundCapacity,
+        /// ADR-024 Amendment A11: how many local playback obligations may be outstanding at once.
+        /// Injectable for the same reason as every bound above — a test forces the edge at 1 or 2
+        /// rather than producing 256 commands.
+        sessionWorkCapacity: Int = Phase5GateBounds.defaultSessionWorkCapacity
     ) {
         self.monotonicNowUs = monotonicNowUs
         self.localPeerId = localPeerId
@@ -451,6 +532,7 @@ public actor SyncPlaybackCoordinator {
         self.routeState = routeState
         self.nextQueueItemId = nextQueueItemId
         self.deferredCommandCapacity = deferredCommandCapacity
+        workLedger = SessionWorkLedger(capacity: sessionWorkCapacity)
         inbound = Phase5FrameQueue(
             capacity: inboundCapacity,
             kindOf: { $0.kind },
@@ -576,23 +658,26 @@ public actor SyncPlaybackCoordinator {
         // Independent-review round 8's CI investigation: a `STATE_REQUEST` that reached
         // `enqueueStateSnapshotReply` before this session was established is answered here, once,
         // and only if it named *this* generation. See `PendingStateSnapshotReply`.
-        await flushPendingStateSnapshotReply(heldReply)
+        // Reset suspends. A request can arrive after it cleared the slot but before the role
+        // was installed. Retain the newest original generation from either admission window;
+        // a late predecessor request must not displace a live one captured before reset.
+        let reply: PendingStateSnapshotReply?
+        if let duringReset = pendingStateSnapshotReply, let beforeReset = heldReply {
+            reply = duringReset.generation >= beforeReset.generation ? duringReset : beforeReset
+        } else {
+            reply = pendingStateSnapshotReply ?? heldReply
+        }
+        await flushPendingStateSnapshotReply(reply)
     }
 
     /// PROTOCOL §10's `STATE_REQUEST` answered late, because it arrived early.
     ///
-    /// The request is captured by `handleConnected` **before** its `resetForNewSession()` — which
-    /// is deliberately the one thing that drops a request no session ever came for — and passed in
-    /// here, so the value being answered is the one that was held when this session began and not
-    /// whatever landed in the slot since. The generation is **compared, never re-read**: a request
-    /// authorised by a lifetime that has since retired is dropped here rather than answered with a
-    /// successor's state, which is ADR-028 Amendment A1's rule applied to a reply this device is
-    /// only now able to build.
+    /// `handleConnected` retains candidates from before and during reset, preserving their
+    /// original generations. Only the selected request's own generation can authorize a reply;
+    /// a retired request cannot borrow the successor's state. Clear the retained slot before
+    /// suspension so another caller cannot answer the same request twice.
     private func flushPendingStateSnapshotReply(_ held: PendingStateSnapshotReply?) async {
         guard let held else { return }
-        // Defence in depth: `resetForNewSession` above already cleared the slot, so nothing else can
-        // still be holding this request — but a future edit that moved the reset must not silently
-        // produce two answers.
         pendingStateSnapshotReply = nil
         guard held.generation == liveGeneration else {
             diagnostics.droppedStateSnapshotReplyCount += 1
@@ -648,6 +733,15 @@ public actor SyncPlaybackCoordinator {
         // Frames still queued outbound stay physically queued and become inert, because each carries
         // the generation that authorised it and `outboundUsable` refuses to write them.
         outboundAuthorityLost = false
+        // ADR-024 Amendment A11: and so does every local obligation, because the chains those
+        // obligations were spent on have just been retired above. Bounded by the generation that
+        // *ended* — `liveGeneration` is still the predecessor's here, refreshed only after this call
+        // returns — never a blanket clear, so a successor that has already reserved capacity keeps
+        // it. A node from the retired session that returns later releases an id the ledger no longer
+        // holds, which is a no-op and can never free a successor's capacity.
+        workLedger.retire(throughGeneration: liveGeneration)
+        deliveredEffects = deliveredEffects.filter { workLedger.isLive($0.value.authority.reservation) }
+        publishRetainedWork()
         lastReceivedSeq = nil
         lastAppliedSeq = nil
         nextSeq = PlaybackBounds.firstCommandSeq
@@ -950,7 +1044,13 @@ public actor SyncPlaybackCoordinator {
     /// manufacture the mirror image of the divergence this whole amendment is closing. Only work
     /// that was never delivered is abandoned. Recovery is a new session, which clears the latch in
     /// `resetForNewSession`.
-    func failClosedOutbound(generation: Int64) async {
+    /// - Parameter state: ADR-024 Amendment A11: what the rider is told. `.transportFailed` for
+    ///   every pre-existing caller — the write failed, or the ordered outbound path was full because
+    ///   the socket is not draining. `.localOverload` for the one caller where the transport was
+    ///   never asked: this device could not guarantee it could honour another command locally, so it
+    ///   refused the command before sending it. The posture is identical; calling them the same
+    ///   thing would not be true.
+    func failClosedOutbound(generation: Int64, state: SyncState = .transportFailed) async {
         // A dead session needs no latch: its authority is already gone, and latching would then
         // survive into the session that replaced it.
         guard generation == (await session.currentAuthGeneration()) else { return }
@@ -980,7 +1080,7 @@ public actor SyncPlaybackCoordinator {
         //
         // Recording the rate here rather than inside `restoreRate` is the same rule one level down:
         // the call below is now one player effect with no write behind it.
-        diagnostics.syncState = .transportFailed
+        diagnostics.syncState = state
         diagnostics.outboundAuthorityLost = true
         diagnostics.deferredCommandCount = 0
         diagnostics.localDriftMs = nil
@@ -996,12 +1096,20 @@ public actor SyncPlaybackCoordinator {
     /// See `applyChain`: the commit hook runs on `drainOutbound`'s single consumer, so doing the
     /// apply there would stall the outbound path behind a decoder pre-roll, and an unstructured
     /// `Task` preserves nothing at all about order — precisely the defect A1 Finding G was about.
-    func chainApply(generation: Int64, _ action: @escaping @Sendable () async -> Void) {
+    func chainApply(
+        generation: Int64,
+        /// ADR-024 Amendment A11: the capacity `issue` reserved **before** the frame could reach the
+        /// peer. Released when this node finishes — unless the node arms a scheduled action, which
+        /// joins the same obligation first, so the obligation outlives the apply exactly as far as
+        /// the audible effect it promised does.
+        reservation: WorkReservation,
+        _ action: @escaping @Sendable () async -> Void
+    ) {
         let previous = applyChain
         let id = claimChainNodeId()
         let node = Task { [weak self] in
             await previous?.value
-            await self?.runApplyNode(id: id, generation: generation, action: action)
+            await self?.runApplyNode(id: id, generation: generation, reservation: reservation, action: action)
         }
         applyChain = node
         trackChainNode(id, node)
@@ -1013,14 +1121,75 @@ public actor SyncPlaybackCoordinator {
     /// inside it — which is the whole defect. The cancellation check is cheap and prompt; the
     /// generation is what is *decisive*, because the node ahead may have been parked in a player call
     /// that ignored the cancellation entirely.
-    private func runApplyNode(id: Int64, generation: Int64, action: @Sendable () async -> Void) async {
+    private func runApplyNode(
+        id: Int64,
+        generation: Int64,
+        reservation: WorkReservation,
+        action: @Sendable () async -> Void
+    ) async {
         defer { releaseChainNode(id) }
+        // Amendment A11: the apply phase is over however it ended — applied, refused for a retired
+        // lifetime, or cancelled outright. A boundary may have released this obligation already, in
+        // which case this is a no-op on an id the ledger no longer holds and can never touch the
+        // reservation that replaced it.
+        defer { releaseWork(reservation) }
         guard !Task.isCancelled, await stillCurrent(generation) else { return }
         // Amendment A5: the proof above suspends, so the synchronous mirror is what makes reaching
         // `action` atomic with having proved it. `action` re-proves for itself as well (A3 Finding B).
         guard stillCurrentNow(generation) else { return }
         await action()
     }
+
+    /// Takes capacity for one local playback obligation, or answers `nil` (ADR-024 Amendment A11).
+    ///
+    /// **Every caller is somewhere the answer can still change what reaches the wire.** A `nil` here
+    /// is the whole point of the amendment: the leader has not sent anything yet, so it refuses the
+    /// command outright; a follower has not spent the `command_seq` yet, so it declares itself
+    /// desynchronised and lets the existing reconciliation repair it; a replay leaves the work where
+    /// it already is. None of them abandons authority the peer already holds, which is precisely
+    /// what Phase 8's first attempt did.
+    func reserveWork(generation: Int64) -> WorkReservation? {
+        let reservation = workLedger.reserve(generation: generation)
+        if reservation == nil { diagnostics.workCapacityRefusedCount += 1 }
+        publishRetainedWork()
+        return reservation
+    }
+
+    func releaseWork(_ reservation: WorkReservation) {
+        workLedger.leavePhase(reservation)
+        if !workLedger.isLive(reservation) { deliveredEffects.removeValue(forKey: reservation.id) }
+        publishRetainedWork()
+    }
+
+    /// Whether a reservation is *likely* to succeed — a pre-check, never an authority.
+    ///
+    /// This pass's own fresh-fix audit: `drainDeferredEvents`' `.playbackState` branch pops its item
+    /// **before** the apply that needs capacity, and the apply re-appends it when there is none. With
+    /// no pre-check the drain pops the same item, fails, re-appends and pops it again in a tight
+    /// loop — the exact shape the clock and content pre-checks above it already exist to prevent. It
+    /// is deliberately advisory: `reserveWork` is still what decides, so a reservation taken between
+    /// this check and that one merely costs one extra drain iteration rather than correctness.
+    var hasWorkCapacity: Bool { workLedger.liveCount < workLedger.capacity }
+
+    func publishRetainedWork() {
+        diagnostics.retainedWorkCount = workLedger.liveCount
+        diagnostics.peakRetainedWorkCount = max(diagnostics.peakRetainedWorkCount, workLedger.liveCount)
+        publishDiagnostics()
+    }
+
+    /// A follower could not take responsibility for more authoritative work (ADR-024 Amendment A11).
+    ///
+    /// The same explicit halt-and-reconcile posture as an ingress overflow or a held-stream overflow,
+    /// and for exactly the same reason: more authority is outstanding than this device can honestly
+    /// account for. **No sequence number is spent**, so the authoritative snapshot that reconciles us
+    /// decides where ordering resumes (Amendment A1 Finding C's rule). Deliberately *not* the
+    /// leader's fail-closed posture — a follower has delivered nothing and owes the peer nothing.
+    func onWorkCapacityExhausted() {
+        latchDesynchronized()
+    }
+
+    /// The bound a boundedness test reads: outstanding local obligations, never task objects.
+    var retainedWorkCount: Int { workLedger.liveCount }
 
     /// Reserves an identity for one chain node. Monotonic, so a retired node's own cleanup can never
     /// remove a node the *next* session created.
@@ -1072,7 +1241,15 @@ public actor SyncPlaybackCoordinator {
     /// ride ended is never stamped, never enqueued, and never applied. The envelope carries it back to
     /// `onCommandOutcome`, so the leader's own local apply is authorised by the ride that *issued* the
     /// command rather than by whichever ride is current when the transport finally answers.
-    func issue(ride: RideAdmission, _ build: (PlaybackCommandHeader) -> PlaybackMessage) async {
+    ///
+    /// **ADR-024 Amendment A14: `origin` says who is creating this authority, and every caller names
+    /// it.** A `.localTransport` command — a fresh press on this phone — exists only while a
+    /// synchronised session owns transport control, so it is re-proved against
+    /// `isSynchronizedModeActive()` in the same no-`await` block that stamps it. The other two origins
+    /// are not gated on it: a retained Play carries the ownership its own press established (every exit
+    /// from synchronised mode cancels it, or `rideStillLive` refuses it), and a follower's intent is the
+    /// *peer's* authority, which the leader adopts by activating (`servePlaybackIntent`).
+    func issue(ride: RideAdmission, origin: IssueOrigin, _ build: (PlaybackCommandHeader) -> PlaybackMessage) async {
         guard let currentRole = role, !outboundAuthorityLost else { return }
         let generation = await session.currentAuthGeneration()
         if currentRole == .follower {
@@ -1083,6 +1260,8 @@ public actor SyncPlaybackCoordinator {
             guard stillCurrentNow(generation) else { return }
             // Round 7: and the ride that admitted this action, proved in the same block.
             guard rideStillLive(ride) else { return }
+            // A14: and, for a fresh local press, that synchronised mode still owns the controls.
+            guard mayIssue(origin) else { return }
             let header = PlaybackCommandHeader(
                 commandSeq: PlaybackBounds.unassignedCommandSeq,
                 effectiveAtSessionUs: 0,
@@ -1105,6 +1284,25 @@ public actor SyncPlaybackCoordinator {
         guard stillCurrentNow(generation) else { return }
         // Round 7: `readyEstimate` above suspends too, and End Ride moves no control generation.
         guard rideStillLive(ride) else { return }
+        // A14: `readyEstimate` suspends, and a boundary that ended synchronised mode inside it must
+        // not let a fresh local press become authority the follower then obeys.
+        guard mayIssue(origin) else { return }
+        // **ADR-024 Amendment A11: capacity before delivery, in the same no-`await` block as the
+        // `command_seq` allocation and the hand-off to the wire.** This is the one placement that
+        // makes the invariant structural: the peer cannot come to rely on a command this device has
+        // no room left to honour, because the command is never stamped, never enqueued and never
+        // written. Phase 8's first attempt asked the same question at the *apply* node, which on
+        // this side of the pipeline is after the transport said yes.
+        guard let reservation = reserveWork(generation: generation) else {
+            // Deliberately the *existing* fail-closed posture rather than a new one: an authoritative
+            // operation this device produced did not reach the peer, which is precisely what
+            // `failClosedOutbound` is for. The state it publishes is `.localOverload` rather than
+            // `.transportFailed`, because the transport did not fail — nothing was ever offered to
+            // it. Sequence truth is untouched: a command that was never stamped leaves no gap, and
+            // every command already delivered keeps its local obligation and its `lastAppliedSeq`.
+            await failClosedOutbound(generation: generation, state: .localOverload)
+            return
+        }
         let seq = nextSeq
         let header = PlaybackCommandHeader(
             commandSeq: seq,
@@ -1118,14 +1316,17 @@ public actor SyncPlaybackCoordinator {
                 [weak self] outcome in
                 await self?.onCommandOutcome(
                     seq: seq, message: message, generation: generation, ride: ride, estimate: estimate,
-                    outcome: outcome
+                    reservation: reservation, outcome: outcome
                 )
             }
         )
         // Amendment A2 §6: a `command_seq` becomes authoritative exactly when the frame carrying it
         // enters the outbound authority pipeline, and not a moment earlier. A refused candidate
         // leaves no gap, because it was never assigned.
+        // Amendment A11: and its reservation goes straight back, so a refused admission cannot
+        // consume capacity. Repeated refusals therefore leave the bound exactly where it was.
         guard admitted else {
+            releaseWork(reservation)
             await onOutboundRefused(.authoritative, generation: generation)
             return
         }
@@ -1136,11 +1337,9 @@ public actor SyncPlaybackCoordinator {
 
     /// The leader's own command, once the transport has answered (Amendment A2 Findings A and C).
     ///
-    /// The leader is the assigner, so its own command cannot be lost between accepting and applying
-    /// it — there is no inbound path that could replay it, because an authoritative command arriving
-    /// at the leader is a role violation. Received and applied therefore still move together here;
-    /// A1 Finding D's split matters on the receiving side. What changed is *when*: only on `.sent`,
-    /// because a command the follower never received is not a command.
+    /// SENT establishes received truth and a session-owned DeliveredAuthority. Applied truth moves
+    /// only when the ordered apply represents that command in playback state with effect ownership.
+    /// End Ride cannot revoke the peer's copy; generation retirement still ends this obligation.
     ///
     /// The apply itself goes through the leader's ordered `applyChain` rather than running on the
     /// outbound consumer, so a decoder pre-roll cannot stall the wire. The leader applies its own
@@ -1156,13 +1355,19 @@ public actor SyncPlaybackCoordinator {
         /// socket write, so reading a live ride here would be the same defect one layer out.
         ride: RideAdmission,
         estimate: SessionClockEstimate,
+        /// ADR-024 Amendment A11: the capacity `issue` took **before** this frame could be written.
+        /// Released on every branch that does not hand it to `chainApply` — an unsent frame owes no
+        /// local work — so a session of nothing but failed sends never consumes the bound.
+        reservation: WorkReservation,
         outcome: OutboundOutcome
     ) async {
         switch OutboundCommitGate.decide(authority: .authoritative, outcome: outcome) {
         case .abortFailClosed:
+            releaseWork(reservation)
             await failClosedOutbound(generation: generation)
             return
         case .abortQuiet:
+            releaseWork(reservation)
             return
         case .commit:
             break
@@ -1170,35 +1375,31 @@ public actor SyncPlaybackCoordinator {
         // Deliberately **not** gated on `outboundAuthorityLost`: this frame reached the peer, so the
         // peer will act on it, and the only consistent thing this device can do is act on it too.
         // The latch stops *new* authority; it does not un-send what was sent.
-        guard await stillCurrent(generation) else { return }
-        // Amendment A5: the two sequence numbers below are exactly what Finding A is about, reached
-        // from the leader's side. No `await` between the synchronous proof and the writes.
-        guard stillCurrentNow(generation) else { return }
-        // **Independent-review round 8's sweep, the leader's own half of Blocker B.** The transport
-        // answers across the outbound consumer, an actor hop and a real socket write, and
-        // `stillCurrent` above suspends again — so a ride boundary accepted in any of those windows
-        // leaves the control generation untouched and both proofs above passing. The two writes
-        // below would then publish this `command_seq` as applied while `chainApply`'s
-        // `applyAuthoritative` refused it as `.rejectedRide`: the same false bookkeeping as the
-        // receiving side's, reached from the issuing side.
-        //
-        // The frame did reach the peer, and this deliberately does not un-send it — but nothing on
-        // this device applied it, so nothing on this device may claim it did. Proved with no
-        // `await` between the proof and the writes.
-        guard rideStillLive(ride) else {
-            diagnostics.retiredRideAdmissionCount += 1
-            publishDiagnostics()
+        guard await stillCurrent(generation) else {
+            releaseWork(reservation)
             return
         }
+        // Amendment A5: the two sequence numbers below are exactly what Finding A is about, reached
+        // from the leader's side. No `await` between the synchronous proof and the writes.
+        guard stillCurrentNow(generation) else {
+            releaseWork(reservation)
+            return
+        }
+        // SENT transfers the cancellation decision from the local ride to the authenticated
+        // session. Keep the original ride as provenance; never recapture the currently live ride.
+        let delivered = DeliveredAuthority(ride: ride, commandSeq: seq, reservation: reservation)
         // max, not assignment: these commit on the outbound consumer, in send order, and a monotone
         // write says the same thing without depending on that ordering twice over.
         lastReceivedSeq = max(lastReceivedSeq ?? seq, seq)
-        lastAppliedSeq = max(lastAppliedSeq ?? seq, seq)
-        diagnostics.lastAppliedCommandSeq = lastAppliedSeq
         diagnostics.lastReceivedCommandSeq = lastReceivedSeq
         publishDiagnostics()
-        chainApply(generation: generation) { [weak self] in
-            await self?.applyAuthoritative(message, generation: generation, ride: ride, estimate: estimate)
+        // Amendment A11: the reservation moves into the ordered apply, which is now guaranteed to
+        // be creatable — that guarantee *is* the fix. The node releases it when its work is done.
+        chainApply(generation: generation, reservation: reservation) { [weak self] in
+            await self?.applyAuthoritative(
+                message, generation: generation, ride: ride, estimate: estimate, reservation: reservation,
+                delivered: delivered
+            )
         }
     }
 
@@ -1280,26 +1481,63 @@ public actor SyncPlaybackCoordinator {
     // suspension — `playerState()` is a cross-actor read — and hands it to `issue`, which proves it
     // adjacent to the stamp. A transport press made in ride 1 can no longer be stamped, sent and
     // applied as ride 2's authority.
+    //
+    // ADR-024 Amendment A14: and each is admitted only while a synchronised session owns transport
+    // control. See `admitLocalTransport`.
 
     public func pause() async {
-        let ride = admitRide()
+        guard let ride = admitLocalTransport() else { return }
         let position = max(await player.playerState().positionMs, 0)
-        await issue(ride: ride) { header in .pause(header: header, positionMs: position) }
+        await issue(ride: ride, origin: .localTransport) { header in .pause(header: header, positionMs: position) }
     }
 
     public func resume() async {
-        let ride = admitRide()
+        guard let ride = admitLocalTransport() else { return }
         let position = max(await player.playerState().positionMs, 0)
-        await issue(ride: ride) { header in .resume(header: header, positionMs: position) }
+        await issue(ride: ride, origin: .localTransport) { header in .resume(header: header, positionMs: position) }
     }
 
     public func seek(positionMs: Int64) async {
-        await issue(ride: admitRide()) { header in .seek(header: header, targetPositionMs: max(positionMs, 0)) }
+        guard let ride = admitLocalTransport() else { return }
+        await issue(ride: ride, origin: .localTransport) { header in
+            .seek(header: header, targetPositionMs: max(positionMs, 0))
+        }
     }
 
-    public func next() async { await issue(ride: admitRide()) { header in .next(header: header) } }
+    public func next() async {
+        guard let ride = admitLocalTransport() else { return }
+        await issue(ride: ride, origin: .localTransport) { header in .next(header: header) }
+    }
 
-    public func previous() async { await issue(ride: admitRide()) { header in .previous(header: header) } }
+    public func previous() async {
+        guard let ride = admitLocalTransport() else { return }
+        await issue(ride: ride, origin: .localTransport) { header in .previous(header: header) }
+    }
+
+    /// The admission point for a **fresh, locally-originated** transport command (ADR-024 Amendment
+    /// A14): nil unless a synchronised session owns this phone's transport controls right now.
+    ///
+    /// `SyncPlaybackGateAdapter` already asks the mirror before it forwards a press, but that answer
+    /// is taken on the main actor and acted on in a `Task`: an End Ride landing between the two would
+    /// otherwise have this admit a brand-new ride and stamp fresh authority after the ride ended. And
+    /// the gate is not the only caller — the synchronised-playback controls call these entry points
+    /// directly. So the invariant is enforced *here*, where the authority is created, and re-proved
+    /// by `issue` adjacent to the stamp. A refused press is dropped, never downgraded to a local
+    /// effect: it was pressed while this phone was synchronised, and deciding now what it meant is
+    /// the caller's job, not this actor's.
+    ///
+    /// Deliberately **not** used by inbound or distributed authority: an accepted command, a
+    /// delivered obligation, a served intent and a resync snapshot are the peer's authority or this
+    /// device's debt to it, and none of them asks whether *local* controls are synchronised.
+    func admitLocalTransport() -> RideAdmission? {
+        guard isSynchronizedModeActive() else { return nil }
+        return admitRide()
+    }
+
+    /// `issue`'s A14 proof, taken synchronously beside the stamp.
+    func mayIssue(_ origin: IssueOrigin) -> Bool {
+        origin != .localTransport || isSynchronizedModeActive()
+    }
 
     /// ARCHITECTURE §3's `RIDE_ACTIVE -> CONNECTED`, reaching the one owner of ride-segment playback
     /// authority (independent-review round 3, Blocker C; ADR-028 Amendment A2).
@@ -1354,47 +1592,69 @@ public actor SyncPlaybackCoordinator {
             publishDiagnostics()
             return .supersededByLiveRideAuthority
         }
-        await leaveSynchronizedMode()
+        await leaveSynchronizedMode(preserveDistributed: true)
         return .cleared
     }
 
     /// Leaves synchronised mode without ending the control session: local playback continues exactly
     /// as a Phase 3 ride, correction stops and the rate goes back to exactly 1.0 (brief §38).
     public func leaveSynchronizedMode() async {
-        // First statement: everything below retires synchronised-mode state, and an apply already in
-        // flight must be refused before it can write any of it back.
+        await leaveSynchronizedMode(preserveDistributed: false)
+    }
+
+    private func leaveSynchronizedMode(preserveDistributed: Bool) async {
+        let keepDelivered = preserveDistributed && hasDeliveredPlayback
+        // Retire local candidates and reconciliation. End Ride alone cannot revoke a delivered
+        // effect: preserve its original playback token/state while that reserved obligation is live.
+        // This is not successor ownership, and no cleanup is deferred behind the player.
         synchronizedModeEpoch += 1
         syncEnabled = false
-        epoch.supersede()
+        if !keepDelivered { epoch.supersede() }
         // Amendment A1 Finding E: leaving synchronised mode cancels the retained Play. A transfer
         // completing afterwards must not start music the user has stopped asking for.
         playRequestFence.supersede()
         let cancelled = pendingPlay == nil ? 0 : 1
         pendingPlay = nil
         transferRequestedForToken = nil
-        discardDeferredEvents()
-        deferredDrainTask?.cancel()
-        deferredDrainTask = nil
-        timeline = nil
+        // ADR-024 Amendment A13: End Ride retires what its ride can cancel and nothing else. An
+        // accepted command already advanced `lastReceivedSeq`, so it is distributed debt and stays
+        // held — and so does the queue state in front of or between such commands, which is
+        // control-generation authority and whose loss would change a kept command's meaning.
+        // "Play locally" is the user leaving synchronised playback on this device, not a ride
+        // boundary, and keeps its pre-existing whole-stream discard.
+        if preserveDistributed {
+            retireRideScopedDeferredEvents()
+        } else {
+            discardDeferredEvents()
+        }
+        if let kept = deferredEvents.first {
+            // The drain that owns the kept debt keeps running (or starts); it is bounded by
+            // `deferredCommandCapacity` and ends with the generation or an empty stream.
+            startDeferredDrain(generation: kept.generation)
+        } else {
+            deferredDrainTask?.cancel()
+            deferredDrainTask = nil
+        }
+        if !keepDelivered { timeline = nil }
         // Independent review, Race 7 (mirroring Android's identical finding): leaving synchronised
         // mode is the user genuinely ending authoritative playback, not a control-lifetime blip —
         // unlike `resetForNewSession`, which deliberately preserves `currentPlaybackIdentity` across
         // a reconnect (Blocker 2B), this is a legitimate place for ride-segment identity to clear
         // too. Without this, a stale track hash from an already-ended synchronised session would
         // still be reported by the next `enqueueStateSnapshotReply` as if still authoritative.
-        currentPlaybackIdentity = nil
+        if !keepDelivered { currentPlaybackIdentity = nil }
         // Nothing is established any more, so no ride owns authority. Kept in lockstep with
         // `currentPlaybackIdentity` above — the two answer "what is standing" and "whose it is", and
         // they must never disagree.
-        rideAuthorityEpoch = 0
+        if !keepDelivered { rideAuthorityEpoch = 0 }
         driftState = DriftController.reset()
         // Amendment A6 Finding B, swept: the identical post-`restoreRate` write shape, in the second
         // of that call's three callers. Every write first, the unfenced player effect last.
         diagnostics.syncState = .inactive
-        diagnostics.currentTrackHash = nil
+        diagnostics.currentTrackHash = currentPlaybackIdentity?.trackHash
         diagnostics.localDriftMs = nil
         diagnostics.peerDriftMs = nil
-        diagnostics.deferredCommandCount = 0
+        diagnostics.deferredCommandCount = deferredEvents.count
         diagnostics.playbackRate = DriftController.rateNormal
         diagnostics.cancelledPendingPlayCount += cancelled
         publishDiagnostics()
@@ -1402,7 +1662,7 @@ public actor SyncPlaybackCoordinator {
     }
 
     /// Whether a synchronised session currently owns transport control (brief §39/§40).
-    public func isSynchronizedModeActive() -> Bool { syncEnabled && role != nil }
+    public func isSynchronizedModeActive() -> Bool { currentTransportOwnership.isSynchronizedModeActive }
 
     /// Brief §38's "correction always ends at exactly 1.0", and the one player call in this phase
     /// that is deliberately **not** fenced (ADR-024 Amendment A4 §D).
@@ -1427,9 +1687,11 @@ public actor SyncPlaybackCoordinator {
     /// in it that it was **discarded** (independent-review round 4, Blocker 2).
     ///
     /// The one place `deferredEvents` is emptied wholesale, so a cancellation cannot be forgotten at
-    /// one of the four callers that legitimately do this — `leaveSynchronizedMode` (End Ride, "Play
-    /// locally"), `resetForNewSession` (a control-lifetime boundary, including a terminal teardown's
+    /// one of the four callers that legitimately do this — `leaveSynchronizedMode` for "Play
+    /// locally", `resetForNewSession` (a control-lifetime boundary, including a terminal teardown's
     /// link loss), `failClosedOutbound`, and `drainDeferredEvents` finding its generation retired.
+    /// End Ride does **not** empty the stream: since ADR-024 Amendment A13 it uses
+    /// `retireRideScopedDeferredEvents`, which keeps accepted commands and queue state.
     /// Each retained anchor reports its own obligation id and the generation that authorised it;
     /// nothing is inferred from the buffer merely becoming empty, which is the inference round 3
     /// already had to remove once.
@@ -1442,6 +1704,23 @@ public actor SyncPlaybackCoordinator {
         let discarded = deferredEvents
         deferredEvents.removeAll()
         for event in discarded {
+            guard let obligation = event.reconciliation else { continue }
+            onReconciliationCancelled?(obligation, event.generation)
+        }
+    }
+
+    /// End Ride's retirement of the held stream (ADR-024 Amendment A13): removes exactly the events
+    /// whose `cancellingRide` is set — ride-scoped `PLAYBACK_STATE`/`STATE_SNAPSHOT` anchors, each of
+    /// whose reconciliation obligations gets its terminal cancellation here, as before — and keeps
+    /// accepted commands and control-generation queue state **in their original order**.
+    ///
+    /// Not a blanket "never clear": a control-generation boundary (`resetForNewSession`), a fail-
+    /// closed latch and "Play locally" still use `discardDeferredEvents`.
+    func retireRideScopedDeferredEvents() {
+        guard deferredEvents.contains(where: { $0.cancellingRide != nil }) else { return }
+        let retired = deferredEvents.filter { $0.cancellingRide != nil }
+        deferredEvents.removeAll { $0.cancellingRide != nil }
+        for event in retired {
             guard let obligation = event.reconciliation else { continue }
             onReconciliationCancelled?(obligation, event.generation)
         }
@@ -1502,6 +1781,23 @@ struct RideAdmission: Sendable, Equatable {
     let rideEpoch: Int64
 }
 
+/// Who is creating the authority `SyncPlaybackCoordinator.issue` is about to stamp (ADR-024
+/// Amendment A14). Every caller names one; there is no default, so a new caller cannot silently
+/// inherit the wrong answer.
+enum IssueOrigin: Sendable, Equatable {
+    /// A fresh press on this phone — `pause`/`resume`/`seek`/`next`/`previous`, whether it came
+    /// through `SyncPlaybackGateAdapter` or straight from a synchronised-playback control. The one
+    /// origin that requires a synchronised session to own transport control.
+    case localTransport
+    /// The one retained Play (`resolvePendingPlay`), whose own press or served intent already
+    /// activated synchronised mode. Every exit from synchronised mode cancels it while it is retained,
+    /// and the ride proof refuses it once it is being issued.
+    case retainedPlay
+    /// A follower's intent, served by the leader (`servePlaybackIntent`) — the peer's authority,
+    /// adopted, never a local candidate.
+    case peerIntent
+}
+
 /// One outbound Phase 5 frame, waiting its turn on the one ordered outbound path — with the two
 /// things Amendment A2 found missing from it.
 ///
@@ -1554,8 +1850,10 @@ struct Phase5Outbound: Sendable {
 /// authority they established then made ride 1's own (correctly superseded-refusing) late cleanup
 /// stand down. See `RideAdmission`.
 enum DeferredEvent: Sendable {
-    /// A `PLAY`/`PAUSE`/`RESUME`/`SEEK`/`NEXT`/`PREVIOUS` the order gate accepted.
-    case command(PlaybackMessage, generation: Int64, ride: RideAdmission)
+    /// A `PLAY`/`PAUSE`/`RESUME`/`SEEK`/`NEXT`/`PREVIOUS` this follower has **accepted** — see
+    /// `AcceptedCommand`. There is deliberately no other command case: nothing enters the held stream
+    /// as a command without `lastReceivedSeq` already naming it (ADR-024 Amendment A13).
+    case acceptedCommand(AcceptedCommand)
     /// PROTOCOL §9's authoritative queue state, held so it cannot change a held command's meaning.
     ///
     /// **Deliberately the one case with no `RideAdmission`** (independent-review round 7's queue
@@ -1583,28 +1881,83 @@ enum DeferredEvent: Sendable {
 
     var generation: Int64 {
         switch self {
-        case .command(_, let generation, _): return generation
+        case .acceptedCommand(let accepted): return accepted.generation
         case .queueSnapshot(_, _, _, let generation): return generation
         case .playbackState(_, let generation, _, _): return generation
         }
     }
 
-    /// The ride lifetime that admitted this event, or nil for the one case that is not ride-scoped.
-    var ride: RideAdmission? {
+    /// The ride lifetime that admitted this event, as **provenance** — or nil for the one case that
+    /// is not ride-scoped. Never a cancellation test on its own: see `cancellingRide`.
+    var provenanceRide: RideAdmission? {
         switch self {
-        case .command(_, _, let ride): return ride
+        case .acceptedCommand(let accepted): return accepted.originalRide
         case .queueSnapshot: return nil
         case .playbackState(_, _, _, let ride): return ride
         }
     }
 
+    /// The ride whose retirement **cancels** this event, or nil when local Ride retirement is not
+    /// cancellation authority for it (ADR-024 Amendment A13).
+    ///
+    /// - An accepted command is distributed debt: its ride is provenance only. It ends by being
+    ///   represented, by authoritative supersession, by explicit reconciliation, or with its control
+    ///   generation — never because this device's ride ended.
+    /// - A queue snapshot is control-generation state (see its case), so it has no ride at all.
+    /// - A held `PLAYBACK_STATE` — including a `STATE_SNAPSHOT` reconciliation — is a ride-scoped
+    ///   anchor under ADR-028 A3–A7, and its ride still cancels it.
+    var cancellingRide: RideAdmission? {
+        switch self {
+        case .acceptedCommand, .queueSnapshot: return nil
+        case .playbackState(_, _, _, let ride): return ride
+        }
+    }
+
+    /// The `command_seq` of an accepted command this event still owes, if it is one.
+    var acceptedCommandSeq: Int64? {
+        if case .acceptedCommand(let accepted) = self { return accepted.commandSeq }
+        return nil
+    }
+
     /// The reconciliation obligation this held event owes a terminal result to, if any.
     var reconciliation: Int64? {
         switch self {
-        case .command, .queueSnapshot: return nil
+        case .acceptedCommand, .queueSnapshot: return nil
         case .playbackState(_, _, let reconciliation, _): return reconciliation
         }
     }
+}
+
+/// An authoritative command a follower has **accepted from the authenticated stream but not yet
+/// represented** — accepted distributed debt (ADR-024 Amendment A13).
+///
+/// A follower takes responsibility for a command at the instant `lastReceivedSeq` advances, which
+/// for a clock-held command is `admitAuthoritativeCommand`'s `.defer_` branch — not when the drain
+/// eventually hands it to `applyAuthoritative`. The leader has, or will, represent the same command,
+/// so from that instant this device's End Ride can no more revoke it than the leader's End Ride can
+/// revoke a command whose transport returned SENT (Amendment A12's `DeliveredAuthority`). The
+/// representation that retained this used to be the same one a still-cancellable candidate had, so
+/// `drainDeferredEvents` and `leaveSynchronizedMode` applied `rideStillLive` to it and threw it away.
+///
+/// Constructed in exactly one place, immediately after the `lastReceivedSeq` write that makes it
+/// true, and `commandSeq` is that same value — structurally, not by inference from the message.
+///
+/// **Two distinct bounds, two distinct owners.** The retained debt is bounded by
+/// `deferredCommandCapacity` through `PendingCommandGate` (an overflow latches desynchronisation and
+/// reconciles, never grows). It holds **no** `SessionWorkLedger` reservation while it waits for its
+/// clock: that ledger bounds local apply/scheduled work, which does not exist until the drain pops
+/// it, so the reservation is taken then — before the pop — exactly as Amendment A11 placed it.
+struct AcceptedCommand: Sendable {
+    let message: PlaybackMessage
+    /// The authenticated control generation that admitted the frame. Its retirement is the one
+    /// local event that ends this obligation without representing or reconciling it.
+    let generation: Int64
+    /// The ride live when the command was admitted: **provenance**, stamped by `representDelivered`
+    /// into `rideAuthorityEpoch` and compared for successor protection. Never re-captured and never a
+    /// cancellation test.
+    let originalRide: RideAdmission
+    /// The value `lastReceivedSeq` took when this device accepted the command.
+    let commandSeq: Int64
 }
 
 /// PROTOCOL §10's `STATE_REQUEST`, retained because it arrived before this device's own
@@ -1649,6 +2002,14 @@ enum StateSnapshotOutcome: Sendable, Equatable {
     /// from `.deferredClock`: nothing is enqueued into `deferredEvents`, because a content transfer
     /// completing is not a clock-readiness event the drain loop polls for.
     case deferredContent
+    /// ADR-024 Amendment A11: the reconciliation is genuinely needed and this device has no capacity
+    /// left to represent the local work it would create. The snapshot is retained in
+    /// `deferredEvents` carrying the same obligation id and re-attempted by the drain, exactly as
+    /// `.deferredClock` is — so ADR-028 Amendment A4's invariant ("every `deferred*` corresponds to
+    /// actual retained work carrying the same obligation id") holds here too. Distinct from
+    /// `.deferredClock` because the clock is fine and saying otherwise would send a future reader to
+    /// the estimator.
+    case deferredCapacity
     /// The snapshot's generation is no longer live — refused, nothing mutated.
     case rejectedStale
     /// This device is not a follower — refused, nothing mutated.
@@ -1675,4 +2036,12 @@ struct PlaybackStateSnapshotFields: Sendable {
     let positionMs: Int64
     let playing: Bool
     let atSessionUs: Int64
+}
+
+/// Successful delivery is irreversible within this control generation. The original ride is
+/// provenance, not cancellation authority. The reservation bounds every retained obligation.
+struct DeliveredAuthority: Sendable, Equatable {
+    let ride: RideAdmission
+    let commandSeq: Int64
+    let reservation: WorkReservation
 }

@@ -277,6 +277,10 @@ final class SyncPlaybackCoordinatorTests: XCTestCase {
     func testAFollowerSendsAnIntentWithCommandSeqZeroAndNeverAllocatesOne() async {
         await build()
         await connect(asLeader: false)
+        // ADR-024 Amendment A14: a local press is synchronised only while synchronised mode owns the
+        // controls. The follower's user starts it on a track this phone cannot play yet, so the press
+        // is retained behind the queue and puts no playback frame on the wire.
+        await coordinator.playSynchronized(SyncTestValues.hash(9))
         await coordinator.pause()
         await settle()
         let sent = await session.playbackMessages()

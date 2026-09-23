@@ -4,10 +4,10 @@ import SwiftUI
 
 /// FR-018's simplified riding surface (Phase 7, ADR-028). Deliberately not a dense diagnostics
 /// screen — see `MainScreen`'s `DiagnosticsCard`/`VoiceCard` for that. Every control here calls
-/// through an **existing** production entry point (`SessionCoordinator`, `SyncPlaybackPresenter`,
-/// `IntercomPolicy`); this view invents no session, playback or intercom state of its own, and every
-/// derivation is `RideLinkPlatform.RideModePresentation` — the same pure mapping a test exercises
-/// without rendering anything.
+/// through an **existing** production entry point (`SessionCoordinator`, `MusicCoordinator` and its
+/// synchronised gate, `IntercomPolicy`); this view invents no session, playback or intercom state
+/// of its own, and every derivation is `RideLinkPlatform.RideModePresentation` — the same pure
+/// mapping a test exercises without rendering anything.
 ///
 /// **Visibility is driven by `SessionFsm`, never by local view state** (this phase's brief §19):
 /// there is no `@State` tracking "is Ride Mode showing" — `MainScreen` presents this view exactly
@@ -22,6 +22,11 @@ struct RideModeView: View {
         ScrollView {
             VStack(spacing: 20) {
                 connectionBanner
+                Text(RideModePresentation.syncLabel(
+                    status: coordinator.state.status,
+                    syncState: syncPlayback?.diagnostics.syncState ?? .inactive
+                ))
+                .font(.caption)
                 nowPlayingSection
                 playbackControls
                 microphoneSection
@@ -92,22 +97,29 @@ struct RideModeView: View {
         }
     }
 
-    // MARK: - Playback controls (the EXISTING Phase 5 command path only — never a second one)
+    // MARK: - Playback controls (the ONE command path, brief §39 — never a second one)
+    //
+    // ADR-024 Amendment A14: through `MusicCoordinator`, exactly as the lock screen, the in-app music
+    // controls and Android's `RideModeScreen` already go. Its gate hands a press to the synchronised
+    // session while one owns transport control and leaves it local otherwise. These used to call the
+    // synchronised entry points directly, which made them the one set of controls that bypassed the
+    // gate: with no synchronised playback started, a press issued synchronised authority instead of
+    // acting on the music this phone was playing — and since A14 the coordinator refuses that, so
+    // they would simply have done nothing.
 
     private var playbackControls: some View {
         HStack(spacing: 32) {
-            largeButton(systemName: "backward.fill") { syncPlayback?.previous() }
+            largeButton(systemName: "backward.fill") { music.previous() }
             largeButton(systemName: music.playerState.playing ? "pause.fill" : "play.fill") {
                 if music.playerState.playing {
-                    syncPlayback?.pause()
+                    music.pause()
                 } else {
-                    syncPlayback?.resume()
+                    music.play()
                 }
             }
             .frame(width: 88, height: 88)
-            largeButton(systemName: "forward.fill") { syncPlayback?.next() }
+            largeButton(systemName: "forward.fill") { music.next() }
         }
-        .disabled(syncPlayback == nil)
     }
 
     // MARK: - Microphone (existing VoiceController/intercom entry points only)

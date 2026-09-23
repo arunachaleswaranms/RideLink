@@ -2082,3 +2082,290 @@ Two properties come with it and are asserted per platform:
 No wire change, no vector change, and no change to what any apply path *does*: every early exit wrote
 nothing before this amendment and writes nothing after it. What changed is that the caller is now
 told which one happened.
+
+---
+
+## Amendment A11 — 22 September 2026 — local work capacity is reserved before delivery, never refused after it
+
+Status: accepted. Supersedes ADR-029 decision 3 (see ADR-029 Amendment A1).
+
+### What Phase 8 got right, and the one thing it got backwards
+
+Phase 8 found a real resource defect and named it exactly: **the bounded wire queues feed unbounded
+downstream work.** `Phase5FrameQueue` bounds what is on the wire in each direction at 256 frames,
+and that bound says nothing about what a frame leaves behind once it has been drained — a leader's
+ordered apply node, and the scheduled node that node arms while it waits for a deadline. With a
+deadline the clock never reaches, 1 000 commands produced 1 000 live tasks.
+
+Its fix counted live chain nodes and refused at the point a node was **created**. On the receiving
+side that is early enough. On the *leader* it is not, because the only thing that creates an apply
+node there is `onCommandOutcome` — the outbound consumer's commit hook, which runs **after**
+`send` returned true and therefore after the follower already has the command. The refusal then
+retired local playback authority outright: `role = nil`, `lastAppliedSeq = nil`,
+`lastReceivedSeq = nil`, the timeline and the ride-scoped track identity cleared, both chains
+cancelled, the deferred stream discarded, and `TRANSPORT_FAILED` published for a transport that had
+just succeeded.
+
+So a reachable ordering existed in which the follower applied C and the leader silently did not,
+with the control session still authenticated and nothing on the wire able to say so. That is the
+exact divergence Amendment A2 exists to prevent, reached from the opposite direction: A2 closed
+*"authoritative local state without delivery"*, and this reopened *"delivery without authoritative
+local state"*. `failClosedOutbound`'s own doc comment had already written the rule this violated —
+**a frame the transport did accept, still in flight when a later one fails, must still commit and
+still take effect, because the peer has it.**
+
+### Decision
+
+**No authoritative send may succeed without guaranteed local capacity to honour it.** Capacity is
+therefore *reserved* at the point responsibility is taken, which is always upstream of the point the
+peer can come to rely on the command:
+
+| Path | Where capacity is taken | What a refusal means there |
+|---|---|---|
+| Leader's own command | `issue`, inside the same critical section (Android) / no-`await` block (iOS) as the `command_seq` allocation and `enqueueOutbound` | The command is never stamped, never enqueued, never written. `failClosedOutbound` with `SyncState.LOCAL_OVERLOAD` |
+| Follower's inbound command | `admitAuthoritativeCommand`, before either sequence number moves | `latchDesynchronized()` — the existing halt-and-reconcile. **No `command_seq` is spent** (A1 Finding C's rule) |
+| A replay from the held stream | `drainHeldCommand` / the `.command` drain branch, before the pop | The command stays exactly where it is, re-attempted on the drain's own cadence |
+| A reconciliation restore | `restoreFromPlaybackState`, immediately before its one `applyPlay` | The snapshot is **retained** carrying the same obligation id, and reported `DEFERRED_CAPACITY` |
+
+`SessionWorkLedger` (pure, mirrored, in `core`/`RideLinkCore`) is the bound. A `WorkReservation` is
+an immutable `(id, generation)` token: `id` comes from a strictly increasing counter that is never
+reused, so a release arriving from a retired session names an id the ledger no longer holds and is a
+no-op — it can never decrement the reservation that replaced it. That is Amendment A7's rule
+("a frame's authority is the binding its read produced, never whatever is live when its work runs")
+applied to capacity, and it is why nothing releases by reading "the current reservation".
+
+**One command's obligation is not one task**, so the reservation is refcounted: created holding one
+phase, `enterPhase` adds one, `leavePhase` removes one, released when the last leaves. The refcount
+is structurally safe rather than carefully safe: `scheduleAt` calls `enterPhase` **synchronously
+inside** the apply phase that is still held, so the count cannot reach zero between an apply
+deciding to arm an effect and that effect being represented. Every reservation has exactly **one**
+release, in a `finally`/`defer` that also covers cancellation.
+
+`retire(throughGeneration:)` releases a lifetime's obligations at the boundary that ends it, bounded
+by the generation that *ended* and never a blanket clear — so a successor that has already reserved
+capacity keeps it. Generations strictly increase (ADR-023 §3), so "through" is the right comparison,
+which is Amendment A8's direction applied here.
+
+### `LOCAL_OVERLOAD` is a new state because the transport did not fail
+
+`SyncState.TRANSPORT_FAILED` means "an authoritative frame this device produced did not reach the
+peer". A capacity refusal never offered anything to the transport, which may be perfectly healthy; a
+rider reading "transport failed" would go looking at the Wi-Fi. The *posture* is identical and shares
+`failClosedOutbound`'s implementation — synchronised mode is left, correction stops, the rate returns
+to exactly 1.0, **local music keeps playing** (ADR-004, FR-025), and a new authenticated connection
+restores eligibility. What must not happen, and is the whole reason the state exists, is any rollback
+of authority the peer already has.
+
+### Sequence semantics, unchanged and now provable
+
+- `nextSeq` — the next `command_seq` this leader will stamp. A capacity refusal happens **before**
+  the stamp, so it leaves no gap: the number was never assigned.
+- `lastReceivedSeq` — authoritative work this device has taken responsibility for. A follower that
+  cannot reserve has not taken responsibility, so it does not advance (A1 Finding C).
+- `lastAppliedSeq` — work reflected in this device's authoritative playback state, and what
+  `PLAYBACK_STATE.command_seq`/`STATE_SNAPSHOT.command_seq` publish. **Nothing in this amendment
+  rolls either back.** Only a retired control lifetime clears them, in `resetForNewSession`, as
+  before.
+
+### Alternatives rejected
+
+- **Raise or remove the bound.** The defect is not the number; it is where the question is asked.
+- **Drop the oldest or newest node after delivery.** Both abandon delivered authority; the second is
+  what Phase 8 did.
+- **Make capacity exhaustion a session-authority failure visible to both peers.** It would need a new
+  wire message for a condition that is now unreachable-by-construction on the delivery path, and
+  PROTOCOL §3 gains nothing it does not already have. Rejected on ADR-024 §3's standing rule: do not
+  add a message type when an existing decision point can answer the question.
+- **A bounded ordered worker replacing the chained tasks.** It would bound the structure, but the
+  admission question — may this command be delivered? — would still have to be asked at `issue`, so
+  it solves the smaller half of the problem and rewrites three amendments' worth of audited
+  cancellation and ownership semantics to do it.
+
+### Verification
+
+No wire change. No vector set — coroutine and `Task` lifetime, and now local work capacity, are
+properties of one device's own scheduler, which is the reason Amendments A3, A5, A7 and ADR-025 add
+none either. `SessionWorkLedger` is pure and unit-tested on both platforms, including a 10 000-step
+alternating run that never exceeds the bound and never leaks. The coordinator regressions are
+mirrored, and the two-peer ones assert the disjunction directly: a command is refused **before**
+delivery, or it is delivered **and** honoured locally — never received by one peer and abandoned by
+the other. See `docs/PHASE8_RELEASE_HARDENING.md`.
+
+### This pass's own fresh-fix audit found two defects in this amendment's first draft
+
+Recorded because this repository's standing lesson is that the freshest fix is the least-audited
+code in it.
+
+1. **A double release.** The first draft released explicitly on three branches of the held-command
+   drain. Releasing a reservation twice is *worse* than leaking it: the scheduled effect that joined
+   the same obligation is still live, so the second release frees capacity work still owns. Every
+   reservation now has exactly one release site, in a `finally`/`defer`.
+2. **A drain storm.** `restoreFromPlaybackState` re-appends its anchor when it cannot reserve, and
+   the drain pops the item *before* calling it — so with the ledger full the drain popped, failed,
+   re-appended and popped the same item again in a tight synchronous loop. The clock and content
+   pre-checks above it exist for exactly this shape; capacity now has one too.
+
+
+## Amendment A12 — 23 September 2026 — delivered authority outlives its local ride
+
+Successful authenticated delivery creates a control-generation-owned local obligation.
+The original `RideAdmission` remains provenance; End Ride is not a control boundary and
+cannot silently cancel authority already held by the peer. `DeliveredAuthority` carries
+the exact A11 reservation and command sequence through apply; pending effect metadata is
+bounded by that same ledger. Applied sequence truth advances at playback-state/effect
+representation, not at SENT. Newer established authority still supersedes old playback
+tokens and protects all successor state. No wire change or disconnect is introduced.
+
+The [complete pipeline, alternatives, product semantics and regression audit](../PHASE8_DELIVERED_AUTHORITY.md)
+records why this is the smallest V1 correction, including intentional audible completion
+after End Ride and the separate successor reconciliation path.
+
+## Amendment A13 — 23 September 2026 — an accepted clock-held command is distributed debt
+
+Amendment A12 made delivered authority outlive its local ride, and applied that to the immediate
+paths: the leader's SENT and a follower's immediate apply. It created `DeliveredAuthority` **too
+late** for the follower's third path. A command a follower accepts while its session clock is
+untrusted advances `lastReceivedSeq` in `admitAuthoritativeCommand`'s DEFER branch and is retained
+in `deferredEvents` — and the retained form was the same `DeferredEvent.command` a still-cancellable
+candidate would have had. `DeliveredAuthority` was only minted when the drain eventually handed it
+to `applyAuthoritative`, so until then every ride rule applied to it: End Ride's
+`leaveSynchronizedMode(preserveDistributed: true)` called `discardDeferredEvents()`, and the drain's
+top-of-loop and adjacent-to-pop `rideStillLive` proofs retired it. The leader had represented C1,
+the follower had taken responsibility for C1, and the follower discarded C1 because its user ended
+the ride. Reproduced on both platforms against the reviewed head `47dd2ac` before any change.
+
+**Decision.** The follower's authority transition is the `lastReceivedSeq` write, not the apply.
+
+1. **Structural type.** `DeferredEvent.command` is replaced by `acceptedCommand(AcceptedCommand)`
+   (Kotlin: `DeferredEvent.AcceptedCommand`) carrying `message`, the admitting `generation`, the
+   `originalRide` and the `commandSeq` `lastReceivedSeq` took. It is constructed in exactly one
+   place, adjacent to that write. There is no other command case, so nothing can be retained as a
+   command without having been accepted.
+2. **Provenance is not cancellation authority.** `DeferredEvent` separates `provenanceRide` (the ride
+   that admitted it) from `cancellingRide` (the ride whose retirement cancels it). An accepted
+   command and a queue snapshot have no `cancellingRide`; a held `PLAYBACK_STATE`/`STATE_SNAPSHOT`
+   anchor keeps ADR-028 A3–A7's ride cancellation unchanged. Every ride-retirement check reads
+   `cancellingRide`, so a future edit cannot re-apply `rideStillLive` to distributed debt by reading
+   the provenance field.
+3. **End Ride partitions the held stream.** `retireRideScopedDeferredEvents` removes exactly the
+   events with a `cancellingRide` — each reconciliation among them still gets its terminal
+   `onReconciliationCancelled` — and keeps accepted commands and queue snapshots in their original
+   order; the drain that owns them keeps running. Queue snapshots are kept because they are
+   control-generation authority (ADR-024 A8) and dropping one in front of a kept command would change
+   that command's meaning. "Play locally", control-generation retirement and fail-closed still use
+   the whole-stream `discardDeferredEvents`.
+4. **Successor protection moves to the same predicate as A12.** `distributedObligationSuperseded`
+   (a strictly newer ride has *established* the standing state, or applied truth is past this
+   command) is what `mayRepresent` checks for delivered work and what the drain checks adjacent to
+   the pop. The ordered stream makes the pre-pop case unreachable (nothing overtakes held work), so
+   it is fail-closed defence; the reachable successor race is after the pop, in the apply's own
+   suspensions, where `mayRepresent` refuses it. A nominal Start Ride establishes nothing and
+   supersedes nothing.
+5. **Two bounds, two owners.** Retained debt is bounded by `deferredCommandCapacity` (16) through
+   `PendingCommandGate`; an overflow latches desynchronisation and reconciles. It holds no
+   `SessionWorkLedger` reservation while waiting for its clock; the reservation (256) is taken before
+   the pop, as A11 placed it, so a clock-held command never starves local apply capacity.
+
+**Legitimate terminal routes for an accepted held command**, and only these: represented by the
+drain; superseded by authoritative state whose `command_seq` covers it (PROTOCOL §5's existing
+supersession rule, now counted as `supersededHeldCommandCount`); refused by the desynchronisation
+latch (overflow, ingress loss, or a held revision mismatch), which raises the existing
+`STATE_REQUEST`/`STATE_SNAPSHOT` reconciliation; or dying with the control generation that admitted
+it. Local Ride retirement is not one.
+
+**Three defects found while building the regressions, all fixed:**
+
+- *iOS drain liveness.* `startDeferredDrain` treated "the task is not cancelled" as "the drain is
+  running", but a loop that ended because the stream emptied leaves a finished, uncancelled task —
+  so every later hold in the session got no 100 ms retry cadence and waited for the 5 s tick. End
+  Ride's kept debt relies on this drain. It now tracks a run token, cleared by a `defer` inside the
+  actor-isolated loop so no hold can land between "stopped" and "flag cleared" (Android's
+  `isActive` never had the defect; a parity test pins both).
+- *Sequence truth after supersession.* A snapshot at `command_seq == lastReceivedSeq` adopted
+  nothing, so after it superseded (or reconciled past) an accepted C1 and its state was represented,
+  `lastAppliedSeq` still said C1 had never applied. `representAuthoritativeSequence` raises applied
+  truth monotonically, only where the snapshot's state is actually represented.
+- *Accounting.* A held command waiting for capacity incremented `workCapacityRefusedCount`, which is
+  documented as "a command whose `command_seq` was not spent"; the drain now pre-checks capacity and
+  counts `heldCommandCapacityWaitCount`, once per cadence pass (which is also what makes a busy loop
+  observable). Android's drain published the popped `seq` as `lastAppliedCommandSeq` before the apply
+  could still refuse it; it now publishes only from representation.
+
+No wire change, no protocol field, no vector: the retained type, End Ride partition and diagnostics
+are local ownership. The earlier round-7/8 regressions that asserted a held **accepted** command is
+discarded on ride retirement asserted the blocker; they now assert completion with original ride
+provenance (never relabelled) and applied truth only at representation. The pipeline trace, every
+exit, and the regression names are in [`PHASE8_DELIVERED_AUTHORITY.md`](../PHASE8_DELIVERED_AUTHORITY.md#amendment-a13--accepted-clock-held-commands).
+
+## Amendment A14 — 23 September 2026 — finishing distributed authority never reopens local transport ownership
+
+Amendment A13 correctly lets an accepted or delivered command finish after End Ride. While it does,
+production legitimately publishes `SyncState.scheduled` (from `scheduleAt`) and then `.synced` (from
+`markSynced`), and the ADR-010 role survives End Ride because the control connection does. The
+coordinator's own answer to "does a synchronised session own transport control?" stayed right —
+`syncEnabled && role != nil`, and nothing that merely finishes distributed work sets `syncEnabled` —
+but iOS did not ask it. `SyncPlaybackPresenter` reconstructed the answer from display fields as
+`diagnostics.role != nil && diagnostics.syncState != .inactive`, and `RideLinkApp` handed that to
+`SyncPlaybackGateAdapter`. The two expressions were approximately equivalent only while nothing could
+report scheduling with synchronised mode ended; A13 made that possible, so after End Ride and the
+debt's completion the lock-screen Pause was intercepted and `pause()` issued a **fresh** synchronised
+`PAUSE`. (`failClosedOutbound` had the same shape all along: it clears `syncEnabled` and publishes
+`.transportFailed`, which the reconstruction also read as "synchronised".) Reproduced first against
+the unmodified sources — moved into `RideLinkPlatform` unchanged so the real presenter and adapter
+could run — as five failures: presenter active at SCHEDULED and at SYNCED, `interceptPause()` true, the
+forwarded press on the wire, and a direct `next()` on the wire; the coordinator said false throughout.
+
+**The invariant.** Completion of previously distributed authority after End Ride may satisfy that old
+obligation, but it never reopens admission of fresh synchronised transport authority. There is exactly
+one authoritative answer to "may a fresh local transport control become synchronised authority?", and
+it is derived from coordinator authority state, never from `SyncState`.
+
+**Decision.**
+
+1. **One source.** `syncEnabled && role != nil`, projected once as `TransportOwnership` (`.local` or
+   `.synchronized(role)`; the role travels inside the case, so ownership and role cannot come from two
+   reads). Three concepts are kept apart: *transport ownership* (may a local control be intercepted),
+   the *role* (how a synchronised command is serialised; survives End Ride), and *`SyncState`*
+   (operational diagnostics; may say SCHEDULED/SYNCED while an old obligation finishes).
+2. **A synchronous mirror written by the coordinator, never reconstructed.** iOS's gate callers
+   (`MPRemoteCommandCenter` handlers, `MusicCoordinator`) cannot await the actor, so
+   `SyncPlaybackCoordinator.transportOwnership` is a lock-backed `TransportOwnershipBox` — the
+   `RideEpochBox` shape — stored by the `didSet` of `syncEnabled` and of `role`, in the same
+   actor-isolated step as the change. No diagnostics publication writes it, there is no hop to lag or
+   reorder, and `SyncPlaybackGateAdapter` and `SyncPlaybackPresenter.isSynchronizedModeActive` read it.
+   Android needed no mirror: its adapter already read the `@Volatile` fields through
+   `isSynchronizedModeActive()`.
+3. **Defence in depth where the authority is created, on both platforms.** The gate is not the only
+   caller — both platforms' Phase 5 synchronised-playback cards call `pause`/`resume`/`seek`/`next`/
+   `previous` directly, and iOS Ride Mode did too — and the gate's own read is acted on in a
+   `Task`/launched coroutine, so End Ride can land between the intercept and the admission. The five
+   entry points are therefore admitted by `admitLocalTransport()` (nil unless ownership is
+   synchronised) and `issue` re-proves it in the same no-`await` block / critical section that stamps
+   the command. `issue` now takes an explicit `IssueOrigin` with no default: only `.localTransport` is
+   gated; `.retainedPlay` (its press activated the mode; every exit cancels it while retained, and the
+   ride proof refuses it once issued) and `.peerIntent` (the peer's authority, adopted by the leader)
+   are not. Inbound authoritative commands, accepted and delivered debt, and resync are untouched, and
+   an authoritative command the leader sends after this phone's End Ride is still accepted and is still
+   an activation — which old-debt completion is not.
+4. **iOS Ride Mode goes through the one command path.** Its transport buttons called the synchronised
+   entry points directly, the one set of controls that bypassed the gate; with the guard they would have
+   done nothing before synchronised playback started. They now call `MusicCoordinator`, exactly as the
+   lock screen, the in-app music controls and Android's `RideModeScreen` do.
+5. **Testability.** `SyncPlaybackGate`, `SyncPlaybackGateAdapter` and `SyncPlaybackPresenter` moved from
+   the app target (which has no test bundle) into `RideLinkPlatform`, unchanged in a separate commit, as
+   `RideSegmentLifecycle` did before them. The adapters over `MusicCoordinator`, `SharedLibraryCoordinator`
+   and `SessionCoordinator` stay in the app.
+
+**`SyncState` after End Ride.** Unchanged, deliberately: an old obligation finishing after End Ride may
+display SCHEDULED and then SYNCHRONIZED, because that is what happened to that command on both phones
+(A12/A13 keep its timeline and drift correction). Authorisation no longer depends on it, and hiding it
+would also hide `.transportFailed`/`.localOverload`, which are set with `syncEnabled` cleared on purpose.
+
+**Consequences.** A press intercepted while synchronised whose admission runs after End Ride is dropped
+— neither synchronised nor local — which is the fail-closed answer to two simultaneous human actions. The
+Phase 5 diagnostic cards' transport buttons do nothing unless synchronised mode is active; Play-synced
+is the local activation. Five iOS and four Android existing tests issued transport commands in a session
+that had never activated synchronised mode; each now starts it the way a user would (Play-synced on a
+track neither phone holds, which issues no playback command and spends no `command_seq`), with every
+assertion unchanged. No wire change, no protocol field, no vector: transport ownership is local.
+The command-gate trace is in [`PHASE8_DELIVERED_AUTHORITY.md`](../PHASE8_DELIVERED_AUTHORITY.md#amendment-a14--transport-ownership-after-distributed-debt).

@@ -221,6 +221,9 @@ object Phase5GateBounds {
      * authoritative operation closed rather than a counter nobody consults.
      */
     const val DEFAULT_OUTBOUND_CAPACITY: Int = 256
+
+    /** Combined live apply and scheduled task nodes downstream of the wire queues. */
+    const val DEFAULT_SESSION_WORK_CAPACITY: Int = 256
 }
 
 // --- ADR-024 Amendment A2 (the second Phase 5 closure audit) ---------------------------------

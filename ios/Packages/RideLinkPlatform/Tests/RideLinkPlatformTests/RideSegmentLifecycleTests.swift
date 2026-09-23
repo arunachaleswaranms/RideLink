@@ -88,7 +88,9 @@ final class RideSegmentLifecycleTests: XCTestCase {
         await content.addPeer(track)
         await sync.playSynchronized(track)
         for _ in 0 ..< 200 {
-            if await sync.diagnostics.currentTrackHash == track { return }
+            let represented = await sync.diagnostics.currentTrackHash == track
+            let completed = await sync.retainedWorkCount == 0
+            if represented && completed { return }
             clock.advance(to: clock.now() + 100_000)
             await settle(5)
         }
@@ -112,6 +114,76 @@ final class RideSegmentLifecycleTests: XCTestCase {
     /// The production End Ride path clears ride-segment playback identity — so a `STATE_SNAPSHOT`
     /// built in ride 2, before ride 2 has any authoritative playback of its own, cannot report
     /// ride 1's track.
+    func testStateRequestArrivingInsideConnectionResetIsAnsweredAfterResetCompletes() async {
+        await build()
+        await sync.handleLinkLost()
+        await session.setGeneration(2)
+        await session.armGenerationGate()
+        let connecting = Task { await self.sync.handleConnected(isLocalLeader: true) }
+        await expect("connection reset parked at generation read") { await self.session.isGenerationGateParked }
+        await sync.enqueueStateSnapshotReply(
+            generation: 2, leaderPeerId: SyncTestValues.leaderPeerId,
+            manifestRevision: 0, transfersInFlight: []
+        )
+        let held = await sync.diagnostics.heldStateSnapshotReplyCount
+        XCTAssertEqual(held, 1)
+        await session.releaseGenerationGate()
+        await connecting.value
+        await expect("request admitted during reset was answered") { await self.resyncChannel.sent.count == 1 }
+        await sync.shutdown()
+    }
+
+    func testRetiredRequestInsideResetCannotDisplaceALiveRequestHeldBeforeReset() async {
+        await build()
+        await sync.handleLinkLost()
+        await session.setGeneration(2)
+        await sync.enqueueStateSnapshotReply(
+            generation: 2, leaderPeerId: SyncTestValues.leaderPeerId,
+            manifestRevision: 0, transfersInFlight: []
+        )
+        await session.armGenerationGate()
+        let connecting = Task { await self.sync.handleConnected(isLocalLeader: true) }
+        await expect("reset parked") { await self.session.isGenerationGateParked }
+        await sync.enqueueStateSnapshotReply(
+            generation: 1, leaderPeerId: SyncTestValues.leaderPeerId,
+            manifestRevision: 99, transfersInFlight: []
+        )
+        await session.releaseGenerationGate()
+        await connecting.value
+        await expect("original live request answered") { await self.resyncChannel.sent.count == 1 }
+        let replies = await resyncChannel.sent
+        guard case .stateSnapshot(_, _, _, _, _, _, let revision, _) = replies.first else {
+            return XCTFail("missing snapshot")
+        }
+        XCTAssertEqual(revision, 0, "the retired request did not replace the retained live request")
+        await sync.shutdown()
+    }
+
+    func testRetiredRequestInsideResetIsDroppedAndTheFollowingLiveRequestStillWorks() async {
+        await build()
+        await sync.handleLinkLost()
+        await session.setGeneration(2)
+        await session.armGenerationGate()
+        let connecting = Task { await self.sync.handleConnected(isLocalLeader: true) }
+        await expect("reset parked") { await self.session.isGenerationGateParked }
+        await sync.enqueueStateSnapshotReply(
+            generation: 1, leaderPeerId: SyncTestValues.leaderPeerId,
+            manifestRevision: 99, transfersInFlight: []
+        )
+        await session.releaseGenerationGate()
+        await connecting.value
+        let dropped = await sync.diagnostics.droppedStateSnapshotReplyCount
+        let retiredReplies = await resyncChannel.sent
+        XCTAssertEqual(dropped, 1)
+        XCTAssertTrue(retiredReplies.isEmpty)
+        await sync.enqueueStateSnapshotReply(
+            generation: 2, leaderPeerId: SyncTestValues.leaderPeerId,
+            manifestRevision: 0, transfersInFlight: []
+        )
+        await expect("live request after retired refusal") { await self.resyncChannel.sent.count == 1 }
+        await sync.shutdown()
+    }
+
     func testEndRideClearsRideSegmentIdentityAndRideTwoCannotReportRideOnesTrack() async {
         await build()
         let trackX = SyncTestValues.hash(1)
@@ -446,6 +518,9 @@ final class RideSegmentLifecycleTests: XCTestCase {
         // by `applyAuthoritative` itself, so the test captures it exactly where
         // `admitAuthoritativeCommand` does — before the suspension the gate below parks in.
         let ride = await sync.admitRide()
+        // ADR-024 Amendment A11: production reserves the obligation at the same admission point, so
+        // the test does too rather than letting the apply invent one.
+        let reservation = await sync.reserveWork(generation: generation)!
         // Armed immediately before the call, so the first generation read it takes — which is
         // `applyAuthoritative`'s own `stillCurrent` — is the one that parks.
         await session.armGenerationGate()
@@ -456,8 +531,10 @@ final class RideSegmentLifecycleTests: XCTestCase {
                 )),
                 generation: generation,
                 ride: ride,
-                estimate: estimate
+                estimate: estimate,
+                reservation: reservation
             )
+            await self.sync.releaseWork(reservation)
         }
         var parked = false
         for _ in 0 ..< 500 where !parked {
@@ -514,6 +591,8 @@ final class RideSegmentLifecycleTests: XCTestCase {
         let estimate = SessionClockEstimate(offsetToLeaderUs: 0, rttP95Us: 8_000, ready: true)
         // Round 7: captured at the admission, as production does.
         let ride = await sync.admitRide()
+        // ADR-024 Amendment A11: reserved where production's admission reserves it.
+        let reservation = await sync.reserveWork(generation: generation)!
         await session.armGenerationGate()
         let apply = Task {
             await self.sync.applyAuthoritative(
@@ -522,8 +601,10 @@ final class RideSegmentLifecycleTests: XCTestCase {
                 )),
                 generation: generation,
                 ride: ride,
-                estimate: estimate
+                estimate: estimate,
+                reservation: reservation
             )
+            await self.sync.releaseWork(reservation)
         }
         var parked = false
         for _ in 0 ..< 500 where !parked {
@@ -554,7 +635,7 @@ final class RideSegmentLifecycleTests: XCTestCase {
     /// Deterministic rather than load-dependent: the resolve gate parks the apply at exactly the
     /// suspension that matters, End Ride runs while it is provably parked, and the gate is then
     /// released. No sleeps and no repetition are needed to reach the ordering.
-    func testAnApplyParkedAcrossEndRideWritesNothingBack() async {
+    func testDeliveredApplyParkedAcrossEndRideCompletesWithOriginalProvenance() async {
         await build()
         let track = SyncTestValues.hash(40)
         await content.addLocal(track)
@@ -586,20 +667,31 @@ final class RideSegmentLifecycleTests: XCTestCase {
         let callsWhileParked = await player.calls
         XCTAssertFalse(callsWhileParked.contains(.select(track)), "parked after the player was touched — too late to be applyPlay's resolve")
 
+        let receivedBeforeResolve = await sync.lastReceivedSeq
+        let appliedBeforeResolve = await sync.lastAppliedSeq
+        XCTAssertEqual(receivedBeforeResolve, 1, "SENT is responsibility, even before local content resolves")
+        XCTAssertNil(appliedBeforeResolve, "SENT alone does not represent playback state")
         await endRide()
         let clearedByEndRide = await sync.diagnostics.currentTrackHash
         XCTAssertNil(clearedByEndRide, "End Ride clears ride-segment identity")
 
         await content.releaseResolveGate()
         _ = await apply.value
-        await settle()
+        // Waits on the outcome, not a yield budget: `apply` returns once the PLAY is issued, and the
+        // parked chain apply resumes on its own schedule — under full-suite load after a fixed
+        // `settle()` and between the separate actor reads below.
+        await expect("the delivered apply represented its state") {
+            await self.sync.currentPlaybackIdentity?.trackHash == track
+        }
 
         let afterRelease = await sync.diagnostics.currentTrackHash
-        XCTAssertNil(afterRelease, "an apply authorised before End Ride wrote its track back afterwards")
+        XCTAssertEqual(afterRelease, track, "delivered authority is still owed within this control session")
         let identity = await sync.currentPlaybackIdentity
-        XCTAssertNil(identity, "…including the ride-segment identity a STATE_SNAPSHOT would report")
+        XCTAssertEqual(identity?.trackHash, track)
         let timeline = await sync.timeline
-        XCTAssertNil(timeline, "…and the synchronised timeline End Ride had retired")
+        XCTAssertEqual(timeline?.trackHash, track)
+        let owner = await sync.rideAuthorityEpoch
+        XCTAssertEqual(owner, 1, "original ride provenance survives delivery; End Ride cannot relabel it")
     }
 
     // MARK: - Independent-review round 5, Blocker 1
@@ -783,11 +875,13 @@ final class RideSegmentLifecycleTests: XCTestCase {
         await settle()
 
         let identity = await sync.currentPlaybackIdentity
-        XCTAssertNil(identity, "ride 1's stale Y survived, mislabelled as ride 2's authority: \(String(describing: identity))")
+        XCTAssertEqual(identity?.trackHash, trackY, "Y was delivered and still owns a pending scheduled effect")
         let hash = await sync.diagnostics.currentTrackHash
-        XCTAssertNil(hash, "…and a STATE_SNAPSHOT would still report it")
+        XCTAssertEqual(hash, trackY)
         let timeline = await sync.timeline
-        XCTAssertNil(timeline, "…including a live playback epoch/timeline Y should never have reached")
+        XCTAssertEqual(timeline?.trackHash, trackY)
+        let owner = await sync.rideAuthorityEpoch
+        XCTAssertEqual(owner, 1, "the delivered debt must not become Ride 2 authority")
         XCTAssertEqual(0, lifecycle.supersededEndRideCount, "ride 1's cleanup must not have been fooled into standing down")
     }
 
@@ -886,7 +980,9 @@ final class RideSegmentLifecycleTests: XCTestCase {
                 await settle()
 
                 let identity = await sync.currentPlaybackIdentity
-                XCTAssertNil(identity, "cycle \(cycle): Regression 1 — ride 1's stale op survived as ride 2's authority")
+                XCTAssertEqual(identity?.trackHash, trackY)
+                let owner = await sync.rideAuthorityEpoch
+                XCTAssertEqual(owner, 1, "cycle \(cycle): delivered obligation preserves original ride")
                 XCTAssertEqual(0, lifecycle.supersededEndRideCount, "cycle \(cycle)")
             } else {
                 let endRideEpoch = lifecycle.nextRideEpoch()
@@ -952,7 +1048,14 @@ final class RideSegmentLifecycleTests: XCTestCase {
     /// `launchInSession`.
     ///
     /// It must fail against the round-6 head, where `DeferredEvent.command` carried no ride at all.
-    func testADeferredRideOneCommandCannotBecomeRideTwosAuthority() async {
+    ///
+    /// **ADR-024 Amendment A13 corrected the other half of this test's original expectation.** Round
+    /// 7 asserted the held command was *discarded*; but it had already advanced `lastReceivedSeq`, so
+    /// the leader had represented it and this follower had taken responsibility for it — discarding
+    /// it was the independently reported Phase 8 blocker, not a safety property. What round 7 was
+    /// actually protecting still holds and is still asserted: the command is never relabelled Ride 2.
+    /// It completes as Ride-1 work, so ride 1's own delayed cleanup still recognises and clears it.
+    func testADeferredRideOneCommandCompletesAsRideOneWorkAndNeverBecomesRideTwosAuthority() async {
         await build()
         await deferringFollower()
         let track = SyncTestValues.hash(120)
@@ -966,7 +1069,7 @@ final class RideSegmentLifecycleTests: XCTestCase {
         // It was admitted under ride 1, and the retained event says so itself.
         let held = await sync.deferredEvents
         XCTAssertEqual(
-            RideAdmission(synchronizedModeEpoch: 0, rideEpoch: 1), held.first?.ride,
+            RideAdmission(synchronizedModeEpoch: 0, rideEpoch: 1), held.first?.provenanceRide,
             "the retained command does not carry the ride that admitted it"
         )
         let receivedSeq = await sync.diagnostics.lastReceivedCommandSeq
@@ -984,26 +1087,27 @@ final class RideSegmentLifecycleTests: XCTestCase {
         await settle()
 
         let identity = await sync.currentPlaybackIdentity
-        XCTAssertNil(identity, "ride 1's held command established ride 2's playback identity: \(String(describing: identity))")
+        XCTAssertEqual(track, identity?.trackHash, "an accepted held command was discarded by ride retirement")
         let timeline = await sync.timeline
-        XCTAssertNil(timeline, "…and a synchronised timeline for a ride that had ended")
-        let hash = await sync.diagnostics.currentTrackHash
-        XCTAssertNil(hash, "…which a STATE_SNAPSHOT would then have reported")
-        let authority = await sync.rideAuthorityEpoch
-        XCTAssertEqual(0, authority, "…and stamped ride-scoped authority for a successor ride")
+        XCTAssertEqual(track, timeline?.trackHash)
         let calls = await player.calls
-        XCTAssertFalse(calls.contains(.select(track)), "a retired ride's held command reached the player: \(calls)")
+        XCTAssertTrue(calls.contains(.select(track)), "the accepted obligation never reached the player: \(calls)")
+        let authority = await sync.rideAuthorityEpoch
+        XCTAssertEqual(1, authority, "ride 1's held command was relabelled as a successor ride's authority")
+        let applied = await sync.lastAppliedSeq
+        XCTAssertEqual(1, applied, "represented, so applied truth moved — and only then")
         let remaining = await sync.deferredEvents
-        XCTAssertTrue(remaining.isEmpty, "the retired-ride event must be discarded, not left to wedge the stream")
+        XCTAssertTrue(remaining.isEmpty, "the stream must drain, not wedge")
         let discarded = await sync.diagnostics.retiredRideDeferredCount
-        XCTAssertEqual(1, discarded, "…and counted rather than dropped silently")
+        XCTAssertEqual(0, discarded, "an accepted command is never retired by its ride")
 
-        // Only now does ride 1's own delayed cleanup run. It must find nothing newer standing.
+        // Only now does ride 1's own delayed cleanup run. Because the command completed as ride-1
+        // work, that cleanup still finds nothing *newer* standing and is not fooled into standing down.
         await lifecycle.endRide(epoch: endRideEpoch)
         await settle()
         XCTAssertEqual(0, lifecycle.supersededEndRideCount, "ride 1's cleanup was fooled into standing down")
         let finalIdentity = await sync.currentPlaybackIdentity
-        XCTAssertNil(finalIdentity, "nothing from the retired ride's held command may survive")
+        XCTAssertNil(finalIdentity, "ride 1's own completed work is cleared by ride 1's own boundary")
     }
 
     /// **Round 7, Regression 4 (command half): the fix must not refuse valid retained work.** The same
@@ -1019,7 +1123,7 @@ final class RideSegmentLifecycleTests: XCTestCase {
         startRide()
         await deliverPlay(track, queueItemId: itemId)
         await expect("the command was accepted and held") { await self.sync.deferredEvents.count == 1 }
-        let admitted = await sync.deferredEvents.first?.ride
+        let admitted = await sync.deferredEvents.first?.provenanceRide
 
         await session.setClock(SessionClockEstimate(offsetToLeaderUs: 0, rttP95Us: 8_000, ready: true))
         await sync.drainDeferredEvents()
@@ -1049,7 +1153,11 @@ final class RideSegmentLifecycleTests: XCTestCase {
     ///
     /// A's ride is retired while A is held; B is then admitted under the live ride and queued behind
     /// it. Both are real inbound frames through the real ingress.
-    func testARetiredRideEventAtTheHeadDoesNotBlockLiveWorkQueuedBehindIt() async {
+    ///
+    /// **ADR-024 Amendment A13:** A is an *accepted* command, so its ride ending no longer discards
+    /// it — A drains first, as ride-1 work, and B then establishes ride 2 over it, which is exactly
+    /// what the leader did. The liveness claim is unchanged: nothing at the head wedges B.
+    func testAnAcceptedRideOneCommandAtTheHeadDrainsInOrderAndDoesNotBlockLiveWorkQueuedBehindIt() async {
         await build()
         await deferringFollower()
         let trackA = SyncTestValues.hash(123)
@@ -1069,8 +1177,9 @@ final class RideSegmentLifecycleTests: XCTestCase {
         await deliverPlay(trackB, queueItemId: SyncTestValues.ulid(124), commandSeq: 2)
         await expect("B queued behind A") { await self.sync.deferredEvents.count == 2 }
         let held = await sync.deferredEvents
-        XCTAssertEqual(RideAdmission(synchronizedModeEpoch: 0, rideEpoch: 1), held.first?.ride, "A must be the dead one")
-        XCTAssertEqual(RideAdmission(synchronizedModeEpoch: 0, rideEpoch: 3), held.last?.ride, "B must be the live one")
+        XCTAssertEqual(RideAdmission(synchronizedModeEpoch: 0, rideEpoch: 1), held.first?.provenanceRide, "A must be ride 1's")
+        XCTAssertEqual(RideAdmission(synchronizedModeEpoch: 0, rideEpoch: 3), held.last?.provenanceRide, "B must be the live one")
+        XCTAssertNil(held.first?.cancellingRide, "an accepted command's ride is provenance, never cancellation authority")
 
         await session.setClock(SessionClockEstimate(offsetToLeaderUs: 0, rttP95Us: 8_000, ready: true))
         await sync.drainDeferredEvents()
@@ -1082,9 +1191,13 @@ final class RideSegmentLifecycleTests: XCTestCase {
         XCTAssertEqual(3, authority, "B's authority must be stamped with B's own ride")
         let calls = await player.calls
         XCTAssertTrue(calls.contains(.select(trackB)), "B never reached the player: \(calls)")
-        XCTAssertFalse(calls.contains(.select(trackA)), "A applied under a ride that had ended: \(calls)")
+        let selectA = calls.firstIndex(of: .select(trackA)), selectB = calls.firstIndex(of: .select(trackB))
+        XCTAssertNotNil(selectA, "accepted A was discarded instead of honoured: \(calls)")
+        if let selectA, let selectB { XCTAssertLessThan(selectA, selectB, "the held stream reordered A and B") }
         let discarded = await sync.diagnostics.retiredRideDeferredCount
-        XCTAssertEqual(1, discarded, "exactly A should have been discarded as retired")
+        XCTAssertEqual(0, discarded, "an accepted command is never retired by its ride")
+        let applied = await sync.lastAppliedSeq
+        XCTAssertEqual(2, applied)
         let remaining = await sync.deferredEvents
         XCTAssertTrue(remaining.isEmpty, "the stream must have fully drained")
 
@@ -1133,7 +1246,14 @@ final class RideSegmentLifecycleTests: XCTestCase {
     /// two assertions taken while parked prove the other end: nothing has been popped and nothing has
     /// been booked yet. No sleep anywhere, and ride 1's cleanup is deliberately not released until
     /// every assertion has been made, so it cannot be what saves the test.
-    func testARideRetiringInsideTheDrainsClockReadNeverPublishesTheCommandAsApplied() async {
+    ///
+    /// **ADR-024 Amendment A13.** The held command had already advanced `lastReceivedSeq`, so round
+    /// 8's expected *refusal* was the Phase 8 blocker: the ride boundary is not cancellation
+    /// authority for it. Round 8's actual invariant is kept, and tightened: `lastAppliedSeq` and its
+    /// published mirror do not move at the pop, only once the command is represented — so the
+    /// value is 7 afterwards *because* identity, timeline and the player now reflect command 7, and
+    /// the command keeps its ride-1 provenance rather than being stamped with the ride that followed.
+    func testARideBoundaryInsideTheDrainsClockReadNeitherDiscardsNorRelabelsTheAcceptedCommand() async {
         await build()
         await deferringFollower()
         let track = SyncTestValues.hash(140)
@@ -1143,7 +1263,7 @@ final class RideSegmentLifecycleTests: XCTestCase {
         startRide()
         await deliverPlay(track, queueItemId: itemId, commandSeq: 7)
         await expect("the command was accepted and held") { await self.sync.deferredEvents.count == 1 }
-        let heldRide = await sync.deferredEvents.first?.ride
+        let heldRide = await sync.deferredEvents.first?.provenanceRide
         XCTAssertEqual(RideAdmission(synchronizedModeEpoch: 0, rideEpoch: 1), heldRide)
         let receivedBefore = await sync.diagnostics.lastReceivedCommandSeq
         XCTAssertEqual(7, receivedBefore, "the command was not accepted for ordering, so this proves nothing")
@@ -1166,24 +1286,24 @@ final class RideSegmentLifecycleTests: XCTestCase {
         await drain.value
         await settle()
 
-        let applied = await sync.lastAppliedSeq
-        XCTAssertNil(applied, "a command the ride fence refused was recorded as applied")
-        let publishedApplied = await sync.diagnostics.lastAppliedCommandSeq
-        XCTAssertNil(publishedApplied, "…and published as this device's authoritative command_seq")
-        let recovered = await sync.diagnostics.recoveredCommandCount
-        XCTAssertEqual(0, recovered, "a refused command was counted as a successful recovery")
-        let discarded = await sync.diagnostics.retiredRideDeferredCount
-        XCTAssertEqual(1, discarded, "the retired-ride discard was not counted")
-        let remaining = await sync.deferredEvents
-        XCTAssertTrue(remaining.isEmpty, "the retired event must be removed cleanly, not left to wedge the stream")
-        let calls = await player.calls
-        XCTAssertFalse(calls.contains(.select(track)), "a retired ride's held command reached the player: \(calls)")
         let identity = await sync.currentPlaybackIdentity
-        XCTAssertNil(identity, "a retired ride's held command established playback identity")
+        XCTAssertEqual(track, identity?.trackHash, "the accepted command was discarded by a ride boundary")
         let timeline = await sync.timeline
-        XCTAssertNil(timeline, "…and a synchronised timeline")
+        XCTAssertEqual(track, timeline?.trackHash)
+        let calls = await player.calls
+        XCTAssertTrue(calls.contains(.select(track)), "the accepted obligation never reached the player: \(calls)")
+        let applied = await sync.lastAppliedSeq
+        XCTAssertEqual(7, applied, "represented — the only thing that may move applied truth")
+        let publishedApplied = await sync.diagnostics.lastAppliedCommandSeq
+        XCTAssertEqual(7, publishedApplied, "the published mirror agrees with represented truth")
+        let recovered = await sync.diagnostics.recoveredCommandCount
+        XCTAssertEqual(1, recovered)
+        let discarded = await sync.diagnostics.retiredRideDeferredCount
+        XCTAssertEqual(0, discarded, "an accepted command is never retired by its ride")
+        let remaining = await sync.deferredEvents
+        XCTAssertTrue(remaining.isEmpty, "the stream must drain, not wedge")
         let authority = await sync.rideAuthorityEpoch
-        XCTAssertEqual(0, authority, "…and stamped ride-scoped authority for a successor ride")
+        XCTAssertEqual(1, authority, "relabelled with a successor ride's epoch")
 
         // Ride 1's own delayed cleanup runs last and must find nothing newer standing.
         await lifecycle.endRide(epoch: endRideEpoch)
@@ -1353,15 +1473,13 @@ final class RideSegmentLifecycleTests: XCTestCase {
             let applied = await sync.lastAppliedSeq
             let recovered = await sync.diagnostics.recoveredCommandCount
             let discarded = await sync.diagnostics.retiredRideDeferredCount
-            if boundaryHappens {
-                XCTAssertNil(applied, "cycle \(cycle): refused work was published as applied")
-                XCTAssertEqual(0, recovered, "cycle \(cycle)")
-                XCTAssertEqual(1, discarded, "cycle \(cycle)")
-            } else {
-                XCTAssertEqual(11, applied, "cycle \(cycle): valid work stopped applying")
-                XCTAssertEqual(1, recovered, "cycle \(cycle)")
-                XCTAssertEqual(0, discarded, "cycle \(cycle)")
-            }
+            let authority = await sync.rideAuthorityEpoch
+            // ADR-024 Amendment A13: an accepted command completes either way; the boundary changes
+            // neither the outcome nor the provenance it is stamped with.
+            XCTAssertEqual(11, applied, "cycle \(cycle) (boundary: \(boundaryHappens)): accepted work did not complete")
+            XCTAssertEqual(1, recovered, "cycle \(cycle)")
+            XCTAssertEqual(0, discarded, "cycle \(cycle): an accepted command was retired by its ride")
+            XCTAssertEqual(1, authority, "cycle \(cycle): relabelled with a successor ride's epoch")
         }
     }
 
@@ -1392,15 +1510,14 @@ final class RideSegmentLifecycleTests: XCTestCase {
             await settle()
 
             let identity = await sync.currentPlaybackIdentity
-            if boundaryHappens {
-                XCTAssertNil(identity, "cycle \(cycle): ride 1's held command became ride 2's authority")
-                if let endRideEpoch {
-                    await lifecycle.endRide(epoch: endRideEpoch)
-                    await settle()
-                }
+            let authority = await sync.rideAuthorityEpoch
+            // ADR-024 Amendment A13: accepted work completes in both arms, always as ride 1's.
+            XCTAssertEqual(track, identity?.trackHash, "cycle \(cycle) (boundary: \(boundaryHappens)): accepted work refused")
+            XCTAssertEqual(1, authority, "cycle \(cycle): ride 1's held command became ride 2's authority")
+            if let endRideEpoch {
+                await lifecycle.endRide(epoch: endRideEpoch)
+                await settle()
                 XCTAssertEqual(0, lifecycle.supersededEndRideCount, "cycle \(cycle)")
-            } else {
-                XCTAssertEqual(track, identity?.trackHash, "cycle \(cycle): valid same-ride retained work was refused")
             }
         }
     }

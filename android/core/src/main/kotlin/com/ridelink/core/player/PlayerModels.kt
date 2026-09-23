@@ -108,7 +108,7 @@ enum class MusicFailure {
 
 /**
  * Observable player state. Enough for Phase 5 to build synchronized playback on top of later
- * (`localEntryId`, `positionMs`, `durationMs` are exactly what a future session-time scheduler would
+ * (`localEntryId`, `positionMs`, `durationMs` are exactly what the session-time scheduler can
  * need to read) **without** this phase adding any of that behaviour itself (brief §15).
  */
 data class PlayerState(

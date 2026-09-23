@@ -66,15 +66,14 @@ struct RideLinkApp: App {
            ) {
             let presenter = SyncPlaybackPresenter(coordinator: sync) { [weak coordinator] diagnostics in
                 coordinator?.updateSyncAvailability(
-                    ![SyncState.syncFailed, .desynchronized, .transportFailed].contains(diagnostics.syncState)
+                    ![SyncState.syncFailed, .desynchronized, .transportFailed, .localOverload]
+                        .contains(diagnostics.syncState)
                 )
             }
             _syncPlayback = State(initialValue: presenter)
-            musicCoordinator.syncGate = SyncPlaybackGateAdapter(
-                sync: sync,
-                isActive: { [weak presenter] in presenter?.isSynchronizedModeActive ?? false },
-                role: { [weak presenter] in presenter?.role }
-            )
+            // ADR-024 Amendment A14: the gate reads the coordinator's own transport-ownership mirror,
+            // not anything the presenter reconstructs from diagnostics.
+            musicCoordinator.syncGate = SyncPlaybackGateAdapter(sync: sync)
             // Phase 7 (ADR-028): after Phase 5, since resync reconciles through the one
             // `SyncPlaybackCoordinator` and refreshes the manifest through the one
             // `SharedLibraryCoordinator` — both must already exist.

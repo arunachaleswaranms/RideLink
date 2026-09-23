@@ -35,7 +35,11 @@ final class SyncPlaybackDeliveryAuditTests: XCTestCase {
     /// Where `leaderPlaying` anchors position 0: the clock's initial instant plus the 120 ms lead.
     private static let anchorSessionUs: Int64 = 1_000_000 + 120_000
 
-    private func build(outboundCapacity: Int = 256, deferredCommandCapacity: Int = 16) async {
+    private func build(
+        outboundCapacity: Int = 256,
+        deferredCommandCapacity: Int = 16,
+        sessionWorkCapacity: Int = 256
+    ) async {
         session = FakeSyncSession()
         player = FakeSyncPlayer()
         content = FakeSyncContent()
@@ -54,9 +58,243 @@ final class SyncPlaybackDeliveryAuditTests: XCTestCase {
             routeState: routeState,
             nextQueueItemId: { ids.next() },
             deferredCommandCapacity: deferredCommandCapacity,
-            outboundCapacity: outboundCapacity
+            outboundCapacity: outboundCapacity,
+            sessionWorkCapacity: sessionWorkCapacity
         )
         await coordinator.start()
+    }
+
+    // MARK: - ADR-024 Amendment A11 — bounded local work that cannot abandon delivered authority
+
+    /// **The defect Phase 8's first bounded-work fix introduced, and the property that replaces it.**
+    ///
+    /// That fix counted live apply/scheduled task nodes and refused at the point a node was created.
+    /// On a leader that point is reached from `onCommandOutcome` — *after* the authenticated
+    /// transport accepted the frame and the peer therefore has it. Its refusal then retired local
+    /// playback authority outright, clearing `lastAppliedSeq`/`lastReceivedSeq`, the timeline and the
+    /// track identity, and cancelling the apply for a command the follower was about to apply. That
+    /// is split-brain authority: the peer acts on C, this device silently does not.
+    ///
+    /// Amendment A11 moves the question to the one place its answer can still change what reaches
+    /// the wire — the same no-`await` block as the `command_seq` allocation and the hand-off to the
+    /// ordered outbound path. Both halves of the resulting disjunction are asserted here.
+    func testAnAuthoritativeCommandWithNoLocalCapacityIsRefusedBeforeItCanReachThePeer() async {
+        await build(sessionWorkCapacity: 2)
+        await leaderPlaying()
+        // Two commands, both delivered, both holding their obligation in an armed scheduled action
+        // whose deadline the frozen clock will never reach.
+        await coordinator.pause()
+        await awaitOutboundQuiescent()
+        await coordinator.seek(positionMs: 1_000)
+        await awaitOutboundQuiescent()
+        await expect("both obligations outstanding") { await self.coordinator.retainedWorkCount == 2 }
+        let delivered = await session.playbackMessages().count
+        XCTAssertEqual(delivered, 2, "the premise: both commands are genuinely on the wire")
+        await expect("both delivered commands are represented, not merely queued for apply") {
+            await self.coordinator.lastAppliedSeq == 3
+        }
+        let before = await coordinator.diagnostics
+
+        // The third meets a full ledger.
+        await coordinator.seek(positionMs: 2_000)
+        await settle()
+
+        let after = await coordinator.diagnostics
+        let stillDelivered = await session.playbackMessages().count
+        XCTAssertEqual(stillDelivered, delivered, "Outcome A: the refused command never reached the peer")
+        XCTAssertEqual(after.workCapacityRefusedCount, 1)
+        XCTAssertEqual(
+            after.syncState, .localOverload,
+            "and it is not called .transportFailed, because the transport was never asked"
+        )
+        XCTAssertTrue(after.outboundAuthorityLost)
+        // **There is no Outcome C.** Sequence truth for the delivered commands is untouched.
+        XCTAssertEqual(
+            after.lastAppliedCommandSeq, before.lastAppliedCommandSeq,
+            "already-delivered authority is never rolled back by a local capacity refusal"
+        )
+        XCTAssertEqual(
+            after.nextCommandSeq, before.nextCommandSeq,
+            "a refused candidate leaves no gap, because it was never assigned"
+        )
+        XCTAssertEqual(after.currentTrackHash, SyncTestValues.hash(1))
+
+        // And the delivered obligations are still real: their deadlines arrive and they act.
+        await player.clearCalls()
+        clock.advance(to: clock.now() + Self.leadUs * 4)
+        await expect("the delivered PAUSE still took effect locally") { [self] in
+            await player.calls.contains(.pause)
+        }
+        await expect("and so did the delivered SEEK") { [self] in
+            await player.calls.contains(.seek(1_000))
+        }
+        await expect("both obligations discharged") { await self.coordinator.retainedWorkCount == 0 }
+    }
+
+    /// A send that failed is not a send, so it owes no local work — and must not consume the bound
+    /// for the rest of the session. Repeated failures here would otherwise leak the ledger one
+    /// reservation at a time until a healthy connection could no longer issue anything.
+    func testARefusedSendReleasesTheCapacityItReserved() async {
+        await build(sessionWorkCapacity: 2)
+        await leaderPlaying()
+        await session.setSendResult(false)
+        for _ in 0 ..< 20 {
+            await coordinator.pause()
+            await awaitOutboundQuiescent()
+        }
+        await settle()
+        let retained = await coordinator.retainedWorkCount
+        XCTAssertEqual(retained, 0, "not one failed send still holds capacity")
+        let refused = await coordinator.diagnostics.workCapacityRefusedCount
+        XCTAssertEqual(refused, 0)
+
+        // A fresh authenticated connection then makes ordinary progress on the full bound.
+        await session.setSendResult(true)
+        await session.setGeneration(2)
+        await coordinator.handleConnected(isLocalLeader: true)
+        await coordinator.playSynchronized(SyncTestValues.hash(1))
+        await expect("fresh authority after repeated send failures") {
+            await self.coordinator.diagnostics.currentTrackHash == SyncTestValues.hash(1)
+        }
+    }
+
+    /// A reservation is an immutable token naming the lifetime that took it, never a query against
+    /// "the current reservation" — so a predecessor's outcome callback, arriving after a successor
+    /// has authenticated *and* reserved capacity of its own, releases an id the ledger no longer
+    /// holds and frees nothing. The send is parked strictly inside the write.
+    func testAGenerationBoundaryReleasesItsOwnReservationsAndNeverASuccessors() async {
+        await build(sessionWorkCapacity: 2)
+        await leaderPlaying()
+        await session.armSendGate()
+        await coordinator.pause()
+        await expect("the consumer is parked inside a write") { [self] in await session.isSendGateParked }
+        await expect("holding generation 1's obligation") { await self.coordinator.retainedWorkCount == 1 }
+
+        await session.setGeneration(2)
+        await coordinator.handleConnected(isLocalLeader: true)
+        await expect("the boundary released exactly generation 1's obligation") {
+            await self.coordinator.retainedWorkCount == 0
+        }
+
+        // Generation 2 takes capacity of its own while generation 1's send is still parked.
+        await content.addLocal(SyncTestValues.hash(1))
+        await content.addPeer(SyncTestValues.hash(1))
+        await coordinator.playSynchronized(SyncTestValues.hash(1))
+        await expect("the successor holds one obligation of its own") {
+            await self.coordinator.retainedWorkCount >= 1
+        }
+        let underSuccessor = await coordinator.retainedWorkCount
+
+        // Generation 1's write finally returns. Its outcome must free nothing and apply nothing.
+        await player.clearCalls()
+        await session.releaseSendGate()
+        await settle()
+        let stillHeld = await coordinator.retainedWorkCount
+        XCTAssertEqual(stillHeld, underSuccessor, "the predecessor freed no successor capacity")
+        let calls = await player.calls
+        XCTAssertFalse(calls.contains(.pause), "and generation 1's command applied nothing under generation 2")
+    }
+
+    /// The reason Phase 8 opened this at all, kept: a deadline that never arrives must not produce
+    /// unbounded retained work. **Measured on the production ledger**, not on a test fixture's own
+    /// recording list.
+    func testAThousandCommandsAgainstAFrozenDeadlineRetainABoundedAmountOfWork() async {
+        await build(sessionWorkCapacity: 8)
+        await leaderPlaying()
+        var peakNodes = 0
+        for _ in 0 ..< 1_000 {
+            await coordinator.pause()
+            await awaitOutboundQuiescent()
+            let held = await coordinator.retainedWorkCount
+            XCTAssertLessThanOrEqual(held, 8, "the ledger is the bound, and it holds")
+            let deliveredMetadata = await coordinator.deliveredEffects.count
+            XCTAssertLessThanOrEqual(deliveredMetadata, held, "debt metadata cannot outgrow its reserved ledger")
+            let nodes = await coordinator.sessionChainNodes.count
+            peakNodes = max(peakNodes, nodes)
+            XCTAssertLessThanOrEqual(nodes, 2 * 8, "each obligation owns at most one apply and one scheduled node")
+        }
+        let diagnostics = await coordinator.diagnostics
+        XCTAssertEqual(diagnostics.peakRetainedWorkCount, 8)
+        XCTAssertEqual(diagnostics.syncState, .localOverload)
+        let onTheWire = await session.playbackMessages().count
+        XCTAssertEqual(onTheWire, 8, "exactly the delivered eight; the rest were refused at admission")
+        // One refusal, not 992: the first fails this generation's outbound authority closed, so the
+        // 991 presses behind it are answered locally by Phase 3 and never reach `issue`'s admission
+        // at all. Fewer refusals is the *stronger* statement.
+        XCTAssertEqual(diagnostics.workCapacityRefusedCount, 1)
+    }
+
+    /// A delivered obligation keeps its original provenance and releases its exact capacity only
+    /// after its scheduled effect completes, even when End/Start occurs inside the player load.
+    func testARideBoundaryCompletesTheDeliveredCommandAndReleasesItsCapacity() async {
+        await build(sessionWorkCapacity: 2)
+        await leaderPlaying()
+        let oldTrack = SyncTestValues.hash(2)
+        let freshTrack = SyncTestValues.hash(3)
+        await content.addLocal(oldTrack)
+        await content.addPeer(oldTrack)
+        await player.gateCalls { if case .load = $0 { true } else { false } }
+        await coordinator.playSynchronized(oldTrack)
+        await expect("ride 1's pre-roll is parked") { [self] in await player.isGateParked }
+        let delivered = await session.playbackMessages().contains { if case .play = $0 { true } else { false } }
+        XCTAssertTrue(delivered, "the premise: ride 1's PLAY genuinely reached the peer")
+        await expect("its obligation is outstanding") { await self.coordinator.retainedWorkCount == 1 }
+
+        // End ride 1 and start ride 2 while that apply is still parked.
+        let ending = await coordinator.rideEpochs.next()
+        _ = await coordinator.endRideSegment(rideEpoch: ending)
+        _ = await coordinator.rideEpochs.next()
+
+        await player.clearCalls()
+        await player.releaseGate()
+        clock.advance(to: clock.now() + Self.leadUs * 4)
+        await settle()
+
+        await expect("a completed obligation hands its capacity back") { await self.coordinator.retainedWorkCount == 0 }
+        let calls = await player.calls
+        XCTAssertTrue(calls.contains(.start), "delivery must be honoured despite local ride retirement")
+
+        // The freed capacity is genuinely reusable by the ride that follows.
+        await content.addLocal(freshTrack)
+        await content.addPeer(freshTrack)
+        await coordinator.playSynchronized(freshTrack)
+        await expect("ride 2 issues normally on capacity ride 1 released") { [self] in
+            await session.playbackMessages().contains {
+                if case .play(_, let hash, _, _) = $0 { hash == freshTrack } else { false }
+            }
+        }
+        let state = await coordinator.diagnostics.syncState
+        XCTAssertNotEqual(state, .localOverload)
+    }
+
+    /// The over-correction guard. Below the bound nothing changes: ordinary authoritative commands
+    /// deliver, commit their sequence numbers, apply locally and stay in `command_seq` order.
+    func testBelowCapacityOrdinaryCommandsStillDeliverCommitAndApplyInOrder() async {
+        await build(sessionWorkCapacity: 8)
+        await leaderPlaying()
+        await coordinator.pause()
+        await awaitOutboundQuiescent()
+        await coordinator.seek(positionMs: 4_000)
+        await awaitOutboundQuiescent()
+        await coordinator.seek(positionMs: 5_000)
+        await awaitOutboundQuiescent()
+        clock.advance(to: clock.now() + Self.leadUs * 4)
+        await expect("the last command became audible") { [self] in await player.calls.contains(.seek(5_000)) }
+        await settle()
+
+        let seqs = await session.playbackMessages().compactMap { message -> Int64? in
+            switch message {
+            case .pause(let header, _): return header.commandSeq
+            case .seek(let header, _): return header.commandSeq
+            default: return nil
+            }
+        }
+        XCTAssertEqual(seqs, [2, 3, 4], "consecutive, never skipped, in issue order")
+        let diagnostics = await coordinator.diagnostics
+        XCTAssertEqual(diagnostics.lastAppliedCommandSeq, 4)
+        XCTAssertEqual(diagnostics.workCapacityRefusedCount, 0)
+        XCTAssertNotEqual(diagnostics.syncState, .localOverload)
+        await expect("every obligation was discharged") { await self.coordinator.retainedWorkCount == 0 }
     }
 
     override func tearDown() async throws {
@@ -253,6 +491,11 @@ final class SyncPlaybackDeliveryAuditTests: XCTestCase {
     func testARefusedFollowerIntentIsCountedButNeverFailsTheSessionClosed() async {
         await build(outboundCapacity: Self.wedgeCapacity)
         await connect(asLeader: false)
+        // ADR-024 Amendment A14: the wedge and the NEXT below are local presses, synchronised only
+        // while synchronised mode owns the controls. The follower's user starts it on a track this
+        // phone cannot play yet; its queue-add intent drains before the wedge is built.
+        await coordinator.playSynchronized(SyncTestValues.hash(9))
+        await awaitOutboundQuiescent()
         await wedgeOutbound()
 
         await coordinator.next()

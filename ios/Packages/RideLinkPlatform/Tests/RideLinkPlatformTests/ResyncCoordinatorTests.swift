@@ -978,7 +978,7 @@ final class ResyncCoordinatorTests: XCTestCase {
         let heldBefore = await syncCoordinator.deferredEvents
         XCTAssertEqual(1, heldBefore.count, "S1's obligation must be backed by exactly one retained event")
         XCTAssertEqual(
-            RideAdmission(synchronizedModeEpoch: 0, rideEpoch: 1), heldBefore.first?.ride,
+            RideAdmission(synchronizedModeEpoch: 0, rideEpoch: 1), heldBefore.first?.provenanceRide,
             "the retained reconciliation does not carry the ride that admitted it"
         )
         await player.clearCalls()
@@ -1238,7 +1238,7 @@ final class ResyncCoordinatorTests: XCTestCase {
         guard let s1 = coordinator.pendingObligationIdForTest else { return XCTFail("S1 has no obligation id") }
         let heldBefore = await syncCoordinator.deferredEvents
         XCTAssertEqual(1, heldBefore.count, "S1's obligation must be backed by exactly one retained event")
-        XCTAssertEqual(RideAdmission(synchronizedModeEpoch: 0, rideEpoch: 1), heldBefore.first?.ride)
+        XCTAssertEqual(RideAdmission(synchronizedModeEpoch: 0, rideEpoch: 1), heldBefore.first?.provenanceRide)
         await player.clearCalls()
 
         // Park the drain inside its own content resolve — only the drain can satisfy this predicate,
@@ -1374,7 +1374,7 @@ final class ResyncCoordinatorTests: XCTestCase {
             let held = await syncCoordinator.deferredEvents
             XCTAssertEqual(1, held.count, "the obligation must be backed by exactly one retained event")
             XCTAssertEqual(
-                RideAdmission(synchronizedModeEpoch: 0, rideEpoch: 1), held.first?.ride,
+                RideAdmission(synchronizedModeEpoch: 0, rideEpoch: 1), held.first?.provenanceRide,
                 "the retained reconciliation carries the wrong ride"
             )
 

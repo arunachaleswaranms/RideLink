@@ -57,6 +57,7 @@ final class ReconnectResyncStressTests: XCTestCase {
         let content: FakeSyncContent
         let catalogue: FakeCatalogue
         let routeState: FakeRouteState
+        var forwardedGeneration: Int64?
 
         init(peer: TestPeer, clock: SharedTestClock) {
             testPeer = peer
@@ -98,6 +99,7 @@ final class ReconnectResyncStressTests: XCTestCase {
                     Task { @MainActor in
                         await sync.handleConnected(isLocalLeader: isLocalLeader)
                         await resync.onConnected(isLeader: isLocalLeader, generation: authGeneration)
+                        self.forwardedGeneration = authGeneration
                     }
                 }
             }
@@ -106,14 +108,9 @@ final class ReconnectResyncStressTests: XCTestCase {
         }
     }
 
-    // Independent review, round 2: CI and this machine under concurrent load both showed an
-    // occasional `notReady` timeout in a handful of these polls — traced (see ADR-028 Amendment A1's
-    // final verification note) to real TLS-handshake/clock-burst scheduling variance on a
-    // resource-constrained runner, not to a logic race in any of the underlying production code,
-    // which was independently re-verified. This is a stress-test timeout margin, not a production
-    // deadline: widening it costs wall-clock time on an already-slow path, never correctness, so 30 s
-    // was chosen as generous rather than tight. If a `notReady` recurs even at this budget, that is
-    // new evidence worth a fresh investigation rather than another mechanical bump.
+    // Real network completion is observed with a bounded poll. A timeout is evidence to
+    // investigate, not a reason to widen this budget: Phase 8 reproduced an unanswered request
+    // admitted during the production connection reset using a separate deterministic gate.
     private func poll(
         timeoutSeconds: Double = 30,
         _ what: String = "?",
@@ -178,26 +175,10 @@ final class ReconnectResyncStressTests: XCTestCase {
         return (a, b, aPort)
     }
 
-    /// `connectedCount`/`FsmSession` only prove the manager-level `.connected` event was
-    /// *recorded*; the `Task` `RideRig.attach()` schedules from it — `sync.handleConnected` then
-    /// `resync.onConnected`, which is what actually sets `isLocalLeader` on each side's
-    /// `ResyncCoordinator` — is a separate async hop that need not have finished yet. Waiting for
-    /// `diagnostics.sessionGeneration` (set inside `handleConnected`, which fully completes before
-    /// `resync.onConnected` is even called in the same `Task`) to reach the manager's own live
-    /// generation is what actually proves each side's resync coordinator is ready to answer a
-    /// trigger for *this* connection — on the first connect and on every reconnect alike. A gap this
-    /// harness had from the start, surfaced only by a test that triggers a resync before any other
-    /// network traffic gives the forwarding `Task` time to catch up on its own.
+    /// Manager event recording and sync diagnostics publication both precede completion of the
+    /// forwarding task. Observe its completed generation as well, so a new cycle cannot overtake
+    /// `resync.onConnected` from the previous connection.
     private func settleResyncForwarding(a: RideRig, b: RideRig) async throws {
-        // **Independent-review round 8: this now waits for what the comment above always claimed.**
-        //
-        // `isLocalLeader` is set on the first connect and never changes afterwards — leadership is
-        // stable across a reconnect (ARCHITECTURE §5) — so from cycle 2 onwards the old condition
-        // was already true before the cycle began and this helper returned immediately, proving
-        // nothing about the connection the cycle had just built. The generation comparison is the
-        // real signal, and it is the one the comment describes: `diagnostics.sessionGeneration` is
-        // written inside `handleConnected`, which completes before `resync.onConnected` is called in
-        // the same `Task`.
         try await poll(timeoutSeconds: 30, "both sides' coordinators to adopt the live generation") {
             guard a.resync.isLocalLeader == true, b.resync.isLocalLeader == false else { return false }
             guard let aLive = a.manager.liveAuthenticatedGeneration(),
@@ -205,6 +186,7 @@ final class ReconnectResyncStressTests: XCTestCase {
             let aAdopted = await a.sync.diagnostics.sessionGeneration
             let bAdopted = await b.sync.diagnostics.sessionGeneration
             return aAdopted == aLive && bAdopted == bLive
+                && a.forwardedGeneration == aLive && b.forwardedGeneration == bLive
         }
     }
 
@@ -260,7 +242,14 @@ final class ReconnectResyncStressTests: XCTestCase {
             // A pending STATE_REQUEST must never straddle a cycle boundary: either it resolved (the
             // real leader answered it) or the generation moved on and the gate's own comparison
             // makes the old one unreachable — never both an outstanding flag *and* a stuck request.
-            try await poll(timeoutSeconds: 30) { !a.resync.diagnostics.requestPending && !b.resync.diagnostics.requestPending }
+            do {
+                try await poll(timeoutSeconds: 30, "reconciliation complete, cycle \(cycle)") {
+                    !a.resync.diagnostics.requestPending && !b.resync.diagnostics.requestPending
+                }
+            } catch {
+                await dumpRig("pending reconciliation cycle \(cycle)", a: a, b: b)
+                throw error
+            }
         }
 
         XCTAssertEqual(cycles + 1, connectedCount(a.session), "each cycle must produce exactly one .connected event on the leader")
@@ -819,7 +808,14 @@ final class ReconnectResyncStressTests: XCTestCase {
 
         for cycle in 1...cycles {
             try await reconnectCycle(a: a, b: b, aPort: aPort)
-            try await poll(timeoutSeconds: 30) { !a.resync.diagnostics.requestPending && !b.resync.diagnostics.requestPending }
+            do {
+                try await poll(timeoutSeconds: 30, "reconciliation complete, cycle \(cycle)") {
+                    !a.resync.diagnostics.requestPending && !b.resync.diagnostics.requestPending
+                }
+            } catch {
+                await dumpRig("pending reconciliation cycle \(cycle)", a: a, b: b)
+                throw error
+            }
             if cycle.isMultiple(of: 10) {
                 // A stale-generation delivery every ten cycles, to give `rejections`/`droppedRetiredGeneration`
                 // real, repeated traffic to (not) accumulate unboundedly from.

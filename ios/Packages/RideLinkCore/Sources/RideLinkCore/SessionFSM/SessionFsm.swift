@@ -137,7 +137,12 @@ public enum SessionFsm {
             return s == .connected ? FsmState(status: .rideActive) : nil
 
         case .endRide:
-            return s == .rideActive ? FsmState(status: .connected) : nil
+            if s == .rideActive { return FsmState(status: .connected) }
+            if s == .reconnecting, state.returnTo == .rideActive {
+                return FsmState(status: .reconnecting, returnTo: .connected)
+            }
+            if s == .disconnected { return FsmState(status: .ending) }
+            return nil
 
         case .linkLost(let reason):
             switch (reason, s) {

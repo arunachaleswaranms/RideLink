@@ -54,6 +54,23 @@ public enum SyncState: String, Sendable, Equatable {
     /// Phase 3 behaviour and the user keeps control of their own music. **Local music keeps
     /// playing** (ADR-004, FR-025), exactly as for every other failure in this enum.
     case transportFailed = "TRANSPORT_FAILED"
+
+    /// ADR-024 **Amendment A11**: this device refused an authoritative command of its own because it
+    /// could not guarantee the local capacity to honour it, and refused it **before** anything
+    /// reached the peer.
+    ///
+    /// Deliberately not `.transportFailed`. The transport was never asked — it may be perfectly
+    /// healthy — and a rider reading "transport failed" would go looking at the Wi-Fi. What failed
+    /// is this device's own ordered work: more authoritative commands are outstanding, unapplied,
+    /// than `Phase5GateBounds.defaultSessionWorkCapacity` allows.
+    ///
+    /// The posture is identical to `.transportFailed`'s and shares its implementation: synchronised
+    /// mode is left, correction stops, the rate returns to exactly 1.0, **local music keeps
+    /// playing** (ADR-004, FR-025), and a new authenticated connection is what restores eligibility.
+    /// What must *not* happen, and is the whole reason this state exists, is any rollback of
+    /// authority the peer has already been given: every command already delivered keeps its local
+    /// obligation and its place in `lastAppliedSeq`.
+    case localOverload = "LOCAL_OVERLOAD"
 }
 
 /// What the ladder last decided, for the FR-023 diagnostics surface.
@@ -183,6 +200,18 @@ public struct SyncPlaybackDiagnostics: Sendable, Equatable {
     /// authorised by the ride it was admitted under — surfaced rather than dropped silently, and a
     /// reconciliation among them receives its terminal cancellation.
     public var retiredRideDeferredCount = 0
+    /// ADR-024 Amendment A13: how many **accepted** held commands left the held stream because
+    /// authoritative state already accounted for them — a `PLAYBACK_STATE`/`STATE_SNAPSHOT` whose
+    /// `command_seq` covers them, or newer established ride authority — rather than by being applied.
+    ///
+    /// Distinct from `retiredRideDeferredCount`, which an accepted command can never enter: local
+    /// Ride retirement is not cancellation authority for distributed debt.
+    public var supersededHeldCommandCount = 0
+    /// ADR-024 Amendment A13: drain passes on which an **accepted**, clock-ready held command stayed
+    /// held because `SessionWorkLedger` had no capacity to represent it. A wait, not a refusal: its
+    /// `command_seq` is already spent, so it is deliberately not `workCapacityRefusedCount`. One per
+    /// drain pass, and the retry cadence paces the passes — so a busy loop would be visible here.
+    public var heldCommandCapacityWaitCount = 0
     /// Independent-review round 8: how many authoritative operations were refused **at their own
     /// admission or commit point** because the ride lifetime that admitted them retired inside a
     /// suspension the admission had to take.
@@ -216,6 +245,15 @@ public struct SyncPlaybackDiagnostics: Sendable, Equatable {
     /// `command_seq`, no `queue_revision`, no local audible effect — and latches
     /// `outboundAuthorityLost`.
     public var outboundOverflowCount = 0
+    /// ADR-024 Amendment A11: how many times this device had no capacity left for one more local
+    /// playback obligation. On a leader each one is a command that was **never sent**; on a follower
+    /// each one is a command whose `command_seq` was **not spent**, answered by the existing
+    /// halt-and-reconcile. Never a command the peer acted on and this device dropped.
+    public var workCapacityRefusedCount = 0
+    /// ADR-024 Amendment A11: local playback obligations outstanding right now.
+    public var retainedWorkCount = 0
+    /// ADR-024 Amendment A11: the high-water mark of `retainedWorkCount` for this process.
+    public var peakRetainedWorkCount = 0
     /// How many frames have been accepted onto the one ordered outbound path.
     public var outboundEnqueuedCount = 0
     /// How many admitted frames the single writer has **tried** to send (Amendment A2 Finding C).

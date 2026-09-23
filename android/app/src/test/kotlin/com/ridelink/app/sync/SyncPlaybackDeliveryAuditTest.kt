@@ -48,10 +48,294 @@ class SyncPlaybackDeliveryAuditTest {
     private lateinit var coordinator: SyncPlaybackCoordinator
     private var idSeed = 700
 
+    // --- ADR-024 Amendment A11: bounded local work that cannot abandon delivered authority --------
+
+    /**
+     * **The defect Phase 8's first bounded-work fix introduced, and the property that replaces it.**
+     *
+     * That fix counted live apply/scheduled task nodes and refused at the point a node was created.
+     * On a leader that point is reached from `onCommandOutcome` — *after* the authenticated
+     * transport accepted the frame and the peer therefore has it. Its refusal then retired local
+     * playback authority outright, clearing `lastAppliedSeq`/`lastReceivedSeq`, the timeline and the
+     * track identity, and cancelling the apply for a command the follower was about to apply.
+     * That is split-brain authority: the peer acts on C, this device silently does not.
+     *
+     * Amendment A11 moves the question to the one place its answer can still change what reaches
+     * the wire — inside the same critical section as the `command_seq` allocation and the hand-off
+     * to the ordered outbound path. So the boundary has exactly two possible outcomes and this test
+     * asserts both halves:
+     *
+     * - the refused command **never reached the wire**, spent no `command_seq`, and applied nothing;
+     * - every command that *did* reach the wire keeps its local obligation and its place in
+     *   `lastAppliedSeq` — which is exactly what Phase 8's version destroyed.
+     */
+    @Test
+    fun `an authoritative command with no local capacity is refused before it can reach the peer`() =
+        runTest(StandardTestDispatcher()) {
+            build(backgroundScope, sessionWorkCapacity = 2)
+            leaderPlaying(this)
+            // Two commands, both delivered, both holding their obligation in an armed scheduled
+            // action whose deadline the frozen clock will never reach.
+            coordinator.pause()
+            runCurrent()
+            coordinator.seek(1_000)
+            runCurrent()
+            val delivered = session.sent.filterIsInstance<PlaybackMessage>().size
+            assertEquals(2, delivered, "the premise: both commands are genuinely on the wire")
+            val appliedAfterDelivery = coordinator.diagnostics.value.lastAppliedCommandSeq
+            val nextSeqAfterDelivery = coordinator.diagnostics.value.nextCommandSeq
+            assertEquals(2, coordinator.retainedWorkCount, "both obligations are outstanding")
+
+            // The third meets a full ledger.
+            coordinator.seek(2_000)
+            runCurrent()
+
+            assertEquals(
+                delivered,
+                session.sent.filterIsInstance<PlaybackMessage>().size,
+                "Outcome A: the refused command never reached the peer",
+            )
+            assertEquals(1, coordinator.diagnostics.value.workCapacityRefusedCount)
+            assertEquals(
+                SyncState.LOCAL_OVERLOAD,
+                coordinator.diagnostics.value.syncState,
+                "and it is not called TRANSPORT_FAILED, because the transport was never asked",
+            )
+            assertTrue(coordinator.diagnostics.value.outboundAuthorityLost)
+            // **There is no Outcome C.** Sequence truth for the delivered commands is untouched.
+            assertEquals(
+                appliedAfterDelivery,
+                coordinator.diagnostics.value.lastAppliedCommandSeq,
+                "already-delivered authority is never rolled back by a local capacity refusal",
+            )
+            assertEquals(
+                nextSeqAfterDelivery,
+                coordinator.diagnostics.value.nextCommandSeq,
+                "a refused candidate leaves no gap, because it was never assigned",
+            )
+            assertEquals(HASH_A, coordinator.diagnostics.value.currentTrackHash)
+
+            // And the delivered obligations are still real: their deadlines arrive and they act.
+            player.calls.clear()
+            clock.advanceBy(LEAD_US * 4)
+            runCurrent()
+            assertTrue(
+                player.calls.contains(FakeSyncPlayer.Call.Pause),
+                "the delivered PAUSE still took effect locally — the peer has it, so this device must too",
+            )
+            assertTrue(player.calls.any { it is FakeSyncPlayer.Call.Seek && it.positionMs == 1_000L })
+            assertEquals(0, coordinator.retainedWorkCount, "and both obligations are discharged")
+        }
+
+    /**
+     * A send that failed is not a send, so it owes no local work — and must not consume the bound
+     * for the rest of the session. Repeated failures here would otherwise leak the ledger one
+     * reservation at a time until a healthy connection could no longer issue anything.
+     */
+    @Test
+    fun `a refused send releases the capacity it reserved`() =
+        runTest(StandardTestDispatcher()) {
+            build(backgroundScope, sessionWorkCapacity = 2)
+            leaderPlaying(this)
+            session.sendResult = false
+            repeat(20) {
+                coordinator.pause()
+                runCurrent()
+            }
+            assertEquals(0, coordinator.retainedWorkCount, "not one failed send still holds capacity")
+            assertEquals(0, coordinator.diagnostics.value.workCapacityRefusedCount)
+
+            // A fresh authenticated connection then makes ordinary progress on the full bound.
+            session.sendResult = true
+            session.currentAuthGeneration = 2
+            session.emit(ControlEvent.Connected(SyncTestValues.followerPeerId, SessionId("fresh"), true, 2))
+            runCurrent()
+            session.sent.clear()
+            coordinator.playSynchronized(HASH_A)
+            runCurrent()
+            clock.advanceBy(LEAD_US * 2)
+            runCurrent()
+            assertEquals(HASH_A, coordinator.diagnostics.value.currentTrackHash)
+            assertTrue(session.sent.filterIsInstance<PlaybackMessage.Play>().isNotEmpty())
+        }
+
+    /**
+     * A reservation is an immutable token naming the lifetime that took it, never a query against
+     * "the current reservation" — so a predecessor's outcome callback, arriving after a successor
+     * has authenticated *and* reserved capacity of its own, releases an id the ledger no longer
+     * holds and frees nothing.
+     *
+     * The send is parked strictly inside the write, which is the real "socket is slow" shape rather
+     * than a hoped-for interleaving.
+     */
+    @Test
+    fun `a generation boundary releases its own reservations and never a successor's`() =
+        runTest(StandardTestDispatcher()) {
+            build(backgroundScope, sessionWorkCapacity = 2)
+            leaderPlaying(this)
+            val gate = CompletableDeferred<Unit>()
+            session.sendGate = gate
+            coordinator.pause() // parks inside the write, holding G1's reservation
+            runCurrent()
+            assertEquals(1, coordinator.retainedWorkCount)
+
+            session.currentAuthGeneration = 2
+            session.emit(ControlEvent.Connected(SyncTestValues.followerPeerId, SessionId("G2"), true, 2))
+            runCurrent()
+            assertEquals(0, coordinator.retainedWorkCount, "the boundary released exactly G1's obligation")
+
+            // G2 takes capacity of its own while G1's send is still parked.
+            content.localHashes.add(HASH_A.value)
+            content.peerHashes.add(HASH_A.value)
+            coordinator.playSynchronized(HASH_A)
+            runCurrent()
+            val underG2 = coordinator.retainedWorkCount
+            assertEquals(1, underG2, "the premise: the successor holds one obligation of its own")
+
+            // G1's write finally returns. Its outcome must free nothing and apply nothing.
+            player.calls.clear()
+            gate.complete(Unit)
+            runCurrent()
+            assertEquals(underG2, coordinator.retainedWorkCount, "the predecessor freed no successor capacity")
+            assertTrue(
+                player.calls.none { it == FakeSyncPlayer.Call.Pause },
+                "and G1's command applied nothing under G2",
+            )
+            assertEquals(2L, coordinator.diagnostics.value.sessionGeneration)
+        }
+
+    /**
+     * The reason Phase 8 opened this at all, kept: a deadline that never arrives must not produce
+     * unbounded retained work. **Measured on the production ledger**, not on a test fixture's own
+     * recording list.
+     */
+    @Test
+    fun `a thousand commands against a frozen deadline retain a bounded amount of work`() =
+        runTest(StandardTestDispatcher()) {
+            build(backgroundScope, sessionWorkCapacity = 8)
+            leaderPlaying(this)
+            repeat(1_000) {
+                coordinator.pause()
+                runCurrent()
+                assertTrue(coordinator.retainedWorkCount <= 8, "the ledger is the bound, and it holds")
+                val debt =
+                    SyncPlaybackCoordinator::class.java.getDeclaredField("deliveredEffects").let {
+                        it.isAccessible = true
+                        it.get(coordinator) as Map<*, *>
+                    }
+                assertTrue(debt.size <= coordinator.retainedWorkCount, "debt metadata cannot outgrow its reserved ledger")
+                assertTrue(
+                    coordinator.retainedChainNodeCount <= 2 * 8,
+                    "each obligation owns at most one apply node and one scheduled node",
+                )
+            }
+            assertEquals(8, coordinator.diagnostics.value.peakRetainedWorkCount)
+            assertEquals(SyncState.LOCAL_OVERLOAD, coordinator.diagnostics.value.syncState)
+            // Exactly the eight that were delivered are on the wire; the rest were refused at
+            // admission, which is what makes the bound safe rather than merely small.
+            assertEquals(8, session.sent.filterIsInstance<PlaybackMessage>().size)
+            // One refusal, not 992: the first one fails this generation's outbound authority closed,
+            // so the 991 presses behind it are answered locally by Phase 3 and never reach `issue`'s
+            // admission at all. Fewer refusals is the *stronger* statement — nothing after the
+            // boundary was stamped, offered to the wire, or half-applied.
+            assertEquals(1, coordinator.diagnostics.value.workCapacityRefusedCount)
+        }
+
+    /** A delivered obligation keeps its provenance and releases capacity after its effect completes. */
+    @Test
+    fun `a ride boundary completes the delivered command and releases its capacity`() =
+        runTest(StandardTestDispatcher()) {
+            build(backgroundScope, sessionWorkCapacity = 2)
+            leaderPlaying(this)
+            content.localHashes.add(HASH_B.value)
+            content.peerHashes.add(HASH_B.value)
+            val gate = CompletableDeferred<Unit>()
+            player.gate = gate
+            player.gateOn = { it is FakeSyncPlayer.Call.Load && it.contentHash == HASH_B }
+
+            coordinator.playSynchronized(HASH_B)
+            runCurrent()
+            assertTrue(
+                session.sent.filterIsInstance<PlaybackMessage.Play>().any { it.trackHash == HASH_B },
+                "the premise: ride 1's PLAY genuinely reached the peer",
+            )
+            assertEquals(1, coordinator.retainedWorkCount, "and its obligation is outstanding, parked in the pre-roll")
+
+            // End ride 1 and start ride 2 while that apply is still parked.
+            coordinator.endRideSegment(rideEpoch = coordinator.rideEpochs.next())
+            val ride2 = coordinator.rideEpochs.next()
+            runCurrent()
+
+            player.calls.clear()
+            gate.complete(Unit)
+            clock.advanceTo(clock.nowUs() + LEAD_US * 4)
+            runCurrent()
+
+            assertEquals(
+                0,
+                coordinator.retainedWorkCount,
+                "a completed obligation hands its capacity back",
+            )
+            assertTrue(
+                player.calls.any { it == FakeSyncPlayer.Call.Start },
+                "delivery must be honoured despite local ride retirement",
+            )
+            assertTrue(ride2 > 0)
+
+            // The freed capacity is genuinely reusable by the ride that follows.
+            content.localHashes.add(HASH_C.value)
+            content.peerHashes.add(HASH_C.value)
+            coordinator.playSynchronized(HASH_C)
+            runCurrent()
+            assertTrue(
+                session.sent.filterIsInstance<PlaybackMessage.Play>().any { it.trackHash == HASH_C },
+                "ride 2 issues normally on capacity ride 1 released",
+            )
+            assertTrue(coordinator.diagnostics.value.syncState != SyncState.LOCAL_OVERLOAD)
+        }
+
+    /**
+     * The over-correction guard. Below the bound nothing changes: ordinary authoritative commands
+     * deliver, commit their sequence numbers, apply locally and stay in `command_seq` order.
+     */
+    @Test
+    fun `below capacity ordinary commands still deliver, commit and apply in order`() =
+        runTest(StandardTestDispatcher()) {
+            build(backgroundScope, sessionWorkCapacity = 8)
+            leaderPlaying(this)
+            coordinator.pause()
+            runCurrent()
+            coordinator.seek(4_000)
+            runCurrent()
+            coordinator.seek(5_000)
+            runCurrent()
+            clock.advanceBy(LEAD_US * 4)
+            runCurrent()
+
+            val seqs =
+                session.sent
+                    .filterIsInstance<PlaybackMessage>()
+                    .mapNotNull {
+                        when (it) {
+                            is PlaybackMessage.Pause -> it.header.commandSeq
+                            is PlaybackMessage.Seek -> it.header.commandSeq
+                            else -> null
+                        }
+                    }
+            assertEquals(listOf(2L, 3L, 4L), seqs, "consecutive, never skipped, in issue order")
+            assertEquals(4L, coordinator.diagnostics.value.lastAppliedCommandSeq)
+            assertEquals(0, coordinator.diagnostics.value.workCapacityRefusedCount)
+            assertEquals(0, coordinator.retainedWorkCount, "every obligation was discharged")
+            assertTrue(coordinator.diagnostics.value.syncState != SyncState.LOCAL_OVERLOAD)
+            val effects = player.calls.filterIsInstance<FakeSyncPlayer.Call.Seek>().map { it.positionMs }
+            assertEquals(listOf(4_000L, 5_000L), effects.filter { it == 4_000L || it == 5_000L })
+        }
+
     private fun build(
         scope: CoroutineScope,
         outboundCapacity: Int = 256,
         deferredCommandCapacity: Int = 16,
+        sessionWorkCapacity: Int = 256,
     ) {
         idSeed += 10
         session = FakeSyncSession()
@@ -71,6 +355,7 @@ class SyncPlaybackDeliveryAuditTest {
                 nextQueueItemId = { SyncTestValues.ulid(idSeed++) },
                 deferredCommandCapacity = deferredCommandCapacity,
                 outboundCapacity = outboundCapacity,
+                sessionWorkCapacity = sessionWorkCapacity,
             )
     }
 
@@ -282,6 +567,11 @@ class SyncPlaybackDeliveryAuditTest {
         runTest(StandardTestDispatcher()) {
             build(backgroundScope, outboundCapacity = WEDGE_CAPACITY)
             connect(this, asLeader = false)
+            // ADR-024 Amendment A14: the wedge and the NEXT below are local presses, synchronised only
+            // while synchronised mode owns the controls. The follower's user starts it on a track this
+            // phone cannot play yet; its queue-add intent drains before the wedge is built.
+            coordinator.playSynchronized(SyncTestValues.hash(9))
+            runCurrent()
             val gate = wedgeOutbound(this)
 
             coordinator.next()
