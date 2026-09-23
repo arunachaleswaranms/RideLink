@@ -309,3 +309,80 @@ Android and iOS agree on every outcome above. Mechanics differ where the platfor
 suspend, so its proofs pair async and synchronous checks. Android `applyPlay` still stamps identity
 before its content resolve (pre-existing, documented), so C is guarded there by the post-resolve
 `mayRepresent`. No async guard was added for symmetry.
+
+## Amendment A14 — transport ownership after distributed debt
+
+[ADR-024 Amendment A14](DECISIONS/ADR-024-synchronized-playback-integration.md#amendment-a14--23-september-2026--finishing-distributed-authority-never-reopens-local-transport-ownership).
+A13 lets old debt finish after End Ride, and while it does production publishes SCHEDULED and SYNCED
+with the role intact. iOS's presenter derived "synchronised mode owns the controls" as
+`role != nil && syncState != .inactive`, which is true at exactly that point, and the gate used it —
+so a lock-screen Pause after End Ride became a fresh synchronised `PAUSE`.
+
+### Command-gate trace (before the fix, iOS)
+
+`MusicCoordinator` → `SyncPlaybackGate` → `SyncPlaybackGateAdapter` → `SyncPlaybackPresenter` →
+`SyncPlaybackCoordinator`.
+
+| Command | 1. Synchronous intercept decision | 2. State read | 3. Authoritative? | 4. Updated by | 5. Debt completion changes it? | 6. End Ride can leave it true? |
+|---|---|---|---|---|---|---|
+| Play | `MusicCoordinator.play` → `interceptPlay` (forwards `resume()`) | `presenter.isSynchronizedModeActive` = `diagnostics.role != nil && diagnostics.syncState != .inactive` | **No** — display fields | every `publishDiagnostics`, one `Task { @MainActor }` hop later | **Yes** — SCHEDULED/SYNCED make it true | **Yes** |
+| Pause | `pause` → `interceptPause` | same | No | same | Yes | Yes |
+| Seek | `seek` → `interceptSeek` | same | No | same | Yes | Yes |
+| Next | `next` → `interceptNext` | same | No | same | Yes | Yes |
+| Previous | `previous` → `interceptPrevious` | same | No | same | Yes | Yes |
+| TrackEnded | `handlePlayerState`'s `TrackEndEdge` → `interceptTrackEnded` (leader forwards `next()`) | same, plus `presenter.role` = `diagnostics.role` | No | same | Yes | Yes |
+
+Entry points: `MPRemoteCommandCenter` via `NowPlayingController` (play, pause, next, previous,
+change-position) and the in-app `MusicSection` call `MusicCoordinator`, so they all reached this gate.
+Two surfaces did **not**: iOS `RideModeView` and both platforms' `SyncPlaybackView`/`SyncPlaybackCard`
+called the coordinator's `pause`/`resume`/`seek`/`next`/`previous` directly, and those called
+`issue`, which checked role, generation, ride and the fail-closed latch — never `syncEnabled`. Android's
+gate read `SyncPlaybackCoordinator.isSynchronizedModeActive()` (`syncEnabled && role != null`,
+`@Volatile` fields) and was already right; its coordinator entry points had the same missing check.
+
+### After
+
+| Question | Answer |
+|---|---|
+| Authoritative source | `syncEnabled && role != nil` (Kotlin `!= null`); iOS `currentTransportOwnership`, the one derivation |
+| Synchronous read on iOS | `SyncPlaybackCoordinator.transportOwnership` (`TransportOwnershipBox`, lock-backed, `nonisolated let`), stored by the `didSet` of `syncEnabled` and `role` in the same actor step; read by the adapter and by `presenter.isSynchronizedModeActive`. No diagnostics publication writes it |
+| Synchronous read on Android | `isSynchronizedModeActive()`, unchanged |
+| Where fresh local authority is admitted | `admitLocalTransport()` in all five entry points, re-proved by `issue(origin: .localTransport)` beside the stamp, both platforms |
+| Not gated | `.retainedPlay`, `.peerIntent`, inbound authoritative commands, accepted and delivered debt, resync |
+| Activation | local Play-synced; an authoritative command accepted from the leader; the leader serving a follower's intent. Completing old debt, a nominal Start Ride, a surviving role and a SYNCED display are not |
+| iOS Ride Mode | now `MusicCoordinator` → gate, as Android's `RideModeScreen` already was |
+
+### Regressions
+
+iOS `SyncPlaybackTransportOwnershipTests` (real adapter, real presenter, fake session on a virtual
+clock): accepted debt finishing after End Ride — presenter never active across SCHEDULED, a parked
+start, SYNCED, while those snapshots satisfy the old derivation (A); the leader's delivered debt, then
+the real gate, direct calls and Play-synced reactivation (A–D for the leader); the real gate local for
+all six intercepts (B); a local Pause/Next declined by the gate and all five direct calls refused with
+nothing enqueued, sent or played (C); a nominal Start Ride, a role and SYNCED together still local,
+then Play-synced reopening Pause/Seek/Next as intents (D); the role surviving without ownership (E);
+every publication after End Ride carrying `.local`, with End Ride mirrored before its own publication
+(F); a press intercepted immediately before End Ride refused at admission; and a fresh leader command
+after End Ride accepted and activating. Android `SyncPlaybackTransportOwnershipTest` mirrors A–E, the
+race and the inbound case. Reproduction: every iOS case that asserts the presenter or the gate failed
+against the moved-but-unmodified sources; on Android the gate half already passed and the direct-call
+and race cases failed. Isolation: reverting only the coordinator guard fails exactly the direct-call,
+race and leader cases; reverting only the presenter's source fails exactly the presenter cases.
+
+### Fresh-fix audit
+
+| Risk | Result |
+|---|---|
+| mirror stale after End Ride / after Start Ride | no — stored in the same actor step as `syncEnabled`/`role`; nominal Start Ride moves neither |
+| role survives while the ownership flag survives | no — E |
+| old distributed completion re-enables ownership | no — the drain never writes `syncEnabled`; A, F |
+| diagnostics published out of order | irrelevant to authority — the mirror is not written by publication; F pins it |
+| remote-command intercept race | closed at admission — race regression, both platforms |
+| `MusicCoordinator` receives both a local and a synchronised command | no — an intercept returns true and `MusicCoordinator` returns before its Phase 3 effect; unchanged |
+| `issue` accepting fresh authority while inactive | no — `admitLocalTransport` + `mayIssue`, both platforms |
+| inbound peer command rejected because local ownership is off | no — inbound case accepts, applies and activates |
+| accepted/delivered debt rejected by the new guard | no — not `.localTransport`; A and every A12/A13 regression green |
+| resync broken while ownership is off | no — resync never reaches the guard; ReconnectResync/Resync suites green |
+| Start Ride unable to reactivate | no — Play-synced reactivates (D); Start Ride was never an activation |
+| multiple sources of truth | no — one derivation; the iOS box is its copy, the presenter reads the box |
+| a test passing vacuously | one found and removed: "presenter local the instant End Ride returns" passed with the old formula because the presenter's main-actor delivery always lands first |

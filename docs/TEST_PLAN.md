@@ -28,6 +28,23 @@ own bound across End Ride. The round-7/8 cases in §3.1c that expected a held **
 be discarded on ride retirement are superseded by A13: they now expect completion with original
 provenance and applied truth only at representation.
 
+**Transport ownership after distributed debt** ([ADR-024 A14](DECISIONS/ADR-024-synchronized-playback-integration.md#amendment-a14--23-september-2026--finishing-distributed-authority-never-reopens-local-transport-ownership)).
+Run iOS `SyncPlaybackTransportOwnershipTests` and Android `SyncPlaybackTransportOwnershipTest`, which
+use the **real** `SyncPlaybackGateAdapter` (and, on iOS, the real `SyncPlaybackPresenter`). A — a
+follower's accepted, clock-held C1 finishes after End Ride (SCHEDULED, a parked start, SYNCED) and
+ownership stays local on every reader, while the published snapshots satisfy the pre-A14 derivation
+`role != nil && syncState != .inactive`; the leader's delivered C1 likewise. B — after that, the real
+gate returns false for Play, Pause, Seek, Next, Previous and TrackEnded, and nothing is enqueued, sent
+or played. C — a local Pause/Next is declined by the gate (Phase 3's path) and all five coordinator
+entry points called directly refuse fresh authority. D — a nominal Start Ride, a surviving role and
+SYNCED together are still local; Play-synced reopens ownership and Pause/Seek/Next are intercepted
+again. E — `role != nil` with ownership off after End Ride and after the debt completes. F — every
+publication after End Ride carries local ownership and End Ride is mirrored before it is published.
+Plus: a press intercepted immediately before End Ride is refused at admission, and a fresh leader
+command after End Ride is still accepted and still activates. The five iOS and four Android existing
+tests that issued transport commands in a never-activated session now start synchronised playback
+first (Play-synced on a track neither phone holds), assertions unchanged.
+
 **Cross-platform software integration.** Run `tools/crossplatform/run.sh`. It starts the Swift and
 Kotlin implementations as two processes joined by a real TCP socket carrying the real protocol and
 compares their reports: matching PROTOCOL §4.5 six-digit codes derived from each side's own TLS

@@ -2296,3 +2296,76 @@ are local ownership. The earlier round-7/8 regressions that asserted a held **ac
 discarded on ride retirement asserted the blocker; they now assert completion with original ride
 provenance (never relabelled) and applied truth only at representation. The pipeline trace, every
 exit, and the regression names are in [`PHASE8_DELIVERED_AUTHORITY.md`](../PHASE8_DELIVERED_AUTHORITY.md#amendment-a13--accepted-clock-held-commands).
+
+## Amendment A14 — 23 September 2026 — finishing distributed authority never reopens local transport ownership
+
+Amendment A13 correctly lets an accepted or delivered command finish after End Ride. While it does,
+production legitimately publishes `SyncState.scheduled` (from `scheduleAt`) and then `.synced` (from
+`markSynced`), and the ADR-010 role survives End Ride because the control connection does. The
+coordinator's own answer to "does a synchronised session own transport control?" stayed right —
+`syncEnabled && role != nil`, and nothing that merely finishes distributed work sets `syncEnabled` —
+but iOS did not ask it. `SyncPlaybackPresenter` reconstructed the answer from display fields as
+`diagnostics.role != nil && diagnostics.syncState != .inactive`, and `RideLinkApp` handed that to
+`SyncPlaybackGateAdapter`. The two expressions were approximately equivalent only while nothing could
+report scheduling with synchronised mode ended; A13 made that possible, so after End Ride and the
+debt's completion the lock-screen Pause was intercepted and `pause()` issued a **fresh** synchronised
+`PAUSE`. (`failClosedOutbound` had the same shape all along: it clears `syncEnabled` and publishes
+`.transportFailed`, which the reconstruction also read as "synchronised".) Reproduced first against
+the unmodified sources — moved into `RideLinkPlatform` unchanged so the real presenter and adapter
+could run — as five failures: presenter active at SCHEDULED and at SYNCED, `interceptPause()` true, the
+forwarded press on the wire, and a direct `next()` on the wire; the coordinator said false throughout.
+
+**The invariant.** Completion of previously distributed authority after End Ride may satisfy that old
+obligation, but it never reopens admission of fresh synchronised transport authority. There is exactly
+one authoritative answer to "may a fresh local transport control become synchronised authority?", and
+it is derived from coordinator authority state, never from `SyncState`.
+
+**Decision.**
+
+1. **One source.** `syncEnabled && role != nil`, projected once as `TransportOwnership` (`.local` or
+   `.synchronized(role)`; the role travels inside the case, so ownership and role cannot come from two
+   reads). Three concepts are kept apart: *transport ownership* (may a local control be intercepted),
+   the *role* (how a synchronised command is serialised; survives End Ride), and *`SyncState`*
+   (operational diagnostics; may say SCHEDULED/SYNCED while an old obligation finishes).
+2. **A synchronous mirror written by the coordinator, never reconstructed.** iOS's gate callers
+   (`MPRemoteCommandCenter` handlers, `MusicCoordinator`) cannot await the actor, so
+   `SyncPlaybackCoordinator.transportOwnership` is a lock-backed `TransportOwnershipBox` — the
+   `RideEpochBox` shape — stored by the `didSet` of `syncEnabled` and of `role`, in the same
+   actor-isolated step as the change. No diagnostics publication writes it, there is no hop to lag or
+   reorder, and `SyncPlaybackGateAdapter` and `SyncPlaybackPresenter.isSynchronizedModeActive` read it.
+   Android needed no mirror: its adapter already read the `@Volatile` fields through
+   `isSynchronizedModeActive()`.
+3. **Defence in depth where the authority is created, on both platforms.** The gate is not the only
+   caller — both platforms' Phase 5 synchronised-playback cards call `pause`/`resume`/`seek`/`next`/
+   `previous` directly, and iOS Ride Mode did too — and the gate's own read is acted on in a
+   `Task`/launched coroutine, so End Ride can land between the intercept and the admission. The five
+   entry points are therefore admitted by `admitLocalTransport()` (nil unless ownership is
+   synchronised) and `issue` re-proves it in the same no-`await` block / critical section that stamps
+   the command. `issue` now takes an explicit `IssueOrigin` with no default: only `.localTransport` is
+   gated; `.retainedPlay` (its press activated the mode; every exit cancels it while retained, and the
+   ride proof refuses it once issued) and `.peerIntent` (the peer's authority, adopted by the leader)
+   are not. Inbound authoritative commands, accepted and delivered debt, and resync are untouched, and
+   an authoritative command the leader sends after this phone's End Ride is still accepted and is still
+   an activation — which old-debt completion is not.
+4. **iOS Ride Mode goes through the one command path.** Its transport buttons called the synchronised
+   entry points directly, the one set of controls that bypassed the gate; with the guard they would have
+   done nothing before synchronised playback started. They now call `MusicCoordinator`, exactly as the
+   lock screen, the in-app music controls and Android's `RideModeScreen` do.
+5. **Testability.** `SyncPlaybackGate`, `SyncPlaybackGateAdapter` and `SyncPlaybackPresenter` moved from
+   the app target (which has no test bundle) into `RideLinkPlatform`, unchanged in a separate commit, as
+   `RideSegmentLifecycle` did before them. The adapters over `MusicCoordinator`, `SharedLibraryCoordinator`
+   and `SessionCoordinator` stay in the app.
+
+**`SyncState` after End Ride.** Unchanged, deliberately: an old obligation finishing after End Ride may
+display SCHEDULED and then SYNCHRONIZED, because that is what happened to that command on both phones
+(A12/A13 keep its timeline and drift correction). Authorisation no longer depends on it, and hiding it
+would also hide `.transportFailed`/`.localOverload`, which are set with `syncEnabled` cleared on purpose.
+
+**Consequences.** A press intercepted while synchronised whose admission runs after End Ride is dropped
+— neither synchronised nor local — which is the fail-closed answer to two simultaneous human actions. The
+Phase 5 diagnostic cards' transport buttons do nothing unless synchronised mode is active; Play-synced
+is the local activation. Five iOS and four Android existing tests issued transport commands in a session
+that had never activated synchronised mode; each now starts it the way a user would (Play-synced on a
+track neither phone holds, which issues no playback command and spends no `command_seq`), with every
+assertion unchanged. No wire change, no protocol field, no vector: transport ownership is local.
+The command-gate trace is in [`PHASE8_DELIVERED_AUTHORITY.md`](../PHASE8_DELIVERED_AUTHORITY.md#amendment-a14--transport-ownership-after-distributed-debt).

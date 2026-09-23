@@ -8,6 +8,45 @@ This is the current audit record; STATUS's older implementation-pass narratives 
 Software closure requires independent review of the live PR and exact-head CI. Physical
 validation remains **DEFERRED — HARDWARE NOT AVAILABLE**.
 
+## Transport ownership after distributed debt — 23 September 2026
+
+Review at `171bb3fa8f44d34296636b50a44a8e9af816340b` found that A13's correct completion of old
+distributed debt after End Ride could reopen **fresh** synchronised transport authority on iOS: the
+finishing command publishes SCHEDULED/SYNCED with the role intact, and `SyncPlaybackPresenter`
+derived ownership as `role != nil && syncState != .inactive`, which the gate then used.
+[ADR-024 Amendment A14](DECISIONS/ADR-024-synchronized-playback-integration.md#amendment-a14--23-september-2026--finishing-distributed-authority-never-reopens-local-transport-ownership)
+gives ownership one source (`syncEnabled && role != nil`), mirrors it synchronously from the
+coordinator on iOS, and has both platforms' coordinators refuse a fresh local transport command
+unless synchronised mode owns the controls; iOS Ride Mode now goes through the gate. The command-gate
+trace and fresh-fix audit are in
+[the delivered-authority audit](PHASE8_DELIVERED_AUTHORITY.md#amendment-a14--transport-ownership-after-distributed-debt).
+No protocol, vector, dependency, security-workflow or cross-platform-gate change.
+
+Reproduced first. iOS: the gate, adapter and presenter were moved into `RideLinkPlatform` unchanged
+(commit `416b194`), and against that code the regression failed five ways — presenter active at
+SCHEDULED and at SYNCED, `interceptPause()` true, the forwarded Pause on the wire as a fresh intent, and
+a direct `next()` on the wire — while `isSynchronizedModeActive()` stayed false. Android, against
+unmodified production: the gate half passed (it already read the coordinator's fields); the direct
+`pause()` and the intercept-then-End-Ride race each put a fresh PAUSE intent on the wire. Isolation:
+reverting only the coordinator guard fails exactly the direct-call, race and leader cases; reverting
+only the presenter's source fails exactly the presenter cases. One new test was found vacuous (it
+passed with the old formula) and removed.
+
+| Gate | Evidence (AUTOMATED, local, final source) |
+|---|---|
+| Targeted repeats | iOS `SyncPlaybackTransportOwnershipTests` 20× (9 tests, 0 failing iterations); the five modified iOS tests 5× (0 failing); Android targeted suites (`SyncPlaybackTransportOwnershipTest`, `SyncPlaybackCoordinatorTest`, `SyncPlaybackDeliveryAuditTest`, `SyncPlaybackClosureAuditTest`) green |
+| Android unit | 1,092 passed, 0 failed, counted from JUnit XML and all executed in this pass: core 459, app 285, network 284, audio 33, data 31 |
+| Android static/build | ktlint, detekt, lint, assembleDebug and assembleRelease passed with JDK 21 |
+| iOS Core | 353 passed |
+| iOS Platform | 670 executed, 0 failures, 1 skipped (the interop half that needs the orchestrator); includes all 16 real-TLS two-peer tests and the 9 new ownership tests |
+| iOS simulator builds | Unsigned Debug and Release (CI's exact commands): `** BUILD SUCCEEDED **` |
+| Cross-platform | `tools/crossplatform/run.sh`: GATE PASSED, 17/17 comparisons |
+| Local security | Gitleaks over git history: no leaks. Local-only policy (`tools/audit_local_only.py`, Python 3.14): 0 findings. The 22 `gitleaks dir` hits over the working tree are all in the untracked SwiftPM `.build/` checkout of GRDB's vendored SQLite, as before |
+| GitHub CI/security | Exact pushed-head run IDs are supplied with the PR handoff |
+
+SwiftLint/SwiftFormat are not installed on this machine and are not CI gates. Physical gates remain
+**DEFERRED — HARDWARE NOT AVAILABLE**. This blocker was software and is closed in software.
+
 ## Accepted clock-held commands — 23 September 2026
 
 Review at `47dd2aca888c574304aeaa6f4afdabadda134128` found the delivered-authority model applied
