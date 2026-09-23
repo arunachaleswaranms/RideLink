@@ -227,6 +227,10 @@ class SyncPlaybackClosureAuditTest {
                 // A queue with two items, so a REMOVE and a MOVE both have something to act on.
                 coordinator.enqueue(HASH_A)
                 coordinator.enqueue(HASH_B)
+                // ADR-024 Amendment A14: the playback actions below are local presses, synchronised only
+                // while synchronised mode owns the controls. The user starts it on a track neither phone
+                // holds, so the press is retained and issues nothing; that track joins the end of the queue.
+                coordinator.playSynchronized(SyncTestValues.hash(9))
                 runCurrent()
                 session.sent.clear()
 
@@ -254,6 +258,10 @@ class SyncPlaybackClosureAuditTest {
                 content.peerHashes.add(HASH_B.value)
                 coordinator.enqueue(HASH_A)
                 coordinator.enqueue(HASH_B)
+                // ADR-024 Amendment A14: the playback actions below are local presses, synchronised only
+                // while synchronised mode owns the controls. The user starts it on a track neither phone
+                // holds, so the press is retained and issues nothing; that track joins the end of the queue.
+                coordinator.playSynchronized(SyncTestValues.hash(9))
                 runCurrent()
                 session.sent.clear()
 

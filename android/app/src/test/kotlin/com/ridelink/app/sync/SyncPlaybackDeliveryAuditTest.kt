@@ -567,6 +567,11 @@ class SyncPlaybackDeliveryAuditTest {
         runTest(StandardTestDispatcher()) {
             build(backgroundScope, outboundCapacity = WEDGE_CAPACITY)
             connect(this, asLeader = false)
+            // ADR-024 Amendment A14: the wedge and the NEXT below are local presses, synchronised only
+            // while synchronised mode owns the controls. The follower's user starts it on a track this
+            // phone cannot play yet; its queue-add intent drains before the wedge is built.
+            coordinator.playSynchronized(SyncTestValues.hash(9))
+            runCurrent()
             val gate = wedgeOutbound(this)
 
             coordinator.next()

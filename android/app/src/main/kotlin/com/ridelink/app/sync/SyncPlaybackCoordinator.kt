@@ -403,6 +403,49 @@ class SyncPlaybackCoordinator(
         val rideEpoch: Long,
     )
 
+    /**
+     * Who is creating the authority [issue] is about to stamp (ADR-024 Amendment A14). Every caller
+     * names one; there is no default, so a new caller cannot silently inherit the wrong answer.
+     */
+    private enum class IssueOrigin {
+        /**
+         * A fresh press on this phone — [pause]/[resume]/[seek]/[next]/[previous], whether it came
+         * through [SyncPlaybackGateAdapter] or straight from a synchronised-playback control. The one
+         * origin that requires a synchronised session to own transport control.
+         */
+        LOCAL_TRANSPORT,
+
+        /**
+         * The one retained Play, whose own press or served intent already activated synchronised
+         * mode. Every exit from synchronised mode cancels it while it is retained, and the ride proof
+         * refuses it once it is being issued.
+         */
+        RETAINED_PLAY,
+
+        /** A follower's intent served by the leader — the peer's authority, adopted, never a local candidate. */
+        PEER_INTENT,
+    }
+
+    /**
+     * The admission point for a **fresh, locally-originated** transport command (ADR-024 Amendment
+     * A14): null unless a synchronised session owns this phone's transport controls right now.
+     *
+     * [SyncPlaybackGateAdapter] asks [isSynchronizedModeActive] before it forwards a press, but acts
+     * on the answer in a launched coroutine, so an End Ride landing between the two would otherwise
+     * have this admit a brand-new ride and stamp fresh authority after the ride ended — and the gate
+     * is not the only caller: the synchronised-playback card calls these entry points directly. So
+     * the invariant is enforced where the authority is created, and re-proved by [issue] inside the
+     * critical section that stamps it. A refused press is dropped, never downgraded to a local effect.
+     *
+     * Deliberately **not** used by inbound or distributed authority: an accepted command, a
+     * delivered obligation, a served intent and a resync snapshot are the peer's authority or this
+     * device's debt to it, and none of them asks whether *local* controls are synchronised.
+     */
+    private fun admitLocalTransport(): RideAdmission? = if (isSynchronizedModeActive()) admitRide() else null
+
+    /** [issue]'s A14 proof, taken inside the critical section that stamps. */
+    private fun mayIssue(origin: IssueOrigin): Boolean = origin != IssueOrigin.LOCAL_TRANSPORT || isSynchronizedModeActive()
+
     /** Successful delivery changes cancellation authority, never original ride provenance. */
     private data class DeliveredAuthority(
         val ride: RideAdmission,
@@ -1727,6 +1770,15 @@ class SyncPlaybackCoordinator(
          * the command rather than by whichever ride is current when the transport finally answers.
          */
         ride: RideAdmission,
+        /**
+         * ADR-024 Amendment A14: a [IssueOrigin.LOCAL_TRANSPORT] command exists only while a
+         * synchronised session owns transport control, and is re-proved against
+         * [isSynchronizedModeActive] in each critical section below. The other two origins are not
+         * gated on it: a retained Play carries the ownership its own press established (every exit from
+         * synchronised mode cancels it, or `rideStillLive` refuses it), and a served intent is the
+         * peer's authority.
+         */
+        origin: IssueOrigin,
         build: (PlaybackCommandHeader) -> PlaybackMessage,
     ) {
         val currentRole = role ?: return
@@ -1737,6 +1789,8 @@ class SyncPlaybackCoordinator(
                 commandMutex.withLock {
                     if (!stillCurrent(generation)) return
                     if (!rideStillLive(ride)) return
+                    // A14: and, for a fresh local press, that synchronised mode still owns the controls.
+                    if (!mayIssue(origin)) return
                     val header =
                         PlaybackCommandHeader(
                             PlaybackBounds.UNASSIGNED_COMMAND_SEQ,
@@ -1758,6 +1812,9 @@ class SyncPlaybackCoordinator(
             if (!stillCurrent(generation) || outboundAuthorityLost) return
             // Round 7: `readyEstimate` above suspends, and End Ride moves no control generation.
             if (!rideStillLive(ride)) return
+            // A14: `readyEstimate` suspends, and a boundary that ended synchronised mode inside it must
+            // not let a fresh local press become authority the follower then obeys.
+            if (!mayIssue(origin)) return
             // **ADR-024 Amendment A11: capacity before delivery, in the same critical section as the
             // `command_seq` allocation and the hand-off to the wire.** This is the one placement
             // that makes the invariant structural: the peer cannot come to rely on a command this
@@ -2000,7 +2057,7 @@ class SyncPlaybackCoordinator(
                 if (!clearPendingPlay(pending, cancelled = false)) return
                 // Round 7: the **press's** ride, not a fresh capture. This is the one authoritative
                 // command whose authorising instant is genuinely older than the function issuing it.
-                issue(pending.ride) { header ->
+                issue(pending.ride, IssueOrigin.RETAINED_PLAY) { header ->
                     PlaybackMessage.Play(header, pending.contentHash, pending.positionMs, pending.queueItemId)
                 }
             }
@@ -2167,29 +2224,41 @@ class SyncPlaybackCoordinator(
     // Independent-review round 7: each of these captures the ride as the first statement of the
     // coroutine and hands it to [issue], which proves it adjacent to the stamp. A transport press
     // made in ride 1 can no longer be stamped, sent and applied as ride 2's authority.
+    //
+    // ADR-024 Amendment A14: and each is admitted only while a synchronised session owns transport
+    // control. See [admitLocalTransport].
 
     fun pause() =
         scope.launch {
-            val ride = admitRide()
+            val ride = admitLocalTransport() ?: return@launch
             val position = player.playerState.value.positionMs
-            issue(ride) { header -> PlaybackMessage.Pause(header, position.coerceAtLeast(0)) }
+            issue(ride, IssueOrigin.LOCAL_TRANSPORT) { header -> PlaybackMessage.Pause(header, position.coerceAtLeast(0)) }
         }
 
     fun resume() =
         scope.launch {
-            val ride = admitRide()
+            val ride = admitLocalTransport() ?: return@launch
             val position = player.playerState.value.positionMs
-            issue(ride) { header -> PlaybackMessage.Resume(header, position.coerceAtLeast(0)) }
+            issue(ride, IssueOrigin.LOCAL_TRANSPORT) { header -> PlaybackMessage.Resume(header, position.coerceAtLeast(0)) }
         }
 
     fun seek(positionMs: Long) =
         scope.launch {
-            issue(admitRide()) { header -> PlaybackMessage.Seek(header, positionMs.coerceAtLeast(0)) }
+            val ride = admitLocalTransport() ?: return@launch
+            issue(ride, IssueOrigin.LOCAL_TRANSPORT) { header -> PlaybackMessage.Seek(header, positionMs.coerceAtLeast(0)) }
         }
 
-    fun next() = scope.launch { issue(admitRide()) { header -> PlaybackMessage.Next(header) } }
+    fun next() =
+        scope.launch {
+            val ride = admitLocalTransport() ?: return@launch
+            issue(ride, IssueOrigin.LOCAL_TRANSPORT) { header -> PlaybackMessage.Next(header) }
+        }
 
-    fun previous() = scope.launch { issue(admitRide()) { header -> PlaybackMessage.Previous(header) } }
+    fun previous() =
+        scope.launch {
+            val ride = admitLocalTransport() ?: return@launch
+            issue(ride, IssueOrigin.LOCAL_TRANSPORT) { header -> PlaybackMessage.Previous(header) }
+        }
 
     /**
      * ARCHITECTURE §3's `RIDE_ACTIVE -> CONNECTED`, reaching the one owner of ride-segment playback
@@ -2301,7 +2370,14 @@ class SyncPlaybackCoordinator(
         }
     }
 
-    /** Whether a synchronised session currently owns transport control (brief §39/§40). */
+    /**
+     * Whether a synchronised session currently owns transport control (brief §39/§40) — **the** answer
+     * to "may a fresh local transport control become synchronised authority?" (ADR-024 Amendment A14).
+     *
+     * A projection of [syncEnabled] and [role] only. The role survives End Ride because the control
+     * connection does, and an already-distributed obligation finishing after End Ride reports
+     * SCHEDULED/SYNCED, so neither `role != null` nor `syncState` is evidence of ownership.
+     */
     fun isSynchronizedModeActive(): Boolean = syncEnabled && role != null
 
     /**
@@ -3125,7 +3201,7 @@ class SyncPlaybackCoordinator(
             resolvePendingPlay()
             return
         }
-        issue(ride) { stamped -> restamp(message, stamped) }
+        issue(ride, IssueOrigin.PEER_INTENT) { stamped -> restamp(message, stamped) }
     }
 
     /** The same message, carrying the leader's authoritative header instead of the intent's. */
