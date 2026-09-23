@@ -48,8 +48,12 @@ binding, untouched here) and was killed; it did not recur in 20 watchdog-guarded
 or in two later full runs. The same interrupted run failed
 `testDeliveredApplyParkedAcrossEndRideCompletesWithOriginalProvenance` once (0/30 in isolation):
 its fixed yield budget let the parked apply resume between two separate actor reads under load; it
-now waits on the outcome. SwiftLint/SwiftFormat are not installed on this machine and are not CI
-gates.
+now waits on the outcome. Exact-head CI run 35860945890 (at `76a359c`) then failed iOS once in
+`SyncPlaybackOperationLifetimeAuditTests.testWithinOneSessionEveryStepOfACompoundStillRuns`, a
+leader-side test this change does not reach: it read `syncState` right after the player recorded the
+seek, while `markSyncedAndPublish` was still crossing its ownership proof to the session actor (0/60
+locally in isolation). It now waits on the same `.synced` outcome. SwiftLint/SwiftFormat are not
+installed on this machine and are not CI gates.
 
 Physical gates remain **DEFERRED — HARDWARE NOT AVAILABLE**. This blocker was software and is
 closed in software.

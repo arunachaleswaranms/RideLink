@@ -409,8 +409,12 @@ final class SyncPlaybackOperationLifetimeAuditTests: XCTestCase {
         await expect("and its seek still followed") { [self] in
             await player.calls.last == .seek(Self.pausePositionMs)
         }
-        let state = await coordinator.diagnostics.syncState
-        XCTAssertEqual(state, .synced, "both steps ran and the command counts as landed")
+        // Waits on the outcome: the seek is recorded on the player actor, and `.synced` is written
+        // only after `markSyncedAndPublish`'s own ownership proof hops to the session actor — so a
+        // single read here raced that hop and failed once on a loaded CI runner.
+        await expect("both steps ran and the command counts as landed") { [self] in
+            await coordinator.diagnostics.syncState == .synced
+        }
     }
 
     // MARK: - Fixtures
