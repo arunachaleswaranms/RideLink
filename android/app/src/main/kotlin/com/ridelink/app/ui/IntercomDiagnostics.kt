@@ -5,7 +5,6 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.ui.unit.dp
 import com.ridelink.app.music.CoexistenceDiagnostics
 import com.ridelink.core.audiopolicy.AudioRouteSnapshot
 import com.ridelink.core.protocol.AudioStateMessage
@@ -32,7 +31,7 @@ internal fun IntercomDiagnosticsSections(
     coexistence: CoexistenceDiagnostics,
     peerAudioState: AudioStateMessage?,
 ) {
-    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+    Column(verticalArrangement = Arrangement.spacedBy(RideSpace.sm)) {
         VoiceMediaDiagnostics(voice.engine)
         VoiceSetupDiagnostics(voice.setup)
         VoiceRouteDiagnostics(voice.route)

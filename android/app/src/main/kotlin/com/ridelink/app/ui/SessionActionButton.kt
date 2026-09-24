@@ -69,10 +69,10 @@ fun StartRideButton(
 private enum class SessionAction(
     val label: String,
 ) {
-    START("Start Discovery"),
-    STOP_DISCOVERY("Stop Discovery"),
+    START("Find peer"),
+    STOP_DISCOVERY("Stop searching"),
     END("End Session"),
-    RETRY("Retry"),
+    RETRY("Find peer again"),
 }
 
 private fun sessionAction(status: SessionStatus): SessionAction? =

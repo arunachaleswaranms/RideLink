@@ -2,6 +2,7 @@ package com.ridelink.app.ui
 
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
@@ -13,13 +14,11 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.unit.dp
 import com.ridelink.app.library.DownloadState
 import com.ridelink.app.library.SharedLibraryCoordinator
 import com.ridelink.app.music.CoexistenceDiagnostics
 import com.ridelink.app.session.SessionCoordinator
 import com.ridelink.app.sync.SyncPlaybackCoordinator
-import com.ridelink.app.sync.SyncState
 import com.ridelink.core.audiopolicy.IntercomPolicy
 import com.ridelink.core.audiopolicy.RideStartDecision
 import com.ridelink.core.library.LibraryEntry
@@ -50,9 +49,16 @@ fun SyncPlaybackCard(
     val queue by sync.queueState.collectAsState()
 
     Card(modifier = Modifier.fillMaxWidth()) {
-        Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        Column(modifier = Modifier.padding(RideSpace.md), verticalArrangement = Arrangement.spacedBy(RideSpace.sm)) {
             Text("Synchronized Playback", style = MaterialTheme.typography.titleMedium)
-            Text(syncStateLabel(diagnostics.syncState), style = MaterialTheme.typography.bodyMedium)
+            Text(
+                rideMusicLabel(
+                    com.ridelink.core.sessionfsm.SessionStatus.CONNECTED,
+                    diagnostics.syncState,
+                    sync.isSynchronizedModeActive(),
+                ),
+                style = MaterialTheme.typography.bodyMedium,
+            )
 
             if (diagnostics.role == null) {
                 Text(
@@ -63,49 +69,37 @@ fun SyncPlaybackCard(
                 return@Column
             }
 
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                OutlinedButton(onClick = { sync.previous() }) { Text("Prev") }
-                OutlinedButton(onClick = { sync.pause() }) { Text("Pause") }
-                OutlinedButton(onClick = { sync.resume() }) { Text("Resume") }
-                OutlinedButton(onClick = { sync.next() }) { Text("Next") }
+            FlowRow(horizontalArrangement = Arrangement.spacedBy(RideSpace.sm)) {
+                OutlinedButton(onClick = { sync.previous() }, enabled = sync.isSynchronizedModeActive()) { Text("Prev") }
+                OutlinedButton(onClick = { sync.pause() }, enabled = sync.isSynchronizedModeActive()) { Text("Pause") }
+                OutlinedButton(onClick = { sync.resume() }, enabled = sync.isSynchronizedModeActive()) { Text("Resume") }
+                OutlinedButton(onClick = { sync.next() }, enabled = sync.isSynchronizedModeActive()) { Text("Next") }
             }
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                OutlinedButton(onClick = { sync.seek(0) }) { Text("Seek 0:00") }
+            FlowRow(horizontalArrangement = Arrangement.spacedBy(RideSpace.sm)) {
+                OutlinedButton(onClick = { sync.seek(0) }, enabled = sync.isSynchronizedModeActive()) { Text("Seek 0:00") }
                 OutlinedButton(onClick = { sync.leaveSynchronizedMode() }) { Text("Play locally") }
             }
 
-            Text("Shared queue (revision ${diagnostics.queueRevision})", style = MaterialTheme.typography.titleSmall)
-            if (queue.items.isEmpty()) {
-                Text("Empty", style = MaterialTheme.typography.bodySmall)
-            }
-            queue.items.forEach { item ->
-                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    val marker = if (item.queueItemId == queue.currentItemId) "▶ " else ""
-                    // The hash prefix, not the filename: ADR-005's authoritative identity is what the
-                    // queue is keyed on, and a filename would invite the user to believe otherwise.
-                    Text("$marker${item.trackHash.hex.take(HASH_PREFIX_CHARS)}…", style = MaterialTheme.typography.bodySmall)
-                    OutlinedButton(onClick = { sync.removeFromQueue(item.queueItemId) }) { Text("Remove") }
-                }
-            }
+            SharedQueueContent(queue, sharedEntries.associate { it.contentHash?.value.orEmpty() to it.title }, sync::removeFromQueue)
 
             Text("Playable on both phones", style = MaterialTheme.typography.titleSmall)
             val playable = sharedEntries.filter { it.contentHash != null && it.contentHash!!.value in localHashes }
             if (playable.isEmpty()) {
                 Text(
-                    "None yet — a track must be present on both phones before synchronized play (REQUIREMENTS §9.4)",
+                    "Download a shared track to make it available on both phones.",
                     style = MaterialTheme.typography.bodySmall,
                 )
             }
             playable.forEach { entry ->
                 val hash = entry.contentHash ?: return@forEach
-                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Column(modifier = Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(RideSpace.sm)) {
                     Text(entry.title, style = MaterialTheme.typography.bodySmall)
                     OutlinedButton(onClick = { sync.playSynchronized(hash) }) { Text("Play synced") }
                     OutlinedButton(onClick = { sync.enqueue(hash) }) { Text("Queue") }
                 }
             }
 
-            SyncDiagnosticsBlock(sync)
+            DiagnosticDisclosure("sync diagnostics") { SyncDiagnosticsBlock(sync) }
         }
     }
 }
@@ -172,7 +166,9 @@ fun AuthenticatedSections(
 private fun SyncDiagnosticsBlock(sync: SyncPlaybackCoordinator) {
     val d by sync.diagnostics.collectAsState()
     Text("Sync diagnostics", style = MaterialTheme.typography.titleSmall)
-    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+    Column(verticalArrangement = Arrangement.spacedBy(RideSpace.xs)) {
+        SyncDiagnosticRow("sync state", d.syncState.name)
+        SyncDiagnosticRow("transport ownership", if (sync.isSynchronizedModeActive()) "synchronized" else "local")
         SyncDiagnosticRow("role", if (d.role == PlaybackRole.LEADER) "orders commands" else "sends intents")
         SyncDiagnosticRow("clock ready", d.clockReady.toString())
         SyncDiagnosticRow("clock offset", d.clockOffsetUs?.let { "$it us" } ?: "—")
@@ -206,24 +202,6 @@ private fun SyncDiagnosticRow(
         Text(value, style = MaterialTheme.typography.bodySmall)
     }
 }
-
-private fun syncStateLabel(state: SyncState): String =
-    when (state) {
-        SyncState.INACTIVE -> "LOCAL — not synchronized"
-        SyncState.CLOCK_UNREADY -> "CLOCK NOT READY — no command will be scheduled against it"
-        SyncState.WAITING_FOR_CONTENT -> "WAITING FOR CONTENT — transferring; play starts by itself"
-        SyncState.WAITING_FOR_QUEUE -> "WAITING FOR QUEUE — the leader has not confirmed the track yet"
-        SyncState.SCHEDULED -> "SCHEDULED — waiting for the effective instant"
-        SyncState.SYNCED -> "SYNCHRONIZED"
-        SyncState.SYNC_FAILED -> "SYNC FAILED — local playback continues, correction stopped"
-        SyncState.DESYNCHRONIZED -> "RESYNCHRONIZING — waiting for authoritative state; local playback continues"
-        SyncState.TRANSPORT_FAILED ->
-            "NOT DELIVERED — a command never reached the peer; synchronisation stopped, local playback continues"
-        SyncState.LOCAL_OVERLOAD ->
-            "OVERLOADED — this phone refused its own command before sending it; local playback continues"
-    }
-
-private const val HASH_PREFIX_CHARS = 8
 
 /**
  * The two authenticated-session sections that sit below the intercom card: PROTOCOL §8's catalogue

@@ -17,24 +17,20 @@ struct LibraryView: View {
     let onPlayNow: (LibraryEntry) -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 8) {
+        VStack(alignment: .leading, spacing: RideDesign.sm) {
+            HStack(spacing: RideDesign.sm) {
                 Button("Import Folder", action: onImportFolder).buttonStyle(.bordered)
                 Button("Import Files", action: onImportFiles).buttonStyle(.bordered)
             }
 
-            TextField("Search title, artist, album, filename", text: Binding(get: { query.searchText }, set: onSearchTextChange))
+            TextField("Search your music", text: Binding(get: { query.searchText }, set: onSearchTextChange))
                 .textFieldStyle(.roundedBorder)
 
-            HStack(spacing: 8) {
-                ForEach(sortOptions, id: \.self) { sort in
-                    Button(sortLabel(sort), action: { onSortChange(sort) })
-                        .buttonStyle(.bordered)
-                        .disabled(query.sort == sort)
-                }
-            }
+            Picker("Sort by", selection: Binding(get: { query.sort }, set: onSortChange)) {
+                ForEach(sortOptions, id: \.self) { sort in Text(sortLabel(sort)).tag(sort) }
+            }.pickerStyle(.menu)
 
-            Text(entries.isEmpty ? "No tracks yet — import a folder or file to get started." : "\(entries.count) track(s)")
+            Text(entries.isEmpty ? (query.searchText.isEmpty ? "No music yet. Import files to build your library." : "No matching tracks. Try another search.") : "\(entries.count) track(s)")
                 .font(.caption)
                 .foregroundStyle(.secondary)
 
@@ -43,7 +39,7 @@ struct LibraryView: View {
             // fine for a "realistic personal library size" without virtualization, and a dedicated
             // lazy library screen outside the shared scroll container is a Ride-Mode-era (Phase 7)
             // concern, not this one.
-            VStack(alignment: .leading, spacing: 4) {
+            VStack(alignment: .leading, spacing: RideDesign.xs) {
                 // Keyed by localEntryId, not track.quickId (ADR-005 Amendment A1) — quickId is not
                 // guaranteed unique across entries, and a duplicate SwiftUI `ForEach` id is undefined
                 // behaviour, not merely a display glitch.
@@ -72,25 +68,28 @@ private struct TrackRow: View {
     let onPlayNow: () -> Void
 
     var body: some View {
-        HStack(spacing: 12) {
-            ArtworkThumbnail(artworkRef: entry.track.artworkRef)
-            VStack(alignment: .leading, spacing: 2) {
-                Text(entry.track.title).font(.body).lineLimit(1)
-                Text("\(entry.track.artist) — \(entry.track.album)").font(.caption).foregroundStyle(.secondary).lineLimit(1)
-                if entry.decodeStatus != .indexed {
-                    Text(decodeStatusLabel(entry.decodeStatus)).font(.caption2)
+        HStack(spacing: RideDesign.md) {
+            Button(action: onPlayNow) {
+                HStack {
+                    ArtworkThumbnail(artworkRef: entry.track.artworkRef)
+                    VStack(alignment: .leading, spacing: RideDesign.xs) {
+                        Text(entry.track.title).font(.body).lineLimit(2)
+                        Text("\(entry.track.artist) — \(entry.track.album)").font(.caption).foregroundStyle(.secondary).lineLimit(2)
+                        if entry.decodeStatus != .indexed {
+                            Text(decodeStatusLabel(entry.decodeStatus)).font(.caption2)
+                        }
+                    }
                 }
-            }
+            }.buttonStyle(.plain).accessibilityLabel("Play \(entry.track.title)")
             Spacer()
             Button("Queue", action: onAddToQueue)
                 .buttonStyle(.bordered)
                 .disabled(entry.decodeStatus != .indexed)
         }
-        .padding(8)
+        .padding(RideDesign.sm)
         .background(Color.gray.opacity(0.08))
-        .cornerRadius(8)
+        .cornerRadius(RideDesign.radius)
         .contentShape(Rectangle())
-        .onTapGesture(perform: onPlayNow)
     }
 
     private func decodeStatusLabel(_ status: DecodeStatus) -> String {

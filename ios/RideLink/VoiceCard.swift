@@ -29,20 +29,23 @@ struct VoiceCard: View {
     let onSelectPolicy: (IntercomPolicy) -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text("Intercom (Phase 2b)").font(.headline)
+        VStack(alignment: .leading, spacing: RideDesign.sm) {
+            Text("Intercom").font(.headline)
             controls
             mode
-            media
-            setup
-            route
-            coexistenceSection
-            peer
-            signalling
+            DisclosureGroup("Intercom diagnostics") {
+                media
+                setup
+                route
+                coexistenceSection
+                peer
+                signalling
+            }
+
         }
         .padding()
-        .background(Color(white: 0.95))
-        .clipShape(RoundedRectangle(cornerRadius: 12))
+        .background(RideDesign.surface)
+        .clipShape(RoundedRectangle(cornerRadius: RideDesign.radius))
     }
 
     private var coexistenceSection: some View {
@@ -67,13 +70,13 @@ struct VoiceCard: View {
         }
         if let refusal {
             // Named, not "connection failed" (this phase's brief §41). FR-025: the session is untouched.
-            Text("Intercom unavailable — \(refusal.rawValue). The peer session is unaffected.")
+            Text(UiPresentation.voiceFailureLabel(refusal))
                 .font(.caption)
                 .foregroundStyle(.red)
         }
-        HStack(spacing: 8) {
+        HStack(spacing: RideDesign.sm) {
             if voice.status == .idle || voice.status == .failed {
-                Button("Start Intercom", action: onStartIntercom).buttonStyle(.borderedProminent)
+                Button("Start Intercom", action: onStartIntercom).buttonStyle(.borderedProminent).foregroundStyle(RideDesign.onPrimary)
             } else {
                 Button("Stop Intercom", action: onStopIntercom).buttonStyle(.bordered)
             }
@@ -81,14 +84,20 @@ struct VoiceCard: View {
                 .buttonStyle(.bordered)
                 .disabled(!voice.localAudioOpen)
         }
-        row("voice state", voice.status.rawValue)
-        row("role", voice.role?.rawValue ?? "—")
-        row("voice session", voice.voiceSessionPrefix ?? "—")
-        row("peer reports", voice.peerReportedState.wire)
-        row("mic (device)", micLabel)
-        row("transmitting", "\(voice.transmitting)")
-        row("wire mic_muted", "\(voice.micMuted)")
-        row("last failure", voice.lastFailure?.rawValue ?? "none")
+        Text(UiPresentation.voiceLabel(voice.status)).font(.headline)
+        Text(voice.userMuted ? "Muted" : voice.transmitting ? "Transmitting" : voice.localAudioOpen ? "Microphone ready" : "Microphone unavailable")
+        if let failure = voice.lastFailure { Text(UiPresentation.voiceFailureLabel(failure)).foregroundStyle(.red) }
+        DisclosureGroup("Voice details") {
+            row("voice state", voice.status.rawValue)
+            row("role", voice.role?.rawValue ?? "—")
+            row("voice session", voice.voiceSessionPrefix ?? "—")
+            row("peer reports", voice.peerReportedState.wire)
+            row("mic (device)", micLabel)
+            row("transmitting", "\(voice.transmitting)")
+            row("wire mic_muted", "\(voice.micMuted)")
+            row("last failure", voice.lastFailure?.rawValue ?? "none")
+        }
+
     }
 
     /// Whether the capture *device* is open — not whether speech is being transmitted (PROTOCOL §4.4).
@@ -99,37 +108,36 @@ struct VoiceCard: View {
 
     @ViewBuilder
     private var mode: some View {
-        Text("MODE").font(.caption2).foregroundStyle(.secondary)
-        HStack(spacing: 4) {
+        Text(UiPresentation.policyLabel(policy)).font(.subheadline)
+        DisclosureGroup("Intercom modes") {
             ForEach(IntercomPolicy.all, id: \.id) { candidate in
-                Button(candidate.id.rawValue.replacingOccurrences(of: "MODE_", with: "")) {
-                    onSelectPolicy(candidate)
-                }
-                .buttonStyle(.bordered)
-                .tint(candidate.id == policy.id ? .accentColor : .gray)
+                Button { onSelectPolicy(candidate) } label: {
+                    Label(UiPresentation.policyLabel(candidate), systemImage: candidate.id == policy.id ? "checkmark.circle.fill" : "circle")
+                        .frame(maxWidth: .infinity, minHeight: RideDesign.touch, alignment: .leading)
+                }.buttonStyle(.bordered)
+                    .accessibilityAddTraits(candidate.id == policy.id ? .isSelected : [])
             }
         }
-        // The default is Mode C by architecture, not by measurement — docs/PHASE0_RESULTS.md is still
-        // awaiting the user's Phase 0 numbers, and saying so here keeps the screen honest.
-        row("policy", "\(policy.id.rawValue) (default MODE_C — architecture, not measured)")
-        row("gate", gateLabel)
-        row("full duplex", "\(policy.fullDuplex)")
-        row("wire mode", "\(voice.mode.wire) / \(voice.intercomMode.wire)")
+        DisclosureGroup("Policy diagnostics") {
+            row("policy", policy.id.rawValue)
+            row("gate", gateLabel)
+            row("full duplex", "\(policy.fullDuplex)")
+            row("wire mode", "\(voice.mode.wire) / \(voice.intercomMode.wire)")
+        }
 
         if case .vox = policy.gate, !voice.voxLevelSourceAvailable {
             // ADR-021 §6, stated rather than discovered by silence: the VOX state machine is real and
             // tested, but no microphone-driven level exists on either platform yet, so the gate cannot
             // open. PENDING REAL AUDIO INPUT / LATER HARDENING.
             Text(
-                "VOX: no microphone level source on this platform yet, so the gate cannot open — "
-                    + "PENDING REAL AUDIO INPUT (ADR-021 §6). Use PTT or continuous."
+                "Voice activation is unavailable. Choose Push to Talk or continuous intercom."
             )
             .font(.caption)
             .foregroundStyle(.red)
         }
 
         if policy.gate == .ptt {
-            PushToTalkButton(voice: voice, onPushToTalkHeld: onPushToTalkHeld)
+            PushToTalkControl(available: voice.localAudioOpen, muted: voice.userMuted, held: voice.pttHeld, onHeld: onPushToTalkHeld)
         }
     }
 
@@ -295,45 +303,9 @@ struct VoiceCard: View {
     }
 
     private func row(_ label: String, _ value: String) -> some View {
-        VStack(alignment: .leading, spacing: 2) {
+        VStack(alignment: .leading, spacing: RideDesign.xs) {
             Text(label).font(.caption).foregroundStyle(.secondary)
             Text(value).font(.body)
         }
-    }
-}
-
-/// Press-and-hold, with every way a hold can end mapped to the same "not held" assignment.
-///
-/// This phase's brief §25 in one view:
-///
-/// - `DragGesture(minimumDistance: 0)`'s `onEnded` fires on release **and** when the gesture is
-///   cancelled by the system, and both are treated as an up. There is no path through this view that
-///   leaves the gate open.
-/// - `onDisappear` releases, so navigating away while held cannot strand transmission on. Backgrounding
-///   is handled one level up, from the scene phase, because a view is not told about that.
-/// - It is a `Button`, so VoiceOver and Switch Control operate it; an activation from either produces the
-///   same down/up pair, so it cannot create a stuck press either.
-///
-/// It gates the outbound track and nothing else: no capture reopen, no peer-connection rebuild.
-private struct PushToTalkButton: View {
-    let voice: VoiceDiagnostics
-    let onPushToTalkHeld: (Bool) -> Void
-
-    var body: some View {
-        Button(voice.pttHeld ? "TALKING — release to stop" : "HOLD TO TALK") {}
-            .buttonStyle(.borderedProminent)
-            .disabled(!voice.localAudioOpen)
-            .frame(maxWidth: .infinity)
-            .simultaneousGesture(
-                DragGesture(minimumDistance: 0)
-                    .onChanged { _ in
-                        guard voice.localAudioOpen else { return }
-                        onPushToTalkHeld(true)
-                    }
-                    // Fires on release and on cancellation alike. Both end the hold, which is the only
-                    // safe reading.
-                    .onEnded { _ in onPushToTalkHeld(false) }
-            )
-            .onDisappear { onPushToTalkHeld(false) }
     }
 }

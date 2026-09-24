@@ -52,6 +52,7 @@ fun RideLinkRoot(
             musicCoordinator = musicCoordinator,
             onPlayMusic = onPlayMusic,
             syncPlaybackCoordinator = syncPlaybackCoordinator,
+            sharedLibraryCoordinator = sharedLibraryCoordinator,
         )
     } else {
         MainScreen(

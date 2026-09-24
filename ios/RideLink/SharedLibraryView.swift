@@ -14,16 +14,16 @@ struct SharedLibraryView: View {
     let onPlayLocally: (ManifestEntry) -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: RideDesign.sm) {
             Text("Shared Library").font(.headline)
             if coordinator.remoteEntries.isEmpty {
-                Text("No shared catalogue yet.").font(.caption).foregroundStyle(.secondary)
+                Text("No shared music yet. Import music on either phone to get started.").font(.caption).foregroundStyle(.secondary)
             } else {
                 Text("\(coordinator.remoteEntries.count) track(s) on the connected peer")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
-            VStack(spacing: 4) {
+            VStack(spacing: RideDesign.xs) {
                 // Closure-audit Finding F: `quickId` alone is not guaranteed unique across entries
                 // (ADR-005 Amendment A1) — `rowId` is the stable, collision-resistant identity.
                 ForEach(coordinator.remoteEntries, id: \.rowId) { entry in
@@ -38,16 +38,16 @@ struct SharedLibraryView: View {
                 }
             }
         }
-        .padding(16)
+        .padding(RideDesign.lg)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color.purple.opacity(0.08))
-        .cornerRadius(8)
+        .background(RideDesign.surface)
+        .cornerRadius(RideDesign.radius)
     }
 }
 
 private let activeStatuses: Set<TransferStatus> = [.queued, .negotiating, .transferring, .verifying]
 
-private struct SharedTrackRow: View {
+struct SharedTrackRow: View {
     let entry: ManifestEntry
     let availability: Availability
     let download: DownloadState?
@@ -56,21 +56,22 @@ private struct SharedTrackRow: View {
     let onPlayLocally: () -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text(entry.title).font(.body).lineLimit(1)
-            Text("\(entry.artist) — \(entry.album)").font(.caption).foregroundStyle(.secondary).lineLimit(1)
+        VStack(alignment: .leading, spacing: RideDesign.xs) {
+            Text(entry.title).font(.body).lineLimit(2)
+            Text("\(entry.artist) — \(entry.album)").font(.caption).foregroundStyle(.secondary).lineLimit(2)
             Text(availabilityLabel).font(.caption2)
             if let download, activeStatuses.contains(download.status), download.totalBytes > 0 {
                 ProgressView(value: Double(download.bytesReceived), total: Double(download.totalBytes))
             }
-            HStack(spacing: 8) {
+            if let error = download?.error { DisclosureGroup("Transfer details") { Text(error.rawValue) } }
+            HStack(spacing: RideDesign.sm) {
                 // Closure-audit Finding G: playback reuses the one existing player/queue for both a
                 // Phase 3 imported row (`hasLocal`) *and* a verified Phase-4 cache-only file that
                 // was never imported (`hasCached`) — see `MusicCoordinator.playExternalVerifiedCachedTrack`.
                 // Provenance stays distinct internally (never a fake imported row), but both are
                 // "Play" from here.
                 if availability.hasLocal || availability.hasCached {
-                    Button("Play", action: onPlayLocally).buttonStyle(.borderedProminent)
+                    Button("Play", action: onPlayLocally).buttonStyle(.borderedProminent).foregroundStyle(RideDesign.onPrimary)
                 } else if let download, activeStatuses.contains(download.status) {
                     Button("Cancel", action: onCancel).buttonStyle(.bordered)
                 } else {
@@ -80,7 +81,7 @@ private struct SharedTrackRow: View {
                 }
             }
         }
-        .padding(8)
+        .padding(RideDesign.sm)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(Color.gray.opacity(0.08))
         .cornerRadius(6)
@@ -91,7 +92,7 @@ private struct SharedTrackRow: View {
         if availability.hasCached { return "Downloaded" }
         guard let download else { return "Remote only" }
         switch download.status {
-        case .failed: return "Failed (\(download.error?.rawValue ?? "unknown"))"
+        case .failed: return "Download failed. Try downloading again."
         case .cancelled: return "Cancelled"
         case .queued: return "Queued"
         case .negotiating: return "Starting…"

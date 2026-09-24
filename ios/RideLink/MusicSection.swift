@@ -1,3 +1,4 @@
+import RideLinkCore
 import SwiftUI
 import UniformTypeIdentifiers
 
@@ -11,18 +12,22 @@ import UniformTypeIdentifiers
 /// that needs it, and hands `MusicCoordinator` the resulting security-scoped URLs directly.
 struct MusicSection: View {
     let musicCoordinator: MusicCoordinator
+    var sharedEntries: [ManifestEntry] = []
 
     @State private var showingFilePicker = false
     @State private var showingFolderPicker = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: RideDesign.md) {
             Text("Local Music").font(.title2)
 
+            let cachedEntry = sharedEntries.first { $0.contentHash != nil && $0.contentHash == musicCoordinator.activeExternalCacheHash }
             NowPlayingCard(
                 playerState: musicCoordinator.playerState,
                 currentEntry: musicCoordinator.currentEntry,
                 queueSize: musicCoordinator.queueState.items.count,
+                title: musicCoordinator.currentEntry?.track.title ?? cachedEntry?.title,
+                artist: musicCoordinator.currentEntry?.track.artist ?? cachedEntry?.artist,
                 onPlay: musicCoordinator.play,
                 onPause: musicCoordinator.pause,
                 onSeek: { musicCoordinator.seek(positionMs: $0) },
@@ -30,6 +35,14 @@ struct MusicSection: View {
                 onPrevious: musicCoordinator.previous
             )
 
+            if !musicCoordinator.queueState.items.isEmpty {
+                DisclosureGroup("Local queue") {
+                    ForEach(Array(musicCoordinator.queueState.items.enumerated()), id: \.element.id) { index, item in
+                        let title = musicCoordinator.libraryEntries.first { $0.localEntryId == item.localEntryId }?.track.title ?? "Shared track"
+                        Text("\(item.id == musicCoordinator.queueState.currentId ? "Current" : String(index + 1)) · \(title)")
+                    }
+                }
+            }
             LibraryView(
                 query: musicCoordinator.query,
                 entries: musicCoordinator.libraryEntries,

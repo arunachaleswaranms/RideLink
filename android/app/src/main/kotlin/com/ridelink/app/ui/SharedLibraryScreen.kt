@@ -12,7 +12,6 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.unit.dp
 import com.ridelink.app.library.DownloadState
 import com.ridelink.core.library.LibraryEntry
 import com.ridelink.core.manifest.ManifestEntry
@@ -45,14 +44,14 @@ fun SharedLibraryScreen(
 ) {
     val localHashes = localEntries.mapNotNull { it.track.contentHash?.value }.toSet()
 
-    Column(modifier = Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+    Column(modifier = Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(RideSpace.sm)) {
         Text("Shared Library", style = MaterialTheme.typography.titleMedium)
         if (remoteEntries.isEmpty()) {
-            Text("No shared catalogue yet.", style = MaterialTheme.typography.bodySmall)
+            Text("No shared music yet. Import music on either phone to get started.", style = MaterialTheme.typography.bodySmall)
         } else {
             Text("${remoteEntries.size} track(s) on the connected peer", style = MaterialTheme.typography.bodySmall)
         }
-        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Column(verticalArrangement = Arrangement.spacedBy(RideSpace.xs)) {
             remoteEntries.forEach { entry ->
                 val hash = entry.contentHash
                 val isLocal = hash != null && hash.value in localHashes
@@ -86,9 +85,9 @@ private fun SharedTrackRow(
     onPlayLocally: () -> Unit,
 ) {
     Card(modifier = Modifier.fillMaxWidth()) {
-        Column(modifier = Modifier.padding(8.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-            Text(entry.title, style = MaterialTheme.typography.bodyLarge, maxLines = 1)
-            Text("${entry.artist} — ${entry.album}", style = MaterialTheme.typography.bodySmall, maxLines = 1)
+        Column(modifier = Modifier.padding(RideSpace.sm), verticalArrangement = Arrangement.spacedBy(RideSpace.xs)) {
+            Text(entry.title, style = MaterialTheme.typography.bodyLarge, maxLines = 2)
+            Text("${entry.artist} — ${entry.album}", style = MaterialTheme.typography.bodySmall, maxLines = 2)
             Text(availabilityLabel(isLocal, isCached, download), style = MaterialTheme.typography.labelSmall)
             if (download != null && download.status in ACTIVE_STATUSES && download.totalBytes > 0) {
                 LinearProgressIndicator(
@@ -96,7 +95,8 @@ private fun SharedTrackRow(
                     modifier = Modifier.fillMaxWidth(),
                 )
             }
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            if (download?.error != null) DiagnosticDisclosure("transfer details") { Text(download.error.toString()) }
+            Row(horizontalArrangement = Arrangement.spacedBy(RideSpace.sm)) {
                 when {
                     // Closure-audit Finding G: playback reuses the one existing player/queue for
                     // both a Phase 3 imported row (`isLocal`) *and* a verified Phase-4 cache-only
@@ -125,7 +125,7 @@ private fun availabilityLabel(
         isLocal -> "Local"
         isCached -> "Downloaded"
         download == null -> "Remote only"
-        download.status == TransferStatus.FAILED -> "Failed (${download.error ?: "unknown"})"
+        download.status == TransferStatus.FAILED -> "Download failed. Try downloading again."
         download.status == TransferStatus.CANCELLED -> "Cancelled"
         else -> downloadStatusLabel(download.status)
     }

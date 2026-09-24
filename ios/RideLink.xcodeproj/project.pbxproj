@@ -22,6 +22,7 @@
 		6A1B2C3D4E5F60718293A4B8 /* SyncPlaybackView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7A1B2C3D4E5F60718293A4B8 /* SyncPlaybackView.swift */; };
 		6A1B2C3D4E5F60718293A4B6 /* SyncPlaybackAdapters.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7A1B2C3D4E5F60718293A4B6 /* SyncPlaybackAdapters.swift */; };
 		1244A68FD842DD32F5D546A5 /* RideModeView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F18C0409DD0A0AC4EBC6EB6E /* RideModeView.swift */; };
+		83623A0DD67C26656B0502C0 /* RideDesign.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1F1F42E86D14C90612D7AF3 /* RideDesign.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -42,6 +43,7 @@
 		7A1B2C3D4E5F60718293A4B8 /* SyncPlaybackView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SyncPlaybackView.swift; sourceTree = "<group>"; };
 		7A1B2C3D4E5F60718293A4B6 /* SyncPlaybackAdapters.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SyncPlaybackAdapters.swift; sourceTree = "<group>"; };
 		F18C0409DD0A0AC4EBC6EB6E /* RideModeView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RideModeView.swift; sourceTree = "<group>"; };
+		A1F1F42E86D14C90612D7AF3 /* RideDesign.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RideDesign.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -67,6 +69,7 @@
 			isa = PBXGroup;
 			children = (
 				64AC9619678E3FA914955CE0 /* RideLinkApp.swift */,
+				A1F1F42E86D14C90612D7AF3 /* RideDesign.swift */,
 				6A7B3DB9D86092FBE9BE657E /* SessionCoordinator.swift */,
 				F57B63A6163CD2391653DC32 /* MainScreen.swift */,
 				0F1E2D3C4B5A69788796A5B4 /* VoiceCard.swift */,
@@ -171,6 +174,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				3AB0CC5ABC0C4289B39D0CF2 /* RideLinkApp.swift in Sources */,
+				83623A0DD67C26656B0502C0 /* RideDesign.swift in Sources */,
 				DC7409DFAD200B422AAB1CE6 /* SessionCoordinator.swift in Sources */,
 				463C73AE6E0372402BEDCCA8 /* MainScreen.swift in Sources */,
 				A1B2C3D4E5F60718293A4B5C /* VoiceCard.swift in Sources */,

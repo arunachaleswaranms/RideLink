@@ -6,6 +6,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
@@ -20,10 +21,10 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextAlign
-import androidx.compose.ui.unit.dp
 import com.ridelink.app.library.SharedLibraryCoordinator
 import com.ridelink.app.music.MusicCoordinator
 import com.ridelink.app.resync.ResyncCoordinator
@@ -36,20 +37,7 @@ import com.ridelink.network.control.ControlDiagnostics
 import com.ridelink.network.control.ControlState
 import com.ridelink.network.control.PairingPrompt
 
-/**
- * Deliberately developer-oriented (CLAUDE.md Phase 2a/2b scope): device identity, connection status,
- * the six-digit pairing prompt, security warnings, control diagnostics, and — new in Phase 2b — an
- * intercom card with Start/Stop, mute, a PTT control, mode selection, the FR-023 media and route
- * diagnostics, and the peer's `AUDIO_STATE`.
- *
- * **No Ride Mode UI belongs here yet.** This is a diagnostics surface, which ADR-020 says is what
- * this phase's UI should be: enough to drive and observe the intercom on two phones, and no design
- * decisions about a real riding screen made before anyone has ridden with it.
- *
- * Nothing here renders an SDP, a candidate string, an IP address or a port — PROTOCOL §7.7 gives
- * those no display path any more than a log path — and nothing renders a device name or a Bluetooth
- * address, which ADR-016 forbids for the same reason.
- */
+/** Stationary setup. Production session state owns navigation, trust and all actions. */
 @Composable
 fun MainScreen(
     coordinator: SessionCoordinator,
@@ -97,22 +85,18 @@ fun MainScreen(
             modifier =
                 Modifier
                     .fillMaxSize()
+                    .safeDrawingPadding()
                     .verticalScroll(rememberScrollState())
-                    .padding(24.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp, Alignment.Top),
+                    .padding(RideSpace.xl),
+            verticalArrangement = Arrangement.spacedBy(RideSpace.md, Alignment.Top),
         ) {
             Text("RideLink", style = MaterialTheme.typography.headlineMedium)
 
-            Text("Device:")
-            Text(deviceDescription, style = MaterialTheme.typography.bodyLarge)
-
-            Text("Connection:")
-            Text(connectionLabel(state.status), style = MaterialTheme.typography.bodyLarge)
+            Text("Your ride, together", style = MaterialTheme.typography.bodyLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            ConnectionSummary(state.status, peers.size)
 
             SessionActionButton(status = state.status, coordinator = coordinator)
             StartRideButton(status = state.status, onStartRide = coordinator::startRide)
-
-            TransportBanner(diagnostics.transportLabel)
 
             securityAlert?.let { code ->
                 SecurityAlertCard(code = code, onDismiss = coordinator::dismissSecurityAlert)
@@ -144,15 +128,6 @@ fun MainScreen(
                 )
             }
 
-            DiagnosticsCard(
-                diagnostics = diagnostics,
-                discoveredPeerCount = peers.size,
-                discoveryCount = discoveryCount,
-                localIdentityPrefix = coordinator.localIdentityPrefix,
-            )
-
-            ResyncDiagnosticsCard(resyncDiagnostics)
-
             // Deliberately independent of `state.status` — this phase's brief §28/§30: local music
             // must be fully usable in airplane mode, with no peer, regardless of session state.
             MusicSection(
@@ -161,7 +136,20 @@ fun MainScreen(
                 onPlayNow = onPlayNow,
                 onImportFolder = onImportFolder,
                 onImportFiles = onImportFiles,
+                sharedEntries = remoteEntries,
             )
+            DiagnosticDisclosure("connection diagnostics") {
+                Text(deviceDescription)
+                TransportBanner(diagnostics.transportLabel)
+                DiagnosticsCard(
+                    diagnostics = diagnostics,
+                    discoveredPeerCount = peers.size,
+                    discoveryCount = discoveryCount,
+                    localIdentityPrefix = coordinator.localIdentityPrefix,
+                )
+
+                ResyncDiagnosticsCard(resyncDiagnostics)
+            }
         }
     }
 }
@@ -179,8 +167,8 @@ fun MainScreen(
 fun SecureTransportUnavailableScreen(reason: String = "") {
     Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
         Column(
-            modifier = Modifier.fillMaxSize().padding(24.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp, Alignment.CenterVertically),
+            modifier = Modifier.fillMaxSize().padding(RideSpace.xl),
+            verticalArrangement = Arrangement.spacedBy(RideSpace.md, Alignment.CenterVertically),
         ) {
             Text("RideLink", style = MaterialTheme.typography.headlineMedium)
             Text("Secure transport unavailable", style = MaterialTheme.typography.titleMedium)
@@ -190,21 +178,21 @@ fun SecureTransportUnavailableScreen(reason: String = "") {
                 style = MaterialTheme.typography.bodyMedium,
             )
             if (reason.isNotEmpty()) {
-                Text(reason, style = MaterialTheme.typography.bodySmall)
+                DiagnosticDisclosure { Text(reason, style = MaterialTheme.typography.bodySmall) }
             }
         }
     }
 }
 
-@Suppress("MagicNumber") // named colours for the transport banner and the security cards
+/** Semantic pairs remain legible in both appearances. */
 internal object BannerColors {
-    val InsecureBackground = Color(0xFFFFF3CD)
-    val InsecureText = Color(0xFF7A5B00)
-    val SecureBackground = Color(0xFFDFF3E0)
-    val SecureText = Color(0xFF1B5E20)
-    val AlertBackground = Color(0xFFFBE3E3)
-    val AlertText = Color(0xFF8B1A1A)
-    val PairingBackground = Color(0xFFE3EEFB)
+    val InsecureBackground @Composable get() = MaterialTheme.colorScheme.tertiaryContainer
+    val InsecureText @Composable get() = MaterialTheme.colorScheme.onTertiaryContainer
+    val SecureBackground @Composable get() = MaterialTheme.colorScheme.primaryContainer
+    val SecureText @Composable get() = MaterialTheme.colorScheme.onPrimaryContainer
+    val AlertBackground @Composable get() = MaterialTheme.colorScheme.errorContainer
+    val AlertText @Composable get() = MaterialTheme.colorScheme.onErrorContainer
+    val PairingBackground @Composable get() = MaterialTheme.colorScheme.primaryContainer
 }
 
 /**
@@ -224,7 +212,7 @@ private fun TransportBanner(transportLabel: String) {
     ) {
         Text(
             "TRANSPORT: $transportLabel",
-            modifier = Modifier.padding(12.dp),
+            modifier = Modifier.padding(RideSpace.md),
             style = MaterialTheme.typography.labelLarge,
             color = if (secure) BannerColors.SecureText else BannerColors.InsecureText,
         )
@@ -239,26 +227,30 @@ private fun TransportBanner(transportLabel: String) {
  * travelled between the devices would prove nothing (PROTOCOL §4.5.1).
  */
 @Composable
-private fun PairingCard(
+internal fun PairingCard(
     prompt: PairingPrompt,
     onDecision: (Boolean) -> Unit,
 ) {
     Card(
         modifier = Modifier.fillMaxWidth(),
-        colors = CardDefaults.cardColors(containerColor = BannerColors.PairingBackground),
+        colors =
+            CardDefaults.cardColors(
+                containerColor = BannerColors.PairingBackground,
+                contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
+            ),
     ) {
         Column(
-            modifier = Modifier.padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp),
+            modifier = Modifier.padding(RideSpace.lg),
+            verticalArrangement = Arrangement.spacedBy(RideSpace.md),
         ) {
-            Text("Pair with this device?", style = MaterialTheme.typography.titleMedium)
+            Text("Verify your peer", style = MaterialTheme.typography.titleMedium)
             Text(
-                prompt.peerDisplayName.ifEmpty { prompt.remotePeerId.toString() },
+                prompt.peerDisplayName.ifEmpty { "Nearby phone" },
                 style = MaterialTheme.typography.bodyMedium,
             )
             Text(
-                prompt.sas6,
-                modifier = Modifier.fillMaxWidth(),
+                prompt.sas6.chunked(SAS_GROUP_SIZE).joinToString(" "),
+                modifier = Modifier.fillMaxWidth().semantics { contentDescription = prompt.sas6.toList().joinToString(" ") },
                 style = MaterialTheme.typography.displayMedium,
                 fontFamily = FontFamily.Monospace,
                 textAlign = TextAlign.Center,
@@ -267,7 +259,7 @@ private fun PairingCard(
                 "Both phones must show the same six digits. If they differ, do not confirm.",
                 style = MaterialTheme.typography.bodySmall,
             )
-            Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+            Row(horizontalArrangement = Arrangement.spacedBy(RideSpace.md)) {
                 Button(onClick = { onDecision(true) }) { Text("They match") }
                 OutlinedButton(onClick = { onDecision(false) }) { Text("They differ") }
             }
@@ -280,17 +272,17 @@ private fun PairingCard(
  * requires it to surface as a warning and never to be resolved by silently re-pairing.
  */
 @Composable
-private fun SecurityAlertCard(
+internal fun SecurityAlertCard(
     code: String,
     onDismiss: () -> Unit,
 ) {
     Card(
         modifier = Modifier.fillMaxWidth(),
-        colors = CardDefaults.cardColors(containerColor = BannerColors.AlertBackground),
+        colors = CardDefaults.cardColors(containerColor = BannerColors.AlertBackground, contentColor = BannerColors.AlertText),
     ) {
         Column(
-            modifier = Modifier.padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp),
+            modifier = Modifier.padding(RideSpace.lg),
+            verticalArrangement = Arrangement.spacedBy(RideSpace.sm),
         ) {
             Text(
                 if (code == "pin_mismatch") "Security warning" else "Connection refused",
@@ -298,7 +290,9 @@ private fun SecurityAlertCard(
                 color = BannerColors.AlertText,
             )
             Text(securityAlertExplanation(code), style = MaterialTheme.typography.bodySmall)
-            Text(code, style = MaterialTheme.typography.labelSmall, fontFamily = FontFamily.Monospace)
+            DiagnosticDisclosure(
+                "security details",
+            ) { Text(code, style = MaterialTheme.typography.labelSmall, fontFamily = FontFamily.Monospace) }
             OutlinedButton(onClick = onDismiss) { Text("Dismiss") }
         }
     }
@@ -325,8 +319,8 @@ private fun DiagnosticsCard(
     localIdentityPrefix: String,
 ) {
     Card(modifier = Modifier.fillMaxWidth()) {
-        Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-            Text("Diagnostics (Phase 1b)", style = MaterialTheme.typography.titleMedium)
+        Column(modifier = Modifier.padding(RideSpace.lg), verticalArrangement = Arrangement.spacedBy(RideSpace.sm)) {
+            Text("Connection diagnostics", style = MaterialTheme.typography.titleMedium)
             DiagnosticRow("Control state", controlStateLabel(diagnostics.controlState))
             // Both identities are shown redacted to 6 hex, matching the ARCHITECTURE §11 logging
             // rule — enough to compare two screens, far too little to identify a device.
@@ -356,20 +350,6 @@ internal fun DiagnosticRow(
     }
 }
 
-private fun connectionLabel(status: SessionStatus): String =
-    when (status) {
-        SessionStatus.IDLE -> "Idle"
-        SessionStatus.DISCOVERING -> "Discovering…"
-        SessionStatus.PAIRING -> "Pairing…"
-        SessionStatus.CONNECTING -> "Connecting…"
-        SessionStatus.CONNECTED -> "Connected"
-        SessionStatus.RIDE_ACTIVE -> "Ride Active"
-        SessionStatus.RECONNECTING -> "Reconnecting…"
-        SessionStatus.DISCONNECTED -> "Disconnected"
-        SessionStatus.ENDING -> "Ending…"
-        SessionStatus.ERROR -> "Error"
-    }
-
 private fun controlStateLabel(state: ControlState): String =
     when (state) {
         ControlState.IDLE -> "Idle"
@@ -379,3 +359,5 @@ private fun controlStateLabel(state: ControlState): String =
         ControlState.DISCONNECTED -> "Disconnected"
         ControlState.ENDED -> "Ended"
     }
+
+private const val SAS_GROUP_SIZE = 3

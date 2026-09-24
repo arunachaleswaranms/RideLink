@@ -5,14 +5,13 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
-import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.unit.dp
+import com.ridelink.app.R
 import com.ridelink.core.library.LibraryEntry
 import com.ridelink.core.player.PlayerState
 
@@ -26,6 +25,8 @@ fun NowPlayingCard(
     playerState: PlayerState,
     currentEntry: LibraryEntry?,
     queueSize: Int,
+    title: String? = currentEntry?.track?.title,
+    artist: String? = currentEntry?.track?.artist,
     onPlay: () -> Unit,
     onPause: () -> Unit,
     onSeek: (Long) -> Unit,
@@ -33,12 +34,13 @@ fun NowPlayingCard(
     onPrevious: () -> Unit,
 ) {
     Card(modifier = Modifier.fillMaxWidth()) {
-        Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Column(modifier = Modifier.padding(RideSpace.lg), verticalArrangement = Arrangement.spacedBy(RideSpace.sm)) {
             Text("Now Playing", style = MaterialTheme.typography.titleMedium)
             Text(
-                currentEntry?.let { "${it.track.title} — ${it.track.artist}" } ?: "Nothing loaded",
+                title?.takeIf { it.isNotBlank() } ?: if (playerState.localEntryId != null) "Shared track" else "Nothing playing",
                 style = MaterialTheme.typography.bodyLarge,
             )
+            artist?.takeIf { it.isNotBlank() }?.let { Text(it, color = MaterialTheme.colorScheme.onSurfaceVariant) }
             playerState.error?.let { error ->
                 Text("Playback error: ${playerFailureLabel(error)}", style = MaterialTheme.typography.bodySmall)
             }
@@ -55,17 +57,25 @@ fun NowPlayingCard(
                 )
             }
 
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Button(onClick = onPrevious) { Text("Previous") }
-                if (playerState.playing) {
-                    Button(onClick = onPause) { Text("Pause") }
-                } else {
-                    Button(onClick = onPlay, enabled = currentEntry != null) { Text("Play") }
-                }
-                Button(onClick = onNext) { Text("Next") }
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(RideSpace.sm)) {
+                RideTransportButton(
+                    "Previous",
+                    R.drawable.ic_transport_previous,
+                    Modifier.weight(1f),
+                    onPrevious,
+                    queueSize > 0,
+                )
+                RideTransportButton(
+                    if (playerState.playing) "Pause" else "Play",
+                    if (playerState.playing) R.drawable.ic_transport_pause else R.drawable.ic_transport_play,
+                    Modifier.weight(1f),
+                    if (playerState.playing) onPause else onPlay,
+                    playerState.localEntryId != null || currentEntry != null || playerState.playing,
+                )
+                RideTransportButton("Next", R.drawable.ic_transport_next, Modifier.weight(1f), onNext, queueSize > 0)
             }
 
-            Text("Queue: $queueSize item(s)", style = MaterialTheme.typography.labelSmall)
+            Text(if (queueSize == 0) "Queue is empty" else "$queueSize items in queue", style = MaterialTheme.typography.labelSmall)
         }
     }
 }
