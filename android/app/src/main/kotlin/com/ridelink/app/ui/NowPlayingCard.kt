@@ -2,15 +2,17 @@ package com.ridelink.app.ui
 
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.material3.Card
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.unit.dp
 import com.ridelink.app.R
 import com.ridelink.core.library.LibraryEntry
 import com.ridelink.core.player.PlayerState
@@ -57,22 +59,26 @@ fun NowPlayingCard(
                 )
             }
 
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(RideSpace.sm)) {
+            FlowRow(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(RideSpace.sm),
+                verticalArrangement = Arrangement.spacedBy(RideSpace.sm),
+            ) {
                 RideTransportButton(
                     "Previous",
                     R.drawable.ic_transport_previous,
-                    Modifier.weight(1f),
+                    Modifier.weight(1f).widthIn(min = 96.dp),
                     onPrevious,
                     queueSize > 0,
                 )
                 RideTransportButton(
                     if (playerState.playing) "Pause" else "Play",
                     if (playerState.playing) R.drawable.ic_transport_pause else R.drawable.ic_transport_play,
-                    Modifier.weight(1f),
+                    Modifier.weight(1f).widthIn(min = 96.dp),
                     if (playerState.playing) onPause else onPlay,
                     playerState.localEntryId != null || currentEntry != null || playerState.playing,
                 )
-                RideTransportButton("Next", R.drawable.ic_transport_next, Modifier.weight(1f), onNext, queueSize > 0)
+                RideTransportButton("Next", R.drawable.ic_transport_next, Modifier.weight(1f).widthIn(min = 96.dp), onNext, queueSize > 0)
             }
 
             Text(if (queueSize == 0) "Queue is empty" else "$queueSize items in queue", style = MaterialTheme.typography.labelSmall)

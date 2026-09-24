@@ -11,7 +11,7 @@ stop and disposal release through accessibility actions; remove the second of tw
 items and require exactly its queue-item ID.
 
 Render native Ride states: idle, intercom, music, combined, PTT-held, muted, reconnecting,
-disconnected, sync failure and long titles. Render setup discovery/connection/pairing/security,
+disconnected, sync failure, waiting for content and long titles. Render setup discovery/connection/pairing/security,
 voice permission failure, empty/playing/paused music, transfer and duplicate queue. Inspect native
 large and small phone viewports, both appearances, scaled text, safe areas, scroll reachability and
 library keyboard behavior. Captures with OS dialogs or unfinished launch transitions are invalid.

@@ -46,7 +46,7 @@ struct PushToTalkControl: View {
     var body: some View {
         Button {} label: {
             Text(held ? "Push to Talk held · Release to stop" : "Hold to talk")
-                .font(.headline).foregroundStyle(Color.black)
+                .font(.headline).foregroundStyle(available && !muted ? Color.black : Color.secondary)
                 .frame(maxWidth: .infinity, minHeight: RideDesign.rideTouch)
         }
         .buttonStyle(.borderedProminent)

@@ -1,10 +1,12 @@
 # RideLink — Status
 
-**24 September 2026 — Phase 8.5 UI polish in validation.** Based on merged main
+**25 September 2026 — Phase 8.5 UI polish implemented and locally validated.** Based on merged main
 `2aa728fd45bfc37c59ba8a5d75014fc80d77e540`, preserving the reviewed Phase 8 architecture.
 Native Ride Mode, setup/pairing, intercom and music/queue presentation are polished; diagnostics
 remain available behind secondary disclosures. [Audit, boundaries and evidence](PHASE8_5_UI_POLISH.md).
-Review readiness awaits final visual, instrumentation and exact-head security/CI checks.
+Native visual QA, Android/iOS software gates and the cross-platform gate passed.
+[PR #12](https://github.com/arunachaleswaranms/RideLink/pull/12) records the final exact-head
+CI/security verdict and remains subject to independent review.
 No merge; Phase 9 physical qualification remains **DEFERRED — PHYSICAL QUALIFICATION**.
 
 **23 September 2026 — Phase 8 transport-ownership follow-up ([ADR-024 Amendment A14](DECISIONS/ADR-024-synchronized-playback-integration.md#amendment-a14--23-september-2026--finishing-distributed-authority-never-reopens-local-transport-ownership), problems 99–100).**

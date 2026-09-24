@@ -16,15 +16,16 @@ struct VisualQAApp: App {
                     title: ["idle", "intercom"].contains(fixture) ? nil
                         : fixture == "long-title" ? "The long way home through the mountains and beyond the horizon" : "The long way home",
                     artist: ["idle", "intercom"].contains(fixture) ? nil : "Evening Roads",
-                    playing: !["idle", "intercom"].contains(fixture),
+                    playing: !["idle", "intercom", "waiting"].contains(fixture),
                     hasTrack: !["idle", "intercom"].contains(fixture),
                     syncText: fixture == "reconnecting" ? "Music sync waits for connection"
                         : fixture == "sync-problem" ? "Music sync paused"
+                        : fixture == "waiting" ? "Waiting for the track to download…"
                         : ["idle", "intercom", "disconnected"].contains(fixture) ? "Local playback" : "Synchronized",
-                    voiceText: fixture == "idle" ? "Intercom not started" : "Intercom active",
-                    microphoneText: fixture == "idle" ? "Microphone unavailable"
+                    voiceText: ["idle", "music"].contains(fixture) ? "Intercom not started" : "Intercom active",
+                    microphoneText: ["idle", "music"].contains(fixture) ? "Microphone unavailable"
                         : fixture == "muted" ? "Muted" : fixture == "ptt" ? "Transmitting" : "Microphone ready",
-                    micAvailable: fixture != "idle", muted: fixture == "muted", ptt: true, held: fixture == "ptt",
+                    micAvailable: !["idle", "music"].contains(fixture), muted: fixture == "muted", ptt: true, held: fixture == "ptt",
                     policyText: "C · Push to Talk / duck music", audioDegraded: false,
                     onPrevious: {}, onPlayPause: {}, onNext: {}, onToggleMute: {}, onPushToTalkHeld: { _ in },
                     onReconnect: {}, onEndRide: {}

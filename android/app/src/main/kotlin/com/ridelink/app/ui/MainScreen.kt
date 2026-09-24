@@ -2,7 +2,7 @@ package com.ridelink.app.ui
 
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
@@ -259,7 +259,10 @@ internal fun PairingCard(
                 "Both phones must show the same six digits. If they differ, do not confirm.",
                 style = MaterialTheme.typography.bodySmall,
             )
-            Row(horizontalArrangement = Arrangement.spacedBy(RideSpace.md)) {
+            FlowRow(
+                horizontalArrangement = Arrangement.spacedBy(RideSpace.md),
+                verticalArrangement = Arrangement.spacedBy(RideSpace.sm),
+            ) {
                 Button(onClick = { onDecision(true) }) { Text("They match") }
                 OutlinedButton(onClick = { onDecision(false) }) { Text("They differ") }
             }

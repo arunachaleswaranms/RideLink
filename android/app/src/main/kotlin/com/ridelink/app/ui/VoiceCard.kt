@@ -2,7 +2,7 @@ package com.ridelink.app.ui
 
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.Button
@@ -92,7 +92,7 @@ private fun IntercomControls(
         )
     }
 
-    Row(horizontalArrangement = Arrangement.spacedBy(RideSpace.sm)) {
+    FlowRow(horizontalArrangement = Arrangement.spacedBy(RideSpace.sm)) {
         if (voice.status == VoiceStatus.IDLE || voice.status == VoiceStatus.FAILED) {
             Button(onClick = onStartIntercom) { Text("Start Intercom") }
         } else {
@@ -110,7 +110,7 @@ private fun IntercomControls(
         } else if (voice.transmitting) {
             "Transmitting"
         } else {
-            micLabel(voice)
+            if (voice.localAudioOpen) "Microphone ready" else "Microphone unavailable"
         },
     )
     voice.lastFailure?.let { Text(voiceFailureLabel(it), color = MaterialTheme.colorScheme.error) }

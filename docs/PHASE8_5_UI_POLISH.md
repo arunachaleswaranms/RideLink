@@ -1,7 +1,9 @@
 # Phase 8.5 — UI polish and UX clarity
 
 Baseline: `2aa728fd45bfc37c59ba8a5d75014fc80d77e540` (merged Phase 8).
-Branch: `phase8-5/ui-polish`. No merge is authorized. Physical qualification is deferred.
+Review branch: `phase8-5/ui-polish-review`; [PR #12](https://github.com/arunachaleswaranms/RideLink/pull/12).
+An isolated worktree preserves unrelated concurrent edits in the original checkout.
+No merge is authorized. Physical qualification is deferred.
 
 ## Initial audit (before implementation)
 
@@ -51,7 +53,7 @@ No protocol, security, synchronization, lifetime, authority, capture or coexiste
 and fixtures are not production state owners. No new cloud/network/analytics dependency.
 No `PROJECT_STATE.md` exists in this baseline; this record and the dated status entry are the handoff.
 
-## Evidence and remaining work
+## Implementation and evidence
 
 Implemented on both native platforms: Ride Mode hierarchy, connection summary, grouped pairing
 code, intercom status/policy wording, Now Playing, library search/sort, duplicate-safe shared queue,
@@ -69,6 +71,7 @@ trust decisions, discovery FSM, action entry points and lifecycle hooks remain i
 - System text scaling is retained. Scroll containers keep lower controls reachable. Long track
   names wrap; setup sorting wraps on Android and uses an iOS menu. Android transport captions
   were adjusted after the 150% narrow-viewport pass showed an awkward single-letter wrap.
+  Setup pairing, transport and intercom controls wrap as groups when the available width is insufficient.
 - PTT still calls the existing gate: touch hold/release, cancellation/disposal release, and named
   accessible Start talking / Stop talking actions. A held indicator does not claim transmission
   while muted. No new microphone/session owner exists.
@@ -78,7 +81,7 @@ trust decisions, discovery FSM, action entry points and lifecycle hooks remain i
 - SF Symbols and small native Android vector transport resources require no new library or
   network access. No decorative animation, polling timer, image service or telemetry was added.
 - Physical TalkBack/VoiceOver, glove ergonomics and sunlight contrast are not established by this
-  audit. Simulator accessibility-action tests and visual inspection are software evidence only.
+  audit. Android emulator accessibility-action tests and native visual inspection are software evidence only.
 
 ### Fresh-fix architecture audit
 
@@ -97,18 +100,70 @@ no-op callbacks and are explicitly separated from production state and authentic
 
 ### Validation ledger
 
-The initial full Android unit/static/build gate passed; final-source rerun is pending. Swift Core
-353 tests and Platform 673 tests (one ordinary-run interop skip) passed. The separate
-`tools/crossplatform/run.sh` gate passed, including TLS/SAS, protocol exchange and generation-2
-silent pinned reconnect. Debug and Release iOS simulator builds passed after the final color fix.
-Native visual fixtures have been rendered on both platforms; final reviewed captures, complete
-instrumentation results, security and exact-head CI will be recorded before review readiness.
+Local validation on 24–25 September 2026:
+
+| Gate | Result |
+|---|---|
+| Android JDK 21 core and all unit tests | PASS — 1,096 distinct tests across core/app/network/audio/data (459/289/284/33/31); debug/release variants are not double-counted |
+| Android ktlint, detekt, lint | PASS |
+| Android assembleDebug / assembleRelease | PASS |
+| Android instrumentation, API 36 ARM64 | PASS — 54 tests (app 9, audio 11, data 34), including PTT accessibility/disposal and duplicate queue identity |
+| Swift RideLinkCore | PASS — 353 tests |
+| Swift RideLinkPlatform | PASS — 673 tests, one expected standalone interop skip, zero failures |
+| Signed iOS simulator Debug / Release, ARM64 | PASS |
+| `tools/crossplatform/run.sh` | PASS — actual TLS/SAS, clock readiness, protocol/state exchange, generation-2 silent pinned reconnect; this supplies the separately orchestrated interop case |
+| Local-only source audit | PASS — 318 production sources, zero findings |
+
+The final run uses the isolated worktree. Android invocation: JDK 21, `:core:test test
+ktlintCheck detekt lint assembleDebug assembleRelease`; instrumentation uses serial
+`connectedAndroidTest`, with final app rendering/action reruns through AndroidJUnitRunner.
+Swift package commands are `swift test --package-path ios/Packages/RideLinkCore` and
+`swift test --package-path ios/Packages/RideLinkPlatform`. Simulator builds use the production
+`ios/RideLink.xcodeproj`, scheme RideLink, both configurations, and `ARCHS=arm64`.
+
+The first pushed UI head `0e781bf` passed CI run `35985322854` and security run `35985323111`
+(Android, iOS, Gitleaks, local-only policy, Dependency Review and both CodeQL languages).
+Those runs do not certify later commits. The final exact-head run IDs and verdicts are recorded in
+[PR #12](https://github.com/arunachaleswaranms/RideLink/pull/12), whose head must match the reviewed
+commit. No workflow, dependency manifest or lockfile is changed by this phase.
 
 Transient harness evidence is not counted as a pass: one Android screenshot-service null result,
 Android launcher/System UI ANRs, early accessibility-tree reads, and simulator launch-transition
-frames. Capture checks now wait for native frames/accessibility idle; invalid images are recaptured.
+frames. Android capture checks wait for the intended fixture identity in the native accessibility tree,
+then native frames/accessibility idle. Invalid simulator transition images are discarded and recaptured.
 The PTT removal assertion waits for disposal's release callback rather than assuming main-loop idle
 means recomposition completed. No production behavior was relaxed to make a fixture pass.
 All physical observations remain **DEFERRED — PHYSICAL QUALIFICATION** (Phase 9): sunlight,
 gloves, mounting, helmet/TWS, real background behavior, audible synchronization, distraction,
 battery, thermal and a real two-hour ride. Emulator/simulator images cannot close these gates.
+
+### Native visual configurations
+
+| Platform | Configuration actually rendered and inspected | Coverage |
+|---|---|---|
+| Android API 36 ARM64, RideLink_API36 | 1280 × 2856 px, density 480 (about 427 × 952 dp), font scale 1.0; light setup / dark Ride Mode | Large phone reference, not a physical OnePlus Nord 5 |
+| Android API 36 ARM64, same AVD | 720 × 1280 px, density 320 (360 × 640 dp), font scale 1.5; dark setup / dark Ride Mode | Narrow controls, long titles, disabled states and scaled text |
+| iOS 27, iPhone 17 Pro Max | 1320 × 2868 px (440 × 956 pt), default text; light setup / dark Ride Mode | Large phone hierarchy and safe areas |
+| iOS 27, iPhone 17e | 1170 × 2532 px (390 × 844 pt), XXXL text; dark setup / dark Ride Mode | Small phone, long metadata, PTT and pairing |
+| iOS 27, iPhone 17e | Same viewport, normal text and light setup | Library, pairing, queue, Now Playing and transfer; software-keyboard presentation |
+
+The fixtures render production components with sample values and no-op callbacks. Their screenshots
+are **AUTOMATED NATIVE RENDERS, VISUALLY INSPECTED**, not a two-peer UI journey. Native keyboard and
+scroll observations are recorded separately. Ride coverage includes idle/nothing playing, intercom,
+music only, combined, PTT-held, muted, reconnecting, disconnected, sync problem, long title and
+waiting for content. Setup covers connection phases, SAS, security warning, microphone permission
+failure, empty/playing/paused music, library, measured transfer progress and duplicate queue items.
+
+The old-obligation-after-End-Ride case is covered by deterministic ownership-label tests and the
+existing real-coordinator Phase 8 suites, not by a fabricated interactive ride. The fresh-fix audit
+above records why its diagnostics cannot authorize transport. Native screenshots do not prove
+real audio or an authenticated emulator-to-simulator flow.
+
+Representative reviewed renders are in [the screenshot index](UI_EVIDENCE/phase8_5/README.md).
+
+Native interaction observations: the iPhone 17e library retains the search field above the software
+keyboard. At XXXL text, scrolling exposes the complete End Ride control with separation from music
+transport. Android fixtures also exercise library keyboard presentation and require the End Ride
+label to be inside the visible window after scrolling. These are simulator/emulator observations,
+not physical VoiceOver/TalkBack or moving-rider qualification. Landscape/tablet expansion was not
+added; native permission dialogs and a paired two-phone UI journey were not newly qualified here.

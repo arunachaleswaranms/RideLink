@@ -22,7 +22,7 @@ subscription and no telemetry — the app is expected to work with mobile data s
 
 ## Status
 
-**24 September 2026 — Phase 8.5 UI polish is in validation**, based on merged Phase 8 main
+**25 September 2026 — Phase 8.5 UI polish is implemented and locally validated**, based on merged Phase 8 main
 `2aa728f`. Ride Mode now emphasizes connection, music, intercom and a separated End Ride control;
 setup follows native appearance and keeps technical diagnostics secondary.
 See the [UI audit and validation record](docs/PHASE8_5_UI_POLISH.md). Independent review is required;

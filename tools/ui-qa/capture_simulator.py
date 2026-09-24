@@ -7,7 +7,7 @@ import time
 
 device, output = sys.argv[1], pathlib.Path(sys.argv[2])
 output.mkdir(parents=True, exist_ok=True)
-fixtures = ["idle", "intercom", "music", "combined", "ptt", "muted", "reconnecting", "disconnected", "sync-problem", "long-title"]
+fixtures = ["idle", "intercom", "music", "combined", "ptt", "muted", "reconnecting", "disconnected", "sync-problem", "long-title", "waiting"]
 fixtures += ["setup-" + name for name in ["IDLE", "DISCOVERING", "CONNECTING", "PAIRING", "CONNECTED", "ERROR", "RECONNECTING", "PAIR_CODE", "VOICE", "QUEUE", "MUSIC_EMPTY", "SECURITY", "LIBRARY", "TRANSFER", "MUSIC_PLAYING", "MUSIC_PAUSED"]]
 if len(sys.argv) > 3:
     fixtures = sys.argv[3:]

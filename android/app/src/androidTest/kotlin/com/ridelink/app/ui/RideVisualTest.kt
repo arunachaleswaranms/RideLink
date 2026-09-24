@@ -1,9 +1,13 @@
 package com.ridelink.app.ui
 
+import android.graphics.Rect
+import android.view.accessibility.AccessibilityNodeInfo
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.layout.Box
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.test.core.app.ActivityScenario
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
@@ -21,7 +25,19 @@ class RideVisualTest {
     fun renderRideStateMatrix() {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val names =
-            listOf("idle", "intercom", "music", "combined", "ptt", "muted", "reconnecting", "disconnected", "sync-problem", "long-title")
+            listOf(
+                "idle",
+                "intercom",
+                "music",
+                "combined",
+                "ptt",
+                "muted",
+                "reconnecting",
+                "disconnected",
+                "sync-problem",
+                "long-title",
+                "waiting",
+            )
         ActivityScenario.launch(MainActivity::class.java).use { scenario ->
             names.forEach { name ->
                 val drawn = CountDownLatch(1)
@@ -49,32 +65,33 @@ class RideVisualTest {
                                     null
                                 },
                             trackArtist = if (activeMusic) "Evening Roads" else null,
-                            isPlaying = activeMusic,
+                            isPlaying = activeMusic && name != "waiting",
                             hasTrackLoaded = activeMusic,
-                            micAvailable = name != "idle",
+                            micAvailable = name !in setOf("idle", "music"),
                             micMuted = name == "muted",
                             pttMode = true,
                             pttHeld = name == "ptt",
-                            intercomDisabled = name == "idle",
+                            intercomDisabled = name in setOf("idle", "music"),
                             intercomModeLabel = "Push to Talk",
                             localAudioDegraded = false,
                             peerAudioDegraded = false,
                         )
                     activity.setContent {
-                        Box(Modifier.onGloballyPositioned { drawn.countDown() }) {
+                        Box(Modifier.semantics { contentDescription = "Fixture ride-$name" }.onGloballyPositioned { drawn.countDown() }) {
                             RideModeContent(
                                 ui = ui,
                                 syncText =
                                     when (name) {
                                         "reconnecting" -> "Music sync waits for connection"
                                         "sync-problem" -> "Music sync paused"
+                                        "waiting" -> "Waiting for the track to download…"
                                         "idle", "intercom", "disconnected" -> "Local playback"
                                         else -> "Synchronized"
                                     },
-                                voiceText = if (name == "idle") "Intercom not started" else "Intercom active",
+                                voiceText = if (name in setOf("idle", "music")) "Intercom not started" else "Intercom active",
                                 microphoneText =
                                     when (name) {
-                                        "idle" -> "Microphone unavailable"
+                                        "idle", "music" -> "Microphone unavailable"
                                         "muted" -> "Muted"
                                         "ptt" -> "Transmitting"
                                         else -> "Microphone ready"
@@ -94,6 +111,16 @@ class RideVisualTest {
                 assertTrue(drawn.await(10, TimeUnit.SECONDS), "Ride layout did not render: $name")
                 instrumentation.waitForIdleSync()
                 captureScreen(scenario, "ride-$name")
+                if (name == "waiting") {
+                    val scroll = accessibilityNodes(instrumentation.uiAutomation.rootInActiveWindow).firstOrNull { it.isScrollable }
+                    if (scroll != null) assertTrue(scroll.performAction(AccessibilityNodeInfo.ACTION_SCROLL_FORWARD))
+                    captureScreen(scenario, "ride-$name", "-scrolled")
+                    val root = instrumentation.uiAutomation.rootInActiveWindow
+                    val endRide = accessibilityNodes(root).first { it.text?.toString() == "End Ride" }
+                    val screen = Rect().also { root.getBoundsInScreen(it) }
+                    val control = Rect().also { endRide.getBoundsInScreen(it) }
+                    assertTrue(endRide.isVisibleToUser && screen.contains(control), "End Ride must be reachable after scrolling")
+                }
             }
         }
     }
