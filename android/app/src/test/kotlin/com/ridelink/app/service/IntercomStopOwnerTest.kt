@@ -16,8 +16,11 @@ import kotlin.test.assertEquals
 /**
  * The in-app End button used to await capture release on `MainActivity.lifecycleScope`, so an
  * Activity recreated or destroyed inside the release window lost the foreground-service stop and
- * left a `microphone` service running with nothing captured. These pin the property the fix rests
- * on: the release and the stop that follows it belong to the process scope, not the caller's.
+ * left a `microphone` service running with nothing captured. These pin the owner's side of the fix:
+ * [IntercomStopOwner.requestStop] does not make its caller wait, so the release and the service stop
+ * after it run on the process scope and survive the caller being cancelled. (That `MainActivity`
+ * calls the owner rather than awaiting itself is a wiring fact these cannot see.) They also pin that
+ * a stop belongs to the intercom it was requested against.
  */
 @OptIn(ExperimentalCoroutinesApi::class)
 class IntercomStopOwnerTest {
@@ -53,6 +56,24 @@ class IntercomStopOwnerTest {
     fun `nothing to release still releases the service exactly once`() {
         owner.requestStop()
         release.complete(StopReleaseResult.AlreadyReleased)
+        processScope.runCurrent()
+        assertEquals(1, serviceReleases)
+    }
+
+    @Test
+    fun `a start after the stop was requested keeps the new intercom's service`() {
+        owner.requestStop()
+        owner.noteStart() // End, then Start again, before the first release has completed
+        release.complete(StopReleaseResult.Released)
+        processScope.runCurrent()
+        assertEquals(0, serviceReleases, "a stale stop must not drop the microphone type from the new intercom")
+    }
+
+    @Test
+    fun `a stop requested after a restart still releases the service`() {
+        owner.noteStart()
+        owner.requestStop()
+        release.complete(StopReleaseResult.Released)
         processScope.runCurrent()
         assertEquals(1, serviceReleases)
     }

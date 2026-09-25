@@ -47,10 +47,11 @@ that fails with the fix neutralised.
 |---|---|---|---|
 | 101 | Android lifecycle | In-app End intercom awaited release on the Activity's scope; recreation inside the window left an orphaned `microphone` foreground service | **Fixed** — one process-scoped `IntercomStopOwner` for both entry points |
 | 102 | Privacy / persistence | `allowBackup=false` does not stop device-to-device transfer on targetSdk 31+ | **Fixed** — `dataExtractionRules` exclude everything |
-| 103 | Networking, both platforms | No deadline on `HELLO`/`HELLO_ACK`; a silent peer parked a reconnect attempt forever (RECONNECTING never ends) and held listener sockets | **Fixed** — 6 s watchdog, mirrored, real-TLS regressions both directions |
+| 103 | Networking, both platforms | No deadline on `HELLO`/`HELLO_ACK`; a silent peer parked a reconnect attempt forever (RECONNECTING never ends) and held listener sockets | **Fixed** — 6 s watchdog, mirrored, real-TLS regressions both directions (ADR-007 Amendment A2) |
 | 104 | Android audio | Music takes no audio focus and ignores becoming-noisy | **Open** — needs an ADR; built-in ExoPlayer handling would violate rules 18/26 |
 | 105 | iOS audio | Music engine ignores `AVAudioEngineConfigurationChange` | **Open** — needs a device to verify a restart path |
 | 106 | iOS audio | Local pause/resume double-scheduled the remainder and inflated position | **Fixed** — measured, then `stop()` + generation, as `seek` already does |
+| 108 | Android lifecycle | A stop's late release could strip the `microphone` type from an intercom restarted in the release window (found by independent review; pre-existing) | **Fixed** — a stop releases only if no start happened since it was requested |
 | 107 | Scope | NFR-08 log export and a sideload build procedure were never delivered | **Open** — first Phase 9 prerequisite |
 | — | CI | `ci.yml` actions were tag-pinned while the Phase 8 record said "SHA-pinned"; no Gradle wrapper-JAR validation; no Gradle cache | **Fixed** — SHA-pinned, `gradle/actions/wrapper-validation`, `setup-java` cache |
 | — | Dependencies | `:audio` declared `media3-session` and never used it | **Fixed** — removed (`:app` declares its own) |
@@ -73,8 +74,8 @@ that fails with the fix neutralised.
 
 **Observed and deliberately not changed:**
 
-- Android's accept loop runs the TLS handshake inline, so one stalling client can delay the next
-  accept by up to 5 s.
+- Both platforms' accept loops run the TLS handshake inline, so one stalling client can delay the
+  next accept by up to 5 s.
 - The clock-sync cadence (11 pings every 10 s, plus keepalive every 2 s) keeps the Wi-Fi radio busy
   for the whole session, including with the screen locked. It is specified by ARCHITECTURE §7.1, so
   its battery cost is an R-05 measurement, not a code change.

@@ -93,3 +93,29 @@ Phase 1b depends on their outcome:
 2. **Exporter availability** — a TLS keying-material exporter reachable from public API on both platforms, producing identical output for the same handshake, matching the construction in [PROTOCOL §4.5.1](../PROTOCOL.md#451-the-six-digit-sas--exact-construction).
 
 Either failing triggers the review above. Neither failing quietly lowers the security bar.
+
+---
+
+## Amendment A2 — 25 September 2026 — the `HELLO` exchange has a deadline
+
+**Decision.** From the end of the TLS handshake, a candidate connection has **6 s** to complete
+`HELLO`/`HELLO_ACK`, on both roles and both platforms. It is closed otherwise. That is PROTOCOL
+§1's keepalive silence rule, applied to the one stretch of a connection's life before the keepalive
+exists. It bounds `HELLO` only. The PROTOCOL §4.5 pairing wait that follows stays deliberately
+unbounded, and so does the duplicate-connection grace period.
+
+**Why.** TLS was bounded (5 s `soTimeout` on Android, `waitUntilReady` on iOS). After it, a read
+blocked with no timeout, and the keepalive starts only after promotion. So a peer that finished
+TLS and then went silent parked the read until TCP keepalive gave up, which on Android defaults to
+two hours. That peer could be Wi-Fi lost without a FIN, a frozen app, or any LAN host holding the
+listener. On the initiator side this parked `ReconnectController`'s attempt, whose 120 s budget
+counts only its backoff delays, so a session could stay in RECONNECTING indefinitely.
+
+**Mechanism.** A watchdog closes the socket, because a blocking socket read ignores coroutine or
+`Task` cancellation and closing the socket is what unblocks it. The watchdog is cancelled and
+joined on every path, including a cancelled caller on Android. A handshake success that raced the
+deadline counts as a closed connection, so the watchdog can never close a promoted socket.
+
+**Consequences.** No wire change, no vector, no state-machine change: the FSM already handles a
+failed connection attempt. PROTOCOL §1 records the value. STATUS §4 problem 103 holds the
+reproduction, and the regressions are `HelloExchangeDeadlineTest` / `HelloExchangeDeadlineTests`.

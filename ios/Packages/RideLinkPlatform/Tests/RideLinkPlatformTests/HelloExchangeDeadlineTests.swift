@@ -8,7 +8,9 @@ import XCTest
 /// is a genuine TLS endpoint that simply never speaks the control protocol. Mirrors Android's
 /// `HelloExchangeDeadlineTest`.
 final class HelloExchangeDeadlineTests: XCTestCase {
-    private static let deadlineMs: Int64 = 300
+    /// Also bounds the well-behaved peer's HELLO in the first test, so it leaves a loaded CI runner
+    /// room for a cold first HELLO/HELLO_ACK; still far below `testBoundNs`.
+    private static let deadlineMs: Int64 = 1_500
     /// Far above the deadline, far below "forever": the pre-fix code never finishes at all.
     private static let testBoundNs: UInt64 = 10_000_000_000
 
@@ -30,9 +32,12 @@ final class HelloExchangeDeadlineTests: XCTestCase {
 
         let silent = try await fakePeer.channel().connect(host: "127.0.0.1", port: port)
         // The SUT must close it; nothing else will ever arrive. The test bounds itself by closing
-        // the socket too, and records whether it had to.
-        let bound = Task<Bool, Never> {
-            try? await Task.sleep(nanoseconds: Self.testBoundNs)
+        // the socket too, and records whether it had to. Locals and an explicit capture list, as in
+        // production's watchdog: Swift 6.3's region-isolation checker rejects `Self.` inside a `Task`
+        // here.
+        let boundNs = Self.testBoundNs
+        let bound = Task<Bool, Never> { [silent] in
+            try? await Task.sleep(nanoseconds: boundNs)
             guard !Task.isCancelled else { return false }
             silent.close()
             return true
@@ -77,8 +82,9 @@ final class HelloExchangeDeadlineTests: XCTestCase {
             }
             return false
         }
-        let bound = Task {
-            try? await Task.sleep(nanoseconds: Self.testBoundNs)
+        let boundNs = Self.testBoundNs
+        let bound = Task { [continuation] in
+            try? await Task.sleep(nanoseconds: boundNs)
             continuation.finish()
         }
         let sawLinkLost = await lost.value

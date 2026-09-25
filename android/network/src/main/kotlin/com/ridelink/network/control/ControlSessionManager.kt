@@ -18,6 +18,7 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -30,6 +31,7 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
@@ -508,8 +510,9 @@ class ControlSessionManager(
         // cancellation, so the watchdog closes the socket; the read then fails as a closed
         // connection. It bounds HELLO only — PROTOCOL §4.5's pairing wait is deliberately
         // unbounded and runs later, in the read loop.
+        // On IO: closing an SSLSocket waits for the read it interrupts, which must not be the main thread.
         val watchdog =
-            scope.launch {
+            scope.launch(Dispatchers.IO) {
                 delay(helloExchangeTimeoutMs)
                 socket.close()
             }
@@ -535,7 +538,9 @@ class ControlSessionManager(
                     )
                 }
             } finally {
-                watchdog.cancelAndJoin()
+                // NonCancellable: if this coroutine is itself cancelled (shutdown), a bare join would
+                // throw at once and leave the watchdog unjoined.
+                withContext(NonCancellable) { watchdog.cancelAndJoin() }
             }
         // The deadline can land between the handshake's last read and the cancel above.
         val outcome = if (performed is HandshakeOutcome.Success && socket.isClosed) HandshakeOutcome.ConnectionClosed else performed

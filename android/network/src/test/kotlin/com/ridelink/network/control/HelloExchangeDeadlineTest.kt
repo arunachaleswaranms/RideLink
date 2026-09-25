@@ -108,7 +108,9 @@ class HelloExchangeDeadlineTest {
         }
 
     private companion object {
-        const val DEADLINE_MS = 300L
+        // Also bounds the well-behaved peer's HELLO in the first test, so it leaves a loaded CI
+        // runner room for a cold first HELLO/HELLO_ACK; still far below TEST_BOUND_MS.
+        const val DEADLINE_MS = 1_500L
 
         // Far above the deadline, far below "forever": the pre-fix code never finishes at all.
         const val TEST_BOUND_MS = 10_000L

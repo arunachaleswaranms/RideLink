@@ -9,6 +9,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.lifecycle.lifecycleScope
 import com.ridelink.app.library.SharedLibraryCoordinator
 import com.ridelink.app.music.MusicCoordinator
+import com.ridelink.app.service.IntercomStopOwner
 import com.ridelink.app.service.RideForegroundService
 import com.ridelink.app.session.SessionCoordinator
 import com.ridelink.app.ui.RideLinkRoot
@@ -67,6 +68,9 @@ class MainActivity : ComponentActivity() {
 
     private var musicCoordinator: MusicCoordinator? = null
 
+    /** Told about every intercom start, so a still-pending stop cannot release the new one's service. */
+    private var intercomStopOwner: IntercomStopOwner? = null
+
     /**
      * Whether this Activity is resumed. The only honest source for
      * [com.ridelink.core.audiopolicy.RideStartRequest.appForegroundVisible].
@@ -84,6 +88,7 @@ class MainActivity : ComponentActivity() {
                     onSuccess = { appContainer ->
                         coordinator = appContainer.sessionCoordinator
                         musicCoordinator = appContainer.musicCoordinator
+                        intercomStopOwner = appContainer.intercomStopOwner
                         RideLinkRoot(
                             coordinator = appContainer.sessionCoordinator,
                             musicCoordinator = appContainer.musicCoordinator,
@@ -174,6 +179,7 @@ class MainActivity : ComponentActivity() {
             coordinator.onForegroundServiceStartFailed()
             return
         }
+        intercomStopOwner?.noteStart()
         coordinator.startIntercom()
     }
 

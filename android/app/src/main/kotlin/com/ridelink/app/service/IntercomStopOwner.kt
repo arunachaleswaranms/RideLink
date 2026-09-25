@@ -4,6 +4,7 @@ import com.ridelink.network.voice.StopReleaseResult
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
+import java.util.concurrent.atomic.AtomicLong
 
 /**
  * The one owner of "end the intercom, then let the foreground service drop its `microphone` type".
@@ -21,6 +22,12 @@ import kotlinx.coroutines.launch
  * and its ongoing notification until the process died. Every entry point (the in-app button and
  * the notification's End action) now calls [requestStop], so none of them can reintroduce that.
  *
+ * A stop belongs to the intercom it was requested against. If the user starts the intercom again
+ * while that release is still pending, the late release must not strip the `microphone` type from
+ * the **new** intercom's service — capture would then be silenced once the screen locks. So every
+ * start is recorded with [noteStart], a stop captures the start epoch it was asked to end, and its
+ * release applies only if no start has happened since.
+ *
  * A timed-out release is never treated as proof the microphone is safe to reclaim: the stop is
  * skipped, and the diagnostics card already shows the stalled route transition.
  */
@@ -29,11 +36,21 @@ class IntercomStopOwner(
     private val endIntercomAndAwaitRelease: suspend () -> StopReleaseResult,
     private val releaseForegroundService: () -> Unit,
 ) {
-    fun requestStop(): Job =
-        scope.launch {
+    private val startEpoch = AtomicLong(0)
+
+    /** Records that a new intercom has been started, superseding any stop still waiting to release. */
+    fun noteStart() {
+        startEpoch.incrementAndGet()
+    }
+
+    fun requestStop(): Job {
+        val stoppingEpoch = startEpoch.get()
+        return scope.launch {
             when (endIntercomAndAwaitRelease()) {
-                StopReleaseResult.Released, StopReleaseResult.AlreadyReleased -> releaseForegroundService()
+                StopReleaseResult.Released, StopReleaseResult.AlreadyReleased ->
+                    if (startEpoch.get() == stoppingEpoch) releaseForegroundService()
                 StopReleaseResult.TimedOut -> Unit
             }
         }
+    }
 }

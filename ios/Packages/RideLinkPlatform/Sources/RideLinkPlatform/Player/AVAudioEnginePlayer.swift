@@ -310,6 +310,11 @@ public actor AVAudioEnginePlayer: Player {
     }
 
     private func tickPosition() {
+        // The tick loop captures `[weak self]`, so it is not actor-isolated: a tick already waiting to
+        // hop onto the actor can run after `pauseCommand`/`handleSegmentFinished` cancelled the loop,
+        // and would republish a state after the pause or end of media. Only a playing node has a
+        // position to report.
+        guard cachedState.playing else { return }
         updateState { $0.copy(positionMs: durationMs(forFrames: currentAbsoluteFrame())) }
     }
 
