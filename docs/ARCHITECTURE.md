@@ -360,7 +360,7 @@ product (REQUIREMENTS §8) and the reason Phase 0 existed.
 | Music playback | `androidx.media3` `ExoPlayer`, with a real `androidx.media3.session.MediaSession` owned directly by the one ride foreground service (ADR-022 — **not** a `MediaSessionService` subclass; see ADR-022 §1 for the binding reason) |
 | Background / lock screen | One foreground service, declared `mediaPlayback` and (when the intercom is part of the ride) `microphone` — see §6.4. Lock-screen transport controls reach the system via a `MediaStyle` notification carrying the `MediaSession`'s token, alongside the service's own mute/end-intercom actions in the same notification (ADR-022) |
 | Voice | WebRTC `PeerConnection` with the built-in `AudioDeviceModule` (owns its own `AudioRecord`/`AudioTrack`, HW AEC/NS/AGC where present). Implemented in `network/voice/WebRtcVoiceEngine`; the session and route half is `audio/route/AndroidVoiceAudioSession`, and the two are deliberately separate calls to tear down (ADR-020 §6) |
-| Route + focus | `AudioManager` — `setCommunicationDevice()` (API 31+, our `minSdk`) for the helmet unit, `AudioFocusRequest` with `WILL_PAUSE_WHEN_DUCKED = false` so *we* control ducking, `AudioDeviceCallback` for connect/disconnect |
+| Route + focus | `AudioManager` — `setCommunicationDevice()` (API 31+, our `minSdk`) for the helmet unit, `AudioFocusRequest` with `WILL_PAUSE_WHEN_DUCKED = false` so *we* control ducking, `AudioDeviceCallback` for connect/disconnect. That focus request belongs to the **voice** session. Local music requests no audio focus and does not observe `ACTION_AUDIO_BECOMING_NOISY` — an open gap, not a decision (STATUS §4 problem 104) |
 | Ducking | `ExoPlayer.volume` driven by the one coexistence coordinator through ten deterministic steps over 200 ms; stored/base volume is never overwritten (ADR-027) |
 
 ### 6.2 iOS
@@ -370,7 +370,7 @@ product (REQUIREMENTS §8) and the reason Phase 0 existed.
 | Music playback | `AVAudioEngine` + `AVAudioPlayerNode` (chosen over `AVAudioPlayer` for sample-accurate scheduling — see §7) |
 | Background / lock screen | `UIBackgroundModes: audio`; `MPNowPlayingInfoCenter` + `MPRemoteCommandCenter` |
 | Voice | WebRTC `RTCPeerConnection` over the duplex session configuration below. Implemented in `RideLinkPlatform/Voice/WebRtcVoiceEngine`; the session and route half is `RideLinkPlatform/Route/IosVoiceAudioSession`, and the two are deliberately separate calls to tear down (ADR-020 §6) |
-| Route + interruption | `AVAudioSession.routeChangeNotification`, `interruptionNotification`, `mediaServicesWereResetNotification` — all three handled explicitly, not just the first (FR-019, NFR-02) |
+| Route + interruption | `AVAudioSession.routeChangeNotification`, `interruptionNotification`, `mediaServicesWereResetNotification` — all three handled explicitly, not just the first (FR-019, NFR-02). Those observers belong to `IosVoiceAudioSession` and exist while the intercom runs. The music `AVAudioEngine` observes none of them and not `AVAudioEngineConfigurationChange`, which Apple documents as stopping the engine on an I/O format change — an open gap needing a device to verify (STATUS §4 problem 105) |
 | Ducking | `AVAudioEngine.mainMixerNode.outputVolume` driven by the one coexistence coordinator through the same ten-step, 200 ms contract (ADR-027) |
 
 **Two audio-session configurations, one process-global owner.** `IosAudioSessionCoordinator` is the
@@ -1176,6 +1176,7 @@ Encoded as build- and code-level rules, not just intentions:
 5. Session keys are TLS 1.3 ephemeral (fresh per connection). Only the long-term identity keypair persists, in Keystore / Keychain. `identity_spki_sha256` is the pinned identity; certificates around that key may be re-issued freely (§4.3).
 6. **mDNS TXT records carry nothing durable** (§4.1). No `peer_id`, no certificate or SPKI fingerprint or prefix, no token, no library size, no device name. Known-peer recognition happens after the TLS handshake, never on the wire in the clear.
 7. `.gitignore` excludes keystores, `.jks`, `.p12`, `.pfx`, `.mobileprovision`, private keys, local secrets, personal music, imported audio, raw recordings and `.part` files. Only synthetic fixtures under `test-media/synthetic/` are committed.
+8. **Nothing the app stores leaves the phone through the platform's own backup or migration.** Android sets `allowBackup="false"` *and* `dataExtractionRules` excluding every domain from both cloud backup and device-to-device transfer — for targetSdk 31+ the first alone no longer blocks the second. The identity key never migrates (Keystore), so a migrated `peer_id` and `trusted_peers.json` would only produce a known `peer_id` with a changed identity, which the pillion's phone correctly refuses; a new phone pairs fresh instead (STATUS §4 problem 102).
 
 ---
 

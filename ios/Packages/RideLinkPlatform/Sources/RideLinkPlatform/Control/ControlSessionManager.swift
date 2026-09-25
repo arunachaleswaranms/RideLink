@@ -107,6 +107,9 @@ public actor ControlSessionManager {
     private static let keepaliveIntervalNs: UInt64 = 2_000_000_000 // PROTOCOL §1
     private static let keepaliveLostThresholdUs: Int64 = 6_000_000 // PROTOCOL §1
     private static let pingTimeoutMs: Int64 = 3_000
+    /// PROTOCOL §1's 6 s silence rule, applied to the `HELLO` exchange that precedes the keepalive.
+    public static let helloExchangeTimeoutMs: Int64 = keepaliveLostThresholdUs / 1_000
+    private let helloExchangeTimeoutNs: UInt64
     private static let clockBurstSampleCount = 11 // ARCHITECTURE §7.1
     private static let clockBurstSpacingNs: UInt64 = 50_000_000 // ARCHITECTURE §7.1 "~50ms apart"
     private static let clockResyncIntervalNs: UInt64 = 10_000_000_000 // ARCHITECTURE §7.1 "every 10s thereafter"
@@ -461,8 +464,11 @@ public actor ControlSessionManager {
         /// monotonic-clocks rule does not apply — and a monotonic value would be meaningless across
         /// reboots, which is exactly what a persisted record has to survive.
         nowEpochSeconds: @escaping @Sendable () -> Int64 = { Int64(Date().timeIntervalSince1970) },
-        randomFraction: @escaping @Sendable () -> Double = { Double.random(in: -1...1) }
+        randomFraction: @escaping @Sendable () -> Double = { Double.random(in: -1...1) },
+        /// How long a candidate may take to complete `HELLO`/`HELLO_ACK`; see `handleCandidate`.
+        helloExchangeTimeoutMs: Int64 = ControlSessionManager.helloExchangeTimeoutMs
     ) {
+        self.helloExchangeTimeoutNs = UInt64(max(0, helloExchangeTimeoutMs)) * 1_000_000
         self.localPeerId = localPeerId
         self.channel = channel
         self.trustedPeers = trustedPeers
@@ -553,7 +559,24 @@ public actor ControlSessionManager {
         }
 
         let localWithTiebreak = local.with(connTiebreak: await arbiter.connTiebreak)
-        let outcome: HandshakeOutcome
+        // The HELLO exchange had no deadline. `waitUntilReady` bounds TCP and TLS, and the keepalive
+        // that detects a silent peer starts only after promotion. So a peer that finished TLS and
+        // then went silent — Wi-Fi lost with no FIN between the two, a frozen app, or any LAN host
+        // holding the listener — parked this receive indefinitely. On the initiator side that parked
+        // ReconnectController's attempt, whose 120 s budget counts only its delays, so the session
+        // sat in RECONNECTING forever and never reached DISCONNECTED. PROTOCOL §1's 6 s silence rule
+        // now applies here too. Cancelling the connection completes the pending receive, so the
+        // handshake returns `.connectionClosed`. It bounds HELLO only — PROTOCOL §4.5's pairing wait
+        // is deliberately unbounded and runs later, in the read loop. The watchdog is cancelled and
+        // joined on every path; its result says whether it fired, even after a success.
+        let deadlineNs = helloExchangeTimeoutNs
+        let watchdog = Task<Bool, Never> {
+            try? await Task.sleep(nanoseconds: deadlineNs)
+            guard !Task.isCancelled else { return false }
+            socket.close()
+            return true
+        }
+        var outcome: HandshakeOutcome
         do {
             outcome =
                 socket.isInitiator
@@ -564,9 +587,13 @@ public actor ControlSessionManager {
                     socket: socket, localPeerId: localPeerId, seqCounter: seqCounter,
                     monotonicNowUs: monotonicNowUs, local: localWithTiebreak, trustedPeers: trustedPeers)
         } catch {
+            watchdog.cancel()
+            _ = await watchdog.value
             socket.close()
             return
         }
+        watchdog.cancel()
+        if await watchdog.value { outcome = .connectionClosed }
 
         switch outcome {
         case .success:

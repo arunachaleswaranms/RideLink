@@ -1,5 +1,70 @@
 # RideLink — Status
 
+**24 September 2026 — full project audit and Phase 9 readiness ([PHASE9_READINESS.md](PHASE9_READINESS.md), problems 101–107).**
+Phase 8 is **merged** to `main` at `2aa728fd45bfc37c59ba8a5d75014fc80d77e540` (PR #6); the dated
+entries below that call PR #6 unmerged are historical. This pass audited what twenty-odd lifetime
+audits had not reached: the platform adapters and plumbing underneath the pure tables. Four
+defects are fixed, each reproduced or traced from production first, each with a regression that fails
+with the fix neutralised:
+
+- **101 (Android):** the in-app End intercom lost its foreground-service stop when the Activity was
+  recreated mid-release.
+- **102 (Android):** device-to-device migration was not excluded.
+- **103 (both platforms):** the `HELLO` exchange had no deadline, so one silent peer parked a
+  reconnect attempt, and with it the whole 120 s ladder, forever.
+- **106 (iOS):** local pause/resume double-scheduled the remainder of the track and inflated the
+  reported position.
+
+Three are recorded open with reasons: **104** (Android music takes no audio focus and ignores
+becoming-noisy, which needs an ADR), **105** (the iOS music engine ignores configuration changes,
+which needs a device), and **107** (NFR-08 log export and a sideload procedure, Phase 8 scope that
+was never delivered). CI actions are now SHA-pinned throughout, with Gradle wrapper validation and a
+Gradle cache. No wire format, vector, security rule or state machine changed. The `HELLO` deadline is
+local timing, recorded in PROTOCOL §1. **Verdict: MANUAL VALIDATION REQUIRED** — Phase 9 is physical
+qualification; the exact next task is PHASE9_READINESS §6. Physical gates remain **DEFERRED —
+HARDWARE NOT AVAILABLE**.
+
+Evidence, all local. Every gate below was re-run on the committed tree (this audit applied to `main`
+at `5b06918`, which includes Phase 8.5) and gave the counts shown:
+
+- **Android unit:** 1,101 passed, 0 failed, counted from JUnit XML (app 292, core 459, network 286,
+  audio 33, data 31). ktlint, detekt, lint, `assembleDebug` and `assembleRelease` pass, all with
+  `--rerun-tasks` on JDK 21.
+- **Android emulator (API 36):** all 9 app instrumented tests passed, including
+  `ActivityOwnershipTest` (20 recreate/foreground cycles against the real `AppContainer`) and
+  Phase 8.5's three UI suites. `:audio`'s 11 instrumented tests passed.
+- **iOS:** Core 353 passed. Platform 676 executed, 0 failures, 1 skipped (the orchestrator-only
+  interop half). Unsigned Debug and Release simulator builds: `** BUILD SUCCEEDED **`.
+- **Cross-platform (`tools/crossplatform/run.sh`):** GATE PASSED twice consecutively, 17/17 each,
+  including first-meeting pairing (the new `HELLO` deadline does not reach the §4.5 wait) and the
+  silent reconnect from generation 1 to 2. The run before those two **failed**, and it is recorded
+  here rather than discarded. The iOS half gave up with `notReady` after 32 s while the Android half
+  was still in a 2 min 44 s cold Gradle compile of the changed sources, and then found no peer
+  ("no pairing prompt"). The run after it passed on warm Gradle with no source change. This is an
+  orchestration limit of the script (the halves start together, and the iOS side's readiness window
+  is shorter than a cold compile), not a product failure.
+- **Security:** Gitleaks over git history: 237 commits, no leaks. The local-only policy
+  (`tools/audit_local_only.py`, which needs Python 3.11+ for `tomllib`) found 0 findings across 318
+  production files. A `gitleaks dir` scan of the working tree reports 22 hits, all in the untracked
+  SwiftPM `.build/` checkout.
+- **Mutation checks:** each new regression was re-run with its fix neutralised and failed, as
+  recorded in problems 101, 103 and 106.
+- **Not run:** exact-head GitHub CI (nothing is pushed), and every physical gate.
+
+**Overlap with Phase 8.5 (reviewed 25 September).** This audit was developed in a working tree that
+also held an intermediate Phase 8.5 commit (`0e781bf`), made by a separate session while the audit was
+in progress. Phase 8.5 was then reviewed and merged on its own as `5b06918` (PR #12). This audit is
+committed separately on top of that merge. It re-applies only the audit's own changes, and adds no
+Phase 8.5 file.
+
+- **Files the two pieces of work share:** `MainActivity.kt`, where Phase 8.5 changes the theme
+  wrapper and the audit changes only the stop path, and the dated doc entries. Both applied to
+  `5b06918` without code conflicts. The only conflict was the order of two dated STATUS entries.
+- **Routing:** every Phase 8.5 Stop Intercom route (VoiceCard, via MainScreen and SyncPlaybackCard)
+  reaches `intercomStopOwner`.
+- **`VisualCapture.kt`:** the one Phase 8.5 file the audit's tree also held uncommitted. It is not
+  part of this commit; its reviewed form reached `main` through PR #12.
+
 **25 September 2026 — Phase 8.5 UI polish implemented and locally validated.** Based on merged main
 `2aa728fd45bfc37c59ba8a5d75014fc80d77e540`, preserving the reviewed Phase 8 architecture.
 Native Ride Mode, setup/pairing, intercom and music/queue presentation are polished; diagnostics
@@ -8186,6 +8251,13 @@ as of this write-up — see §7.
 | 98 | **FIXED 23 September 2026 (found by problem 96's regressions, both platforms).** Sequence truth and accounting around accepted debt: (a) a snapshot at `command_seq == lastReceivedSeq` adopted nothing, so after it superseded or reconciled past an accepted C1 and its state was represented, `lastAppliedSeq` still said C1 had never applied; (b) a held command waiting for local capacity incremented `workCapacityRefusedCount` ("a command whose `command_seq` was not spent"); (c) Android's drain published the popped `seq` as `lastAppliedCommandSeq` before the apply could still refuse it | ~~Medium~~ Fixed | `representAuthoritativeSequence` raises applied truth monotonically only where the snapshot's state is represented; advisory capacity pre-check plus `heldCommandCapacityWaitCount` (one per cadence pass); Android publishes applied truth only from `representDelivered`. Regressions E and F |
 | 99 | **FIXED 23 September 2026 (independent review of `171bb3f`, ADR-024 Amendment A14, iOS).** `SyncPlaybackPresenter.isSynchronizedModeActive` was `diagnostics.role != nil && diagnostics.syncState != .inactive`, and `RideLinkApp` gave it to `SyncPlaybackGateAdapter`. After A13, accepted or delivered debt finishing after End Ride publishes SCHEDULED (`scheduleAt`) and SYNCED (`markSynced`) with the role intact, so the derivation read "synchronised" with `syncEnabled == false`: lock-screen/Control Center Pause was intercepted and `pause()` → `issue()` stamped a fresh synchronised `PAUSE`. `failClosedOutbound`'s `.transportFailed` had always had the same effect | ~~High~~ Fixed | One source, `syncEnabled && role != nil`, projected as `TransportOwnership` and mirrored in a lock-backed `TransportOwnershipBox` stored by the `didSet` of `syncEnabled` and `role`; the adapter and presenter read it, and nothing reads `SyncState` to authorise. `SyncPlaybackGate`, `SyncPlaybackGateAdapter` and `SyncPlaybackPresenter` moved into `RideLinkPlatform` (the app target has no test bundle) in a separate no-change commit, and `SyncPlaybackTransportOwnershipTests` reproduced it there first. Android's gate already read the coordinator's fields |
 | 100 | **FIXED 23 September 2026 (found by problem 99's audit, both platforms).** The coordinators' `pause`/`resume`/`seek`/`next`/`previous` admitted a fresh press whether or not synchronised mode owned the controls. Reachable from the Phase 5 synchronised-playback cards (which call them directly), from iOS Ride Mode (which did too), and from the gate's own intercept-then-`Task`/`launch` window — End Ride landing there let the press admit a brand-new ride and stamp fresh authority. A leader doing so also left its own `syncEnabled` false while activating the follower | ~~High~~ Fixed | `admitLocalTransport()` in the five entry points and `issue(origin:)` re-proving it beside the stamp, with an explicit `IssueOrigin` (only `.localTransport` gated; retained Play, served intents, inbound commands, accepted/delivered debt and resync untouched). iOS `RideModeView` now calls `MusicCoordinator`, as Android's `RideModeScreen` does. Reproduced against unmodified production on both platforms (direct call and race cases); five iOS and four Android tests that issued transport commands in a never-activated session now activate first, assertions unchanged |
+| 101 | **FIXED 24 September 2026 (project audit, Android, ADR-021 Amendment A8).** The in-app End intercom button awaited capture release on `MainActivity.lifecycleScope` and only then dropped the foreground service's `microphone` type. The Activity is not orientation-locked, so a rotation, theme change or system finish inside the release window cancelled that coroutine after release was queued: capture was released and `RideForegroundService.stopIntercom` never ran, leaving a `microphone` foreground service and its ongoing notification until process death. `AppContainer`'s KDoc claimed both End entry points "funnel through" its app-scoped handler; only the notification action did | ~~Medium~~ Fixed | `IntercomStopOwner` on the process scope is now the one owner; the in-app button and the notification action both call `AppContainer.intercomStopOwner.requestStop()`. `IntercomStopOwnerTest` (3 cases); the caller-scope-cancelled case fails when the await is moved back onto the caller's scope (`expected: <1> but was: <0>`). Reproduced by code trace, not on a device: starting the intercom needs an authenticated peer |
+| 102 | **FIXED 24 September 2026 (project audit, Android).** `android:allowBackup="false"` does not block device-to-device transfer for targetSdk 31+. A migrated phone would inherit `files/security/peer_id` and `trusted_peers.json` but mint a new Keystore identity (Keystore keys never migrate), so the pillion's phone sees a known `peer_id` with a changed SPKI and correctly refuses it; SAF library grants would not carry over either | ~~Low~~ Fixed | `res/xml/data_extraction_rules.xml` excludes every domain from cloud backup and device transfer; ARCHITECTURE §11 item 8. Lint-validated; the migration itself is **MANUAL REQUIRED** (a second Android phone) |
+| 103 | **FIXED 24 September 2026 (project audit, both platforms).** The `HELLO`/`HELLO_ACK` exchange had no deadline. TLS is bounded (5 s `soTimeout` on Android, `waitUntilReady` on iOS), then the read blocks with no timeout, and the keepalive that detects silence starts only after promotion. A peer that finished TLS and went silent (Wi-Fi lost without a FIN between the two, a frozen app, any LAN host holding the listener) parked the read until TCP keepalive gave up (2 h default on Android). On the initiator side that parked `ReconnectController`'s attempt, whose 120 s budget counts only its backoff delays, so the session stayed RECONNECTING indefinitely and never reached DISCONNECTED. On the acceptor side each silent connection held a socket and a coroutine indefinitely | ~~Medium~~ Fixed | A watchdog around `performAsInitiator`/`performAsAcceptor` closes the socket after PROTOCOL §1's 6 s silence bound (a blocking read ignores coroutine cancellation; closing it is what unblocks it), is cancelled and joined on every path, and downgrades a success it raced to a closed connection. Pairing (§4.5) is not covered and stays unbounded. PROTOCOL §1 table. `HelloExchangeDeadlineTest` / `HelloExchangeDeadlineTests` over real TLS, both directions; all four fail with the watchdog's close neutralised. The accept loop still runs the TLS handshake inline, so a stalling client can delay the next accept by up to 5 s — recorded, not changed |
+| 104 | **OPEN — design needed (project audit, Android).** Local music requests no audio focus and does not observe `ACTION_AUDIO_BECOMING_NOISY`. Phase 3 deferred music focus to Phase 6 (§2q: "Phase 6's job"); Phase 6 implemented intercom ducking through `ExoPlayer.volume` and never added it. Consequences on a phone: music keeps playing over another app, a navigation prompt or a call; and when the helmet unit disconnects (battery, out of range) music moves to the phone's loudspeaker | Medium | **Not** fixable by `setAudioAttributes(…, handleAudioFocus = true)` / `setHandleAudioBecomingNoisy(true)`: both pause or duck the player directly, behind `MusicCoordinator` (rules 18, 26), and the first would react to the intercom's own voice focus request and undo ADR-027's music-under-voice design. Needs an ADR: route focus loss and becoming-noisy into `MusicCoordinator` as local intents (in synchronised mode, through the existing gate). A Phase 9 physical test will expose it immediately |
+| 105 | **OPEN — needs a device (project audit, iOS).** The music `AVAudioEngine` observes neither `AVAudioEngineConfigurationChange` nor any `AVAudioSession` notification; those observers belong to `IosVoiceAudioSession`. Apple documents that the engine stops and uninitialises itself when its I/O channel count or sample rate changes, and `AVAudioEnginePlayer` would keep reporting `playing == true`. The candidates are a Bluetooth route change and the `.playback` → `.playAndRecord`/HFP switch the intercom makes, which is exactly ADR-027's music-under-voice path | Medium (unmeasured) | Deliberately **not** patched blind: a restart path on a sync-critical player needs a real route change to verify. Recommended shape: observe the notification for this engine, and if `playing`, restart the engine and reschedule from the last published position under a new generation, so Phase 5's drift ladder sees a short gap rather than permanent silence. **MANUAL REQUIRED**: TWS connect/disconnect while playing, and Start Intercom while playing, on an iPhone |
+| 106 | **FIXED 24 September 2026 (project audit, iOS).** `AVAudioEnginePlayer.pauseCommand` called `playerNode.pause()`, which keeps the node's queued segment and its sample clock, and `playCommand` resumes by scheduling a fresh segment from the pause offset. So every local Pause → Play (and Mode D's `pauseForVoice`/`resumeAfterVoice`, which are the same two commands) played the remainder twice, published `ended` while the second copy was still audible, and reported `seekOffsetFrames + sampleTime`, counting the pre-pause time twice. That inflated position is what a follower's `POSITION_REPORT` carries to the drift ladder. Synchronised resume goes through `seek`, which stops the node, and was unaffected | ~~High~~ Fixed | `stop()` plus a generation bump, the pattern `seekCommand` already uses. Measured first on this machine: a standalone script saw two completions (714 ms and 1 102 ms for a 509 ms file), and `AVAudioEnginePlayerTests.testPauseThenResumeContinuesFromThePausePointAndEndsExactlyOnce` failed against unmodified production twice, once per symptom (a duplicate `ended`, then 491 ms reported after pausing at 235 ms and playing ~50 ms). Green 5/5 with `Phase5RealPlayerTests` after the fix. Android is unaffected (ExoPlayer's pause is a true pause) |
+| 107 | **OPEN — Phase 8 scope item never delivered (project audit).** REQUIREMENTS NFR-08 ("local diagnostic logs shall be exportable") and §13's Phase 8 row ("diagnostics export … repeatable sideload builds"), and TEST_PLAN §9's Phase 8 gate ("log export, sideload build"), have no implementation on either platform, and no document recorded them as deferred. The 1 024-event in-memory log (ADR-029 §2) can be read only on the diagnostics cards. There is also no documented procedure for producing an installable signed build for the two phones | Medium | The first Phase 9 task (`docs/PHASE9_READINESS.md` §6): physical qualification is a field exercise, and its evidence is the transition log. Export must go through the redacting sink only (ARCHITECTURE §11 item 3) and be user-initiated through the platform share sheet — no new network path |
 
 Resolved 26 Aug 2026 session: `CLAUDE.md` in `.gitignore` (was problem 1); `.DS_Store` tracking
 (was problem 7 — the claim was incorrect; the files are untracked and now ignored); the ADR-015/
@@ -8219,6 +8291,9 @@ Not blocking Phase 1. Answers needed before Phase 6.
 ---
 
 ## 7. Next exact task
+
+**Superseded 24 September 2026.** Everything below in this section is historical (it predates the
+Phase 7 and Phase 8 merges). The current next task is [PHASE9_READINESS.md](PHASE9_READINESS.md) §6.
 
 **Phase 7 — Ride Mode and resilience. SOFTWARE CLOSURE IS IMPLEMENTED, SELF-AUDITED (§2av), AND HAS
 NOW SURVIVED *SIX* ROUNDS OF INDEPENDENT REVIEW — §2aw (two blocker groups), round 3 (ADR-028

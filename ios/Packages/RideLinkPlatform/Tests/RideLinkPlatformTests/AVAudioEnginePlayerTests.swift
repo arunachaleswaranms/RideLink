@@ -107,6 +107,40 @@ final class AVAudioEnginePlayerTests: XCTestCase {
         )
     }
 
+    /// A local Pause → Play (and Mode D's `pauseForVoice`/`resumeAfterVoice`, which are the same two
+    /// commands) used to `pause()` the node — which keeps its queued segment and keeps its sample
+    /// clock — and then schedule a *second* segment from the pause offset on resume. Measured on this
+    /// machine: the remainder played twice, the first copy's completion reported `ended` while the
+    /// second was still audible, and the reported position was `pauseOffset + nodeSampleTime`, i.e.
+    /// inflated by the whole pre-pause duration on every resume.
+    func testPauseThenResumeContinuesFromThePausePointAndEndsExactlyOnce() async throws {
+        await player.execute(.load(localEntryId: LocalEntryId("00000000-0000-4000-8000-c3c3c3c3c3c3"), location: try location("normal.m4a")))
+        let ready = try await firstState { $0.durationMs > 0 }
+        await player.execute(.play)
+        _ = try await firstState { $0.playing && $0.positionMs >= 150 }
+        await player.execute(.pause)
+        let paused = try await firstState { !$0.playing }
+
+        // Resume briefly and pause again: the second pause reads the absolute position synchronously,
+        // so it shows whether the pre-pause time (>= 150 ms here) was counted a second time.
+        await player.execute(.play)
+        _ = try await firstState { $0.playing }
+        try await Task.sleep(nanoseconds: 50_000_000)
+        await player.execute(.pause)
+        let pausedAgain = try await firstState { !$0.playing }
+        XCTAssertLessThan(
+            pausedAgain.positionMs, paused.positionMs + 150,
+            "resume must continue from the pause point (\(paused.positionMs) ms), not add the pre-pause time again"
+        )
+
+        await player.execute(.play)
+        _ = try await firstState { $0.ended }
+        // A duplicated segment completes a second time under the same generation and re-publishes
+        // `ended`. Nothing legitimate publishes anything after end of media with no further command.
+        let later = try? await firstState(timeout: TimeInterval(ready.durationMs) / 1000 + 1) { _ in true }
+        XCTAssertNil(later, "a second segment kept playing after end of media: \(String(describing: later))")
+    }
+
     func testEndOfTrackIsReportedAsEnded() async throws {
         // normal.m4a is ~0.5s — short enough to reach the real end of track within the test's own
         // timeout rather than needing a fake clock, proving the real AVAudioPlayerNode completion

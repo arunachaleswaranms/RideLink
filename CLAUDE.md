@@ -221,7 +221,11 @@ resume are deferred, but the chunk and page framing keep both possible.
 
 ## Current phase
 
-**Phase 8 — Release Hardening & Software Integration is in progress.** Phase 7 was
+**Phase 8 — Release Hardening & Software Integration is merged** at
+`2aa728fd45bfc37c59ba8a5d75014fc80d77e540` (PR #6), and Phase 8.5's UI polish at
+`5b06918` (PR #12). **Phase 9 is physical qualification**, and whether the software is ready
+for it — the 24 September 2026 project audit, its fixes (STATUS problems 101–107) and the exact
+next task — is `docs/PHASE9_READINESS.md`. Phase 7 was
 independently reviewed, merged at `48b7a8e5d07fe52010d05c1893d3f914722d80f0`, and its
 post-merge CI passed. The current evidence and remaining gates are in
 `docs/PHASE8_RELEASE_HARDENING.md`; the Phase 7 narrative below is historical.

@@ -1,6 +1,7 @@
 # ADR-029 — Release hardening at recovery and retention boundaries
 
-Date: 22 September 2026. Status: proposed for independent review with Phase 8.
+Date: 22 September 2026. Status: **accepted** — merged with Phase 8 (PR #6, `2aa728f`). Proposed
+for independent review with Phase 8; the amendments below record that review.
 
 ## Context
 
