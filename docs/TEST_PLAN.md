@@ -1,5 +1,24 @@
 # RideLink — Test Plan
 
+## Phase 8.5 UI polish additions
+
+See [UI audit and evidence](PHASE8_5_UI_POLISH.md) and [native fixture instructions](../tools/ui-qa/README.md).
+Run Android `UiLabelsTest` / `RideModeUiStateTest`, Swift `UiPresentationTests`, and Android
+`PresentationActionsTest`. Preserve the full Phase 8 authority/lifecycle suites. Test labels for
+late distributed debt after End Ride with local transport ownership, connection loss overriding
+stale sync diagnostics, Modes A–E wording, and permission/failure guidance. Exercise PTT start,
+stop and disposal release through accessibility actions; remove the second of two equal-hash queue
+items and require exactly its queue-item ID.
+
+Render native Ride states: idle, intercom, music, combined, PTT-held, muted, reconnecting,
+disconnected, sync failure, waiting for content and long titles. Render setup discovery/connection/pairing/security,
+voice permission failure, empty/playing/paused music, transfer and duplicate queue. Inspect native
+large and small phone viewports, both appearances, scaled text, safe areas, scroll reachability and
+library keyboard behavior. Captures with OS dialogs or unfinished launch transitions are invalid.
+Fixtures are passive rendering evidence, not authenticated two-phone or physical audio evidence.
+All Phase 9 sunlight/gloves/mounting/background/Bluetooth/audible-sync/battery/thermal/riding gates
+remain **DEFERRED — PHYSICAL QUALIFICATION**.
+
 ## Phase 8 release-hardening additions
 
 See [Phase 8 evidence](PHASE8_RELEASE_HARDENING.md), ADR-029 and

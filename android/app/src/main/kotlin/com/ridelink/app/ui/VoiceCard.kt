@@ -1,11 +1,8 @@
 package com.ridelink.app.ui
 
-import androidx.compose.foundation.gestures.awaitEachGesture
-import androidx.compose.foundation.gestures.awaitFirstDown
-import androidx.compose.foundation.gestures.waitForUpOrCancellation
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.Button
@@ -15,13 +12,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.DisposableEffect
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.input.pointer.pointerInput
-import androidx.compose.ui.semantics.Role
-import androidx.compose.ui.semantics.role
-import androidx.compose.ui.semantics.semantics
-import androidx.compose.ui.unit.dp
 import com.ridelink.app.music.CoexistenceDiagnostics
 import com.ridelink.core.audiopolicy.IntercomPolicy
 import com.ridelink.core.audiopolicy.RideStartDecision
@@ -62,13 +53,15 @@ internal fun VoiceCard(
 ) {
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(
-            modifier = Modifier.fillMaxWidth().padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(6.dp),
+            modifier = Modifier.fillMaxWidth().padding(RideSpace.lg),
+            verticalArrangement = Arrangement.spacedBy(RideSpace.sm),
         ) {
-            Text("INTERCOM (Phase 2b)", style = MaterialTheme.typography.titleSmall)
+            Text("Intercom", style = MaterialTheme.typography.titleSmall)
             IntercomControls(voice, refusal, onStartIntercom, onStopIntercom, onToggleMute)
             IntercomModeControls(voice, policy, onSelectPolicy, onPushToTalkHeld)
-            IntercomDiagnosticsSections(voice, coexistence, peerAudioState)
+            DiagnosticDisclosure("intercom diagnostics") {
+                IntercomDiagnosticsSections(voice, coexistence, peerAudioState)
+            }
         }
     }
 }
@@ -93,13 +86,13 @@ private fun IntercomControls(
     refusal?.let { refused ->
         // Named, not "connection failed" (this phase's brief §41). FR-025: the session is untouched.
         Text(
-            "Intercom unavailable — ${refused.failure.name}. The peer session is unaffected.",
-            color = BannerColors.AlertText,
+            voiceFailureLabel(refused.failure),
+            color = MaterialTheme.colorScheme.error,
             style = MaterialTheme.typography.bodySmall,
         )
     }
 
-    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+    FlowRow(horizontalArrangement = Arrangement.spacedBy(RideSpace.sm)) {
         if (voice.status == VoiceStatus.IDLE || voice.status == VoiceStatus.FAILED) {
             Button(onClick = onStartIntercom) { Text("Start Intercom") }
         } else {
@@ -110,14 +103,27 @@ private fun IntercomControls(
         }
     }
 
-    DiagnosticRow("voice state", voice.status.name)
-    DiagnosticRow("role", voice.role?.name ?: "—")
-    DiagnosticRow("voice session", voice.voiceSessionPrefix ?: "—")
-    DiagnosticRow("peer reports", voice.peerReportedState.name)
-    DiagnosticRow("mic (device)", micLabel(voice))
-    DiagnosticRow("transmitting", voice.transmitting.toString())
-    DiagnosticRow("wire mic_muted", voice.micMuted.toString())
-    DiagnosticRow("last failure", voice.lastFailure?.name ?: "none")
+    Text(voiceLabel(voice.status), style = MaterialTheme.typography.titleMedium)
+    Text(
+        if (voice.userMuted) {
+            "Muted"
+        } else if (voice.transmitting) {
+            "Transmitting"
+        } else {
+            if (voice.localAudioOpen) "Microphone ready" else "Microphone unavailable"
+        },
+    )
+    voice.lastFailure?.let { Text(voiceFailureLabel(it), color = MaterialTheme.colorScheme.error) }
+    DiagnosticDisclosure("voice details") {
+        DiagnosticRow("voice state", voice.status.name)
+        DiagnosticRow("role", voice.role?.name ?: "—")
+        DiagnosticRow("voice session", voice.voiceSessionPrefix ?: "—")
+        DiagnosticRow("peer reports", voice.peerReportedState.name)
+        DiagnosticRow("mic (device)", micLabel(voice))
+        DiagnosticRow("transmitting", voice.transmitting.toString())
+        DiagnosticRow("wire mic_muted", voice.micMuted.toString())
+        DiagnosticRow("last failure", voice.lastFailure?.name ?: "none")
+    }
 }
 
 /** Whether the capture *device* is open — not whether speech is being transmitted (PROTOCOL §4.4). */
@@ -135,37 +141,41 @@ private fun IntercomModeControls(
     onSelectPolicy: (IntercomPolicy) -> Unit,
     onPushToTalkHeld: (Boolean) -> Unit,
 ) {
-    Text("MODE", style = MaterialTheme.typography.labelSmall)
-    Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-        for (candidate in IntercomPolicy.ALL) {
-            FilterChip(
-                selected = candidate.id == policy.id,
-                onClick = { onSelectPolicy(candidate) },
-                label = { Text(candidate.id.name.removePrefix("MODE_")) },
-            )
+    Text(policyLabel(policy), style = MaterialTheme.typography.bodyMedium)
+    DiagnosticDisclosure("intercom modes") {
+        Column {
+            for (candidate in IntercomPolicy.ALL) {
+                FilterChip(
+                    selected = candidate.id == policy.id,
+                    onClick = { onSelectPolicy(candidate) },
+                    label = { Text(policyLabel(candidate)) },
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            }
         }
     }
-    // The default is Mode C by architecture, not by measurement — docs/PHASE0_RESULTS.md is still
-    // awaiting the user's Phase 0 numbers, and saying so here keeps the screen honest.
-    DiagnosticRow("policy", "${policy.id.name} (default MODE_C — architecture, not measured)")
-    DiagnosticRow("gate", gateLabel(policy))
-    DiagnosticRow("full duplex", policy.fullDuplex.toString())
-    DiagnosticRow("wire mode", "${voice.mode.name} / ${voice.intercomMode.name}")
+    DiagnosticDisclosure("policy diagnostics") {
+        // The default is Mode C by architecture, not by measurement — docs/PHASE0_RESULTS.md is still
+        // awaiting the user's Phase 0 numbers, and saying so here keeps the screen honest.
+        DiagnosticRow("policy", "${policy.id.name} (default MODE_C — architecture, not measured)")
+        DiagnosticRow("gate", gateLabel(policy))
+        DiagnosticRow("full duplex", policy.fullDuplex.toString())
+        DiagnosticRow("wire mode", "${voice.mode.name} / ${voice.intercomMode.name}")
+    }
 
     if (policy.gate is TransmissionGate.Vox && !voice.voxLevelSourceAvailable) {
         // ADR-021 §6, stated rather than discovered by silence: the VOX state machine is real and
         // tested, but no microphone-driven level exists on either platform yet, so the gate cannot
         // open. PENDING REAL AUDIO INPUT / LATER HARDENING.
         Text(
-            "VOX: no microphone level source on this platform yet, so the gate cannot open — " +
-                "PENDING REAL AUDIO INPUT (ADR-021 §6). Use PTT or continuous.",
-            color = BannerColors.AlertText,
+            "Voice activation is unavailable. Choose Push to Talk or continuous intercom.",
+            color = MaterialTheme.colorScheme.error,
             style = MaterialTheme.typography.bodySmall,
         )
     }
 
     if (policy.gate == TransmissionGate.Ptt) {
-        PushToTalkButton(voice, onPushToTalkHeld)
+        PushToTalkControl(voice.localAudioOpen, voice.userMuted, voice.pttHeld, onPushToTalkHeld)
     }
 }
 
@@ -176,50 +186,3 @@ private fun gateLabel(policy: IntercomPolicy): String =
         TransmissionGate.Ptt -> "ptt"
         TransmissionGate.Disabled -> "disabled (music only)"
     }
-
-/**
- * Press-and-hold, with every way a hold can end mapped to the same "not held" assignment.
- *
- * This phase's brief §25 in one composable:
- *
- * - [waitForUpOrCancellation] returns null on a *cancelled* gesture — a drag off the button, a
- *   scroll taking over the pointer — and that is treated exactly as an up. There is no path through
- *   this function that leaves the gate open.
- * - The [DisposableEffect] releases on dispose, so navigating away or the composable leaving the tree
- *   while held cannot strand transmission on. Backgrounding is handled one level up, in the Activity's
- *   `onPause`, because a composable is not told about that.
- * - `semantics { role = Role.Button }` keeps it operable by an accessibility service; an activation
- *   from one produces a down and an up like any other, so it cannot create a stuck press either.
- *
- * It gates the outbound track and nothing else: no capture reopen, no peer-connection rebuild.
- */
-@Composable
-private fun PushToTalkButton(
-    voice: VoiceDiagnostics,
-    onPushToTalkHeld: (Boolean) -> Unit,
-) {
-    DisposableEffect(Unit) {
-        onDispose { onPushToTalkHeld(false) }
-    }
-    Button(
-        onClick = {},
-        enabled = voice.localAudioOpen,
-        modifier =
-            Modifier
-                .fillMaxWidth()
-                .semantics { role = Role.Button }
-                .pointerInput(voice.localAudioOpen) {
-                    if (!voice.localAudioOpen) return@pointerInput
-                    awaitEachGesture {
-                        awaitFirstDown(requireUnconsumed = false)
-                        onPushToTalkHeld(true)
-                        // Null means the gesture was cancelled rather than released. Both end the
-                        // hold, which is the only safe reading.
-                        waitForUpOrCancellation()
-                        onPushToTalkHeld(false)
-                    }
-                },
-    ) {
-        Text(if (voice.pttHeld) "TALKING — release to stop" else "HOLD TO TALK")
-    }
-}

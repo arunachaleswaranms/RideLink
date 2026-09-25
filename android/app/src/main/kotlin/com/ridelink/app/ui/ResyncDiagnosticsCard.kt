@@ -9,7 +9,6 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.unit.dp
 import com.ridelink.app.resync.ResyncDiagnostics
 import com.ridelink.app.resync.ResyncOutcome
 
@@ -24,7 +23,7 @@ import com.ridelink.app.resync.ResyncOutcome
 @Composable
 internal fun ResyncDiagnosticsCard(diagnostics: ResyncDiagnostics) {
     Card(modifier = Modifier.fillMaxWidth()) {
-        Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        Column(modifier = Modifier.padding(RideSpace.lg), verticalArrangement = Arrangement.spacedBy(RideSpace.sm)) {
             Text("Resync (Phase 7)", style = MaterialTheme.typography.titleMedium)
             DiagnosticRow("Request outstanding", diagnostics.requestPending.toString())
             DiagnosticRow("Last outcome", resyncOutcomeLabel(diagnostics.lastOutcome))

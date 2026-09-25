@@ -43,9 +43,7 @@ struct SecureTransportUnavailableView: View {
             )
             .font(.body)
             .foregroundStyle(.secondary)
-            Text(reason)
-                .font(.footnote.monospaced())
-                .foregroundStyle(.secondary)
+            DisclosureGroup("Diagnostics") { Text(reason).font(.footnote.monospaced()) }
         }
         .padding(24)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)

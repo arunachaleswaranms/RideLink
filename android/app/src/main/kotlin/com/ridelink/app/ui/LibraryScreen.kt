@@ -8,6 +8,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
@@ -15,6 +16,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
@@ -52,8 +54,8 @@ fun LibraryScreen(
     onAddToQueue: (LibraryEntry) -> Unit,
     onPlayNow: (LibraryEntry) -> Unit,
 ) {
-    Column(modifier = Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+    Column(modifier = Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(RideSpace.sm)) {
+        FlowRow(horizontalArrangement = Arrangement.spacedBy(RideSpace.sm)) {
             Button(onClick = onImportFolder) { Text("Import Folder") }
             Button(onClick = onImportFiles) { Text("Import Files") }
         }
@@ -62,19 +64,25 @@ fun LibraryScreen(
             value = query.searchText,
             onValueChange = onSearchTextChange,
             modifier = Modifier.fillMaxWidth(),
-            label = { Text("Search title, artist, album, filename") },
+            label = { Text("Search your music") },
             singleLine = true,
         )
 
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        FlowRow(horizontalArrangement = Arrangement.spacedBy(RideSpace.sm)) {
             LibrarySort.entries.forEach { sort ->
                 val selected = query.sort == sort
-                Button(onClick = { onSortChange(sort) }, enabled = !selected) { Text(sortLabel(sort)) }
+                FilterChip(selected = selected, onClick = { onSortChange(sort) }, label = { Text(sortLabel(sort)) })
             }
         }
 
         Text(
-            if (entries.isEmpty()) "No tracks yet — import a folder or file to get started." else "${entries.size} track(s)",
+            if (entries.isEmpty() && query.searchText.isNotBlank()) {
+                "No matching tracks. Try another search."
+            } else if (entries.isEmpty()) {
+                "No music yet. Import files to build your library."
+            } else {
+                "${entries.size} track(s)"
+            },
             style = MaterialTheme.typography.bodySmall,
         )
 
@@ -87,7 +95,7 @@ fun LibraryScreen(
         // "realistic personal library size" (REQUIREMENTS' own phrase) without virtualization; a
         // dedicated lazy library screen outside the shared scroll container is a Ride-Mode-era
         // (Phase 7) UI concern, not this one.
-        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Column(verticalArrangement = Arrangement.spacedBy(RideSpace.xs)) {
             entries.forEach { entry ->
                 TrackRow(entry = entry, onAddToQueue = { onAddToQueue(entry) }, onPlayNow = { onPlayNow(entry) })
             }
@@ -103,14 +111,14 @@ private fun TrackRow(
 ) {
     Card(modifier = Modifier.fillMaxWidth().clickable(onClick = onPlayNow)) {
         Row(
-            modifier = Modifier.padding(8.dp),
+            modifier = Modifier.padding(RideSpace.sm),
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(12.dp),
+            horizontalArrangement = Arrangement.spacedBy(RideSpace.md),
         ) {
             ArtworkThumbnail(entry)
             Column(modifier = Modifier.weight(1f)) {
-                Text(entry.track.title, style = MaterialTheme.typography.bodyLarge, maxLines = 1)
-                Text("${entry.track.artist} — ${entry.track.album}", style = MaterialTheme.typography.bodySmall, maxLines = 1)
+                Text(entry.track.title, style = MaterialTheme.typography.bodyLarge, maxLines = 2)
+                Text("${entry.track.artist} — ${entry.track.album}", style = MaterialTheme.typography.bodySmall, maxLines = 2)
                 if (entry.decodeStatus != DecodeStatus.INDEXED) {
                     Text(decodeStatusLabel(entry.decodeStatus), style = MaterialTheme.typography.labelSmall)
                 }

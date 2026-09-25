@@ -130,6 +130,13 @@ class RideModeUiStateTest {
         assertEquals("Intercom off", ui.intercomModeLabel)
     }
 
+    @Test
+    fun `cached shared track enables transport without local library metadata`() {
+        val loaded = PlayerState(localEntryId = entry().localEntryId)
+        assertTrue(uiState(playerState = loaded, currentEntry = null).hasTrackLoaded)
+        assertFalse(uiState(playerState = PlayerState(), currentEntry = null).hasTrackLoaded)
+    }
+
     // --- audio-route health ---------------------------------------------------------------------
 
     @Test

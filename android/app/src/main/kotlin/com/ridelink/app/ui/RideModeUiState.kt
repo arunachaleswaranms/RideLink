@@ -92,7 +92,7 @@ fun rideModeUiState(
         trackTitle = currentEntry?.track?.title,
         trackArtist = currentEntry?.track?.artist,
         isPlaying = playerState.playing,
-        hasTrackLoaded = currentEntry != null,
+        hasTrackLoaded = currentEntry != null || playerState.localEntryId != null,
         micAvailable = voice.localAudioOpen,
         micMuted = voice.userMuted,
         pttMode = policy.gate == TransmissionGate.Ptt,

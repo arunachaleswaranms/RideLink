@@ -6,13 +6,13 @@ import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.material3.MaterialTheme
 import androidx.lifecycle.lifecycleScope
 import com.ridelink.app.library.SharedLibraryCoordinator
 import com.ridelink.app.music.MusicCoordinator
 import com.ridelink.app.service.RideForegroundService
 import com.ridelink.app.session.SessionCoordinator
 import com.ridelink.app.ui.RideLinkRoot
+import com.ridelink.app.ui.RideLinkTheme
 import com.ridelink.app.ui.SecureTransportUnavailableScreen
 import com.ridelink.core.audiopolicy.RideStartDecision
 import com.ridelink.core.library.LibraryEntry
@@ -80,7 +80,7 @@ class MainActivity : ComponentActivity() {
         val deviceDescription = "${Build.MANUFACTURER} ${Build.MODEL}"
 
         setContent {
-            MaterialTheme {
+            RideLinkTheme {
                 container.fold(
                     onSuccess = { appContainer ->
                         coordinator = appContainer.sessionCoordinator

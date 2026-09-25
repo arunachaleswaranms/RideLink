@@ -22,17 +22,12 @@ struct MainScreen: View {
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 12) {
+            VStack(alignment: .leading, spacing: RideDesign.md) {
                 Text("RideLink")
                     .font(.largeTitle)
 
-                Text("Device:")
-                Text(deviceDescription)
-                    .font(.body)
-
-                Text("Connection:")
-                Text(connectionLabel(coordinator.state.status))
-                    .font(.body)
+                Text("Your ride, together").font(.body).foregroundStyle(.secondary)
+                ConnectionSummary(status: coordinator.state.status, peerCount: coordinator.discoveredPeers.count)
 
                 // One button, four meanings, decided by `SessionFsm`'s own legal transitions rather
                 // than by this screen (`docs/STATUS.md` §4 problem 53). Before this pass it only ever
@@ -48,10 +43,8 @@ struct MainScreen: View {
                         case .retry: coordinator.retryDiscovery()
                         }
                     }
-                    .buttonStyle(.borderedProminent)
+                    .buttonStyle(.borderedProminent).foregroundStyle(RideDesign.onPrimary)
                 }
-
-                TransportBanner(transportLabel: coordinator.controlDiagnostics.transportLabel)
 
                 // FR-018 (Phase 7, ADR-028): the entry point into the simplified riding surface.
                 // Gated on `SessionFsm`'s own legality (`RideModePresentation.canStartRide` mirrors
@@ -60,7 +53,7 @@ struct MainScreen: View {
                 // has nothing to show.
                 if RideModePresentation.canStartRide(coordinator.state.status), case .success = music {
                     Button("Start Ride") { coordinator.startRide() }
-                        .buttonStyle(.borderedProminent)
+                        .buttonStyle(.borderedProminent).foregroundStyle(RideDesign.onPrimary)
                         .controlSize(.large)
                 }
 
@@ -108,30 +101,37 @@ struct MainScreen: View {
                     }
                 }
 
-                DiagnosticsCard(
-                    diagnostics: coordinator.controlDiagnostics,
-                    discoveredPeerCount: coordinator.discoveredPeers.count,
-                    discoveryCount: coordinator.discoveryCount,
-                    localIdentityPrefix: coordinator.localIdentityPrefix
-                )
-
-                ResyncDiagnosticsCard(diagnostics: coordinator.resyncDiagnostics)
-
                 // Deliberately independent of `coordinator.state.status` — this phase's brief §28/
                 // §30: local music must be fully usable in airplane mode, with no peer, regardless
                 // of session state.
                 switch music {
                 case .success(let musicCoordinator):
-                    MusicSection(musicCoordinator: musicCoordinator)
+                    MusicSection(musicCoordinator: musicCoordinator, sharedEntries: coordinator.sharedLibrary?.remoteEntries ?? [])
                 case .failure(let error):
-                    Text("Local music unavailable: \(String(describing: error))")
+                    Text("Local music unavailable. Restart RideLink to try again.")
+                    DisclosureGroup("Music diagnostics") { Text(String(describing: error)) }
                         .font(.footnote)
                         .foregroundStyle(.red)
                 }
+                DisclosureGroup("Connection diagnostics") {
+                    Text(deviceDescription)
+                    TransportBanner(transportLabel: coordinator.controlDiagnostics.transportLabel)
+                    DiagnosticsCard(
+                        diagnostics: coordinator.controlDiagnostics,
+                        discoveredPeerCount: coordinator.discoveredPeers.count,
+                        discoveryCount: coordinator.discoveryCount,
+                        localIdentityPrefix: coordinator.localIdentityPrefix
+                    )
+
+                    ResyncDiagnosticsCard(diagnostics: coordinator.resyncDiagnostics)
+                }.font(.subheadline)
             }
-            .padding(24)
+            .padding(RideDesign.xl)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
+        .background(RideDesign.background)
+        .tint(RideDesign.primary)
+        .controlSize(.large)
         .onChange(of: scenePhase) { _, phase in
             coordinator.setAppForegroundVisible(phase == .active)
         }
@@ -196,10 +196,10 @@ private struct TransportBanner: View {
     var body: some View {
         Text("TRANSPORT: \(transportLabel)")
             .font(.caption.bold())
-            .padding(12)
+            .padding(RideDesign.md)
             .frame(maxWidth: .infinity, alignment: .leading)
             .background((isSecure ? Color.green : Color.yellow).opacity(0.25))
-            .cornerRadius(8)
+            .cornerRadius(RideDesign.radius)
     }
 }
 
@@ -208,60 +208,58 @@ private struct TransportBanner: View {
 /// The code is shown large and monospaced because it is read aloud across a car park, and the
 /// wording says *compare*, not *enter* — there is nowhere to type it, deliberately: a code that
 /// travelled between the devices would prove nothing (PROTOCOL §4.5.1).
-private struct PairingCard: View {
+struct PairingCard: View {
     let prompt: PairingPrompt
     let onDecision: (Bool) -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("Pair with this device?")
+        VStack(alignment: .leading, spacing: RideDesign.md) {
+            Text("Verify your peer")
                 .font(.headline)
-            Text(prompt.peerDisplayName.isEmpty ? "\(prompt.remotePeerId)" : prompt.peerDisplayName)
+            Text(prompt.peerDisplayName.isEmpty ? "Nearby phone" : prompt.peerDisplayName)
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
-            Text(prompt.sas6)
+            Text("\(prompt.sas6.prefix(3)) \(prompt.sas6.suffix(3))")
                 .font(.system(size: 44, weight: .bold, design: .monospaced))
                 .frame(maxWidth: .infinity, alignment: .center)
                 .accessibilityLabel(prompt.sas6.map(String.init).joined(separator: " "))
             Text("Both phones must show the same six digits. If they differ, do not confirm.")
                 .font(.footnote)
                 .foregroundStyle(.secondary)
-            HStack(spacing: 12) {
+            HStack(spacing: RideDesign.md) {
                 Button("They match") { onDecision(true) }
-                    .buttonStyle(.borderedProminent)
+                    .buttonStyle(.borderedProminent).foregroundStyle(RideDesign.onPrimary)
                 Button("They differ") { onDecision(false) }
                     .buttonStyle(.bordered)
             }
         }
-        .padding(16)
+        .padding(RideDesign.lg)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(Color.blue.opacity(0.1))
-        .cornerRadius(8)
+        .cornerRadius(RideDesign.radius)
     }
 }
 
 /// A refused handshake the user has to see. `pin_mismatch` is the one that matters: ADR-012
 /// requires it to surface as a warning and never to be resolved by silently re-pairing.
-private struct SecurityAlertCard: View {
+struct SecurityAlertCard: View {
     let code: String
     let onDismiss: () -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: RideDesign.sm) {
             Text(code == "pin_mismatch" ? "Security warning" : "Connection refused")
                 .font(.headline)
             Text(explanation)
                 .font(.footnote)
-            Text(code)
-                .font(.caption.monospaced())
-                .foregroundStyle(.secondary)
+            DisclosureGroup("Security details") { Text(code).font(.caption.monospaced()) }
             Button("Dismiss", action: onDismiss)
                 .buttonStyle(.bordered)
         }
-        .padding(16)
+        .padding(RideDesign.lg)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(Color.red.opacity(0.12))
-        .cornerRadius(8)
+        .cornerRadius(RideDesign.radius)
     }
 
     private var explanation: String {
@@ -287,7 +285,7 @@ private struct ResyncDiagnosticsCard: View {
     let diagnostics: ResyncDiagnostics
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
+        VStack(alignment: .leading, spacing: RideDesign.sm) {
             Text("Resync (Phase 7)").font(.headline)
             diagnosticRow("request pending", "\(diagnostics.requestPending)")
             diagnosticRow("reconnect requests", "\(diagnostics.reconnectRequestCount)")
@@ -297,10 +295,10 @@ private struct ResyncDiagnosticsCard: View {
             diagnosticRow("last snapshot manifest_revision", diagnostics.lastSnapshotManifestRevision.map(String.init) ?? "—")
             diagnosticRow("last snapshot command_seq", diagnostics.lastSnapshotCommandSeq.map(String.init) ?? "—")
         }
-        .padding(16)
+        .padding(RideDesign.lg)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(Color.gray.opacity(0.1))
-        .cornerRadius(8)
+        .cornerRadius(RideDesign.radius)
     }
 
     private func outcomeLabel(_ outcome: ResyncOutcome) -> String {
@@ -315,7 +313,7 @@ private struct ResyncDiagnosticsCard: View {
     }
 
     private func diagnosticRow(_ label: String, _ value: String) -> some View {
-        VStack(alignment: .leading, spacing: 2) {
+        VStack(alignment: .leading, spacing: RideDesign.xs) {
             Text(label).font(.caption).foregroundStyle(.secondary)
             Text(value).font(.body)
         }
@@ -329,8 +327,8 @@ private struct DiagnosticsCard: View {
     let localIdentityPrefix: String
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text("Diagnostics (Phase 1b)")
+        VStack(alignment: .leading, spacing: RideDesign.sm) {
+            Text("Connection diagnostics")
                 .font(.headline)
             diagnosticRow("Control state", controlStateLabel(diagnostics.controlState))
             // Both identities are shown redacted to 6 hex, matching the ARCHITECTURE §11 logging
@@ -347,14 +345,14 @@ private struct DiagnosticsCard: View {
             diagnosticRow("Discovered peers (current)", "\(discoveredPeerCount)")
             diagnosticRow("Discovery count (cumulative)", "\(discoveryCount)")
         }
-        .padding(16)
+        .padding(RideDesign.lg)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(Color.gray.opacity(0.1))
-        .cornerRadius(8)
+        .cornerRadius(RideDesign.radius)
     }
 
     private func diagnosticRow(_ label: String, _ value: String) -> some View {
-        VStack(alignment: .leading, spacing: 2) {
+        VStack(alignment: .leading, spacing: RideDesign.xs) {
             Text(label).font(.caption).foregroundStyle(.secondary)
             Text(value).font(.body)
         }
@@ -381,10 +379,10 @@ private enum SessionAction {
 
     var label: String {
         switch self {
-        case .start: return "Start Discovery"
-        case .stopDiscovery: return "Stop Discovery"
+        case .start: return "Find peer"
+        case .stopDiscovery: return "Stop searching"
         case .end: return "End Session"
-        case .retry: return "Retry"
+        case .retry: return "Find peer again"
         }
     }
 }
@@ -422,5 +420,20 @@ private func controlStateLabel(_ state: ControlState) -> String {
     case .reconnecting: "Reconnecting…"
     case .disconnected: "Disconnected"
     case .ended: "Ended"
+    }
+}
+
+struct ConnectionSummary: View {
+    let status: SessionStatus
+    let peerCount: Int
+    var body: some View {
+        VStack(alignment: .leading, spacing: RideDesign.sm) {
+            Label(status == .idle ? "No peer connected" : connectionLabel(status), systemImage: "antenna.radiowaves.left.and.right")
+                .font(.title2.bold())
+            Text(UiPresentation.connectionHint(status)).font(.body)
+            if status == .discovering && peerCount > 0 {
+                Text("Peer found · Connecting automatically").font(.subheadline.weight(.semibold))
+            }
+        }.rideSurface()
     }
 }

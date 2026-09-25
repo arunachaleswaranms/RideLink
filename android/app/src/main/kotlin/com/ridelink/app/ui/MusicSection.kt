@@ -20,6 +20,7 @@ fun MusicSection(
     onPlayNow: (LibraryEntry) -> Unit,
     onImportFolder: () -> Unit,
     onImportFiles: () -> Unit,
+    sharedEntries: List<com.ridelink.core.manifest.ManifestEntry> = emptyList(),
 ) {
     val query by musicCoordinator.query.collectAsState()
     val entries by musicCoordinator.libraryEntries.collectAsState()
@@ -42,10 +43,13 @@ fun MusicSection(
         )
     }
 
+    val cachedEntry = sharedEntries.firstOrNull { it.contentHash == musicCoordinator.activeExternalCacheHash() && it.contentHash != null }
     NowPlayingCard(
         playerState = playerState,
         currentEntry = currentEntry,
         queueSize = queueState.items.size,
+        title = currentEntry?.track?.title ?: cachedEntry?.title,
+        artist = currentEntry?.track?.artist ?: cachedEntry?.artist,
         onPlay = onPlayMusic,
         onPause = musicCoordinator::pause,
         onSeek = musicCoordinator::seek,
@@ -53,6 +57,14 @@ fun MusicSection(
         onPrevious = musicCoordinator::previous,
     )
 
+    if (queueState.items.isNotEmpty()) {
+        DiagnosticDisclosure("local queue") {
+            queueState.items.forEachIndexed { index, item ->
+                val title = entries.firstOrNull { it.localEntryId == item.localEntryId }?.track?.title ?: "Shared track"
+                Text("${if (item.id == queueState.currentId) "Current" else "${index + 1}"} · $title")
+            }
+        }
+    }
     LibraryScreen(
         query = query,
         entries = entries,
