@@ -32,9 +32,9 @@ final class HelloExchangeDeadlineTests: XCTestCase {
 
         let silent = try await fakePeer.channel().connect(host: "127.0.0.1", port: port)
         // The SUT must close it; nothing else will ever arrive. The test bounds itself by closing
-        // the socket too, and records whether it had to. Locals and an explicit capture list, as in
-        // production's watchdog: Swift 6.3's region-isolation checker rejects `Self.` inside a `Task`
-        // here.
+        // the socket too, and records whether it had to. The closure captures only locals, as
+        // production's watchdog does: Swift 6.3's region-isolation checker rejects `Self.` inside a
+        // `Task` here.
         let boundNs = Self.testBoundNs
         let bound = Task<Bool, Never> { [silent] in
             try? await Task.sleep(nanoseconds: boundNs)

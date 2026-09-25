@@ -48,7 +48,7 @@ at `5b06918`, which includes Phase 8.5) and gave the counts shown:
   production files. A `gitleaks dir` scan of the working tree reports 22 hits, all in the untracked
   SwiftPM `.build/` checkout.
 - **Mutation checks:** each new regression was re-run with its fix neutralised and failed, as
-  recorded in problems 101, 103 and 106.
+  recorded in problems 101, 103, 106 and 108.
 - **Not run here:** every physical gate. Exact-head GitHub CI and the independent review of the pushed commit are recorded on the PR.
 
 **Overlap with Phase 8.5 (reviewed 25 September).** This audit was developed in a working tree that

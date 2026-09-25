@@ -113,8 +113,10 @@ counts only its backoff delays, so a session could stay in RECONNECTING indefini
 
 **Mechanism.** A watchdog closes the socket, because a blocking socket read ignores coroutine or
 `Task` cancellation and closing the socket is what unblocks it. The watchdog is cancelled and
-joined on every path, including a cancelled caller on Android. A handshake success that raced the
-deadline counts as a closed connection, so the watchdog can never close a promoted socket.
+joined on every path, including a cancelled caller on Android, before the candidate can be
+resolved or promoted. That ordering is why the watchdog can never close a promoted socket. A
+handshake success that raced the deadline counts as a closed connection, so a socket the watchdog
+already closed is never promoted.
 
 **Consequences.** No wire change, no vector, no state-machine change: the FSM already handles a
 failed connection attempt. PROTOCOL §1 records the value. STATUS §4 problem 103 holds the

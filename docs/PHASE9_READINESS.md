@@ -51,8 +51,8 @@ that fails with the fix neutralised.
 | 104 | Android audio | Music takes no audio focus and ignores becoming-noisy | **Open** — needs an ADR; built-in ExoPlayer handling would violate rules 18/26 |
 | 105 | iOS audio | Music engine ignores `AVAudioEngineConfigurationChange` | **Open** — needs a device to verify a restart path |
 | 106 | iOS audio | Local pause/resume double-scheduled the remainder and inflated position | **Fixed** — measured, then `stop()` + generation, as `seek` already does |
-| 108 | Android lifecycle | A stop's late release could strip the `microphone` type from an intercom restarted in the release window (found by independent review; pre-existing) | **Fixed** — a stop releases only if no start happened since it was requested |
 | 107 | Scope | NFR-08 log export and a sideload build procedure were never delivered | **Open** — first Phase 9 prerequisite |
+| 108 | Android lifecycle | A stop's late release could strip the `microphone` type from an intercom restarted in the release window (found by independent review; pre-existing) | **Fixed** — a stop releases only if no start happened since it was requested |
 | — | CI | `ci.yml` actions were tag-pinned while the Phase 8 record said "SHA-pinned"; no Gradle wrapper-JAR validation; no Gradle cache | **Fixed** — SHA-pinned, `gradle/actions/wrapper-validation`, `setup-java` cache |
 | — | Dependencies | `:audio` declared `media3-session` and never used it | **Fixed** — removed (`:app` declares its own) |
 | — | Documentation | README, CLAUDE.md, STATUS, the Phase 8 record and ADR-029 still described Phase 8 as an unmerged PR | **Fixed** |

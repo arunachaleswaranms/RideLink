@@ -512,7 +512,7 @@ class ControlSessionManager(
         // unbounded and runs later, in the read loop.
         // On IO: closing an SSLSocket waits for the read it interrupts, which must not be the main thread.
         val watchdog =
-            scope.launch(Dispatchers.IO) {
+            scope.launch(ioDispatcher) {
                 delay(helloExchangeTimeoutMs)
                 socket.close()
             }

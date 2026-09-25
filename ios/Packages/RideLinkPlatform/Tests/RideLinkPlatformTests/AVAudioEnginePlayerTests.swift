@@ -117,19 +117,22 @@ final class AVAudioEnginePlayerTests: XCTestCase {
         await player.execute(.load(localEntryId: LocalEntryId("00000000-0000-4000-8000-c3c3c3c3c3c3"), location: try location("normal.m4a")))
         let ready = try await firstState { $0.durationMs > 0 }
         await player.execute(.play)
-        _ = try await firstState { $0.playing && $0.positionMs >= 150 }
+        _ = try await firstState { $0.playing && $0.positionMs >= 200 }
         await player.execute(.pause)
         let paused = try await firstState { !$0.playing }
 
         // Resume briefly and pause again: the second pause reads the absolute position synchronously,
-        // so it shows whether the pre-pause time (>= 150 ms here) was counted a second time.
+        // so it shows whether the pre-pause time (>= 200 ms here) was counted a second time.
         await player.execute(.play)
         _ = try await firstState { $0.playing }
         try await Task.sleep(nanoseconds: 50_000_000)
         await player.execute(.pause)
         let pausedAgain = try await firstState { !$0.playing }
+        // 50 ms of play plus scheduling on a loaded runner stays well under +200. Counting the
+        // pre-pause time (P >= 200 ms, in practice the 250 ms tick) twice lands at P + 250 or more,
+        // or at the 509 ms clamp, and both exceed P + 200 for any P below ~309 ms.
         XCTAssertLessThan(
-            pausedAgain.positionMs, paused.positionMs + 150,
+            pausedAgain.positionMs, paused.positionMs + 200,
             "resume must continue from the pause point (\(paused.positionMs) ms), not add the pre-pause time again"
         )
 
