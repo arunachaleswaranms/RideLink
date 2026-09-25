@@ -13,6 +13,7 @@ import com.ridelink.app.music.MusicCoordinator
 import com.ridelink.app.resync.ResyncCoordinator
 import com.ridelink.app.resync.ResyncRelayAdapter
 import com.ridelink.app.resync.ResyncSessionManagerAdapter
+import com.ridelink.app.service.IntercomStopOwner
 import com.ridelink.app.service.RideCommand
 import com.ridelink.app.service.RideCommandBus
 import com.ridelink.app.service.RideForegroundService
@@ -56,7 +57,6 @@ import com.ridelink.network.security.AndroidKeystoreIdentityStore
 import com.ridelink.network.security.DeviceIdentity
 import com.ridelink.network.security.TlsControlChannel
 import com.ridelink.network.transfer.BulkTransportManager
-import com.ridelink.network.voice.StopReleaseResult
 import com.ridelink.network.voice.VoiceController
 import com.ridelink.network.voice.WebRtcVoiceEngine
 import kotlinx.coroutines.CoroutineScope
@@ -289,6 +289,14 @@ class AppContainer(
 
     val sessionCoordinator: SessionCoordinator
 
+    /**
+     * The one owner of an intercom stop and the foreground-service release that follows it. Both
+     * the in-app End button ([com.ridelink.app.MainActivity]) and the notification's End action
+     * ([installRideNotificationCommands]) go through it, so the awaited release runs on [appScope]
+     * and survives the Activity being recreated or destroyed while it waits.
+     */
+    val intercomStopOwner: IntercomStopOwner
+
     init {
         requireSecureControlChannel(controlChannel.isSecure, controlChannel.transportLabel)
         // brief §39: the in-app controls and the ADR-022 MediaSession already funnel into
@@ -333,6 +341,12 @@ class AppContainer(
 
                         override fun endRideSegment(rideEpoch: Long) = syncPlaybackCoordinator.endRideSegment(rideEpoch)
                     },
+            )
+        intercomStopOwner =
+            IntercomStopOwner(
+                scope = appScope,
+                endIntercomAndAwaitRelease = sessionCoordinator::endIntercomAndAwaitRelease,
+                releaseForegroundService = { RideForegroundService.stopIntercom(context) },
             )
         installRideNotificationCommands()
         observeMusicActivity()
@@ -390,10 +404,9 @@ class AppContainer(
      * **`END_INTERCOM` owns stopping the foreground service, not `RideForegroundService` itself**
      * (this phase's hardening pass, Issue F). `RideCommandBus.dispatch` is a synchronous call, but
      * releasing capture is not — `endIntercomAndAwaitRelease` suspends until
-     * `engine.release()`/`audioSession.close()` have actually completed — so this handler launches on
-     * [appScope] and calls [RideForegroundService.stop] only once that awaited call returns. This is
-     * the one place a lock-screen End Intercom tap and the in-app End button both funnel through, so
-     * fixing it here covers both entry points identically.
+     * `engine.release()`/`audioSession.close()` have actually completed — so [intercomStopOwner]
+     * launches on [appScope] and drops the service's `microphone` type only once that awaited call
+     * returns. The in-app End button calls the same owner, so both entry points behave identically.
      */
     private fun installRideNotificationCommands() {
         RideCommandBus.handler = { command ->
@@ -403,16 +416,7 @@ class AppContainer(
                     sessionCoordinator.setMicrophoneMuted(muted)
                     RideForegroundService.updateMuteState(context, muted)
                 }
-                RideCommand.END_INTERCOM ->
-                    appScope.launch {
-                        // This phase's final hardening pass (Issue 2): a timed-out release must not be
-                        // treated as proof the microphone is safe to reclaim — the stop is skipped, and
-                        // the diagnostics card already shows the stalled route transition to explain why.
-                        when (sessionCoordinator.endIntercomAndAwaitRelease()) {
-                            StopReleaseResult.Released, StopReleaseResult.AlreadyReleased -> RideForegroundService.stopIntercom(context)
-                            StopReleaseResult.TimedOut -> Unit
-                        }
-                    }
+                RideCommand.END_INTERCOM -> intercomStopOwner.requestStop()
             }
         }
     }

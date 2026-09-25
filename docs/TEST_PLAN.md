@@ -19,6 +19,22 @@ Fixtures are passive rendering evidence, not authenticated two-phone or physical
 All Phase 9 sunlight/gloves/mounting/background/Bluetooth/audible-sync/battery/thermal/riding gates
 remain **DEFERRED — PHYSICAL QUALIFICATION**.
 
+## Project audit additions (24 September 2026)
+
+Regressions added by the Phase 9 readiness audit ([PHASE9_READINESS.md](PHASE9_READINESS.md)). Each
+fails with its fix neutralised; the neutralisation used is named in STATUS §4.
+
+| Problem | Test | Proves |
+|---|---|---|
+| 101, 108 | `IntercomStopOwnerTest` (Android, 5 cases) | `requestStop` does not make its caller wait, so the release and the service stop run on the process scope; `AlreadyReleased` releases once; `TimedOut` never releases; a stop never releases the service of an intercom started after it was requested. That `MainActivity` calls the owner is wiring these cannot see |
+| 103 | `HelloExchangeDeadlineTest` / `HelloExchangeDeadlineTests` (both platforms, real TLS) | a peer silent after TLS is closed by the listener, which then still serves a real peer; a dial to a silent peer ends in `LinkLost` instead of parking the reconnect ladder |
+| 106 | `AVAudioEnginePlayerTests.testPauseThenResumeContinuesFromThePausePointAndEndsExactlyOnce` (iOS, real engine, real fixture) | pause → play continues from the pause point and publishes nothing after end of media |
+
+**MANUAL REQUIRED**, and not closed by any of the above: problem 101 on a device (rotate inside the
+release window); problem 102's device-to-device migration (two Android phones); problem 104
+(Android music under a navigation prompt, a call and a helmet disconnect); and problem 105 (iPhone
+route change and Start Intercom while music plays).
+
 ## Phase 8 release-hardening additions
 
 See [Phase 8 evidence](PHASE8_RELEASE_HARDENING.md), ADR-029 and

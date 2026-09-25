@@ -18,6 +18,8 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -29,6 +31,7 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
@@ -178,6 +181,8 @@ class ControlSessionManager(
      */
     private val nowEpochSeconds: () -> Long = { System.currentTimeMillis() / MILLIS_PER_SECOND },
     random: Random = Random,
+    /** How long a candidate may take to complete `HELLO`/`HELLO_ACK`; see [handleCandidate]. */
+    private val helloExchangeTimeoutMs: Long = HELLO_EXCHANGE_TIMEOUT_MS,
 ) {
     private val seqCounter = SeqCounter()
     private val arbiter = DuplicateConnectionArbiter(localPeerId, ConnTiebreakGenerator.generate())
@@ -494,26 +499,51 @@ class ControlSessionManager(
             return
         }
 
-        val outcome =
-            if (socket.isInitiator) {
-                ControlHandshake.performAsInitiator(
-                    socket,
-                    localPeerId,
-                    seqCounter,
-                    monotonicNowUs,
-                    local.copy(connTiebreak = arbiter.connTiebreak),
-                    trustedPeers,
-                )
-            } else {
-                ControlHandshake.performAsAcceptor(
-                    socket,
-                    localPeerId,
-                    seqCounter,
-                    monotonicNowUs,
-                    local.copy(connTiebreak = arbiter.connTiebreak),
-                    trustedPeers,
-                )
+        // The HELLO exchange had no deadline. The TLS handshake is bounded by its own socket
+        // timeout, which is then cleared so the read loop can block indefinitely, and the keepalive
+        // that detects a silent peer starts only after promotion. So a peer that finished TLS and
+        // then went silent — Wi-Fi lost with no FIN between the two, a frozen app, or any LAN host
+        // holding the listener — parked this read until TCP gave up (hours). On the initiator side
+        // that parked ReconnectController's attempt, whose 120 s budget counts only its delays,
+        // so the session sat in RECONNECTING forever and never reached DISCONNECTED. PROTOCOL §1's
+        // 6 s silence rule now applies here too. A blocking socket read ignores coroutine
+        // cancellation, so the watchdog closes the socket; the read then fails as a closed
+        // connection. It bounds HELLO only — PROTOCOL §4.5's pairing wait is deliberately
+        // unbounded and runs later, in the read loop.
+        // On IO: closing an SSLSocket waits for the read it interrupts, which must not be the main thread.
+        val watchdog =
+            scope.launch(ioDispatcher) {
+                delay(helloExchangeTimeoutMs)
+                socket.close()
             }
+        val performed =
+            try {
+                if (socket.isInitiator) {
+                    ControlHandshake.performAsInitiator(
+                        socket,
+                        localPeerId,
+                        seqCounter,
+                        monotonicNowUs,
+                        local.copy(connTiebreak = arbiter.connTiebreak),
+                        trustedPeers,
+                    )
+                } else {
+                    ControlHandshake.performAsAcceptor(
+                        socket,
+                        localPeerId,
+                        seqCounter,
+                        monotonicNowUs,
+                        local.copy(connTiebreak = arbiter.connTiebreak),
+                        trustedPeers,
+                    )
+                }
+            } finally {
+                // NonCancellable: if this coroutine is itself cancelled (shutdown), a bare join would
+                // throw at once and leave the watchdog unjoined.
+                withContext(NonCancellable) { watchdog.cancelAndJoin() }
+            }
+        // The deadline can land between the handshake's last read and the cancel above.
+        val outcome = if (performed is HandshakeOutcome.Success && socket.isClosed) HandshakeOutcome.ConnectionClosed else performed
 
         // Neither branch below emits LinkLost directly: the caller (connectTo/attemptConnection)
         // determines success or failure from `activeSocket` once this function returns, which is
@@ -1282,6 +1312,7 @@ class ControlSessionManager(
         const val KEEPALIVE_INTERVAL_MS = 2_000L // PROTOCOL §1
         const val KEEPALIVE_LOST_THRESHOLD_US = 6_000_000L // PROTOCOL §1
         const val PING_TIMEOUT_MS = 3_000L
+        const val HELLO_EXCHANGE_TIMEOUT_MS = KEEPALIVE_LOST_THRESHOLD_US / 1_000L // PROTOCOL §1's 6 s silence rule
         const val CLOCK_BURST_SAMPLE_COUNT = 11 // ARCHITECTURE §7.1
         const val CLOCK_BURST_SPACING_MS = 50L // ARCHITECTURE §7.1 "~50ms apart"
         const val CLOCK_RESYNC_INTERVAL_MS = 10_000L // ARCHITECTURE §7.1 "every 10s thereafter"

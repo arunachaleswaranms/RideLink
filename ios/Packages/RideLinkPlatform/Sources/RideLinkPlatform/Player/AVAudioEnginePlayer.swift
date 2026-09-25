@@ -193,7 +193,15 @@ public actor AVAudioEnginePlayer: Player {
     private func pauseCommand() {
         guard audioFile != nil else { return }
         seekOffsetFrames = currentAbsoluteFrame()
-        playerNode.pause()
+        // `stop()`, never `pause()`: `playCommand` resumes by scheduling a fresh segment from
+        // `seekOffsetFrames`, which is only correct on an empty node whose sample clock restarts at
+        // zero. `pause()` keeps both the queued remainder and the clock, so a resume played the rest
+        // of the track twice, published `ended` while the second copy was still audible, and reported
+        // `seekOffsetFrames + sampleTime` — the pre-pause time counted twice. Measured, not inferred:
+        // `AVAudioEnginePlayerTests.testPauseThenResumeContinuesFromThePausePointAndEndsExactlyOnce`.
+        // The generation bump makes the stopped segment's completion inert, exactly as in `seekCommand`.
+        playerNode.stop()
+        generation += 1
         stopPositionTicking()
         updateState { $0.copy(positionMs: durationMs(forFrames: seekOffsetFrames), playing: false) }
     }
@@ -302,6 +310,11 @@ public actor AVAudioEnginePlayer: Player {
     }
 
     private func tickPosition() {
+        // The tick loop captures `[weak self]`, so it is not actor-isolated: a tick already waiting to
+        // hop onto the actor can run after `pauseCommand`/`handleSegmentFinished` cancelled the loop,
+        // and would republish a state after the pause or end of media. Only a playing node has a
+        // position to report.
+        guard cachedState.playing else { return }
         updateState { $0.copy(positionMs: durationMs(forFrames: currentAbsoluteFrame())) }
     }
 

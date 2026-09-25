@@ -22,16 +22,17 @@ subscription and no telemetry — the app is expected to work with mobile data s
 
 ## Status
 
-**25 September 2026 — Phase 8.5 UI polish is implemented and locally validated**, based on merged Phase 8 main
-`2aa728f`. Ride Mode now emphasizes connection, music, intercom and a separated End Ride control;
+**25 September 2026 — Phase 8.5 UI polish is merged** at `5b06918` (PR #12), based on merged Phase 8
+main `2aa728f`. Ride Mode now emphasizes connection, music, intercom and a separated End Ride control;
 setup follows native appearance and keeps technical diagnostics secondary.
-See the [UI audit and validation record](docs/PHASE8_5_UI_POLISH.md). Independent review is required;
-physical riding qualification remains deferred to Phase 9. Earlier status entries below are historical.
+See the [UI audit and validation record](docs/PHASE8_5_UI_POLISH.md). Physical riding qualification
+remains deferred to Phase 9. Earlier status entries below are historical.
 
 **Phase 7 is independently reviewed and merged** at
 `48b7a8e5d07fe52010d05c1893d3f914722d80f0`. Phase 8 — Release Hardening & Software
-Integration — is in progress on `phase8/release-hardening`; see the
-[Phase 8 evidence and audit](docs/PHASE8_RELEASE_HARDENING.md).
+Integration — is merged at `2aa728f` (PR #6); see the
+[Phase 8 evidence and audit](docs/PHASE8_RELEASE_HARDENING.md). Whether the software is ready for
+Phase 9's physical qualification is [`docs/PHASE9_READINESS.md`](docs/PHASE9_READINESS.md).
 Physical qualification remains **DEFERRED — HARDWARE NOT AVAILABLE**.
 The software test results do not establish audible sync, Bluetooth behavior, battery life,
 thermal performance, or real iPhone background/lock behavior.

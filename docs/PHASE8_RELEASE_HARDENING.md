@@ -2,7 +2,8 @@
 
 Baseline: independently reviewed Phase 7 merge
 `48b7a8e5d07fe52010d05c1893d3f914722d80f0`.
-Branch: `phase8/release-hardening`. No merge is authorized.
+Branch: `phase8/release-hardening`, **merged to `main` as `2aa728f` (PR #6).** The "no merge is
+authorized" / "PR remains unmerged" wording below is the record as it stood during review.
 
 This is the current audit record; STATUS's older implementation-pass narratives are historical.
 Software closure requires independent review of the live PR and exact-head CI. Physical

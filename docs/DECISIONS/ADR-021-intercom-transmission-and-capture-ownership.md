@@ -1141,3 +1141,19 @@ default would be a shared epoch, which is exactly the state the amendment exists
 
 **No device gate is closed by this.** TEST_PLAN A-01/A-02/A-04/A-09/A-10 and V-01…V-11 remain open,
 and nothing here has run on a phone or moved audio.
+
+---
+
+## Amendment A8 — 24 September 2026 — the awaited release belongs to the process, not the Activity
+
+The awaited-release decision above stands. One of its two call sites awaited on the wrong scope.
+`MainActivity.stopIntercom()` ran the await on `lifecycleScope`, and the Activity is not
+orientation-locked. An Activity recreated or destroyed inside the release window cancelled that
+coroutine after `StopRequested` was queued. Capture was then released and
+`RideForegroundService.stopIntercom` never ran: a `microphone` foreground service with no
+microphone, which is the orphan this ADR exists to prevent, reached from the other direction.
+
+Both entry points now call one `IntercomStopOwner` built on `AppContainer`'s `appScope`. It keeps
+this ADR's rules unchanged: release first, and a timed-out release never releases the service. No
+wire, vector or state-machine change. Regression: `IntercomStopOwnerTest`; see `docs/STATUS.md` §4
+problem 101.

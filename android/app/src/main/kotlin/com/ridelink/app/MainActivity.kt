@@ -9,6 +9,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.lifecycle.lifecycleScope
 import com.ridelink.app.library.SharedLibraryCoordinator
 import com.ridelink.app.music.MusicCoordinator
+import com.ridelink.app.service.IntercomStopOwner
 import com.ridelink.app.service.RideForegroundService
 import com.ridelink.app.session.SessionCoordinator
 import com.ridelink.app.ui.RideLinkRoot
@@ -17,7 +18,6 @@ import com.ridelink.app.ui.SecureTransportUnavailableScreen
 import com.ridelink.core.audiopolicy.RideStartDecision
 import com.ridelink.core.library.LibraryEntry
 import com.ridelink.core.manifest.ManifestEntry
-import com.ridelink.network.voice.StopReleaseResult
 import kotlinx.coroutines.launch
 
 /**
@@ -68,6 +68,9 @@ class MainActivity : ComponentActivity() {
 
     private var musicCoordinator: MusicCoordinator? = null
 
+    /** Told about every intercom start, so a still-pending stop cannot release the new one's service. */
+    private var intercomStopOwner: IntercomStopOwner? = null
+
     /**
      * Whether this Activity is resumed. The only honest source for
      * [com.ridelink.core.audiopolicy.RideStartRequest.appForegroundVisible].
@@ -85,6 +88,7 @@ class MainActivity : ComponentActivity() {
                     onSuccess = { appContainer ->
                         coordinator = appContainer.sessionCoordinator
                         musicCoordinator = appContainer.musicCoordinator
+                        intercomStopOwner = appContainer.intercomStopOwner
                         RideLinkRoot(
                             coordinator = appContainer.sessionCoordinator,
                             musicCoordinator = appContainer.musicCoordinator,
@@ -95,7 +99,7 @@ class MainActivity : ComponentActivity() {
                             onStartIntercom = {
                                 attemptIntercomStart(appContainer.sessionCoordinator, requestPermissionsIfMissing = true)
                             },
-                            onStopIntercom = { stopIntercom(appContainer.sessionCoordinator) },
+                            onStopIntercom = { appContainer.intercomStopOwner.requestStop() },
                             onPlayMusic = { attemptMusicPlay(appContainer.musicCoordinator) },
                             onPlayNow = { entry -> attemptPlayNow(appContainer.musicCoordinator, entry) },
                             onImportFolder = { pickFolder.launch(null) },
@@ -175,37 +179,8 @@ class MainActivity : ComponentActivity() {
             coordinator.onForegroundServiceStartFailed()
             return
         }
+        intercomStopOwner?.noteStart()
         coordinator.startIntercom()
-    }
-
-    /**
-     * Order matters and is the reverse of the start: the intercom releases capture first, then the
-     * service that existed to hold it goes. A microphone foreground service with no microphone is the
-     * orphan ARCHITECTURE §6.4's failure table forbids.
-     *
-     * This phase's hardening pass (Issue F): `endIntercom()` alone only *queues* the stop — the actual
-     * `engine.release()`/`audioSession.close()` runs later, on the controller's own consumer. Calling
-     * [RideForegroundService.stopIntercom] right after it, as before, could let the platform reclaim
-     * the service while it still held the microphone. [SessionCoordinator.endIntercomAndAwaitRelease]
-     * suspends until release has actually happened (or until there was nothing to release), so the
-     * service is told the intercom ended only once that is true. Phase 3: this drops only the
-     * `microphone` type — a music track still playing keeps the service (and `mediaPlayback`) alive.
-     *
-     * This phase's **final** hardening pass (Issue 2): the awaited result is now explicit
-     * ([com.ridelink.network.voice.StopReleaseResult]), and a timeout is never treated as release —
-     * leaving the service running on a stalled release is the safer failure than telling the
-     * platform a microphone still open is safe to reclaim. The diagnostics card already shows the
-     * stuck route transition; nothing here retries automatically, since a silent retry from this
-     * path is exactly what ARCHITECTURE §6.4 forbids for a start and this phase's brief §9
-     * (`stopAndAwaitRelease` is failure protection, never a success it invents) forbids for an end.
-     */
-    private fun stopIntercom(coordinator: SessionCoordinator) {
-        lifecycleScope.launch {
-            when (coordinator.endIntercomAndAwaitRelease()) {
-                StopReleaseResult.Released, StopReleaseResult.AlreadyReleased -> RideForegroundService.stopIntercom(this@MainActivity)
-                StopReleaseResult.TimedOut -> Unit
-            }
-        }
     }
 
     /**
