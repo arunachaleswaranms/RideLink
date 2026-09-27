@@ -12,6 +12,8 @@
 # password lives in the macOS login Keychain and reaches keytool/apksigner without being printed or
 # passed as an argument. No network access beyond what Gradle's own dependency cache already needs.
 set -euo pipefail
+# Never `set -x` here: it would echo the key password. Name the failing line instead of exiting mute.
+trap 'echo "error: tools/sideload/android.sh failed at line $LINENO" >&2' ERR
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 PACKAGE="com.ridelink.app"
@@ -26,7 +28,7 @@ die() { echo "error: $*" >&2; exit 1; }
 java_home() {
     local candidate="${RIDELINK_JAVA_HOME:-/opt/homebrew/opt/openjdk@21/libexec/openjdk.jdk/Contents/Home}"
     [ -x "$candidate/bin/java" ] || die "JDK 21 not found at $candidate; set RIDELINK_JAVA_HOME"
-    "$candidate/bin/java" -version 2>&1 | head -1 | grep -q '"21\.' || die "$candidate is not JDK 21"
+    "$candidate/bin/java" -version 2>&1 | awk 'NR==1' | grep -q '"21\.' || die "$candidate is not JDK 21"
     echo "$candidate"
 }
 
@@ -58,14 +60,18 @@ cmd_keystore() {
     mkdir -p "$SIDELOAD_HOME"
     chmod 700 "$SIDELOAD_HOME"
     local password
-    password="$(LC_ALL=C tr -dc 'A-Za-z0-9' </dev/urandom | head -c 40)"
+    # 192 random bits as 48 hex characters. Not `tr </dev/urandom | head`: under pipefail, head
+    # closing the pipe kills tr with SIGPIPE and the whole step fails.
+    password="$(openssl rand -hex 24)"
+    [ "${#password}" -eq 48 ] || die "could not generate a key password"
     # `security -i` reads its command from stdin, so the password is never a process argument.
     printf 'add-generic-password -U -a "%s" -s "%s" -w "%s"\n' "$USER" "$KEYCHAIN_SERVICE" "$password" \
-        | security -i >/dev/null
+        | security -i >/dev/null || die "could not store the key password in the login Keychain"
+    # keytool's stderr is kept: it reports failures and never prints the password.
     RIDELINK_KS_PASS="$password" "$(java_home)/bin/keytool" -genkeypair -noprompt \
         -storetype PKCS12 -keystore "$KEYSTORE" -storepass:env RIDELINK_KS_PASS \
         -alias "$KEY_ALIAS" -keyalg RSA -keysize 3072 -validity 10000 \
-        -dname "CN=RideLink sideload" >/dev/null 2>&1
+        -dname "CN=RideLink sideload" >/dev/null || die "keytool could not create the key"
     unset password
     chmod 600 "$KEYSTORE"
     echo "created the sideload signing key (outside the repository; password in the login Keychain)"
@@ -103,7 +109,7 @@ cmd_build() {
     "$tools/zipalign" -c -P 16 4 "$apk" || die "alignment verification failed"
 
     local badging version_name version_code
-    badging="$("$tools/aapt2" dump badging "$apk" | head -1)"
+    badging="$("$tools/aapt2" dump badging "$apk" | awk 'NR==1')"
     version_name="$(sed -n "s/.*versionName='\([^']*\)'.*/\1/p" <<<"$badging")"
     version_code="$(sed -n "s/.*versionCode='\([^']*\)'.*/\1/p" <<<"$badging")"
 
@@ -119,7 +125,7 @@ cmd_build() {
         echo "version_code: $version_code"
         echo "build_type: release (not debuggable)"
         echo "build_tools: $(basename "$tools")"
-        echo "jdk: $("$jdk/bin/java" -version 2>&1 | head -1)"
+        echo "jdk: $("$jdk/bin/java" -version 2>&1 | awk 'NR==1')"
         echo "built_at_utc: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
     } >"$record"
     cat "$record"
