@@ -6,11 +6,24 @@ Baseline `main` `ac7303d` (PR #13). PHASE9_READINESS §6 recorded both prerequis
 this pass implemented only those, on branch `phase9a/field-readiness`, and stopped at the Stage 1
 checkpoint. **No Phase 9A qualification row has been run.**
 
+**PR #15 review follow-up, 27 September:** the Android export no longer reuses a cache path and
+URI. Every tap creates `ridelink-diagnostics-<random UUID>.txt` under `cache/diagnostics/`; before
+writing, cleanup retains at most three older snapshots, leaving a maximum of four. Existing IDs
+cannot be overwritten, and an older URI grant cannot name a newer file. Four focused JVM tests
+cover distinct paths, unchanged bytes, bounded cleanup, invalid IDs and collision refusal.
+`DiagnosticsShareProviderTest` passed on the API 36 emulator: two real `FileProvider` URIs differed,
+both addressed their original bytes, the provider was non-exported, and the chooser carried only a
+read grant with neither write nor prefix grant. The Android unit, style, static analysis, lint and
+Debug/Release assembly gates; iOS Core/Platform tests and Debug/Release simulator builds; the
+cross-platform gate; local-only policy; and Gitleaks all passed locally. This emulator check is a
+software regression test. **No new OnePlus procedure check or formal physical qualification was
+run for the review fix.** Exact-head GitHub CI/Security remain the PR's review gates.
+
 - **NFR-08 diagnostics export, both platforms:** a user-initiated share of the existing redacted
   sink through the system share sheet, rendered by a pure, mirrored formatter with a
   build-provenance header. There is no upload, no network path and no new log path. Android uses a
-  non-exported `FileProvider` over one overwritten cache file; iOS uses `ShareLink` and renders in
-  memory.
+  non-exported `FileProvider` over distinct, bounded cache snapshots; iOS uses `ShareLink` and
+  renders in memory.
 - **Problem 109, fixed (both platforms, pre-existing):** the advertise log line carried the full
   discovery handle. It is fixed at the type.
 - **Sideload procedure:** `tools/sideload/android.sh` and [SIDELOAD.md](SIDELOAD.md). It makes a
@@ -20,8 +33,8 @@ checkpoint. **No Phase 9A qualification row has been run.**
 
 Evidence, all on the committed branch:
 
-- **Android unit:** 1,111 passed, 0 failed (app 296, core 464, network 287, audio 33, data 31),
-  counted from JUnit XML with `--rerun-tasks` on JDK 21. That is +8 new tests. ktlint, detekt,
+- **Android unit:** 1,115 passed, 0 failed (app 300, core 464, network 287, audio 33, data 31),
+  counted from JUnit XML on JDK 21. That is +12 new tests. ktlint, detekt,
   lint (0 errors; no warning in a changed file), `assembleDebug` and `assembleRelease` all pass.
 - **iOS:** Core 358 passed (+5). Platform 677 executed, 0 failures, 1 skipped (the orchestrator-only
   interop half). Unsigned iOS-device build, and unsigned Debug and Release simulator builds:

@@ -78,6 +78,12 @@ the formal Stage 3 starts from a genuine clean install.
 - Not observed on the phone: the exported file's *content*. Reading it needs the user to pick a
   target. Content is pinned by the unit tests; DX-01 covers the phone.
 
+The filename above records the **earlier prerequisite build** and its single-file implementation.
+The review fix now creates a distinct `ridelink-diagnostics-<random UUID>.txt` under
+`cache/diagnostics/` for every export, retaining at most four snapshots. An older URI grant cannot
+read a newer snapshot. The earlier phone check does not validate this changed implementation;
+the two-share procedure remains a pre-review check, not a Phase 9A qualification row.
+
 ## 4. Settings baseline (Stage 4) — PENDING
 
 Record before changing anything: notification permission, microphone permission, battery

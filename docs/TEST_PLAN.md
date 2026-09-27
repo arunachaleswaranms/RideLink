@@ -1331,7 +1331,7 @@ and that the installed build's header names the right commit.
 | # | Test | Pass condition | Status |
 |---|---|---|---|
 | DX-01 | Android physical phone: install through `tools/sideload/android.sh install`, then Export diagnostics log | Share sheet opens; the shared file's `source_revision` equals the provenance record; no full identifier in the file | Phase 9A |
-| DX-02 | The same, with the share sheet cancelled | No crash; nothing leaves the phone; a later export overwrites the one cache file | Phase 9A |
+| DX-02 | The same, with the share sheet cancelled | No crash; nothing leaves the phone; a later export gets a distinct URI and cannot change the earlier snapshot | Phase 9A |
 | DX-03 | iPhone: personal-team install per SIDELOAD.md, then Export diagnostics log | As DX-01 | **DEFERRED — REQUIRES PHYSICAL IPHONE** (Phase 9B) |
 
 ### 3.1 The secure control channel — what is proven on a laptop, and what is not

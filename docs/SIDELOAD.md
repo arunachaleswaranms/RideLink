@@ -97,9 +97,10 @@ the commit in the provenance record. `unrecorded` means the build did not come f
 ## Diagnostics export (NFR-08) — both platforms
 
 **Show connection diagnostics → Diagnostics log → Export diagnostics log** hands the process's redacted
-event log (the latest 1,024 events, ADR-029 §2) to the system share sheet as
-`ridelink-diagnostics.txt`. RideLink sends nothing on its own: the user chooses where it goes (Files,
-AirDrop, Nearby Share, a mail draft and so on) or cancels. There is no new network path.
+event log (the latest 1,024 events, ADR-029 §2) to the system share sheet as a text file. On
+Android its filename includes a random UUID. RideLink sends nothing on its own: the user chooses
+where it goes (Files, AirDrop, Nearby Share, a mail draft and so on) or cancels. There is no new
+network path.
 
 The export contains only:
 
@@ -112,9 +113,12 @@ The export contains only:
 SAS codes, TLS secrets, exporter output, bulk tokens and key material have **no log path**, so they
 cannot be in an export. Audio is never logged. The unit tests pin both halves (ADR-029 Amendment A2).
 
-On Android the text is written to one file in the app's private cache, which the next export
-overwrites. It is readable by the chosen target only through a per-share grant on a non-exported
-`FileProvider`. On iOS the text is produced in memory when the share target asks for it.
+On Android each export is written to a new file named `ridelink-diagnostics-<random UUID>.txt` under
+`cache/diagnostics/`. The non-exported `FileProvider` gives each file a distinct URI; a grant for an
+older URI cannot read a newer snapshot. At most four snapshots are kept: before writing another,
+the oldest export files are deleted. Deleting an old file can end access through its old grant; its
+URI is never reused for new bytes. The share intent grants read access only. On iOS the text is
+produced in memory when the share target asks for it.
 
 ## iOS (iPhone 17 Pro Max) — personal team
 

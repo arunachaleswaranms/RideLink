@@ -142,10 +142,13 @@ way out of the process, and it is initiated by the user.
    material still have no API into the sink. No upload, background export, analytics or network
    path is added. Decision 2's "no upload" stands; its "no persistence" now has one narrow,
    user-initiated exception, stated in item 2.
-2. **Platform hand-off.** Android writes the rendered text to one file,
-   `cacheDir/diagnostics/ridelink-diagnostics.txt`, overwritten by every export, and shares it
-   through a **non-exported** `androidx.core` `FileProvider` restricted to that directory, with a read
-   grant scoped to the one `ACTION_SEND` intent. A file is used rather than `EXTRA_TEXT` because a
+2. **Platform hand-off.** Android writes each rendered snapshot to a unique
+   `cacheDir/diagnostics/ridelink-diagnostics-<random UUID>.txt` file and shares its distinct URI
+   through a **non-exported** `androidx.core` `FileProvider` restricted to that directory, with a
+   read-only, non-prefix grant on the one `ACTION_SEND` intent. An old URI grant cannot access a
+   later snapshot. At most four snapshots remain: before each write the oldest export files are
+   deleted, and deleted names are never reused for new bytes. This bounds cache storage without
+   claiming that active grants are revoked. A file is used rather than `EXTRA_TEXT` because a
    full log can exceed a Binder transaction. iOS uses `ShareLink` with a `Transferable` that renders
    lazily, in memory, when the target asks for the data. Neither adds a dependency: `FileProvider`
    ships in `androidx.core`, which is already approved and used.

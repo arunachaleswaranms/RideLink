@@ -39,7 +39,6 @@ class DiagnosticsExportSource(
 
 object DiagnosticsExport {
     const val FORMAT_VERSION = 1
-    const val FILE_NAME = "ridelink-diagnostics.txt"
 
     fun render(
         provenance: ExportProvenance,
