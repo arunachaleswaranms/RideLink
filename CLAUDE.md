@@ -189,6 +189,12 @@ python3 tools/generate_coexistence_vectors.py
 # processes joined by a real socket carrying the real protocol. Not in CI; re-runnable locally.
 ./tools/crossplatform/run.sh
 
+# Sideload builds for the physical phones (ADR-029 A2, docs/SIDELOAD.md). The signing key lives
+# outside the repository and its password in the login Keychain; never print, copy or commit either.
+./tools/sideload/android.sh keystore                               # once per Mac
+./tools/sideload/android.sh build                                  # clean tree only; provenance record
+./tools/sideload/android.sh install -s <physical-serial> <apk>     # proves the installed bytes
+
 # Requirements doc (DOCX is read-only input; never modify it)
 python3 tools/extract_docx.py docs/RideLink_Requirements_and_Implementation_Plan.docx
 ```
@@ -230,6 +236,10 @@ independently reviewed, merged at `48b7a8e5d07fe52010d05c1893d3f914722d80f0`, an
 post-merge CI passed. The current evidence and remaining gates are in
 `docs/PHASE8_RELEASE_HARDENING.md`; the Phase 7 narrative below is historical.
 No physical iPhone is available: hardware gates remain **DEFERRED — HARDWARE NOT AVAILABLE**.
+**Phase 9A** (Android-only physical qualification on the OnePlus Nord 5) began 27 September 2026:
+its two software prerequisites — NFR-08 diagnostics export and the sideload procedure (ADR-029
+Amendment A2) — are on branch `phase9a/field-readiness`, pending independent review; formal
+qualification waits for that merge. Evidence: `docs/PHASE9A_ANDROID_PHYSICAL.md`.
 
 **The Phase 8 PR has been independently reviewed once, and both of its findings are closed
 (`docs/STATUS.md` problems 94 and 95).** The first is rule 27 above and the sharpest instance yet of

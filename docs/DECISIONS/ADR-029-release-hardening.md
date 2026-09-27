@@ -116,3 +116,80 @@ gate.
 It is deliberately **not** in CI: it starts two toolchains and a real socket, and CI already runs
 both suites separately. It is a re-runnable local gate, recorded with its measured result in
 `docs/PHASE8_RELEASE_HARDENING.md`.
+
+## Amendment A2 — 27 September 2026 — diagnostics export and sideload provenance
+
+Status: **proposed** — Phase 9A prerequisites (STATUS §4 problems 107 and 109), pending independent
+review.
+
+### Context
+
+REQUIREMENTS NFR-08 says local diagnostic logs "shall be exportable", and §13's Phase 8 row asks for
+"diagnostics export … repeatable sideload builds". Neither was delivered (problem 107). Phase 9 is a
+field exercise, and its primary evidence is ARCHITECTURE §3 rule 5's transition log. Decision 2
+above bounds that log and says "no persistence or upload is added". This amendment adds exactly one
+way out of the process, and it is initiated by the user.
+
+### Decision
+
+1. **Export is a user-initiated share of the existing redacted sink, and nothing else.** A pure,
+   mirrored formatter (`core.logging.DiagnosticsExport` / `RideLinkCore.DiagnosticsExport`) renders a
+   provenance header followed by one line per retained `LogEvent`. The header holds platform, app
+   version, source revision and export time as a monotonic timestamp: no device name, no identity,
+   no peer and no wall-clock read (the X.509 exception stays the only one). Newlines inside an event
+   are escaped, so a message cannot forge a header or a second event. The export adds no data
+   source, and therefore no log path. SAS codes, TLS secrets, exporter output, tokens and key
+   material still have no API into the sink. No upload, background export, analytics or network
+   path is added. Decision 2's "no upload" stands; its "no persistence" now has one narrow,
+   user-initiated exception, stated in item 2.
+2. **Platform hand-off.** Android writes the rendered text to one file,
+   `cacheDir/diagnostics/ridelink-diagnostics.txt`, overwritten by every export, and shares it
+   through a **non-exported** `androidx.core` `FileProvider` restricted to that directory, with a read
+   grant scoped to the one `ACTION_SEND` intent. A file is used rather than `EXTRA_TEXT` because a
+   full log can exceed a Binder transaction. iOS uses `ShareLink` with a `Transferable` that renders
+   lazily, in memory, when the target asks for the data. Neither adds a dependency: `FileProvider`
+   ships in `androidx.core`, which is already approved and used.
+3. **A redaction gap found while building it is fixed (problem 109).** On both platforms
+   `SessionCoordinator` logged `AdvertiseState.Advertising` through the type's default description,
+   which printed the **full 32-hex discovery handle** and the instance name (which carries 8 hex of
+   the same handle), against ARCHITECTURE §11 item 3's 6-hex rule. The handle is ephemeral and already
+   public in mDNS, so the harm was small, but an export would have carried it off the phone. The
+   carrier now redacts itself, the way the identifier types do: `dh:` plus 6 hex, and no instance
+   name. The fix is on the type, so every interpolation is covered, not only the one call site.
+4. **Sideload provenance.** A qualification build must be traceable to one commit.
+   `tools/sideload/android.sh` refuses a dirty tree, builds `assembleRelease` with
+   `-Pridelink.sourceRevision=<HEAD>`, which the Gradle file validates as 40-hex before compiling it
+   into `BuildConfig.SOURCE_REVISION`, then aligns, signs with a local key and verifies. After install
+   it proves the phone's installed bytes equal the built APK. The signing key is a PKCS12 file outside
+   the repository, and its random password is kept in the login Keychain and never printed or passed
+   as an argument. Signing is deliberately **not** a Gradle `signingConfig`, so no key path or
+   password property ever needs to exist in the build. iOS takes the same revision from a
+   `RIDELINK_SOURCE_REVISION` build setting, which the command line sets and the project file does
+   not, into the `RideLinkSourceRevision` Info.plist key. Any build that did not come from the
+   procedure exports `source_revision: unrecorded`, and the formatter renders anything that is not
+   exactly 40 lowercase hex the same way. The procedure is `docs/SIDELOAD.md`.
+
+### Alternatives rejected
+
+- **A runtime scrubber** that pattern-matches six-digit codes or hex runs out of the export. The
+  timestamps are digits, and it would turn "has no log path" into "is probably filtered". The
+  property stays structural, and the tests pin its premise.
+- **A Gradle `signingConfig` reading a local `keystore.properties`.** It works, but it puts a
+  password-bearing file on the build's configuration path. Post-build `apksigner` keeps the build
+  itself key-free.
+- **Exporting the diagnostics cards as well.** They are live UI state, not the NFR-08 log, and every
+  added field would be a new thing to prove redacted. It can be added later, deliberately.
+
+### Verification
+
+`DiagnosticsExportTest` / `DiagnosticsExportTests` pin identical golden text, provenance validation,
+newline escaping, render-time reads and the retention bound. `SessionCoordinatorDiagnosticsExportTest`
+drives every identifier-bearing Android `SessionCoordinator` log site through its real entry point
+with fabricated full-length values, and proves the rendered export holds only 6-character prefixes.
+Its source scan pins the premise: `SessionCoordinator` is the only production logger, and no log call
+interpolates a SAS/prompt, token, secret, exporter or key value. The iOS app target has no test
+bundle (problem 48), so iOS proves the redaction at the type (`DiscoveryPrivacyTests`). Its
+coordinator's eleven log sites were enumerated by hand: they interpolate only the self-redacting
+`PeerId`/`SpkiHash`, the now-redacting `AdvertiseState`, PROTOCOL §4.6 codes, FSM states and events,
+an intercom refusal code and a boolean. Each redaction regression
+fails with its fix neutralised. No wire format, vector, state machine or security rule changed.

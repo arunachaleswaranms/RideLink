@@ -116,6 +116,20 @@ that fails with the fix neutralised.
    known limitation for the first sessions.
 4. Qualify one known build: `main` at or after this audit's merge, which includes Phase 8.5.
 
+**27 September 2026 — prerequisites 1 and 2 implemented, pending independent review.** The work is
+on branch `phase9a/field-readiness`, [ADR-029 Amendment A2](DECISIONS/ADR-029-release-hardening.md#amendment-a2--27-september-2026--diagnostics-export-and-sideload-provenance):
+
+- The diagnostics export exists on both platforms.
+- The Android sideload procedure is `tools/sideload/android.sh` ([SIDELOAD.md](SIDELOAD.md)). The
+  iOS personal-team procedure is documented and **not executed**.
+- Building the export found and fixed one redaction gap: the full discovery handle was reaching the
+  log (STATUS §4 problem 109).
+
+Prerequisite 3 (problem 104) is **unchanged**. Phase 9A records its behaviour stationary first and
+does not close it by assumption. Formal physical qualification starts only after that branch is
+reviewed and merged. The evidence document is
+[PHASE9A_ANDROID_PHYSICAL.md](PHASE9A_ANDROID_PHYSICAL.md).
+
 ## 7. Manual tests still required (all MANUAL REQUIRED)
 
 | Area | TEST_PLAN | Needs |

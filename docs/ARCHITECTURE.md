@@ -1177,6 +1177,7 @@ Encoded as build- and code-level rules, not just intentions:
 6. **mDNS TXT records carry nothing durable** (§4.1). No `peer_id`, no certificate or SPKI fingerprint or prefix, no token, no library size, no device name. Known-peer recognition happens after the TLS handshake, never on the wire in the clear.
 7. `.gitignore` excludes keystores, `.jks`, `.p12`, `.pfx`, `.mobileprovision`, private keys, local secrets, personal music, imported audio, raw recordings and `.part` files. Only synthetic fixtures under `test-media/synthetic/` are committed.
 8. **Nothing the app stores leaves the phone through the platform's own backup or migration.** Android sets `allowBackup="false"` *and* `dataExtractionRules` excluding every domain from both cloud backup and device-to-device transfer — for targetSdk 31+ the first alone no longer blocks the second. The identity key never migrates (Keystore), so a migrated `peer_id` and `trusted_peers.json` would only produce a known `peer_id` with a changed identity, which the pillion's phone correctly refuses; a new phone pairs fresh instead (STATUS §4 problem 102).
+9. **Diagnostics leave the phone only when the user shares them** (NFR-08, ADR-029 Amendment A2). The export renders the redacted sink of item 3 with a build-provenance header, and hands it to the system share sheet. It adds no data source, so it adds no log path, and it adds no network path. Android writes one overwritten file in its private cache, behind a non-exported `FileProvider` with a per-share read grant. iOS renders in memory for `ShareLink`.
 
 ---
 

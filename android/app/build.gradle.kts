@@ -3,6 +3,17 @@ plugins {
     alias(libs.plugins.kotlin.compose)
 }
 
+// ADR-029 Amendment A2: the exact commit a sideload build was made from, stamped by
+// tools/sideload/android.sh (which refuses a dirty tree) and shown by the diagnostics export. Any
+// other build — an IDE run, CI — carries none, and the export says "unrecorded". Validated here so
+// a malformed value fails the build rather than being written into Java source.
+val sourceRevision: String =
+    providers.gradleProperty("ridelink.sourceRevision").orElse("").get().also { revision ->
+        require(revision.isEmpty() || Regex("^[0-9a-f]{40}$").matches(revision)) {
+            "ridelink.sourceRevision must be a full 40-hex lowercase Git commit"
+        }
+    }
+
 android {
     namespace = "com.ridelink.app"
     compileSdk = 36
@@ -14,6 +25,7 @@ android {
         versionCode = 1
         versionName = "0.1.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+        buildConfigField("String", "SOURCE_REVISION", "\"$sourceRevision\"")
     }
 
     buildTypes {
@@ -29,6 +41,7 @@ android {
 
     buildFeatures {
         compose = true
+        buildConfig = true
     }
 }
 

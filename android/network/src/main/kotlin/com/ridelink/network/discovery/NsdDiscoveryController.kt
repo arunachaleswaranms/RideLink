@@ -5,6 +5,7 @@ import android.net.nsd.NsdManager
 import android.net.nsd.NsdServiceInfo
 import android.os.Build
 import androidx.annotation.RequiresApi
+import com.ridelink.core.logging.Redactor
 import com.ridelink.core.model.DiscoveredPeer
 import com.ridelink.core.model.Platform
 import kotlinx.coroutines.channels.awaitClose
@@ -45,7 +46,14 @@ sealed class AdvertiseState {
         val serviceName: String,
         val port: Int,
         val discoveryHandle: String,
-    ) : AdvertiseState()
+    ) : AdvertiseState() {
+        /**
+         * Redacted, because `SessionCoordinator` logs this state and a data class's generated
+         * `toString` would print the whole discovery handle (ARCHITECTURE §11 item 3: the handle
+         * logs as 6 hex). The instance name carries 8 hex of the same handle, so it is omitted too.
+         */
+        override fun toString(): String = "Advertising(port=$port, ${Redactor.discoveryHandle(discoveryHandle)})"
+    }
 
     data class Failed(
         val errorCode: Int,

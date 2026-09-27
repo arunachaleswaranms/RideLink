@@ -28,6 +28,7 @@ import androidx.compose.ui.text.style.TextAlign
 import com.ridelink.app.library.SharedLibraryCoordinator
 import com.ridelink.app.music.MusicCoordinator
 import com.ridelink.app.resync.ResyncCoordinator
+import com.ridelink.app.resync.ResyncDiagnostics
 import com.ridelink.app.session.SessionCoordinator
 import com.ridelink.app.sync.SyncPlaybackCoordinator
 import com.ridelink.core.library.LibraryEntry
@@ -38,6 +39,7 @@ import com.ridelink.network.control.ControlState
 import com.ridelink.network.control.PairingPrompt
 
 /** Stationary setup. Production session state owns navigation, trust and all actions. */
+@Suppress("LongParameterList") // one callback per Activity-owned action; RideLinkRoot passes each through
 @Composable
 fun MainScreen(
     coordinator: SessionCoordinator,
@@ -62,6 +64,8 @@ fun MainScreen(
     onImportFolder: () -> Unit,
     onImportFiles: () -> Unit,
     onPlaySharedTrackLocally: (ManifestEntry) -> Unit,
+    /** NFR-08: share the redacted event log. Routed through the Activity, which owns the share sheet. */
+    onExportDiagnostics: () -> Unit,
 ) {
     val state by coordinator.state.collectAsState()
     val peers by coordinator.discoveredPeers.collectAsState()
@@ -138,19 +142,42 @@ fun MainScreen(
                 onImportFiles = onImportFiles,
                 sharedEntries = remoteEntries,
             )
-            DiagnosticDisclosure("connection diagnostics") {
-                Text(deviceDescription)
-                TransportBanner(diagnostics.transportLabel)
-                DiagnosticsCard(
-                    diagnostics = diagnostics,
-                    discoveredPeerCount = peers.size,
-                    discoveryCount = discoveryCount,
-                    localIdentityPrefix = coordinator.localIdentityPrefix,
-                )
-
-                ResyncDiagnosticsCard(resyncDiagnostics)
-            }
+            ConnectionDiagnosticsSection(
+                deviceDescription = deviceDescription,
+                diagnostics = diagnostics,
+                discoveredPeerCount = peers.size,
+                discoveryCount = discoveryCount,
+                localIdentityPrefix = coordinator.localIdentityPrefix,
+                resyncDiagnostics = resyncDiagnostics,
+                onExportDiagnostics = onExportDiagnostics,
+            )
         }
+    }
+}
+
+@Suppress("LongParameterList") // the section's own inputs, previously inline in MainScreen
+@Composable
+private fun ConnectionDiagnosticsSection(
+    deviceDescription: String,
+    diagnostics: ControlDiagnostics,
+    discoveredPeerCount: Int,
+    discoveryCount: Int,
+    localIdentityPrefix: String,
+    resyncDiagnostics: ResyncDiagnostics,
+    onExportDiagnostics: () -> Unit,
+) {
+    DiagnosticDisclosure("connection diagnostics") {
+        Text(deviceDescription)
+        TransportBanner(diagnostics.transportLabel)
+        DiagnosticsCard(
+            diagnostics = diagnostics,
+            discoveredPeerCount = discoveredPeerCount,
+            discoveryCount = discoveryCount,
+            localIdentityPrefix = localIdentityPrefix,
+        )
+
+        ResyncDiagnosticsCard(resyncDiagnostics)
+        DiagnosticsExportCard(onExport = onExportDiagnostics)
     }
 }
 

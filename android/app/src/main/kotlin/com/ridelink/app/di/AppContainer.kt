@@ -4,6 +4,7 @@ import android.content.Context
 import android.os.Build
 import android.os.SystemClock
 import androidx.room.Room
+import com.ridelink.app.BuildConfig
 import com.ridelink.app.library.BulkTransportManagerAdapter
 import com.ridelink.app.library.ControlSessionManagerAdapter
 import com.ridelink.app.library.LocalContentResolverAdapter
@@ -33,6 +34,8 @@ import com.ridelink.audio.player.ExoPlayerMusicPlayer
 import com.ridelink.audio.route.AndroidVoiceAudioSession
 import com.ridelink.audio.route.AudioEndpointPreference
 import com.ridelink.core.audiopolicy.RouteState
+import com.ridelink.core.logging.DiagnosticsExportSource
+import com.ridelink.core.logging.ExportProvenance
 import com.ridelink.core.logging.InMemoryLogSink
 import com.ridelink.core.model.ManifestId
 import com.ridelink.core.model.TransferId
@@ -104,9 +107,22 @@ class AppContainer(
      */
     private val wallClockNow: () -> UtcTime = { UtcTime(System.currentTimeMillis() / MILLIS_PER_SECOND) }
 
-    // Phase 1b: an in-memory sink is enough to prove the redaction-by-construction contract.
-    // A persistent/platform sink (Logcat, ring buffer) arrives when there is a reason to keep one.
+    // The process's one redacted log (ARCHITECTURE §11 item 3), bounded by ADR-029 §2. It is never
+    // persisted; the only way out of the process is the user-initiated export below.
     private val logSink = InMemoryLogSink()
+
+    /** NFR-08 (ADR-029 Amendment A2): the redacted sink, rendered only when the user shares it. */
+    val diagnosticsExport =
+        DiagnosticsExportSource(
+            sink = logSink,
+            provenance =
+                ExportProvenance(
+                    platform = "android",
+                    appVersion = "${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})",
+                    sourceRevision = BuildConfig.SOURCE_REVISION.ifEmpty { null },
+                ),
+            monotonicNowUs = monotonicNowUs,
+        )
 
     private val securityDirectory: File = File(context.filesDir, "security").apply { mkdirs() }
 

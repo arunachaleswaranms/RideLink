@@ -1,6 +1,8 @@
+import CoreTransferable
 import RideLinkCore
 import RideLinkPlatform
 import SwiftUI
+import UniformTypeIdentifiers
 
 /// Deliberately developer-oriented (CLAUDE.md Phase 2b scope): device identity, connection status, the
 /// six-digit pairing prompt, security warnings, the intercom card, and diagnostics (peer, RTT, clock
@@ -124,6 +126,7 @@ struct MainScreen: View {
                     )
 
                     ResyncDiagnosticsCard(diagnostics: coordinator.resyncDiagnostics)
+                    DiagnosticsExportCard(source: coordinator.diagnosticsExport)
                 }.font(.subheadline)
             }
             .padding(RideDesign.xl)
@@ -435,5 +438,42 @@ struct ConnectionSummary: View {
                 Text("Peer found · Connecting automatically").font(.subheadline.weight(.semibold))
             }
         }.rideSurface()
+    }
+}
+
+/// NFR-08 (ADR-029 Amendment A2): the redacted event log, offered to the system share sheet as a
+/// text file. RideLink sends nothing itself — the user picks a target or cancels — and there is no
+/// network path here. Mirrors Android's `DiagnosticsExportCard`.
+private struct DiagnosticsExportCard: View {
+    let source: DiagnosticsExportSource
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: RideDesign.sm) {
+            Text("Diagnostics log").font(.headline)
+            Text("Shares this session's redacted event log as a text file, through the share sheet. Nothing is sent unless you choose where it goes.")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+            ShareLink(
+                item: DiagnosticsExportDocument(source: source),
+                preview: SharePreview("RideLink diagnostics")
+            ) {
+                Label("Export diagnostics log", systemImage: "square.and.arrow.up")
+                    .frame(maxWidth: .infinity, minHeight: RideDesign.touch)
+            }
+            .buttonStyle(.bordered)
+        }
+    }
+}
+
+/// Rendered when the share target asks for the data, not when the view is built, so the export is
+/// the log as it stands at the moment of sharing. Nothing is written to disk by RideLink.
+private struct DiagnosticsExportDocument: Transferable {
+    let source: DiagnosticsExportSource
+
+    static var transferRepresentation: some TransferRepresentation {
+        DataRepresentation(exportedContentType: .plainText) { document in
+            Data(document.source.render().utf8)
+        }
+        .suggestedFileName(DiagnosticsExport.fileName)
     }
 }

@@ -1304,6 +1304,35 @@ HARDENING** because the pinned public WebRTC APIs provide no suitably fast produ
 
 ---
 
+### 3.1h Diagnostics export and sideload provenance — ADR-029 Amendment A2, problems 107 and 109
+
+NFR-08's export is a user-initiated share of the existing redacted sink, and nothing else.
+Procedure: [SIDELOAD.md](SIDELOAD.md).
+
+**Proven on a laptop, on both platforms:**
+
+- `DiagnosticsExportTest` / `DiagnosticsExportTests`: identical golden text; any revision that is not
+  exactly 40 lowercase hex renders as `unrecorded`; an event cannot forge a line; the sink is read
+  at render time; the export is bounded by the 1,024-event retention.
+- `DiscoveryPrivacyTest` / `DiscoveryPrivacyTests`: `AdvertiseState` logs the discovery handle as
+  `dh:` plus 6 hex and never the instance name (problem 109). Both fail with the fix neutralised.
+- Android `SessionCoordinatorDiagnosticsExportTest`: every identifier-bearing `SessionCoordinator`
+  log site, driven through its real entry point with fabricated full-length values, reaches the
+  export only as a 6-character prefix. A source scan pins that `SessionCoordinator` is the only
+  production logger and that no log call interpolates a SAS/prompt, token, secret, exporter or key
+  value.
+- The Android Gradle file rejects a malformed `ridelink.sourceRevision`. The iOS device build expands
+  `RIDELINK_SOURCE_REVISION` into `RideLinkSourceRevision`.
+
+**Not provable on a laptop:** that the share sheet appears and delivers the file on a real phone,
+and that the installed build's header names the right commit.
+
+| # | Test | Pass condition | Status |
+|---|---|---|---|
+| DX-01 | Android physical phone: install through `tools/sideload/android.sh install`, then Export diagnostics log | Share sheet opens; the shared file's `source_revision` equals the provenance record; no full identifier in the file | Phase 9A |
+| DX-02 | The same, with the share sheet cancelled | No crash; nothing leaves the phone; a later export overwrites the one cache file | Phase 9A |
+| DX-03 | iPhone: personal-team install per SIDELOAD.md, then Export diagnostics log | As DX-01 | **DEFERRED — REQUIRES PHYSICAL IPHONE** (Phase 9B) |
+
 ### 3.1 The secure control channel — what is proven on a laptop, and what is not
 
 Phase 1b's security path is exercised end to end by `TlsControlChannelTest` (Android) and
@@ -1758,7 +1787,7 @@ subjective intelligibility 1–5, and every anomaly. Template in `docs/test-resu
 | Platform baseline | script in `tools/` | `minSdk`/`compileSdk`/`targetSdk` = 31/36/36; iOS deployment target = ADR-011 value |
 | Dependency allowlist | script in `tools/` | **no analytics/ads/telemetry/crash-reporter SDK** (NFR-05); no DI framework while ADR-014 stands |
 | Secret scan | script in `tools/` | no keystores, `.jks`, `.p12`, `.pfx`, `.mobileprovision`, private keys, personal audio |
-| Log-hygiene scan | script in `tools/` | no raw-audio write path; **no log path for the SAS, bulk tokens, TLS secrets or exporter output**; `identity_spki_sha256` never logged beyond 6 hex |
+| Log-hygiene scan | script in `tools/`; since ADR-029 A2, also `SessionCoordinatorDiagnosticsExportTest`'s source scan (§3.1h) | no raw-audio write path; **no log path for the SAS, bulk tokens, TLS secrets or exporter output**; `identity_spki_sha256` never logged beyond 6 hex |
 | Discovery-privacy scan | script in `tools/` | no code path writes `peer_id`, `identity_spki_sha256` or any prefix of either into an mDNS TXT record |
 | Retired-vocabulary scan | script in `tools/` | source and docs contain no `cert_fingerprint`, no `fp6`, no bare `.allowBluetooth`, and no `a2dp`/`hfp` string in a wire value |
 
@@ -1782,7 +1811,7 @@ A phase is complete only when **all** of its row passes and `STATUS.md` records 
 | **5 Sync playback** | + `session-clock/` (29) + `ordering/` (70) + `drift/` (27 rows, 13 sequences) + `queue/` (22 scenarios, 4 snapshots, 2 cap rows) + `playback-messages/` (94) + `queue-messages/` (85), all passing both platforms — **done, §2aa**; + the coordinator suites (Android `app.sync` 32 cases; iOS `RideLinkPlatform` 31), the pre-authentication Phase 5 refusal over **real TLS** on both platforms, and a two-peer integration on each: iOS over a real authenticated TLS connection with the real `ClockSync` estimator (mapped session start error **47 us**, software scheduling only), Android in-process on clocks 7.5 s apart so the offset arithmetic is genuinely exercised — **done, §2aa**; + the closure audit's regressions (`SyncPlaybackClosureAuditTest[s]`) — **done, §2ab**; + the delivery audit's (`SyncPlaybackDeliveryAuditTest[s]`, 17/18 cases) — **done, §2ac**; + the lifecycle audit's (`SyncPlaybackLifecycleAuditTest[s]`, 9 cases each, plus one Android two-peer scenario), every one of the seven lifecycle cases verified to fail against the genuine pre-A3 production code on both platforms, and the previously-skipped stress runs actually performed (iOS 200x, Android 100x) — **done, §2ad**; + the operation-lifetime audit's (`SyncPlaybackOperationLifetimeAuditTest[s]`, 7 cases each), 5 of 7 verified to fail against pre-A4 fence semantics on both platforms, with the whole 90-test iOS sweep stressed in one process and every flake classified against an unmodified-baseline re-run — **done, §2ae** | **Android: done** — `SyncScheduledPlaybackTest` on the real `RideLink_API36` emulator proves the ARCHITECTURE §7.2 pre-roll, a start at a **monotonic deadline**, and ADR-004's nudge reaching the real `setPlaybackParameters` and returning to exactly 1.0 (measured sleeper wake error 1.4–3.1 ms — *software scheduling only*). **iOS: pending** — `AVAudioEnginePlayer` has not been started at a deadline on a simulator, and `AVAudioUnitVarispeed` has never changed a real rate | **S-01…S-12 pending** (§5.2); I-09, I-12 pending | — | — | **drift p95 pending (S-09); no alignment figure exists (S-03)** |
 | 6 Coexistence | + audio policy, audio-state vectors | AF-02…AF-09, IA-04…IA-09 | I-13, I-25 | A-03, A-05…A-08, A-10, A-11 | R-01, R-02 | mode chosen and recorded; `confidence` = `measured` |
 | 7 Ride Mode | + `resync-messages/` (Phase 7, ADR-028); `StateResyncGate`/`ResyncCodec`/`ResyncCoordinator` suites both platforms; `RideModeUiState`/`RideModePresentation` state-driven tests (both platforms, no screenshots) — **software done, §2av** | app installs/launches on emulator + simulator, no crash — **done, §2av**; Ride Mode itself not interactively exercised (needs a paired peer) — pending | **all pending** (needs two real devices) | — | **R-03…R-05 pending — DEFERRED, HARDWARE NOT AVAILABLE** | battery/thermal **not recorded** — see ADR-028 "Battery/thermal — honest scope"; software-only reconnect/reconciliation stress evidence recorded in §2av instead |
-| 8 Hardening | all | all | all | all | R-05 | security review, log export, sideload build |
+| 8 Hardening | all | all | all | all | R-05 | security review, log export, sideload build — the last two delivered late, as Phase 9A prerequisites (§3.1h, ADR-029 Amendment A2), with DX-01…DX-03 pending |
 
 ---
 

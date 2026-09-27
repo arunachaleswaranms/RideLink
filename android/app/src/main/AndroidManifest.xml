@@ -68,5 +68,17 @@
             android:name=".service.RideForegroundService"
             android:exported="false"
             android:foregroundServiceType="microphone|mediaPlayback" />
+
+        <!-- ADR-029 Amendment A2: the user-initiated diagnostics export. Not exported; a share
+             target can read the one export file only through the grant on that share's intent. -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.diagnostics"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/diagnostics_export_paths" />
+        </provider>
     </application>
 </manifest>
