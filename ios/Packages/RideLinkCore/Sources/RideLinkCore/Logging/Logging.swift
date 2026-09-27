@@ -45,10 +45,13 @@ public protocol LogSink: Sendable {
 
 /// Process-owned diagnostics. The ring retains the latest 1,024 events in chronological order.
 public final class InMemoryLogSink: LogSink, @unchecked Sendable {
+    /// ADR-029 §2's retention bound. Public so a diagnostics export can state it.
+    public static let capacity = 1_024
+
     private let lock = NSLock()
     private var storage: [LogEvent] = []
     private var next = 0
-    private let capacity = 1_024
+    private let capacity = InMemoryLogSink.capacity
 
     public init() {}
 

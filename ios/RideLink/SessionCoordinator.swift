@@ -97,6 +97,9 @@ public final class SessionCoordinator {
     private let deviceIdentity: DeviceIdentity
     private let monotonicNowUs: @Sendable () -> Int64
     private let logger: StructuredLogger
+    /// NFR-08 (ADR-029 Amendment A2): the redacted sink `logger` writes to, rendered only when the
+    /// user shares it. `Sendable`, so the share sheet can render it lazily off the main actor.
+    public let diagnosticsExport: DiagnosticsExportSource
 
     private var connectAttempted = false
     private var lastPeerHost: String?
@@ -168,6 +171,16 @@ public final class SessionCoordinator {
     /// Test-visible count of `VoiceDiagnostics` snapshots `updateCoexistence` refused as stale.
     public private(set) var staleVoiceDiagnosticsCount = 0
 
+    /// Build provenance for the export. `RideLinkSourceRevision` is expanded from the
+    /// `RIDELINK_SOURCE_REVISION` build setting, which only the documented sideload build sets
+    /// (docs/SIDELOAD.md); an unset one expands to empty and the export says `unrecorded`.
+    private static func exportProvenance(_ bundle: Bundle) -> ExportProvenance {
+        let version = bundle.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "?"
+        let build = bundle.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "?"
+        let revision = bundle.object(forInfoDictionaryKey: "RideLinkSourceRevision") as? String
+        return ExportProvenance(platform: "ios", appVersion: "\(version) (\(build))", sourceRevision: revision)
+    }
+
     /// Assembles the security wiring, and nothing else does: the Keychain identity (ADR-017), the
     /// one production `ControlChannel` — TLS 1.3 — and the trusted-peer store the SPKI pin is
     /// checked against (ADR-012).
@@ -182,6 +195,11 @@ public final class SessionCoordinator {
         // ARCHITECTURE §7's "monotonic clocks only" rule.
         let monotonicNowUs: @Sendable () -> Int64 = { Int64(DispatchTime.now().uptimeNanoseconds / 1000) }
         logger = StructuredLogger(sink: sink, monotonicNowUs: monotonicNowUs)
+        diagnosticsExport = DiagnosticsExportSource(
+            sink: sink,
+            provenance: Self.exportProvenance(Bundle.main),
+            monotonicNowUs: monotonicNowUs
+        )
 
         let directory = Self.securityDirectory()
         // The one wall-clock read in the app, and only X.509 uses it — see `UtcTime` for why

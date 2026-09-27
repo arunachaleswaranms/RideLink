@@ -6,6 +6,14 @@ import XCTest
 /// accidental future addition (`peer_id`, a device name, a library count) fails this test, not
 /// merely a manual review. Mirrors Android's `DiscoveryPrivacyTest`.
 final class DiscoveryPrivacyTests: XCTestCase {
+    /// ADR-029 Amendment A2: `SessionCoordinator` logs this state into the exportable sink.
+    func testAnAdvertisingStateLogsTheDiscoveryHandleAsSixHexAndNeverTheInstanceName() {
+        let handle = "0123456789abcdef0123456789abcdef"
+        let logged = "\(AdvertiseState.advertising(serviceName: instanceServiceName(discoveryHandle: handle), discoveryHandle: handle))"
+        XCTAssertEqual(logged, "advertising(dh:012345…)")
+        XCTAssertFalse(logged.contains("0123456"), "no more than 6 hex of the handle may reach a log line")
+    }
+
     func testTxtKeySetIsExactlyVDhPlat() {
         let record = buildTxtRecord(discoveryHandle: "0123456789abcdef0123456789abcdef")
         XCTAssertEqual(Set(record.keys), ["v", "dh", "plat"])

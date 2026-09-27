@@ -37,6 +37,21 @@ public enum AdvertiseState: Sendable, Equatable {
     case stopped
 }
 
+/// Redacted, because `SessionCoordinator` logs this state and Swift's default enum description would
+/// print the whole discovery handle (ARCHITECTURE §11 item 3: the handle logs as 6 hex). The
+/// instance name carries 8 hex of the same handle, so it is omitted too. Mirrors Android's
+/// `AdvertiseState.Advertising.toString`.
+extension AdvertiseState: CustomStringConvertible {
+    public var description: String {
+        switch self {
+        case .starting: "starting"
+        case let .advertising(_, discoveryHandle): "advertising(\(Redactor.discoveryHandle(discoveryHandle)))"
+        case let .failed(reason): "failed(\(reason))"
+        case .stopped: "stopped"
+        }
+    }
+}
+
 public enum DiscoveryError: Error, Sendable {
     case invalidPort
 }

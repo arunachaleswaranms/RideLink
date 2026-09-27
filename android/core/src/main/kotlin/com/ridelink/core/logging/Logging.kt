@@ -54,7 +54,8 @@ class InMemoryLogSink : LogSink {
         }
     }
 
-    private companion object {
+    companion object {
+        /** ADR-029 §2's retention bound. Public so a diagnostics export can state it. */
         const val MAX_EVENTS = 1_024
     }
 }

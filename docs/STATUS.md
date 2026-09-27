@@ -1,5 +1,70 @@
 # RideLink — Status
 
+**27 September 2026 — Phase 9A started: the two Phase 9 prerequisites, pending independent review
+([PHASE9A_ANDROID_PHYSICAL.md](PHASE9A_ANDROID_PHYSICAL.md), ADR-029 Amendment A2, problems 107 and 109).**
+Baseline `main` `ac7303d` (PR #13). PHASE9_READINESS §6 recorded both prerequisites as missing, so
+this pass implemented only those, on branch `phase9a/field-readiness`, and stopped at the Stage 1
+checkpoint. **No Phase 9A qualification row has been run.**
+
+**PR #15 review follow-up, 27 September:** the Android export no longer reuses a cache path and
+URI. Every tap creates `ridelink-diagnostics-<random UUID>.txt` under `cache/diagnostics/`; before
+writing, cleanup retains at most three older snapshots, leaving a maximum of four. Existing IDs
+cannot be overwritten, and an older URI grant cannot name a newer file. Four focused JVM tests
+cover distinct paths, unchanged bytes, bounded cleanup, invalid IDs and collision refusal.
+`DiagnosticsShareProviderTest` passed on the API 36 emulator: two real `FileProvider` URIs differed,
+both addressed their original bytes, the provider was non-exported, and the chooser carried only a
+read grant with neither write nor prefix grant. The Android unit, style, static analysis, lint and
+Debug/Release assembly gates; iOS Core/Platform tests and Debug/Release simulator builds; the
+cross-platform gate; local-only policy; and Gitleaks all passed locally. This emulator check is a
+software regression test. **No new OnePlus procedure check or formal physical qualification was
+run for the review fix.** Exact-head GitHub CI/Security remain the PR's review gates.
+
+- **NFR-08 diagnostics export, both platforms:** a user-initiated share of the existing redacted
+  sink through the system share sheet, rendered by a pure, mirrored formatter with a
+  build-provenance header. There is no upload, no network path and no new log path. Android uses a
+  non-exported `FileProvider` over distinct, bounded cache snapshots; iOS uses `ShareLink` and
+  renders in memory.
+- **Problem 109, fixed (both platforms, pre-existing):** the advertise log line carried the full
+  discovery handle. It is fixed at the type.
+- **Sideload procedure:** `tools/sideload/android.sh` and [SIDELOAD.md](SIDELOAD.md). It makes a
+  clean-tree, revision-stamped signed release build with a local key outside the repository, and
+  proves the installed bytes. The iOS personal-team procedure is documented, **not executed**.
+- **Problem 104 is unchanged, deliberately:** it is to be observed stationary first.
+
+Evidence, all on the committed branch:
+
+- **Android unit:** 1,115 passed, 0 failed (app 300, core 464, network 287, audio 33, data 31),
+  counted from JUnit XML on JDK 21. That is +12 new tests. ktlint, detekt,
+  lint (0 errors; no warning in a changed file), `assembleDebug` and `assembleRelease` all pass.
+- **iOS:** Core 358 passed (+5). Platform 677 executed, 0 failures, 1 skipped (the orchestrator-only
+  interop half). Unsigned iOS-device build, and unsigned Debug and Release simulator builds:
+  `** BUILD SUCCEEDED **`.
+- **Cross-platform (`tools/crossplatform/run.sh`):** GATE PASSED, 17/17, first run.
+- **Mutation checks:** each platform's `AdvertiseState` redaction test failed with its fix
+  neutralised.
+- **Security:** `tools/audit_local_only.py` found 0 findings in 323 production files. Gitleaks over
+  git history: 244 commits, no leaks. A working-tree `gitleaks dir` scan reports 22 hits, all in the
+  untracked SwiftPM `.build/` checkout (unchanged from 24 September).
+- **Physical OnePlus Nord 5 (procedure validation only, not a qualification result):** a signed
+  build of `5250042` was installed over wireless adb, and the installed APK was byte-identical to
+  the build. The export opened the share sheet (374 B, header only). The FileProvider refused
+  `adb shell` access. The build was uninstalled afterwards. The same pass found and fixed a silent
+  `pipefail` failure in the script's own keystore step. Details are in PHASE9A_ANDROID_PHYSICAL
+  §3.1.
+- **Pre-PR review (a separate review agent, not the independent review):** four findings, all
+  fixed. The script's `ERR` trap never fired inside functions (now `set -E`). The evidence
+  document recorded the phone's hardware serial and a LAN address (removed; the install record now
+  prints only a redacted transport prefix). The claim of identical golden text was overstated, and
+  the fixtures are now aligned. An iOS doc comment had moved onto the wrong function.
+- **Not run here:** every physical qualification row, pending the merge. Exact-head GitHub CI and
+  Security are recorded on the PR.
+
+**Next exact task:** independent review of the `phase9a/field-readiness` PR. After it merges, run
+PHASE9A_ANDROID_PHYSICAL §4 onward against a fresh `tools/sideload/android.sh build` of the merged
+`main`, starting with a `--clean` install.
+
+---
+
 **24–25 September 2026 — full project audit and Phase 9 readiness ([PHASE9_READINESS.md](PHASE9_READINESS.md), problems 101–108).**
 Phase 8 is **merged** to `main` at `2aa728fd45bfc37c59ba8a5d75014fc80d77e540` (PR #6); the dated
 entries below that call PR #6 unmerged are historical. This pass audited what twenty-odd lifetime
@@ -8257,8 +8322,9 @@ as of this write-up — see §7.
 | 104 | **OPEN — design needed (project audit, Android).** Local music requests no audio focus and does not observe `ACTION_AUDIO_BECOMING_NOISY`. Phase 3 deferred music focus to Phase 6 (§2q: "Phase 6's job"); Phase 6 implemented intercom ducking through `ExoPlayer.volume` and never added it. Consequences on a phone: music keeps playing over another app, a navigation prompt or a call; and when the helmet unit disconnects (battery, out of range) music moves to the phone's loudspeaker | Medium | **Not** fixable by `setAudioAttributes(…, handleAudioFocus = true)` / `setHandleAudioBecomingNoisy(true)`: both pause or duck the player directly, behind `MusicCoordinator` (rules 18, 26), and the first would react to the intercom's own voice focus request and undo ADR-027's music-under-voice design. Needs an ADR: route focus loss and becoming-noisy into `MusicCoordinator` as local intents (in synchronised mode, through the existing gate). A Phase 9 physical test will expose it immediately |
 | 105 | **OPEN — needs a device (project audit, iOS).** The music `AVAudioEngine` observes neither `AVAudioEngineConfigurationChange` nor any `AVAudioSession` notification; those observers belong to `IosVoiceAudioSession`. Apple documents that the engine stops and uninitialises itself when its I/O channel count or sample rate changes, and `AVAudioEnginePlayer` would keep reporting `playing == true`. The candidates are a Bluetooth route change and the `.playback` → `.playAndRecord`/HFP switch the intercom makes, which is exactly ADR-027's music-under-voice path | Medium (unmeasured) | Deliberately **not** patched blind: a restart path on a sync-critical player needs a real route change to verify. Recommended shape: observe the notification for this engine, and if `playing`, restart the engine and reschedule from the last published position under a new generation, so Phase 5's drift ladder sees a short gap rather than permanent silence. **MANUAL REQUIRED**: TWS connect/disconnect while playing, and Start Intercom while playing, on an iPhone |
 | 106 | **FIXED 24 September 2026 (project audit, iOS).** `AVAudioEnginePlayer.pauseCommand` called `playerNode.pause()`, which keeps the node's queued segment and its sample clock, and `playCommand` resumes by scheduling a fresh segment from the pause offset. So every local Pause → Play (and Mode D's `pauseForVoice`/`resumeAfterVoice`, which are the same two commands) played the remainder twice, published `ended` while the second copy was still audible, and reported `seekOffsetFrames + sampleTime`, counting the pre-pause time twice. That inflated position is what a follower's `POSITION_REPORT` carries to the drift ladder. Synchronised resume goes through `seek`, which stops the node, and was unaffected | ~~High~~ Fixed | `stop()` plus a generation bump, the pattern `seekCommand` already uses. Measured first on this machine: a standalone script saw two completions (714 ms and 1 102 ms for a 509 ms file), and `AVAudioEnginePlayerTests.testPauseThenResumeContinuesFromThePausePointAndEndsExactlyOnce` failed against unmodified production twice, once per symptom (a duplicate `ended`, then 491 ms reported after pausing at 235 ms and playing ~50 ms). Green 5/5 with `Phase5RealPlayerTests` after the fix. Android is unaffected (ExoPlayer's pause is a true pause). **Follow-up (independent review, 25 September):** the position-tick loop captures `[weak self]` and is therefore not actor-isolated, so a tick already waiting to hop onto the actor could republish a state after the pause or end of media; `tickPosition` now publishes only while playing |
-| 107 | **OPEN — Phase 8 scope item never delivered (project audit).** REQUIREMENTS NFR-08 ("local diagnostic logs shall be exportable") and §13's Phase 8 row ("diagnostics export … repeatable sideload builds"), and TEST_PLAN §9's Phase 8 gate ("log export, sideload build"), have no implementation on either platform, and no document recorded them as deferred. The 1 024-event in-memory log (ADR-029 §2) can be read only on the diagnostics cards. There is also no documented procedure for producing an installable signed build for the two phones | Medium | The first Phase 9 task (`docs/PHASE9_READINESS.md` §6): physical qualification is a field exercise, and its evidence is the transition log. Export must go through the redacting sink only (ARCHITECTURE §11 item 3) and be user-initiated through the platform share sheet — no new network path |
+| 107 | **IMPLEMENTED 27 September 2026 — pending independent review** (Phase 9A prerequisites, branch `phase9a/field-readiness`, ADR-029 Amendment A2; the diagnostics export is on both platforms, the Android sideload procedure is `tools/sideload/android.sh` + `docs/SIDELOAD.md`, and the iOS personal-team install is documented but **not executed** — no iPhone). Originally: **OPEN — Phase 8 scope item never delivered (project audit).** REQUIREMENTS NFR-08 ("local diagnostic logs shall be exportable") and §13's Phase 8 row ("diagnostics export … repeatable sideload builds"), and TEST_PLAN §9's Phase 8 gate ("log export, sideload build"), have no implementation on either platform, and no document recorded them as deferred. The 1 024-event in-memory log (ADR-029 §2) can be read only on the diagnostics cards. There is also no documented procedure for producing an installable signed build for the two phones | Medium | The first Phase 9 task (`docs/PHASE9_READINESS.md` §6): physical qualification is a field exercise, and its evidence is the transition log. Export must go through the redacting sink only (ARCHITECTURE §11 item 3) and be user-initiated through the platform share sheet — no new network path |
 | 108 | **FIXED 25 September 2026 (independent review of the audit commit, Android; pre-existing).** A stop's service release was not tied to the intercom it ended. Tap End, then Start again before the first release completed: `startFromVisibleUi` set `intercomActive`, then the late `Released` ran `RideForegroundService.stopIntercom`, which cleared it and dropped the `microphone` type from the **new** intercom's service, so capture could be silenced once the screen locked. The old `lifecycleScope` path had the same window | ~~Medium~~ Fixed | `IntercomStopOwner` records every start (`noteStart`, called by `MainActivity` right before `startIntercom`). A stop captures the start epoch it was requested against and releases the service only if no start happened since. `IntercomStopOwnerTest` gains two cases, and the stale-stop case fails with the epoch check removed (`expected: <0> but was: <1>`). **MANUAL REQUIRED** on a phone: End then Start within the release window, then lock the screen and confirm capture continues |
+| 109 | **FIXED 27 September 2026 — pending independent review (found while building the problem-107 export, both platforms; pre-existing).** `SessionCoordinator` logged `advertise: $advertiseState`, and `AdvertiseState.Advertising`'s generated description printed the **full 32-hex discovery handle** and the instance name, which carries 8 hex of it. That breaks ARCHITECTURE §11 item 3's 6-hex rule for the handle. Measured on iOS with the fix neutralised: `advertising(serviceName: "RideLink-01234567", discoveryHandle: "0123456789abcdef0123456789abcdef")` | Low | The handle is ephemeral (rotated) and already public in the mDNS TXT record, so nothing durable leaked. Until the export existed the log never left the process, but the export would have carried it off the phone. Fixed at the type (Android `toString`, iOS `CustomStringConvertible`), so every interpolation is covered: `dh:` plus 6 hex, and no instance name. `DiscoveryPrivacyTest[s]` fail with the fix neutralised |
 
 Resolved 26 Aug 2026 session: `CLAUDE.md` in `.gitignore` (was problem 1); `.DS_Store` tracking
 (was problem 7 — the claim was incorrect; the files are untracked and now ignored); the ADR-015/

@@ -3,10 +3,12 @@ package com.ridelink.app
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.lifecycle.lifecycleScope
+import com.ridelink.app.diagnostics.DiagnosticsShare
 import com.ridelink.app.library.SharedLibraryCoordinator
 import com.ridelink.app.music.MusicCoordinator
 import com.ridelink.app.service.IntercomStopOwner
@@ -17,8 +19,12 @@ import com.ridelink.app.ui.RideLinkTheme
 import com.ridelink.app.ui.SecureTransportUnavailableScreen
 import com.ridelink.core.audiopolicy.RideStartDecision
 import com.ridelink.core.library.LibraryEntry
+import com.ridelink.core.logging.DiagnosticsExportSource
 import com.ridelink.core.manifest.ManifestEntry
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import java.io.IOException
 
 /**
  * The one place that can honestly claim "the app is foreground-visible", which is why
@@ -111,6 +117,7 @@ class MainActivity : ComponentActivity() {
                                     entry,
                                 )
                             },
+                            onExportDiagnostics = { exportDiagnostics(appContainer.diagnosticsExport) },
                         )
                     },
                     // The only way to land here is a device-identity failure. There is deliberately
@@ -266,6 +273,25 @@ class MainActivity : ComponentActivity() {
                 return@launch
             }
             musicCoordinator.playExternalVerifiedCachedTrack(hash, file, entry.title, entry.artist)
+        }
+    }
+
+    /**
+     * NFR-08 (ADR-029 Amendment A2). Only ever reached from the user's tap: the redacted log is
+     * rendered now, written to the app's private cache and offered to the share sheet, where the
+     * user picks a target or cancels. Nothing here uploads anything.
+     */
+    private fun exportDiagnostics(source: DiagnosticsExportSource) {
+        lifecycleScope.launch {
+            val file =
+                try {
+                    withContext(Dispatchers.IO) { DiagnosticsShare.write(cacheDir, source.render()) }
+                } catch (failure: IOException) {
+                    val message = "Could not prepare the diagnostics log: ${failure.javaClass.simpleName}"
+                    Toast.makeText(this@MainActivity, message, Toast.LENGTH_LONG).show()
+                    return@launch
+                }
+            startActivity(DiagnosticsShare.chooser(this@MainActivity, file))
         }
     }
 

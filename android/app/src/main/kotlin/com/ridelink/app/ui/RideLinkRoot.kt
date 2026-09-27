@@ -39,6 +39,7 @@ fun RideLinkRoot(
     onImportFolder: () -> Unit,
     onImportFiles: () -> Unit,
     onPlaySharedTrackLocally: (ManifestEntry) -> Unit,
+    onExportDiagnostics: () -> Unit,
 ) {
     val state by coordinator.state.collectAsState()
     var showRideMode by remember { mutableStateOf(false) }
@@ -69,6 +70,7 @@ fun RideLinkRoot(
             onImportFolder = onImportFolder,
             onImportFiles = onImportFiles,
             onPlaySharedTrackLocally = onPlaySharedTrackLocally,
+            onExportDiagnostics = onExportDiagnostics,
         )
     }
 }

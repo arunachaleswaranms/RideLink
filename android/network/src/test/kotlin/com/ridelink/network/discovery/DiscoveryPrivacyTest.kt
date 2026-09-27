@@ -15,6 +15,15 @@ import kotlin.test.assertTrue
  */
 class DiscoveryPrivacyTest {
     @Test
+    fun `an advertising state logs the discovery handle as 6 hex and never the instance name`() {
+        // ADR-029 Amendment A2: SessionCoordinator logs this state into the exportable sink.
+        val handle = "0123456789abcdef0123456789abcdef"
+        val logged = "${AdvertiseState.Advertising(instanceServiceName(handle), 43210, handle)}"
+        assertEquals("Advertising(port=43210, dh:012345…)", logged)
+        assertFalse("0123456" in logged, "no more than 6 hex of the handle may reach a log line")
+    }
+
+    @Test
     fun `TXT key set is exactly v, dh, plat`() {
         val record = buildTxtRecord("0123456789abcdef0123456789abcdef")
         assertEquals(setOf("v", "dh", "plat"), record.keys)
