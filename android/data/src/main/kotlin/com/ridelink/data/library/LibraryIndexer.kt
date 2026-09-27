@@ -16,6 +16,8 @@ import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.security.MessageDigest
 import java.util.UUID
@@ -40,6 +42,13 @@ import java.util.UUID
  * folder ANR-killed the app on a physical phone (STATUS §4 problem 111). The suspending repository
  * calls in between are Room's and dispatch themselves. Every loop checks [ensureActive] so a
  * cancelled scan actually stops rather than merely being ignored (brief §19's "cancellable").
+ *
+ * Scans are serialised by [indexing]: each import or rescan holds it for its whole pass, and the
+ * hashing pass takes it per file, so an import is never queued behind hashing a whole library.
+ * [indexOrReindex] looks a location up and inserts it later, so two overlapping passes over the
+ * same files both inserted, and the second crashed the app on `UNIQUE(locationUri)`. That was
+ * reachable as soon as imports ran off the main thread (STATUS §4 problem 111's follow-up, found
+ * on a physical phone).
  */
 class LibraryIndexer(
     private val context: Context,
@@ -49,12 +58,16 @@ class LibraryIndexer(
     private val newLocalEntryId: () -> LocalEntryId = { LocalEntryId(UUID.randomUUID().toString()) },
     private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
 ) {
+    private val indexing = Mutex()
+
     /** Primary Android import path (ARCHITECTURE §8.4): a SAF folder tree, persisted so future
      *  rescans do not need the picker again. */
     suspend fun importTree(treeUri: Uri) =
         withContext(ioDispatcher) {
-            persistPermission(treeUri)
-            reconcileAndIndex(SafLibraryScanner.scanTree(context, treeUri))
+            indexing.withLock {
+                persistPermission(treeUri)
+                reconcileAndIndex(SafLibraryScanner.scanTree(context, treeUri))
+            }
         }
 
     /**
@@ -66,20 +79,22 @@ class LibraryIndexer(
      */
     suspend fun importFiles(uris: List<Uri>) =
         withContext(ioDispatcher) {
-            val now = monotonicNowUs()
-            for (uri in uris) {
-                currentCoroutineContext().ensureActive()
-                persistPermission(uri)
-                val filename = displayNameOf(uri) ?: uri.lastPathSegment ?: uri.toString()
-                val sizeBytes = sizeOf(uri) ?: 0L
-                indexExplicit(DiscoveredLocation(uri.toString(), filename, sizeBytes), now)
+            indexing.withLock {
+                val now = monotonicNowUs()
+                for (uri in uris) {
+                    currentCoroutineContext().ensureActive()
+                    persistPermission(uri)
+                    val filename = displayNameOf(uri) ?: uri.lastPathSegment ?: uri.toString()
+                    val sizeBytes = sizeOf(uri) ?: 0L
+                    indexExplicit(DiscoveredLocation(uri.toString(), filename, sizeBytes), now)
+                }
             }
         }
 
     /** Secondary "whole device library" convenience (ARCHITECTURE §8.4). */
     suspend fun rescanMediaStore() =
         withContext(ioDispatcher) {
-            reconcileAndIndex(MediaStoreLibraryScanner.scan(context))
+            indexing.withLock { reconcileAndIndex(MediaStoreLibraryScanner.scan(context)) }
         }
 
     /**
@@ -95,11 +110,13 @@ class LibraryIndexer(
         withContext(ioDispatcher) {
             for (entry in repository.entriesMissingContentHash()) {
                 currentCoroutineContext().ensureActive()
-                val hash =
-                    runCatching {
-                        ContentHashing.computeContentHash(context.contentResolver, Uri.parse(entry.location.uri))
-                    }.getOrNull() ?: continue
-                repository.updateContentHash(entry.localEntryId, hash)
+                indexing.withLock {
+                    val hash =
+                        runCatching {
+                            ContentHashing.computeContentHash(context.contentResolver, Uri.parse(entry.location.uri))
+                        }.getOrNull()
+                    if (hash != null) repository.updateContentHash(entry.localEntryId, hash)
+                }
             }
         }
 
