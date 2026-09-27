@@ -158,6 +158,16 @@ class ControlSocket internal constructor(
 }
 
 /**
+ * One accepted connection failed before it became a [ControlSocket] — for TLS, its server
+ * handshake — and has already been closed. The listener is still open, and the next accept may
+ * succeed. Distinct from every other [IOException] an accept can throw, which means the listener
+ * itself is gone (STATUS §4 problem 110).
+ */
+class CandidateRejectedException(
+    cause: Throwable,
+) : IOException("inbound connection rejected before the control protocol: ${cause.javaClass.simpleName}", cause)
+
+/**
  * An accepting control-plane listener on an OS-selected dynamic TCP port (PROTOCOL §1). The port
  * is what discovery advertises, so exactly one socket is bound per session.
  *

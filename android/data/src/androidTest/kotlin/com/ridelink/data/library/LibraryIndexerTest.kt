@@ -1,20 +1,33 @@
 package com.ridelink.data.library
 
+import android.content.ContentResolver
+import android.content.ContextWrapper
 import android.net.Uri
+import android.os.Looper
 import androidx.documentfile.provider.DocumentFile
 import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.ridelink.core.library.DecodeStatus
 import com.ridelink.core.library.LibraryQuery
+import com.ridelink.core.model.LocalEntryId
 import com.ridelink.data.database.RideLinkDatabase
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withContext
 import org.junit.After
 import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
 import java.io.File
+import java.util.UUID
+import java.util.concurrent.CyclicBarrier
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
 import kotlin.test.assertEquals
 import kotlin.test.assertNotNull
@@ -296,4 +309,80 @@ class LibraryIndexerTest {
             indexer.completeContentHashing()
             assertEquals(0, repository.observe(LibraryQuery()).first().count { it.track.contentHash == null })
         }
+
+    /**
+     * STATUS §4 problem 111, reproduced on the physical OnePlus Nord 5 (Phase 9A, 3/3 ANRs): the
+     * composition root runs every import on a `Dispatchers.Main` scope, so the SAF walk,
+     * `MediaMetadataRetriever` and whole-file SHA-256 all ran on the main thread and a real folder
+     * ANR-killed the app. Every blocking read in this pipeline goes through the `ContentResolver`,
+     * so a context that records the thread asking for it shows where the work actually ran —
+     * whatever dispatcher the caller happens to use.
+     */
+    @Test
+    fun importAndHashingNeverTouchTheContentResolverOnTheMainThread() =
+        runBlocking {
+            val mainThreadReads = AtomicInteger(0)
+            val offMainReads = AtomicInteger(0)
+            val recording =
+                object : ContextWrapper(context) {
+                    override fun getContentResolver(): ContentResolver {
+                        val onMain = Looper.myLooper() == Looper.getMainLooper()
+                        (if (onMain) mainThreadReads else offMainReads).incrementAndGet()
+                        return super.getContentResolver()
+                    }
+                }
+            val mainCaller = LibraryIndexer(recording, repository, ArtworkCache(context), monotonicNowUs = { clock.incrementAndGet() })
+            val uris = listOf(fixtureUri("normal.m4a"), fixtureUri("no_artwork.m4a"))
+
+            withContext(Dispatchers.Main) {
+                mainCaller.importFiles(uris)
+                mainCaller.completeContentHashing()
+            }
+
+            assertEquals(0, mainThreadReads.get(), "indexing read media on the main thread")
+            assertTrue(offMainReads.get() > 0, "the recording context was never consulted, so this test proves nothing")
+            assertEquals(0, repository.observe(LibraryQuery()).first().count { it.track.contentHash == null })
+        }
+
+    /**
+     * STATUS §4 problem 111's follow-up, found on the physical OnePlus Nord 5 by re-running the
+     * reproduction on the fixed build: two overlapping imports of the same folder crashed the app
+     * with `UNIQUE constraint failed: tracks.locationUri`. `indexOrReindex` looks a location up,
+     * extracts metadata, then inserts, so two passes that both look before either inserts both
+     * insert. Once imports ran off the main thread, the pool made that ordinary. The barrier sits in
+     * the id factory, which runs between the look-up and the insert, so both passes are made to look
+     * first whenever the indexer lets them overlap at all; a serialised indexer lets only one in,
+     * and the barrier times out harmlessly.
+     */
+    @Test
+    fun overlappingImportsOfTheSameFilesNeverInsertTheSameLocationTwice() =
+        runBlocking {
+            val bothLookedUp = CyclicBarrier(2)
+            val racing =
+                LibraryIndexer(
+                    context,
+                    repository,
+                    ArtworkCache(context),
+                    monotonicNowUs = { clock.incrementAndGet() },
+                    newLocalEntryId = {
+                        runCatching { bothLookedUp.await(BARRIER_TIMEOUT_MS, TimeUnit.MILLISECONDS) }
+                        LocalEntryId(UUID.randomUUID().toString())
+                    },
+                )
+            val uri = fixtureUri("normal.m4a")
+
+            val outcomes =
+                coroutineScope {
+                    List(2) { async(Dispatchers.IO) { runCatching { racing.importFiles(listOf(uri)) } } }.awaitAll()
+                }
+
+            outcomes.forEach { outcome ->
+                assertNull(outcome.exceptionOrNull(), "an overlapping import failed: ${outcome.exceptionOrNull()}")
+            }
+            assertEquals(1, repository.observe(LibraryQuery()).first().size)
+        }
+
+    private companion object {
+        const val BARRIER_TIMEOUT_MS = 2_000L
+    }
 }

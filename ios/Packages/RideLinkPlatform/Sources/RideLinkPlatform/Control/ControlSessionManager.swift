@@ -510,7 +510,16 @@ public actor ControlSessionManager {
         listener = bound
         acceptTask = Task {
             while !Task.isCancelled {
-                guard let socket = try? await bound.accept() else { return }
+                let socket: ControlConnection
+                do {
+                    socket = try await bound.accept()
+                } catch is ControlCandidateRejected {
+                    // One inbound connection failed its TLS handshake and is already closed; the
+                    // next peer must still be served (STATUS §4 problem 110).
+                    continue
+                } catch {
+                    return // the listener itself is gone
+                }
                 Task { await self.handleCandidate(socket: socket, local: local) }
             }
         }

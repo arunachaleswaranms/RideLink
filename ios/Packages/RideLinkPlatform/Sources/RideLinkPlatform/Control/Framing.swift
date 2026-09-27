@@ -28,6 +28,14 @@ public enum ControlTransportError: Error, Sendable {
     case notReady
 }
 
+/// One accepted connection failed `ControlListener`'s `onAccepted` step (for TLS, its handshake)
+/// and has already been closed. The listener is still open and the next `accept()` may succeed.
+/// Distinct from every other error an accept can throw, which means the listener itself is gone
+/// (STATUS §4 problem 110). Mirrors Android's `CandidateRejectedException`.
+public struct ControlCandidateRejected: Error, Sendable {
+    public let reason: String
+}
+
 /// Swift 6 strict concurrency forbids mutating a captured `var` from inside an escaping
 /// `@Sendable` closure (`NWConnection`/`NWListener` state handlers can fire more than once, and
 /// a `CheckedContinuation` traps if resumed twice). This box makes "resume exactly once" safe and
@@ -390,7 +398,7 @@ public final class ControlListener: @unchecked Sendable {
             try await onAccepted(connection)
         } catch {
             connection.close()
-            throw error
+            throw ControlCandidateRejected(reason: "\(error)")
         }
         return connection
     }

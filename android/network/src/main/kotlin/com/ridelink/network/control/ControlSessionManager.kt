@@ -430,13 +430,24 @@ class ControlSessionManager(
         return bound.localPort
     }
 
-    @Suppress("SwallowedException") // the listener being closed is the expected way this loop ends
-    private suspend fun acceptOrNull(listener: ControlListener): ControlSocket? =
-        try {
-            listener.accept()
-        } catch (closed: IOException) {
-            null
+    /**
+     * Returns null only when the listener itself has gone. A [CandidateRejectedException] is one
+     * inbound connection failing before the control protocol (for TLS, its handshake) and has
+     * already been closed; the next peer must still be served, so it is skipped rather than read as
+     * the end of the loop (STATUS §4 problem 110, reproduced on a physical phone).
+     */
+    @Suppress("SwallowedException") // both are expected: a rejected candidate, and a closed listener ending the loop
+    private suspend fun acceptOrNull(listener: ControlListener): ControlSocket? {
+        while (true) {
+            try {
+                return listener.accept()
+            } catch (rejected: CandidateRejectedException) {
+                continue
+            } catch (closed: IOException) {
+                return null
+            }
         }
+    }
 
     /**
      * Dials a discovered peer. Runs concurrently with [startListening]'s accept loop. May emit
