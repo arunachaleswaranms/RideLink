@@ -4,7 +4,10 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
 
-/** ADR-029 Amendment A2. Mirrored by `DiagnosticsExportTests.swift`; the golden text is identical. */
+/**
+ * ADR-029 Amendment A2. Mirrored by `DiagnosticsExportTests.swift`: the golden text is identical
+ * apart from the platform line. The event strings are fixtures of the format, not production output.
+ */
 class DiagnosticsExportTest {
     private val revision = "0123456789abcdef0123456789abcdef01234567"
 

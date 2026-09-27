@@ -171,13 +171,6 @@ public final class SessionCoordinator {
     /// Test-visible count of `VoiceDiagnostics` snapshots `updateCoexistence` refused as stale.
     public private(set) var staleVoiceDiagnosticsCount = 0
 
-    /// Assembles the security wiring, and nothing else does: the Keychain identity (ADR-017), the
-    /// one production `ControlChannel` — TLS 1.3 — and the trusted-peer store the SPKI pin is
-    /// checked against (ADR-012).
-    ///
-    /// Throws if the device identity cannot be created. That is deliberately fatal to the session
-    /// rather than degraded: without an identity there is no certificate, no pin and no channel
-    /// binding, and PROTOCOL §1 admits no plaintext alternative to fall back to.
     /// Build provenance for the export. `RideLinkSourceRevision` is expanded from the
     /// `RIDELINK_SOURCE_REVISION` build setting, which only the documented sideload build sets
     /// (docs/SIDELOAD.md); an unset one expands to empty and the export says `unrecorded`.
@@ -188,6 +181,13 @@ public final class SessionCoordinator {
         return ExportProvenance(platform: "ios", appVersion: "\(version) (\(build))", sourceRevision: revision)
     }
 
+    /// Assembles the security wiring, and nothing else does: the Keychain identity (ADR-017), the
+    /// one production `ControlChannel` — TLS 1.3 — and the trusted-peer store the SPKI pin is
+    /// checked against (ADR-012).
+    ///
+    /// Throws if the device identity cannot be created. That is deliberately fatal to the session
+    /// rather than degraded: without an identity there is no certificate, no pin and no channel
+    /// binding, and PROTOCOL §1 admits no plaintext alternative to fall back to.
     public init(audioSessionCoordinator: IosAudioSessionCoordinator = IosAudioSessionCoordinator()) throws {
         self.audioSessionCoordinator = audioSessionCoordinator
         let sink = InMemoryLogSink()

@@ -10,7 +10,7 @@ final class DiagnosticsExportTests: XCTestCase {
         let text = DiagnosticsExport.render(
             provenance: ExportProvenance(platform: "ios", appVersion: "0.1.0 (1)", sourceRevision: revision),
             events: [
-                LogEvent(monotonicTimestampUs: 10, level: .info, tag: "SessionCoordinator", message: "idle -> discovering (startDiscovery)"),
+                LogEvent(monotonicTimestampUs: 10, level: .info, tag: "SessionCoordinator", message: "IDLE -> DISCOVERING (StartDiscovery)"),
                 LogEvent(monotonicTimestampUs: 25, level: .warn, tag: "SessionCoordinator", message: "handshake refused: pin_mismatch"),
             ],
             exportedAtMonotonicUs: 99
@@ -24,7 +24,7 @@ final class DiagnosticsExportTests: XCTestCase {
         events: 2 (latest 1024 retained)
         redaction: identifiers are cut to 6 characters by construction; there is no log path for audio, SAS codes, TLS secrets, exporter output, tokens or key material
         ---
-        10 INFO SessionCoordinator: idle -> discovering (startDiscovery)
+        10 INFO SessionCoordinator: IDLE -> DISCOVERING (StartDiscovery)
         25 WARN SessionCoordinator: handshake refused: pin_mismatch
 
         """)

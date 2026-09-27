@@ -84,7 +84,8 @@ tools/sideload/android.sh install -s <serial> --clean <apk>   # clean install: E
   app's own prompts, because those prompts are under test.
 - After installing, it **pulls the installed `base.apk` back from the phone** and requires its
   SHA-256 to equal the built APK's. It then prints the install record: mode (clean or update), time,
-  serial, model, build fingerprint, `versionName`/`versionCode`, and `lastUpdateTime`.
+  a redacted transport prefix, model, build fingerprint, `versionName`/`versionCode`, and
+  `lastUpdateTime`. Never commit a phone's hardware serial or a LAN address into evidence.
 - An update (`install -r`) keeps RideLink's data and trust. A record must say which one was used.
   Never describe an update as a clean install.
 

@@ -182,7 +182,8 @@ way out of the process, and it is initiated by the user.
 
 ### Verification
 
-`DiagnosticsExportTest` / `DiagnosticsExportTests` pin identical golden text, provenance validation,
+`DiagnosticsExportTest` / `DiagnosticsExportTests` pin the same golden text (identical apart from
+the platform line; no shared vector file, because the format is not a wire contract), provenance validation,
 newline escaping, render-time reads and the retention bound. `SessionCoordinatorDiagnosticsExportTest`
 drives every identifier-bearing Android `SessionCoordinator` log site through its real entry point
 with fabricated full-length values, and proves the rendered export holds only 6-character prefixes.

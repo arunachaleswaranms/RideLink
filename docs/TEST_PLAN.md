@@ -1311,7 +1311,8 @@ Procedure: [SIDELOAD.md](SIDELOAD.md).
 
 **Proven on a laptop, on both platforms:**
 
-- `DiagnosticsExportTest` / `DiagnosticsExportTests`: identical golden text; any revision that is not
+- `DiagnosticsExportTest` / `DiagnosticsExportTests`: the same golden text, apart from the platform
+  line; any revision that is not
   exactly 40 lowercase hex renders as `unrecorded`; an event cannot forge a line; the sink is read
   at render time; the export is bounded by the 1,024-event retention.
 - `DiscoveryPrivacyTest` / `DiscoveryPrivacyTests`: `AdvertiseState` logs the discovery handle as

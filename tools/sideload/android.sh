@@ -11,7 +11,8 @@
 # in a PKCS12 keystore under $RIDELINK_SIDELOAD_HOME (default ~/.ridelink/sideload), and its random
 # password lives in the macOS login Keychain and reaches keytool/apksigner without being printed or
 # passed as an argument. No network access beyond what Gradle's own dependency cache already needs.
-set -euo pipefail
+# -E: without it bash does not run the ERR trap inside functions, where all the work is.
+set -Eeuo pipefail
 # Never `set -x` here: it would echo the key password. Name the failing line instead of exiting mute.
 trap 'echo "error: tools/sideload/android.sh failed at line $LINENO" >&2' ERR
 
@@ -166,7 +167,7 @@ cmd_install() {
     local installed pulled
     installed="$(adb -s "$serial" shell pm path "$PACKAGE" | tr -d '\r' | sed -n 's/^package://p' | grep 'base.apk$')"
     pulled="$(mktemp -d)/base.apk"
-    adb -s "$serial" pull "$installed" "$pulled" >/dev/null
+    adb -s "$serial" pull "$installed" "$pulled" >/dev/null 2>&1 || die "could not read the installed APK back from $serial"
     [ "$(apk_sha256 "$pulled")" = "$(apk_sha256 "$apk")" ] || die "the installed APK differs from $apk"
     rm -rf "$(dirname "$pulled")"
 
@@ -175,7 +176,9 @@ cmd_install() {
     echo "installed_apk_sha256: $(apk_sha256 "$apk") (read back from the device, identical)"
     echo "install_mode: $([ "$clean" = 1 ] && echo clean || echo update-or-first)"
     echo "installed_at_utc: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
-    echo "device_serial: $serial"
+    # Only a prefix: a hardware serial or LAN address is a persistent identifier, and this record is
+    # meant to be copied into committed evidence.
+    echo "device_transport: ${serial:0:4}… (redacted)"
     echo "device: $(adb -s "$serial" shell getprop ro.product.manufacturer | tr -d '\r') $(adb -s "$serial" shell getprop ro.product.model | tr -d '\r')"
     echo "device_fingerprint: $(adb -s "$serial" shell getprop ro.build.fingerprint | tr -d '\r')"
     grep -m1 -o 'versionName=[^ ]*' <<<"$dumpsys" || true
