@@ -236,10 +236,11 @@ independently reviewed, merged at `48b7a8e5d07fe52010d05c1893d3f914722d80f0`, an
 post-merge CI passed. The current evidence and remaining gates are in
 `docs/PHASE8_RELEASE_HARDENING.md`; the Phase 7 narrative below is historical.
 No physical iPhone is available: hardware gates remain **DEFERRED — HARDWARE NOT AVAILABLE**.
-**Phase 9A** (Android-only physical qualification on the OnePlus Nord 5) began 27 September 2026:
-its two software prerequisites — NFR-08 diagnostics export and the sideload procedure (ADR-029
-Amendment A2) — are on branch `phase9a/field-readiness`, pending independent review; formal
-qualification waits for that merge. Evidence: `docs/PHASE9A_ANDROID_PHYSICAL.md`.
+**Phase 9A** (Android-only physical qualification on the OnePlus Nord 5): its prerequisites merged
+as PR #15 (`98438d6`), and the formal run on that build (27 September 2026) passed every peer-free
+Android row. It also reproduced three defects on the phone (STATUS problems 110, 111 and 111's
+follow-up), now fixed on branch `phase9a/qualification-fixes` **pending independent review**.
+Rows that need an authenticated peer remain PENDING. Evidence: `docs/PHASE9A_ANDROID_PHYSICAL.md`.
 
 **The Phase 8 PR has been independently reviewed once, and both of its findings are closed
 (`docs/STATUS.md` problems 94 and 95).** The first is rule 27 above and the sharpest instance yet of
