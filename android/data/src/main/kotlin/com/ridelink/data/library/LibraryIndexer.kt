@@ -12,8 +12,11 @@ import com.ridelink.core.library.MetadataNormalizer
 import com.ridelink.core.model.LocalEntryId
 import com.ridelink.core.model.QuickId
 import com.ridelink.core.model.Track
+import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.withContext
 import java.security.MessageDigest
 import java.util.UUID
 
@@ -30,11 +33,13 @@ import java.util.UUID
  * first/last 64 KiB, so two genuinely different files over 128 KiB can share one, and using it as
  * cross-row identity used to let that silently collapse two different files into one row.
  *
- * Runs on whatever dispatcher the caller supplies (the `app`-layer composition root chooses
- * `Dispatchers.IO`, matching [com.ridelink.network.control.ControlSessionManager]'s convention of
- * deciding dispatchers at the composition root rather than inside a reusable class); every loop
- * checks [ensureActive] so a cancelled scan actually stops rather than merely being ignored (brief
- * §19's "cancellable").
+ * Every public entry point confines itself to [ioDispatcher], whatever dispatcher the caller is on.
+ * This used to be left to the caller, and the only caller (`MusicCoordinator`, on the composition
+ * root's `Dispatchers.Main` scope, which the player needs) never switched: the SAF walk,
+ * `MediaMetadataRetriever` and whole-file SHA-256 all ran on the main thread, and importing a real
+ * folder ANR-killed the app on a physical phone (STATUS §4 problem 111). The suspending repository
+ * calls in between are Room's and dispatch themselves. Every loop checks [ensureActive] so a
+ * cancelled scan actually stops rather than merely being ignored (brief §19's "cancellable").
  */
 class LibraryIndexer(
     private val context: Context,
@@ -42,13 +47,15 @@ class LibraryIndexer(
     private val artworkCache: ArtworkCache,
     private val monotonicNowUs: () -> Long,
     private val newLocalEntryId: () -> LocalEntryId = { LocalEntryId(UUID.randomUUID().toString()) },
+    private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
 ) {
     /** Primary Android import path (ARCHITECTURE §8.4): a SAF folder tree, persisted so future
      *  rescans do not need the picker again. */
-    suspend fun importTree(treeUri: Uri) {
-        persistPermission(treeUri)
-        reconcileAndIndex(SafLibraryScanner.scanTree(context, treeUri))
-    }
+    suspend fun importTree(treeUri: Uri) =
+        withContext(ioDispatcher) {
+            persistPermission(treeUri)
+            reconcileAndIndex(SafLibraryScanner.scanTree(context, treeUri))
+        }
 
     /**
      * Explicit multi-select (`ACTION_OPEN_DOCUMENT`, brief §10's "multiple files import"). Unlike
@@ -57,21 +64,23 @@ class LibraryIndexer(
      * deterministically ([DecodeStatus.UNSUPPORTED]) rather than silently dropping a deliberate
      * user choice the way an incidental non-audio file in a scanned folder is dropped.
      */
-    suspend fun importFiles(uris: List<Uri>) {
-        val now = monotonicNowUs()
-        for (uri in uris) {
-            currentCoroutineContext().ensureActive()
-            persistPermission(uri)
-            val filename = displayNameOf(uri) ?: uri.lastPathSegment ?: uri.toString()
-            val sizeBytes = sizeOf(uri) ?: 0L
-            indexExplicit(DiscoveredLocation(uri.toString(), filename, sizeBytes), now)
+    suspend fun importFiles(uris: List<Uri>) =
+        withContext(ioDispatcher) {
+            val now = monotonicNowUs()
+            for (uri in uris) {
+                currentCoroutineContext().ensureActive()
+                persistPermission(uri)
+                val filename = displayNameOf(uri) ?: uri.lastPathSegment ?: uri.toString()
+                val sizeBytes = sizeOf(uri) ?: 0L
+                indexExplicit(DiscoveredLocation(uri.toString(), filename, sizeBytes), now)
+            }
         }
-    }
 
     /** Secondary "whole device library" convenience (ARCHITECTURE §8.4). */
-    suspend fun rescanMediaStore() {
-        reconcileAndIndex(MediaStoreLibraryScanner.scan(context))
-    }
+    suspend fun rescanMediaStore() =
+        withContext(ioDispatcher) {
+            reconcileAndIndex(MediaStoreLibraryScanner.scan(context))
+        }
 
     /**
      * ADR-005's background lazy pass: computes the authoritative
@@ -82,16 +91,17 @@ class LibraryIndexer(
      * fresh call always resumes exactly the rows still missing a hash, whether that is because a
      * previous pass was cancelled or because new tracks were imported since.
      */
-    suspend fun completeContentHashing() {
-        for (entry in repository.entriesMissingContentHash()) {
-            currentCoroutineContext().ensureActive()
-            val hash =
-                runCatching {
-                    ContentHashing.computeContentHash(context.contentResolver, Uri.parse(entry.location.uri))
-                }.getOrNull() ?: continue
-            repository.updateContentHash(entry.localEntryId, hash)
+    suspend fun completeContentHashing() =
+        withContext(ioDispatcher) {
+            for (entry in repository.entriesMissingContentHash()) {
+                currentCoroutineContext().ensureActive()
+                val hash =
+                    runCatching {
+                        ContentHashing.computeContentHash(context.contentResolver, Uri.parse(entry.location.uri))
+                    }.getOrNull() ?: continue
+                repository.updateContentHash(entry.localEntryId, hash)
+            }
         }
-    }
 
     private suspend fun reconcileAndIndex(discovered: List<DiscoveredLocation>) {
         val now = monotonicNowUs()

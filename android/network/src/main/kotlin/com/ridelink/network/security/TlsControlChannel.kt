@@ -3,6 +3,7 @@ package com.ridelink.network.security
 import com.ridelink.core.model.SpkiHash
 import com.ridelink.core.protocol.Sas
 import com.ridelink.core.security.IdentityCertificate
+import com.ridelink.network.control.CandidateRejectedException
 import com.ridelink.network.control.ChannelSecurity
 import com.ridelink.network.control.ControlChannel
 import com.ridelink.network.control.ControlListener
@@ -179,10 +180,24 @@ class TlsControlChannel(
             ControlListener(server) { socket -> accept(socket) }
         }
 
+    /**
+     * A failure of `server.accept()` itself means the listener is gone and propagates unchanged. A
+     * failure *after* it belongs to this one candidate — any host on the Wi-Fi can open a TCP
+     * connection and send nothing, garbage or a certificate-less ClientHello — so the candidate is
+     * reported as [CandidateRejectedException], which the accept loop survives (STATUS §4 problem
+     * 110; before it, the loop ended). The close is belt-and-braces: Conscrypt already closes the
+     * socket after a fatal handshake alert (measured on the JVM by removing this line).
+     */
+    @Suppress("TooGenericExceptionCaught") // finishHandshake's check()/error() throw IllegalStateException, not IOException
     private suspend fun accept(server: ServerSocket): ControlSocket =
         withContext(ioDispatcher) {
             val socket = server.accept() as SSLSocket
-            finishHandshake(socket, isInitiator = false)
+            try {
+                finishHandshake(socket, isInitiator = false)
+            } catch (failure: Exception) {
+                runCatching { socket.close() }
+                throw CandidateRejectedException(failure)
+            }
         }
 
     override suspend fun connect(
