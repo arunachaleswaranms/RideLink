@@ -1,5 +1,17 @@
 # Phase 9A — Android field readiness and physical qualification (OnePlus Nord 5)
 
+**Status, 4 October 2026: FINAL MERGED-BUILD REQUALIFICATION DONE ON `d2cd71a` (§14); READY FOR
+INDEPENDENT REVIEW — PHASE 9A FINAL WITH PEER-DEPENDENT ROWS PENDING.** The merged fixes passed on
+the phone. Problem 111: 3,460/3,460 tracks, no ANR; five overlapping imports, no `UNIQUE` crash and
+no duplicate rows; a repeat import kept the count. Problem 110: 8/8 certificate-less TLS candidates
+rejected, and the listener survived. The compact regression smoke passed. Two findings are recorded
+and not fixed: **problem 114 now reaches ANR severity** (a ~20 s main-thread composition on a cold
+launch or on clearing search with 3,460 tracks; 4/4), and **problem 116** is new (the lock-screen
+player keeps the first track's metadata). No authenticated software peer could be formed on this
+network (§14.5), so every peer-dependent Android row remains **PENDING — AUTHENTICATED PEER
+UNAVAILABLE**. No production source changed. The section below this one is the historical status
+of the `98438d6` run.
+
 **Status, 27 September 2026: FORMAL QUALIFICATION RUN ON THE MERGED BUILD; STOPPED AT
 "READY FOR INDEPENDENT REVIEW — PHASE 9A FIX".** Every Android-only row that needs no peer was run
 on the reviewed and merged build `98438d6`. That run reproduced **two defects** on the phone
@@ -374,7 +386,7 @@ SOFTWARE PEER.** With problem 110 fixed, a reviewer may consider the bridge agai
 
 **PENDING, needing only a peer (any authenticated one):** AF-01, AF-02, AF-05 (session and capture),
 AF-06 (ride), AF-07 (ride), problems 101 and 108, V-09's Android half, notification Mute / End
-intercom (and problem 113).
+intercom (and problem 113). Still pending after the `d2cd71a` requalification (§14.7).
 
 ## 11. UI/UX observations for Phase 9A.5
 
@@ -508,3 +520,173 @@ The review fix now creates a distinct `ridelink-diagnostics-<random UUID>.txt` u
 `cache/diagnostics/` for every export, retaining at most four snapshots. An older URI grant cannot
 read a newer snapshot. The earlier phone check does not validate this changed implementation;
 the two-share procedure remains a pre-review check, not a Phase 9A qualification row.
+
+## 14. Final merged-build requalification (`d2cd71a`, 29 September – 4 October 2026)
+
+This section is the requalification of the **reviewed and merged** fixes for problems 110 and 111
+(PR #16). Sections 1–13 above are the historical record of the formal run on `98438d6` and are
+unchanged. Times are IST (UTC+05:30), as the phone's clock showed them.
+
+### 14.1 Baseline and gates
+
+| Item | Value |
+|---|---|
+| `main` | `d2cd71a82ab2a6ec58929ddabf0e01cff4249fa6` (PR #16 merged). `git pull --ff-only` found nothing newer; working tree clean; unchanged when the run resumed on 4 October |
+| Post-merge Security | Green on `d2cd71a` (push run and the next scheduled run) |
+| Post-merge CI | **First attempt red**: one iOS test, `AVAudioEnginePlayerTests.testPauseThenResumeContinuesFromThePausePointAndEndsExactlyOnce`, read `509` (the fixture's end) against a bound of `456` after a 50 ms resume. PR #16 changed no player code; the PR's own CI and the previous `main` CI were green; the test passed 10/10 locally at `d2cd71a`. Its failed job was re-run with the user's approval and passed; CI is green on attempt 2. Recorded as a CI-runner timing sensitivity of a real-engine test, not as a product result |
+| Device | OnePlus CPH2707, Android 16 / API 36, `CPH2707_16.0.5.1201(EX01)`, `ro.boot.qemu` empty. Wireless debugging, explicit `-s` on every command. Serial and LAN addresses not recorded |
+
+`tools/sideload/android.sh build` from the clean tree:
+
+```
+source_revision: d2cd71a82ab2a6ec58929ddabf0e01cff4249fa6
+working_tree: clean
+apk: ridelink-android-d2cd71a82ab2.apk
+apk_sha256: 094695fa75d5d1fdfdfe23dd446e7d6e1aeb54b06eadd7369596cf5ddc0e7fba
+signer_certificate_sha256: 51d88fc76947c7027fa8fad18a77961c4d1e5c14e950c70d6888ada9240b3ee2
+version_name: 0.1.0   version_code: 1   build_type: release (not debuggable)
+build_tools: 36.0.0   jdk: openjdk version "21.0.12.1" 2026-08-18
+built_at_utc: 2026-09-29T18:01:34Z
+```
+
+The signer is the same key as the `98438d6` formal build. **Install mode: clean**, four times, all
+with these bytes, each read back from the phone **byte-identical**: 2026-09-29T18:07:10Z (RideLink was
+absent beforehand), 18:40:37Z (an empty library for §14.2's overlapping run: OxygenOS refuses
+`pm clear` to the shell, `SecurityException … CLEAR_APP_USER_DATA`), 2026-09-30T04:55:22Z (a small
+library for the peer attempt, see §14.6), and 2026-10-04T10:49:34Z (RideLink had been uninstalled
+from the phone between sessions). The emulator used in §14.5 ran the same bytes (its installed
+`base.apk` hashed to `094695fa…`).
+
+**Harness setting changed, then restored:** the screen-off timeout was raised from 10 to 30 min
+while the run was unattended (29 Sep 00:19 → restored 01:07; 30 Sep at resume → restored on
+4 Oct). `user_rotation` was moved for recreation and restored to 0. Nothing else was changed.
+
+### 14.2 Problem 111 — large library — PASS — PHYSICAL ONEPLUS NORD 5
+
+The same `Music` tree as §8.2 had grown slightly: **3,459 `.mp3` + 1 `.m4a` = 3,460 supported
+files** in 10 subfolders. The extension gate skipped, as designed, 2,773 `.awb`, 15 `.amr`, one
+`.3ga`, six `.jpg`, a `.nomedia` and one other file.
+
+| Run | Procedure | Result |
+|---|---|---|
+| **5A single import** | Clean install; Import Folder → `Music`, picked once | Picker returned 23:42:54. The SAF walk ran on a background thread (`DefaultDispatcher` worker and the `externalstorage` provider busy; main thread ~4 s of CPU in total). First rows at 23:47:58 (259), then 641, 1,035, 1,431, 1,860, 2,590, **3,460 by 23:50:56** (**about 8 min**: ~5 min walk, ~3 min inserts) and stable. One process (PID unchanged), **0 `am_anr` / `am_crash` / `am_kill`**, no dropbox ANR or crash dated after 27 September |
+| **5C repeat after completion** | Same folder, picked once more after 5A settled | Walk and re-index busy for ~4.5 min (00:03:05–00:07:37). **3,460 in every readable sample** (43) before, during and after: no duplicate rows, nothing lost. Same process, 0 ANR/crash |
+| **5B overlapping** | Fresh clean install (empty library). The user picked the same folder **5 times**: at 00:11:52, 00:12:36, 00:13:27, 00:16:26 and 00:18:37–49, the last two while the count was climbing | **No `SQLiteConstraintException`**, no crash, one process (PID 10653) throughout. Counts 2,014 (00:19:22) → 2,880 (00:22:11) → **3,460** (00:22:48 and 00:24:03). Re-read on 30 September after a cold start: **3,460**. Because `tracks.locationUri` is `UNIQUE`, a duplicate would have surfaced as §8.2's crash, not as a larger count |
+
+During 5B the system froze and killed its own `externalstorage` document provider **three times**
+mid-walk (00:20:09, 00:20:21, 00:20:31; `oom_adj` 900–925, procstate 19) and restarted it. RideLink
+survived every one, and the final count was still complete.
+
+### 14.3 Problem 110 — TLS listener survival — PASS — PHYSICAL ONEPLUS NORD 5
+
+- **Preconditions:** RideLink discovering ("Finding your peer…"), the control listener bound on one
+  port and advertised as `_ridelink._tcp` with TXT keys exactly `{dh, plat, v}`.
+- **Steps (30 September, 10:10:43):** from the Mac on the same Wi-Fi, **8** TLS 1.3 connections with
+  no client certificate, one second apart (Homebrew Python, OpenSSL 3.6.4).
+- **Result:** **8/8 answered and rejected** (`SSLEOFError: UNEXPECTED_EOF_WHILE_READING`) in
+  58–219 ms. Afterwards: the same port still bound, the same PID, and the UI still "Finding your
+  peer…". On the `98438d6` formal build, probe 1 was answered and every later one went silent (§8.1).
+- **Legitimate peer afterwards:** not attempted; no authenticated peer was available (§14.5).
+
+### 14.4 Regression smoke (4 October) — PASS — PHYSICAL ONEPLUS NORD 5
+
+This ran on a 21-track library (`Music/RideLink`, §14.6), one process (PID unchanged) throughout,
+with 0 `am_anr` / `am_crash` / `am_proc_died`.
+
+| Area | Result |
+|---|---|
+| Start | Queued items do not start playback; Next starts the queue (known, §11.2). Then `PLAYING`, position advancing; one MediaSession (`androidx.media3.session.id.ridelink.ride`, holding media-button priority), one `RideForegroundService` (`types=0x00000002`), one notification (id 1) |
+| Pause / Play | `PAUSED`, position frozen at 18,308 ms for 3 s; Play → `PLAYING` from there |
+| Seek | ~75% → 119.6 s; ~20% → 27.0 s; still playing |
+| Next / Previous | Track changed (title hash), position reset; Previous returned to the original |
+| Home → return | ×2: same PID, still playing, one session, one FGS |
+| Activity recreation | 5 forced rotations plus the restore: **6 destroy / 6 create / 6 resume**, music uninterrupted, one session and FGS in every cycle |
+| Shade (Quick Settings) controls | Rendered: Previous track, Pause, Next track, output switcher, nothing else. Pause → `PAUSED` with the position frozen; Play resumed the same track (27,551 → 27,789 ms); Next and Previous changed track. A first Play that appeared to change track was the track ending within the 3 s window (paused at 154.5 s of ~155 s) |
+| Screen off under the real PIN keyguard | `mWakefulness=Dozing`, `isKeyguardShowing=true`: **12/12 samples `PLAYING`** over ~75 s; same PID, session and FGS |
+| Lock-screen controls | Pause → `PAUSED` (position shown live, 00:28); Play → `PLAYING`; Next on the last of three items ended the queue (documented no-wrap), and the service stopped cleanly: no session, no FGS, no notification, no orphan |
+| Real unlock | The user unlocked (fingerprint, over the PIN-secured keyguard); the UI agreed with the stopped state (Play shown, last item at 0:00) |
+
+**A new defect was found here (problem 116), recorded and not fixed.** The lock-screen media player
+showed the **first** track's title, artist, artwork and duration (02:35) for the whole queue, while
+the session's metadata (`dumpsys media_session`) had correctly moved on twice. Playback state and
+position on that card were live; only the metadata was stale. By code trace,
+`RideForegroundService.buildNotification` posts fixed ride copy plus the session token, and the
+notification is re-posted only when the foreground types or mute state change, never on a track
+change. That SystemUI takes metadata from the notification post is inferred from the behaviour, not
+read from SystemUI's source. Problem 112's copy was reconfirmed in the same `dumpsys notification`:
+"RideLink intercom active" / "Microphone open for the intercom." during music only, with no
+microphone open.
+
+### 14.5 Software peer — not established — PENDING — AUTHENTICATED PEER UNAVAILABLE
+
+The topology was the `RideLink_API36` emulator on this Mac, running the same bytes. It cannot form
+a session with the phone on this network, and the reason is the environment, not the product:
+
+- The emulator's own `_ridelink._tcp` advertisement reaches the LAN, but resolves to its
+  NAT address `10.0.2.16`, which the phone cannot route to.
+- The emulator does **not** receive LAN mDNS. A decoy `_ridelink._tcp` record registered from the
+  Mac was never discovered in 30 s. With both apps discovering for over a minute, neither showed a
+  peer, although the Mac saw both advertisements.
+- Plain reachability was fine: emulator → phone and Mac → phone answered ICMP, and the Mac firewall
+  is off. Only discovery fails.
+- The emulator exited twice when its netsim Wi-Fi backend's stream was cancelled.
+
+The remaining route was a bridge: a Mac relay plus a `dns-sd -P` proxy record into the emulator
+through `adb forward`. It would expose a local listener on the Wi-Fi. The session's safety policy
+refused it, and the user then chose not to run it. No product behaviour is called broken here.
+**No row is labelled SUPPLEMENTARY — PHYSICAL ANDROID + SOFTWARE PEER.**
+
+### 14.6 Problem 114 escalated: an ANR on cold launch with a large library — FAIL — REPRODUCED
+
+With the 3,460-track library, the first composition of the main screen blocks the **main thread**
+for about 20 s. Any touch in that window ANRs, and OxygenOS then closes the app by itself.
+
+- **Accidental first occurrence (30 Sep, 10:08):** a cold start, and an adb swipe about 4 s later.
+  `am_anr` came at 10:08:59 ("Input dispatching timed out … Waited 5000ms for MotionEvent").
+  `am_kill … user request after error` followed 1.7 s later.
+- **Controlled reproduction, 3/3** (4/4 in all): force-stop, `am start` (`TotalTime` 263–271 ms), then
+  one tap on the non-interactive title 3 s later. Each time `am_anr` came ~8.4 s after process start,
+  and OxygenOS killed the process ~1.4 s later with no human input.
+- **Main-thread stack** (`Runnable`, `utm=820` 9 s after start): Compose
+  `SlotWriter.insertSlots` / `moveSlotGapTo` ← `ChangeList.execute` ← `CompositionImpl.applyChanges`
+  ← `Recomposer.runRecomposeAndApplyChanges` ← `Choreographer.doFrame`. It is composition, not I/O.
+  Problem 111's fix holds.
+- **Untouched cold start:** the main thread used **18.5 s of CPU** (~20 s wall) before going idle.
+  It rendered 8 frames, with p90/p99 at 4,950 ms.
+- **Once composed:**
+  - 3 scroll swipes rendered 246 frames: 7.7% janky, p50 18 ms, p90 24 ms, p99 31 ms, and ~0.6 s of
+    main-thread CPU per swipe.
+  - Sort cost 2.9 s (Artist) and 2.6 s (Title) of main-thread CPU.
+  - Search: the first character cost 2.6 s, later characters under 0.1 s.
+  - **Clearing the search back to empty cost 18.8 s (~20 s frozen)**, the same full composition. A
+    touch in that window would ANR the same way.
+- **Artwork:** the placeholder glyph showed in 8/8 visible rows, with no image node. Whether these
+  files carry embedded art was not checked.
+
+This is §8.3's problem 114, now at ANR severity. It is **not fixed here**: Phase 9A.5 owns the lazy
+library. The peer attempt and the smoke therefore used a 21-track folder after a clean reinstall, so
+Activity recreation was not confounded by a 20 s main-thread block.
+
+### 14.7 Matrix for this build
+
+| Row | Result |
+|---|---|
+| Formal signed build, clean install, provenance (`d2cd71a`) | **PASS — PHYSICAL ONEPLUS NORD 5** |
+| Problem 111: single large import (3,460) | **PASS — PHYSICAL ONEPLUS NORD 5** |
+| Problem 111 follow-up: overlapping import ×5 | **PASS — PHYSICAL ONEPLUS NORD 5** |
+| Repeat import after completion | **PASS — PHYSICAL ONEPLUS NORD 5** |
+| Problem 110: 8 bad TLS candidates, listener survives | **PASS — PHYSICAL ONEPLUS NORD 5** |
+| Problem 110: legitimate peer afterwards | **PENDING — AUTHENTICATED PEER UNAVAILABLE** |
+| Authenticated software peer | Not established (§14.5) |
+| AF-01, AF-02, AF-05 (session and capture), AF-06 (ride), AF-07 (ride) | **PENDING — AUTHENTICATED PEER UNAVAILABLE** |
+| Problems 101 and 108 | **PENDING — AUTHENTICATED PEER UNAVAILABLE** |
+| V-09, Android half | **PENDING — AUTHENTICATED PEER UNAVAILABLE** |
+| Problem 113 (intercom Mute / End rendered?) | **PENDING — AUTHENTICATED PEER UNAVAILABLE**. Music-only: the shade and lock screen render only Previous / Play-Pause / Next / output, as §8.3 recorded |
+| Regression smoke (§14.4) | **PASS — PHYSICAL ONEPLUS NORD 5** |
+| Problem 114 at ANR severity | **FAIL — REPRODUCED** (4/4), deferred to Phase 9A.5 |
+| Problem 116 (stale lock-screen metadata) | **FAIL — REPRODUCED** (1/1, observed over three track changes), deferred to Phase 9A.5 |
+| Helmet Bluetooth unit | **DEFERRED — HELMET HARDWARE NOT AVAILABLE** |
+| Every iPhone and two-device row (§10) | **DEFERRED — REQUIRES PHYSICAL IPHONE** |
+
+**No production source changed in this requalification.** Neither new finding blocks a row that the
+available setup can run, and both belong to Phase 9A.5's library and notification work.

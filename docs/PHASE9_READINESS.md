@@ -130,6 +130,20 @@ does not close it by assumption. Formal physical qualification starts only after
 reviewed and merged. The evidence document is
 [PHASE9A_ANDROID_PHYSICAL.md](PHASE9A_ANDROID_PHYSICAL.md).
 
+**4 October 2026: Phase 9A's final merged-build requalification is done on `d2cd71a`, pending
+independent review** ([PHASE9A_ANDROID_PHYSICAL.md](PHASE9A_ANDROID_PHYSICAL.md) §14). Problems 110
+and 111 passed on the phone. Every Android row that needs an authenticated peer is **PENDING —
+AUTHENTICATED PEER UNAVAILABLE**. **The exact next tasks are:**
+
+1. Independent review of that evidence.
+2. **Phase 9A.5 — Release UX Polish**, which must now include:
+   - the lazy library (problem 114 is an ANR with a large library);
+   - the ride notification's media metadata (problem 116) and its copy and actions (problems 112
+     and 113).
+3. **Phase 9B** on the physical iPhone. It closes the peer-dependent Android rows (AF-01, AF-02,
+   AF-05, AF-06, AF-07, problems 101 and 108, V-09's Android half, and problem 113's intercom half)
+   together with the two-device rows.
+
 ## 7. Manual tests still required (all MANUAL REQUIRED)
 
 | Area | TEST_PLAN | Needs |
