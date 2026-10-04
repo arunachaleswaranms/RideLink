@@ -239,8 +239,12 @@ No physical iPhone is available: hardware gates remain **DEFERRED — HARDWARE N
 **Phase 9A** (Android-only physical qualification on the OnePlus Nord 5): its prerequisites merged
 as PR #15 (`98438d6`), and the formal run on that build (27 September 2026) passed every peer-free
 Android row. It also reproduced three defects on the phone (STATUS problems 110, 111 and 111's
-follow-up), now fixed on branch `phase9a/qualification-fixes` **pending independent review**.
-Rows that need an authenticated peer remain PENDING. Evidence: `docs/PHASE9A_ANDROID_PHYSICAL.md`.
+follow-up). Their fixes merged as PR #16 (`d2cd71a`) and **passed the final merged-build
+requalification on the phone** (4 October 2026, evidence §14). That pass also escalated problem 114
+to an ANR (a ~20 s first composition with a 3,460-track library) and found problem 116 (stale
+lock-screen metadata). Both are deferred to Phase 9A.5. Rows that need an authenticated peer remain
+**PENDING — AUTHENTICATED PEER UNAVAILABLE**, because the emulator's mDNS is not routable on this
+network. Evidence: `docs/PHASE9A_ANDROID_PHYSICAL.md`.
 
 **The Phase 8 PR has been independently reviewed once, and both of its findings are closed
 (`docs/STATUS.md` problems 94 and 95).** The first is rule 27 above and the sharpest instance yet of
