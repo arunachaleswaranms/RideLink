@@ -49,6 +49,7 @@ class UiLabelsTest {
             }
         }
         IntercomPolicy.ALL.forEach { assertFalse(policyLabel(it).contains("peer", ignoreCase = true)) }
+        listOf(true, false).forEach { assertFalse(foundLabel(it).contains("peer", ignoreCase = true)) }
         listOf("pin_mismatch", "certificate_invalid", "identity_mismatch", "other").forEach {
             assertFalse(securityAlertExplanation(it).contains("peer", ignoreCase = true), it)
         }

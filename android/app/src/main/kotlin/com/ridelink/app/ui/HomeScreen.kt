@@ -64,10 +64,7 @@ internal fun HomeContent(
     val intercomRefusal by coordinator.lastIntercomRefusal.collectAsState()
     val remoteEntries by sharedLibraryCoordinator.remoteEntries.collectAsState()
     val libraryCount by musicCoordinator.libraryCount.collectAsState()
-    val queueSize =
-        musicCoordinator.queueState
-            .collectAsState()
-            .value.items.size
+    val queue by musicCoordinator.queueState.collectAsState()
     val importProgress by musicCoordinator.imports.progress.collectAsState()
     val preparing by musicCoordinator.imports.preparing.collectAsState()
     val resyncDiagnostics by resyncCoordinator.diagnostics.collectAsState()
@@ -124,7 +121,11 @@ internal fun HomeContent(
             )
             NavigationGroup {
                 NavigationRow(R.drawable.ic_library, "Library", tracks(libraryCount)) { onNavigate(MainDestination.LIBRARY) }
-                NavigationRow(R.drawable.ic_up_next, "Up Next", upNextSummary(queueSize)) { onNavigate(MainDestination.UP_NEXT) }
+                NavigationRow(
+                    R.drawable.ic_up_next,
+                    "Up Next",
+                    upNextSummary(queue.items.size, queue.currentIndex),
+                ) { onNavigate(MainDestination.UP_NEXT) }
                 if (authenticated) {
                     NavigationRow(R.drawable.ic_library, "Other phone's music", tracks(remoteEntries.size)) {
                         onNavigate(MainDestination.SHARED_MUSIC)
@@ -205,4 +206,13 @@ internal fun NavigationRow(
     }
 }
 
-internal fun upNextSummary(size: Int): String = if (size == 0) "Empty" else tracks(size)
+/** "Track 3 of 10" while something in the queue is current, so the row moves as the queue plays. */
+internal fun upNextSummary(
+    size: Int,
+    currentIndex: Int? = null,
+): String =
+    when {
+        size == 0 -> "Empty"
+        currentIndex != null -> "Track ${count(currentIndex + 1)} of ${count(size)}"
+        else -> tracks(size)
+    }

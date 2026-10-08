@@ -41,8 +41,8 @@ struct MusicSection: View {
                 NavigationLink {
                     UpNextScreen(musicCoordinator: musicCoordinator, synchronized: synchronized)
                 } label: {
-                    let size = musicCoordinator.queueState.items.count
-                    navigationRow("Up Next", systemImage: "list.number", detail: size == 0 ? "Empty" : trackCount(size))
+                    let queue = musicCoordinator.queueState
+                    navigationRow("Up Next", systemImage: "list.number", detail: upNextDetail(queue))
                 }
             }
             .background(RideDesign.surface, in: RoundedRectangle(cornerRadius: RideDesign.radius))
@@ -65,6 +65,13 @@ struct MusicSection: View {
     }
 
     private func trackCount(_ count: Int) -> String { count == 1 ? "1 track" : "\(count.formatted()) tracks" }
+
+    /// "Track 3 of 10" while something in the queue is current, so the row moves as the queue plays.
+    private func upNextDetail(_ queue: LocalQueueState) -> String {
+        if queue.items.isEmpty { return "Empty" }
+        if let index = queue.currentIndex { return "Track \(index + 1) of \(queue.items.count)" }
+        return trackCount(queue.items.count)
+    }
 }
 
 /// The local queue (Phase 9A.5 §10) — mirrors Android's `UpNextContent`. A `List`, so it is lazy;

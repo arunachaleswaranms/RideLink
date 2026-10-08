@@ -318,7 +318,7 @@ private struct ResyncDiagnosticsCard: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: RideDesign.sm) {
-            Text("Resync (Phase 7)").font(.headline)
+            Text("Resync").font(.headline)
             diagnosticRow("request pending", "\(diagnostics.requestPending)")
             diagnosticRow("reconnect requests", "\(diagnostics.reconnectRequestCount)")
             diagnosticRow("desync requests", "\(diagnostics.desyncRequestCount)")
@@ -468,15 +468,26 @@ struct ConnectionSummary: View {
             }
             .accessibilityElement(children: .combine)
             Text(UiPresentation.connectionHint(status)).font(.body).foregroundStyle(.secondary)
-            if status == .discovering && peerCount > 0 {
-                Text("Other phone found. Connecting…")
+            if found {
+                // Phase 9A backlog: "found, connecting" used to stay up forever when the one dial
+                // failed. After 15 s it says so — wording over the FSM's state, never a retry.
+                Text(stalled ? "Couldn't reach the other phone yet. Stop searching, then find it again." : "Other phone found. Connecting…")
                     .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(RideDesign.primary)
+                    .foregroundStyle(stalled ? RideDesign.warning : RideDesign.primary)
                     .transition(.opacity)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+        .task(id: found) {
+            stalled = false
+            guard found else { return }
+            try? await Task.sleep(for: .seconds(15))
+            if !Task.isCancelled { stalled = true }
+        }
     }
+
+    private var found: Bool { status == .discovering && peerCount > 0 }
+    @State private var stalled = false
 }
 
 /// NFR-08 (ADR-029 Amendment A2): the redacted event log, offered to the system share sheet as a
@@ -488,7 +499,7 @@ private struct DiagnosticsExportCard: View {
     var body: some View {
         VStack(alignment: .leading, spacing: RideDesign.sm) {
             Text("Diagnostics log").font(.headline)
-            Text("Shares this session's redacted event log as a text file, through the share sheet. Nothing is sent unless you choose where it goes.")
+            Text("Shares a redacted log file. Nothing is sent unless you pick where.")
                 .font(.footnote)
                 .foregroundStyle(.secondary)
             ShareLink(

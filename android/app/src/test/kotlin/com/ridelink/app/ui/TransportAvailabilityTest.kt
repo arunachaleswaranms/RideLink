@@ -37,6 +37,7 @@ class TransportAvailabilityTest {
     fun `labels count tracks plainly`() {
         kotlin.test.assertEquals("Empty", upNextSummary(0))
         kotlin.test.assertEquals("1 track", upNextSummary(1))
+        kotlin.test.assertEquals("Track 3 of 10", upNextSummary(10, currentIndex = 2))
         val grouped = "%,d".format(3460) // the user's own digit grouping
         kotlin.test.assertEquals("$grouped tracks", tracks(3460))
         kotlin.test.assertEquals("12 of $grouped tracks", libraryCountLabel(12, 3460, "road"))

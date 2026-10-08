@@ -68,6 +68,19 @@ internal fun ConnectionSummary(
         }
     }
 
+    // Phase 9A backlog: "found, connecting" used to stay up forever when the one dial failed, so the
+    // user waited on a state that would not change. After [FOUND_STALL_MS] it says so instead. This
+    // is wording over the FSM's own state, never a retry and never a state of its own.
+    val found = status == SessionStatus.DISCOVERING && peerCount > 0
+    var stalled by remember { mutableStateOf(false) }
+    LaunchedEffect(found) {
+        stalled = false
+        if (found) {
+            delay(FOUND_STALL_MS)
+            stalled = true
+        }
+    }
+
     Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(RideSpace.xs)) {
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(RideSpace.md)) {
             StatusIndicator(status, reducedMotion)
@@ -93,14 +106,14 @@ internal fun ConnectionSummary(
         }
         Text(connectionHint(status), style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
         AnimatedVisibility(
-            visible = status == SessionStatus.DISCOVERING && peerCount > 0,
+            visible = found,
             enter = if (reducedMotion) fadeIn(tween(0)) else fadeIn() + expandVertically(),
             exit = if (reducedMotion) fadeOut(tween(0)) else fadeOut() + shrinkVertically(),
         ) {
             Text(
-                "Other phone found. Connecting…",
+                foundLabel(stalled),
                 style = MaterialTheme.typography.labelLarge,
-                color = MaterialTheme.colorScheme.primary,
+                color = if (stalled) MaterialTheme.colorScheme.tertiary else MaterialTheme.colorScheme.primary,
             )
         }
     }
@@ -147,6 +160,13 @@ internal fun rememberReducedMotion(): Boolean {
     }
 }
 
+internal fun foundLabel(stalled: Boolean): String =
+    if (stalled) {
+        "Couldn't reach the other phone yet. Stop searching, then find it again."
+    } else {
+        "Other phone found. Connecting…"
+    }
+
 internal fun connectionTitle(status: SessionStatus): String =
     when (status) {
         SessionStatus.IDLE -> "Not connected"
@@ -167,3 +187,4 @@ private val INDICATOR_SIZE = 18.dp
 private val DOT_SIZE = 10.dp
 private const val TRANSITION_MS = 180
 private const val PAIRED_CHECK_MS = 2_000L
+private const val FOUND_STALL_MS = 15_000L
