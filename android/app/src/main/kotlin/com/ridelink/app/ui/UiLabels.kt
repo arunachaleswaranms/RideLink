@@ -3,8 +3,10 @@ package com.ridelink.app.ui
 import com.ridelink.app.sync.SyncState
 import com.ridelink.core.audiopolicy.IntercomPolicy
 import com.ridelink.core.audiopolicy.VoiceFailure
+import com.ridelink.core.player.MusicFailure
 import com.ridelink.core.sessionfsm.SessionStatus
 import com.ridelink.core.voice.VoiceStatus
+import com.ridelink.network.control.ControlState
 
 /** Read-only words, never command admission or authority. */
 internal fun connectionHint(status: SessionStatus): String =
@@ -86,4 +88,45 @@ internal fun rideMusicLabel(
         -> syncLabel(state)
         !ownsTransport -> "Local playback"
         else -> syncLabel(state)
+    }
+
+internal fun formatMs(ms: Long): String {
+    val totalSeconds = ms.coerceAtLeast(0) / MILLIS_PER_SECOND
+    return "%d:%02d".format(totalSeconds / SECONDS_PER_MINUTE, totalSeconds % SECONDS_PER_MINUTE)
+}
+
+internal fun playerFailureLabel(failure: MusicFailure): String =
+    when (failure) {
+        MusicFailure.DECODE_FAILED -> "This file could not be played. Try another track."
+        MusicFailure.FILE_MISSING -> "This file is no longer on the phone. Import it again."
+        MusicFailure.UNSUPPORTED_FORMAT -> "This audio format is not supported."
+        MusicFailure.STORAGE_IO -> "The file could not be read."
+        MusicFailure.CANCELLED -> "Playback cancelled."
+        MusicFailure.FOREGROUND_SERVICE_START_FAILED -> "Bring RideLink to the front and try again."
+    }
+
+private const val MILLIS_PER_SECOND = 1000L
+private const val SECONDS_PER_MINUTE = 60L
+
+internal fun securityAlertExplanation(code: String): String =
+    when (code) {
+        "pin_mismatch" ->
+            "This peer's identity key has changed. That happens after a reinstall — but it is also " +
+                "what an impersonation attempt looks like. RideLink will not reconnect until you " +
+                "forget this peer and pair again."
+        "certificate_invalid" ->
+            "The peer's certificate is outside its validity window. Check the date and time on both phones."
+        "identity_mismatch" ->
+            "The peer's stated identity did not match its certificate. The connection was refused."
+        else -> "The connection was refused."
+    }
+
+internal fun controlStateLabel(state: ControlState): String =
+    when (state) {
+        ControlState.IDLE -> "Idle"
+        ControlState.CONNECTING -> "Connecting…"
+        ControlState.CONNECTED -> "Connected"
+        ControlState.RECONNECTING -> "Reconnecting…"
+        ControlState.DISCONNECTED -> "Disconnected"
+        ControlState.ENDED -> "Ended"
     }

@@ -279,11 +279,16 @@ class MusicCoordinator(
 
     fun selectQueueItem(id: String) = dispatch(LocalQueueAction.Select(id))
 
+    /**
+     * Play, from the app or the lock screen. A synchronised session owns it first (ADR-024 A14, via
+     * [syncGate]); otherwise the local queue decides: with tracks queued and nothing selected it
+     * starts the first one, and otherwise resumes the player (Phase 9A.5 §11, [LocalQueueAction.Play]).
+     */
     fun play() {
         _lastMusicStartRefusal.value = null
         coexistenceEvents?.onPlaybackIntent(playing = true)
         if (syncGate?.interceptPlay() == true) return
-        scope.launch { player.execute(PlaybackCommand.Play) }
+        dispatch(LocalQueueAction.Play)
     }
 
     fun pause() {
@@ -404,6 +409,7 @@ class MusicCoordinator(
             when (effect) {
                 is LocalQueueEffect.LoadAndPlay -> scope.launch { loadAndPlay(effect.localEntryId) }
                 LocalQueueEffect.StopPlayback -> scope.launch { player.execute(PlaybackCommand.Stop) }
+                LocalQueueEffect.ResumePlayback -> scope.launch { player.execute(PlaybackCommand.Play) }
             }
         }
     }

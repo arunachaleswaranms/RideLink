@@ -39,6 +39,8 @@ data class RideModeUiState(
     val intercomModeLabel: String,
     val localAudioDegraded: Boolean,
     val peerAudioDegraded: Boolean,
+    /** Phase 9A.5 §11: a queued track can be started even with nothing selected yet. */
+    val queueCanStart: Boolean = false,
 )
 
 /**

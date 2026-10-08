@@ -64,6 +64,10 @@ internal fun HomeContent(
     val intercomRefusal by coordinator.lastIntercomRefusal.collectAsState()
     val remoteEntries by sharedLibraryCoordinator.remoteEntries.collectAsState()
     val libraryCount by musicCoordinator.libraryCount.collectAsState()
+    val queueSize =
+        musicCoordinator.queueState
+            .collectAsState()
+            .value.items.size
     val importProgress by musicCoordinator.imports.progress.collectAsState()
     val preparing by musicCoordinator.imports.preparing.collectAsState()
     val resyncDiagnostics by resyncCoordinator.diagnostics.collectAsState()
@@ -110,7 +114,7 @@ internal fun HomeContent(
         // Deliberately independent of `state.status` — local music must be fully usable in
         // airplane mode, with no peer, regardless of session state.
         HomeSection("Music") {
-            MusicSection(musicCoordinator = musicCoordinator, onPlayMusic = onPlayMusic, sharedEntries = remoteEntries)
+            MusicSection(musicCoordinator = musicCoordinator, onPlayMusic = onPlayMusic)
             ImportStatusPanel(
                 progress = importProgress,
                 preparing = preparing,
@@ -120,6 +124,7 @@ internal fun HomeContent(
             )
             NavigationGroup {
                 NavigationRow(R.drawable.ic_library, "Library", tracks(libraryCount)) { onNavigate(MainDestination.LIBRARY) }
+                NavigationRow(R.drawable.ic_up_next, "Up Next", upNextSummary(queueSize)) { onNavigate(MainDestination.UP_NEXT) }
                 if (authenticated) {
                     NavigationRow(R.drawable.ic_library, "Other phone's music", tracks(remoteEntries.size)) {
                         onNavigate(MainDestination.SHARED_MUSIC)
@@ -199,3 +204,5 @@ internal fun NavigationRow(
         Icon(painterResource(R.drawable.ic_chevron_right), contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant)
     }
 }
+
+internal fun upNextSummary(size: Int): String = if (size == 0) "Empty" else tracks(size)

@@ -108,6 +108,7 @@ class MainActivity : ComponentActivity() {
                             onStopIntercom = { appContainer.intercomStopOwner.requestStop() },
                             onPlayMusic = { attemptMusicPlay(appContainer.musicCoordinator) },
                             onPlayNow = { entry -> attemptPlayNow(appContainer.musicCoordinator, entry) },
+                            onPlayQueueItem = { id -> attemptPlayQueueItem(appContainer.musicCoordinator, id) },
                             onImportFolder = { pickFolder.launch(null) },
                             onImportFiles = { pickFiles.launch(arrayOf("audio/*")) },
                             onPlaySharedTrackLocally = { entry ->
@@ -239,6 +240,19 @@ class MainActivity : ComponentActivity() {
             return
         }
         musicCoordinator.playNow(entry)
+    }
+
+    /** Up Next's "tap an entry to play it" (Phase 9A.5 §10): the same first-play discipline. */
+    private fun attemptPlayQueueItem(
+        musicCoordinator: MusicCoordinator,
+        queueItemId: String,
+    ) {
+        if (!foregroundVisible) return
+        if (!RideForegroundService.startMusicFromVisibleUi(this)) {
+            musicCoordinator.onForegroundServiceStartFailed()
+            return
+        }
+        musicCoordinator.selectQueueItem(queueItemId)
     }
 
     /**

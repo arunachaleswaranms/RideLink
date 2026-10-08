@@ -4,6 +4,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
@@ -15,6 +16,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
+import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -75,7 +77,12 @@ fun RideModeScreen(
 
     val cachedEntry = sharedEntries.firstOrNull { it.contentHash != null && it.contentHash == musicCoordinator.activeExternalCacheHash() }
     RideModeContent(
-        ui = ui.copy(trackTitle = ui.trackTitle ?: cachedEntry?.title, trackArtist = ui.trackArtist ?: cachedEntry?.artist),
+        ui =
+            ui.copy(
+                trackTitle = ui.trackTitle ?: cachedEntry?.title,
+                trackArtist = ui.trackArtist ?: cachedEntry?.artist,
+                queueCanStart = transportAvailability(queueState, playerState).canPlayPause,
+            ),
         syncText = rideMusicLabel(fsmState.status, syncDiagnostics.syncState, syncPlaybackCoordinator.isSynchronizedModeActive()),
         voiceText = voiceLabel(voice.status),
         microphoneText =
@@ -147,17 +154,7 @@ internal fun RideModeContent(
                         Text(syncText, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.primary)
                     }
                 }
-                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(RideSpace.md)) {
-                    RideTransportButton("Previous", R.drawable.ic_transport_previous, Modifier.weight(1f), onPrevious)
-                    RideTransportButton(
-                        if (ui.isPlaying) "Pause" else "Play",
-                        if (ui.isPlaying) R.drawable.ic_transport_pause else R.drawable.ic_transport_play,
-                        Modifier.weight(1f),
-                        onPlayPause,
-                        enabled = ui.hasTrackLoaded || ui.isPlaying,
-                    )
-                    RideTransportButton("Next", R.drawable.ic_transport_next, Modifier.weight(1f), onNext)
-                }
+                RideTransportRow(ui, onPrevious, onPlayPause, onNext)
                 Column(verticalArrangement = Arrangement.spacedBy(RideSpace.md)) {
                     Text(voiceText, style = MaterialTheme.typography.titleLarge)
                     Text(microphoneText, style = MaterialTheme.typography.titleMedium, color = MaterialTheme.colorScheme.primary)
@@ -186,6 +183,32 @@ internal fun RideModeContent(
                 }
             }
         }
+    }
+}
+
+/** Previous · Play/Pause · Next, with Play/Pause the larger, filled control (Phase 9A.5 §12). */
+@Composable
+private fun RideTransportRow(
+    ui: RideModeUiState,
+    onPrevious: () -> Unit,
+    onPlayPause: () -> Unit,
+    onNext: () -> Unit,
+) {
+    Row(
+        Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(RideSpace.md),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        RideTransportButton("Previous", R.drawable.ic_transport_previous, Modifier.weight(1f), onPrevious)
+        RideTransportButton(
+            if (ui.isPlaying) "Pause" else "Play",
+            if (ui.isPlaying) R.drawable.ic_transport_pause else R.drawable.ic_transport_play,
+            Modifier.weight(PRIMARY_WEIGHT).heightIn(min = RideSpace.rideTouch + RideSpace.lg),
+            onPlayPause,
+            enabled = ui.hasTrackLoaded || ui.isPlaying || ui.queueCanStart,
+            primary = true,
+        )
+        RideTransportButton("Next", R.drawable.ic_transport_next, Modifier.weight(1f), onNext)
     }
 }
 
@@ -223,17 +246,28 @@ internal fun RideTransportButton(
     modifier: Modifier = Modifier,
     onClick: () -> Unit,
     enabled: Boolean = true,
+    /** Play/Pause is the filled, primary control; Previous and Next are tonal (Phase 9A.5 §12). */
+    primary: Boolean = false,
 ) {
-    Button(
-        onClick = onClick,
-        enabled = enabled,
-        modifier = modifier.heightIn(min = RideSpace.rideTouch),
-        shape = MaterialTheme.shapes.large,
-        contentPadding = PaddingValues(RideSpace.sm),
-    ) {
+    val content: @Composable RowScope.() -> Unit = {
         Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(RideSpace.xs)) {
-            Icon(painterResource(icon), contentDescription = null, modifier = Modifier.size(28.dp))
+            Icon(painterResource(icon), contentDescription = null, modifier = Modifier.size(if (primary) 36.dp else 28.dp))
             Text(label, style = MaterialTheme.typography.labelMedium, textAlign = TextAlign.Center)
         }
     }
+    val sized = modifier.heightIn(min = RideSpace.rideTouch)
+    if (primary) {
+        Button(onClick, sized, enabled, MaterialTheme.shapes.large, contentPadding = PaddingValues(RideSpace.sm), content = content)
+    } else {
+        FilledTonalButton(
+            onClick,
+            sized,
+            enabled,
+            MaterialTheme.shapes.large,
+            contentPadding = PaddingValues(RideSpace.sm),
+            content = content,
+        )
+    }
 }
+
+private const val PRIMARY_WEIGHT = 1.4f

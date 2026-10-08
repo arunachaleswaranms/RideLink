@@ -152,12 +152,56 @@ final class LocalQueueTests: XCTestCase {
             state = outcome.state
             for effect in outcome.effects {
                 switch effect {
-                case .loadAndPlay, .stopPlayback: break
+                case .loadAndPlay, .stopPlayback, .resumePlayback: break
                 }
             }
             if state.currentId == nil {
                 state = LocalQueue.reduce(state, .next).state
             }
         }
+    }
+
+    // MARK: - Phase 9A.5 §11: Play with a queue and no selection
+
+    func testPlayWithItemsQueuedAndNothingSelectedStartsTheFirstItem() {
+        let outcome = LocalQueue.reduce(LocalQueueState(items: [item("a1"), item("b2")]), .play)
+        XCTAssertEqual("a1", outcome.state.currentId)
+        XCTAssertEqual([.loadAndPlay(localEntryIdFor("a1"))], outcome.effects)
+    }
+
+    func testPlayAfterTheQueueRanPastItsEndStartsItAgainFromTheFirstItem() {
+        let ended = LocalQueue.reduce(LocalQueueState(items: [item("a1")], currentId: "a1"), .next).state
+        XCTAssertNil(ended.currentId)
+        let outcome = LocalQueue.reduce(ended, .play)
+        XCTAssertEqual("a1", outcome.state.currentId)
+        XCTAssertEqual([.loadAndPlay(localEntryIdFor("a1"))], outcome.effects)
+    }
+
+    func testPlayWithACurrentItemResumesItAndChangesNothing() {
+        let state = LocalQueueState(items: [item("a1"), item("b2")], currentId: "b2")
+        let outcome = LocalQueue.reduce(state, .play)
+        XCTAssertEqual(state, outcome.state)
+        XCTAssertEqual([.resumePlayback], outcome.effects)
+    }
+
+    func testPlayWithAnEmptyQueueOnlyAsksThePlayerToResume() {
+        let outcome = LocalQueue.reduce(LocalQueueState(), .play)
+        XCTAssertEqual(LocalQueueState(), outcome.state)
+        XCTAssertEqual([.resumePlayback], outcome.effects)
+    }
+
+    func testRemovingOneOfTwoCopiesOfTheCurrentTrackRemovesExactlyThatEntry() {
+        let sameTrack = localEntryIdFor("aa")
+        let state = LocalQueueState(
+            items: [
+                LocalQueueItem(id: "q1", localEntryId: sameTrack, insertedAtMonoUs: 0),
+                LocalQueueItem(id: "q2", localEntryId: sameTrack, insertedAtMonoUs: 1),
+            ],
+            currentId: "q2"
+        )
+        let outcome = LocalQueue.reduce(state, .remove(id: "q1"))
+        XCTAssertEqual(["q2"], outcome.state.items.map(\.id))
+        XCTAssertEqual("q2", outcome.state.currentId)
+        XCTAssertTrue(outcome.effects.isEmpty)
     }
 }

@@ -40,6 +40,8 @@ import com.ridelink.core.model.QuickId
 import com.ridelink.core.model.Track
 import com.ridelink.core.playback.SharedQueueItem
 import com.ridelink.core.playback.SharedQueueState
+import com.ridelink.core.player.LocalQueueItem
+import com.ridelink.core.player.LocalQueueState
 import com.ridelink.core.player.PlayerState
 import com.ridelink.core.sessionfsm.SessionStatus
 import com.ridelink.core.transfer.TransferStatus
@@ -126,9 +128,7 @@ class SetupVisualTest {
                                                 )
                                             "MUSIC_EMPTY" ->
                                                 NowPlayingCard(
-                                                    PlayerState(),
-                                                    null,
-                                                    0,
+                                                    NowPlayingUi(PlayerState(), null, null, null, TransportAvailability(false, false)),
                                                     onPlay = {},
                                                     onPause = {},
                                                     onSeek = {},
@@ -137,17 +137,18 @@ class SetupVisualTest {
                                                 )
                                             "MUSIC_PLAYING", "MUSIC_PAUSED" ->
                                                 NowPlayingCard(
-                                                    PlayerState(
-                                                        localEntryId = LocalEntryId.parse("00000000-0000-0000-0000-000000000001")!!,
-                                                        playing =
-                                                            name == "MUSIC_PLAYING",
-                                                        durationMs = 180000,
-                                                        positionMs = 60000,
+                                                    NowPlayingUi(
+                                                        PlayerState(
+                                                            localEntryId = LocalEntryId.parse("00000000-0000-0000-0000-000000000001")!!,
+                                                            playing = name == "MUSIC_PLAYING",
+                                                            durationMs = 180000,
+                                                            positionMs = 60000,
+                                                        ),
+                                                        "The long way home",
+                                                        "Evening Roads",
+                                                        null,
+                                                        TransportAvailability(true, true),
                                                     ),
-                                                    null,
-                                                    2,
-                                                    title = "The long way home",
-                                                    artist = "Evening Roads",
                                                     onPlay = {},
                                                     onPause = {},
                                                     onSeek = {},
@@ -238,6 +239,34 @@ class SetupVisualTest {
                     ),
                     LibraryActions(),
                 )
+            "UP_NEXT" -> {
+                val rows =
+                    listOf(
+                        UpNextRow("u1", "Coast Road", "Evening Roads", null),
+                        UpNextRow("u2", "Night ferry", "Evening Roads", null),
+                        UpNextRow("u3", "Coast Road", "Evening Roads", null),
+                        UpNextRow("u4", "Headwind", "Evening Roads", null),
+                    )
+                UpNextContent(
+                    rows,
+                    LocalQueueState(rows.map { LocalQueueItem(it.id, small[0].localEntryId, 0) }, currentId = "u2"),
+                    synchronized = false,
+                    actions = UpNextActions(),
+                ) {
+                    MiniPlayer(
+                        NowPlayingUi(
+                            PlayerState(localEntryId = small[0].localEntryId, playing = true, durationMs = 200_000, positionMs = 70_000),
+                            "Night ferry",
+                            "Evening Roads",
+                            null,
+                            TransportAvailability(true, true),
+                        ),
+                        {},
+                        {},
+                        {},
+                    )
+                }
+            }
             "TRANSFER" ->
                 SharedMusicContent(
                     SharedMusicUiState(
@@ -296,7 +325,16 @@ class SetupVisualTest {
 
     private companion object {
         val FULL_SCREEN =
-            listOf("LIBRARY", "LIBRARY_LARGE", "LIBRARY_SEARCH", "LIBRARY_EMPTY", "IMPORT_CONFIRM", "IMPORT_PROGRESS", "TRANSFER")
+            listOf(
+                "LIBRARY",
+                "LIBRARY_LARGE",
+                "LIBRARY_SEARCH",
+                "LIBRARY_EMPTY",
+                "IMPORT_CONFIRM",
+                "IMPORT_PROGRESS",
+                "UP_NEXT",
+                "TRANSFER",
+            )
         val SYNTHETIC_TITLES =
             listOf(
                 "The long way home",

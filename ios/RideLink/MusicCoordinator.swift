@@ -246,13 +246,13 @@ public final class MusicCoordinator {
 
     public func selectQueueItem(id: String) { dispatch(.select(id: id)) }
 
+    /// Play, from the app or the lock screen. A synchronised session owns it first (ADR-024 A14, via
+    /// `syncGate`); otherwise the local queue decides: with tracks queued and nothing selected it
+    /// starts the first one, and otherwise resumes the player (Phase 9A.5 §11, `LocalQueueAction.play`).
     public func play() {
         coexistenceEvents?.onPlaybackIntent(playing: true)
         if syncGate?.interceptPlay() == true { return }
-        Task {
-            await activateAudioSessionIfNeeded()
-            await player.execute(.play)
-        }
+        dispatch(.play)
     }
 
     public func pause() {
@@ -355,6 +355,11 @@ public final class MusicCoordinator {
                 }
             case .stopPlayback:
                 Task { await self.player.execute(.stop) }
+            case .resumePlayback:
+                Task {
+                    await self.activateAudioSessionIfNeeded()
+                    await self.player.execute(.play)
+                }
             }
         }
     }

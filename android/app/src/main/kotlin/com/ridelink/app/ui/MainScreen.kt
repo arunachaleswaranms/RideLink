@@ -35,7 +35,6 @@ import com.ridelink.core.library.LibraryEntry
 import com.ridelink.core.manifest.ManifestEntry
 import com.ridelink.core.sessionfsm.SessionStatus
 import com.ridelink.network.control.ControlDiagnostics
-import com.ridelink.network.control.ControlState
 import com.ridelink.network.control.PairingPrompt
 
 /**
@@ -69,6 +68,8 @@ fun MainScreen(
     /** The library screen's "tap a row to play it now" affordance, held to the exact same
      *  foreground-visible discipline as [onPlayMusic] — see [MainActivity.attemptPlayNow]. */
     onPlayNow: (LibraryEntry) -> Unit,
+    /** Up Next's "tap an entry to play it", held to the same discipline as [onPlayNow]. */
+    onPlayQueueItem: (String) -> Unit,
     onImportFolder: () -> Unit,
     onImportFiles: () -> Unit,
     onPlaySharedTrackLocally: (ManifestEntry) -> Unit,
@@ -83,6 +84,17 @@ fun MainScreen(
     // leaving a screen whose actions can no longer be admitted.
     LaunchedEffect(destination, authenticated) {
         if (destination == MainDestination.SHARED_MUSIC && !authenticated) onNavigate(MainDestination.HOME)
+    }
+
+    // The one player, observed — never a second owner. Shown under the long lists so playback stays
+    // reachable while browsing, at a fixed height so the list above it never shifts.
+    val miniPlayer: @Composable () -> Unit = {
+        MiniPlayer(
+            rememberNowPlaying(musicCoordinator),
+            onPlay = onPlayMusic,
+            onPause = musicCoordinator::pause,
+            onNext = musicCoordinator::next,
+        )
     }
 
     Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
@@ -105,23 +117,23 @@ fun MainScreen(
                 MainDestination.LIBRARY ->
                     LibraryRoute(
                         musicCoordinator = musicCoordinator,
+                        actions = libraryActions(musicCoordinator, onNavigate, onPlayNow, onImportFolder, onImportFiles),
+                        bottomBar = miniPlayer,
+                    )
+                MainDestination.UP_NEXT ->
+                    UpNextRoute(
+                        musicCoordinator = musicCoordinator,
+                        synchronized = syncPlaybackCoordinator.isSynchronizedModeActive(),
                         actions =
-                            LibraryActions(
+                            UpNextActions(
                                 onBack = { onNavigate(MainDestination.HOME) },
-                                onSearchTextChange = musicCoordinator::setSearchText,
-                                onSortChange = musicCoordinator::setSort,
-                                import =
-                                    ImportActions(
-                                        onImportFolder = onImportFolder,
-                                        onImportFiles = onImportFiles,
-                                        onConfirm = musicCoordinator.imports::confirm,
-                                        onCancel = musicCoordinator.imports::cancel,
-                                        onDismiss = musicCoordinator.imports::dismiss,
-                                    ),
-                                onPlayNow = onPlayNow,
-                                onAddToQueue = musicCoordinator::addToQueue,
-                                onOpenUpNext = { onNavigate(MainDestination.HOME) },
+                                onSelect = onPlayQueueItem,
+                                onRemove = musicCoordinator::removeFromQueue,
+                                onMove = musicCoordinator::moveInQueue,
+                                onClear = musicCoordinator::clearQueue,
+                                onOpenLibrary = { onNavigate(MainDestination.LIBRARY) },
                             ),
+                        bottomBar = miniPlayer,
                     )
                 MainDestination.SHARED_MUSIC ->
                     SharedMusicRoute(
@@ -161,6 +173,30 @@ internal fun ConnectionDiagnosticsSection(
         DiagnosticsExportCard(onExport = onExportDiagnostics)
     }
 }
+
+/** The Library screen's actions, each reaching its existing owner. */
+private fun libraryActions(
+    musicCoordinator: MusicCoordinator,
+    onNavigate: (MainDestination) -> Unit,
+    onPlayNow: (LibraryEntry) -> Unit,
+    onImportFolder: () -> Unit,
+    onImportFiles: () -> Unit,
+) = LibraryActions(
+    onBack = { onNavigate(MainDestination.HOME) },
+    onSearchTextChange = musicCoordinator::setSearchText,
+    onSortChange = musicCoordinator::setSort,
+    import =
+        ImportActions(
+            onImportFolder = onImportFolder,
+            onImportFiles = onImportFiles,
+            onConfirm = musicCoordinator.imports::confirm,
+            onCancel = musicCoordinator.imports::cancel,
+            onDismiss = musicCoordinator.imports::dismiss,
+        ),
+    onPlayNow = onPlayNow,
+    onAddToQueue = musicCoordinator::addToQueue,
+    onOpenUpNext = { onNavigate(MainDestination.UP_NEXT) },
+)
 
 /**
  * Shown instead of [MainScreen] when the device identity could not be created or loaded — which is
@@ -309,19 +345,6 @@ internal fun SecurityAlertCard(
     }
 }
 
-private fun securityAlertExplanation(code: String): String =
-    when (code) {
-        "pin_mismatch" ->
-            "This peer's identity key has changed. That happens after a reinstall — but it is also " +
-                "what an impersonation attempt looks like. RideLink will not reconnect until you " +
-                "forget this peer and pair again."
-        "certificate_invalid" ->
-            "The peer's certificate is outside its validity window. Check the date and time on both phones."
-        "identity_mismatch" ->
-            "The peer's stated identity did not match its certificate. The connection was refused."
-        else -> "The connection was refused."
-    }
-
 @Composable
 private fun DiagnosticsCard(
     diagnostics: ControlDiagnostics,
@@ -360,15 +383,5 @@ internal fun DiagnosticRow(
         Text(value, style = MaterialTheme.typography.bodyMedium)
     }
 }
-
-private fun controlStateLabel(state: ControlState): String =
-    when (state) {
-        ControlState.IDLE -> "Idle"
-        ControlState.CONNECTING -> "Connecting…"
-        ControlState.CONNECTED -> "Connected"
-        ControlState.RECONNECTING -> "Reconnecting…"
-        ControlState.DISCONNECTED -> "Disconnected"
-        ControlState.ENDED -> "Ended"
-    }
 
 private const val SAS_GROUP_SIZE = 3

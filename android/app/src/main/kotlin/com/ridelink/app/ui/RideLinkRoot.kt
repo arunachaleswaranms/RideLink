@@ -38,6 +38,7 @@ fun RideLinkRoot(
     onStopIntercom: () -> Unit,
     onPlayMusic: () -> Unit,
     onPlayNow: (LibraryEntry) -> Unit,
+    onPlayQueueItem: (String) -> Unit,
     onImportFolder: () -> Unit,
     onImportFiles: () -> Unit,
     onPlaySharedTrackLocally: (ManifestEntry) -> Unit,
@@ -73,6 +74,7 @@ fun RideLinkRoot(
             onStopIntercom = onStopIntercom,
             onPlayMusic = onPlayMusic,
             onPlayNow = onPlayNow,
+            onPlayQueueItem = onPlayQueueItem,
             onImportFolder = onImportFolder,
             onImportFiles = onImportFiles,
             onPlaySharedTrackLocally = onPlaySharedTrackLocally,
@@ -87,4 +89,4 @@ fun RideLinkRoot(
  * The stationary app's destinations (Phase 9A.5 §5). Each long list lives on its own destination so
  * it can be a lazy list with a finite height — the home screen's scroll cannot host one.
  */
-enum class MainDestination { HOME, LIBRARY, SHARED_MUSIC }
+enum class MainDestination { HOME, LIBRARY, UP_NEXT, SHARED_MUSIC }
