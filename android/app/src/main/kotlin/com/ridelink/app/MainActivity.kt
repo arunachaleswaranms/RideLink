@@ -63,13 +63,13 @@ class MainActivity : ComponentActivity() {
      */
     private val pickFolder =
         registerForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
-            uri?.let { musicCoordinator?.importTree(it) }
+            uri?.let { musicCoordinator?.imports?.importTree(it) }
         }
 
     /** `ACTION_OPEN_DOCUMENT` multi-select — brief §10's explicit "multiple files" import path. */
     private val pickFiles =
         registerForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
-            if (uris.isNotEmpty()) musicCoordinator?.importFiles(uris)
+            if (uris.isNotEmpty()) musicCoordinator?.imports?.importFiles(uris)
         }
 
     private var musicCoordinator: MusicCoordinator? = null
@@ -253,20 +253,22 @@ class MainActivity : ComponentActivity() {
      *    player/queue, held to the identical foreground-visible discipline as every other first
      *    play of a track (ARCHITECTURE §6.4). There is still no second, cache-file-only player.
      */
-    @Suppress("ReturnCount") // one early-out per case in Finding G's KDoc, in that order
     private fun attemptPlaySharedTrackLocally(
         musicCoordinator: MusicCoordinator,
         sharedLibraryCoordinator: SharedLibraryCoordinator,
         entry: ManifestEntry,
     ) {
         val hash = entry.contentHash ?: return
-        val localEntry = musicCoordinator.libraryEntries.value.find { it.track.contentHash == hash }
-        if (localEntry != null) {
-            attemptPlayNow(musicCoordinator, localEntry)
-            return
-        }
         if (!foregroundVisible) return
         lifecycleScope.launch {
+            // Looked up in the repository, not in the Library screen's search-filtered, only-while-
+            // collected list (Phase 9A.5): that list could be empty or filtered here, sending a track
+            // this phone holds down the cache path instead.
+            val localEntry = musicCoordinator.findLocalByContentHash(hash)
+            if (localEntry != null) {
+                attemptPlayNow(musicCoordinator, localEntry)
+                return@launch
+            }
             val file = sharedLibraryCoordinator.cachedFile(hash) ?: return@launch
             if (!RideForegroundService.startMusicFromVisibleUi(this@MainActivity)) {
                 musicCoordinator.onForegroundServiceStartFailed()

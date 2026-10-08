@@ -190,7 +190,7 @@ class AppContainer(
             .databaseBuilder(context, RideLinkDatabase::class.java, RideLinkDatabase.DATABASE_NAME)
             // Phase 4's migration 1->2 (TransferCacheEntity, brief §16/§38): a real migration path,
             // not a destructive fallback — a user's Phase 3 imported library must survive untouched.
-            .addMigrations(RideLinkDatabase.MIGRATION_1_2)
+            .addMigrations(RideLinkDatabase.MIGRATION_1_2, RideLinkDatabase.MIGRATION_2_3)
             .build()
 
     private val libraryRepository = LibraryRepository(musicDatabase.trackDao())

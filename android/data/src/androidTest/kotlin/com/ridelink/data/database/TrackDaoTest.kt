@@ -125,6 +125,8 @@ class TrackDaoTest {
                 sizeBytes = 8192,
                 decodeStatus = "INDEXED",
                 lastSeenAtMonoUs = 42,
+                sourceKind = "FILE",
+                sourceKey = "content://c",
             )
             assertEquals(1, dao.count())
             val updated = dao.findByLocalEntryId("id-c")
@@ -168,12 +170,27 @@ class TrackDaoTest {
     fun touchSeenUpdatesStatusAndLastSeenWithoutTouchingOtherFields() =
         runBlocking {
             dao.insertNew(track("id-e", locationUri = "content://e", title = "Still Here", indexedAt = 100, lastSeen = 100))
-            dao.touchSeen("content://e", lastSeenAtMonoUs = 999)
+            dao.touchSeen("content://e", lastSeenAtMonoUs = 999, sourceKind = "TREE", sourceKey = "content://tree")
             val updated = dao.findByLocalEntryId("id-e")
             assertEquals("INDEXED", updated?.decodeStatus)
             assertEquals(999, updated?.lastSeenAtMonoUs)
             assertEquals("Still Here", updated?.title)
             assertEquals(100, updated?.indexedAtMonoUs)
+            assertEquals("TREE", updated?.sourceKind, "the scan that saw it again owns its reconciliation")
+            assertEquals("content://tree", updated?.sourceKey)
+        }
+
+    @Test
+    fun observeCountAndIndexedHashesTrackTheTableWithoutReadingRows() =
+        runBlocking {
+            dao.insertNew(track("id-h1", locationUri = "content://h1").copy(contentHash = "sha256:" + "a".repeat(64)))
+            dao.insertNew(track("id-h2", locationUri = "content://h2").copy(contentHash = "sha256:" + "a".repeat(64)))
+            dao.insertNew(track("id-h3", locationUri = "content://h3"))
+            assertEquals(3, dao.observeCount().first())
+            assertEquals(listOf("sha256:" + "a".repeat(64)), dao.observeIndexedContentHashes().first())
+            dao.markMissing("content://h1", 1)
+            dao.markMissing("content://h2", 1)
+            assertEquals(emptyList(), dao.observeIndexedContentHashes().first(), "a missing row cannot serve its bytes")
         }
 
     @Test
@@ -254,6 +271,8 @@ class TrackDaoTest {
                 sizeBytes = 4096,
                 decodeStatus = "INDEXED",
                 lastSeenAtMonoUs = 1,
+                sourceKind = "FILE",
+                sourceKey = "content://f1",
             )
             assertEquals(0, dao.observeSearch("Original*").first().size)
             assertEquals(1, dao.observeSearch("Renamed*").first().size)

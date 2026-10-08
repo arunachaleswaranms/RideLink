@@ -23,9 +23,10 @@ object SafLibraryScanner {
     suspend fun scanTree(
         context: Context,
         treeUri: Uri,
+        onFound: (Int) -> Unit = {},
     ): List<DiscoveredLocation> {
         val root = DocumentFile.fromTreeUri(context, treeUri) ?: return emptyList()
-        return scanTree(root)
+        return scanTree(root, onFound)
     }
 
     /**
@@ -33,16 +34,24 @@ object SafLibraryScanner {
      * [java.io.File] via `DocumentFile.fromFile` — which is how `LibraryIndexerTest` exercises this
      * exact recursive-walk/extension-gate logic on the real filesystem without needing the system
      * folder picker (brief §26's "real pipeline, not real picker UI" distinction).
+     *
+     * [onFound] receives the running count of supported files (Phase 9A.5 §8). A walk cannot know its
+     * total in advance, so a count is all it reports.
      */
-    suspend fun scanTree(root: DocumentFile): List<DiscoveredLocation> {
+    suspend fun scanTree(
+        root: DocumentFile,
+        onFound: (Int) -> Unit = {},
+    ): List<DiscoveredLocation> {
         val results = mutableListOf<DiscoveredLocation>()
-        walk(root, results)
+        walk(root, emptyList(), results, onFound)
         return results
     }
 
     private suspend fun walk(
         dir: DocumentFile,
+        folders: List<String>,
         into: MutableList<DiscoveredLocation>,
+        onFound: (Int) -> Unit,
     ) {
         currentCoroutineContext().ensureActive() // brief §19: indexing must be cancellable
         // A permission revoked mid-walk (brief §10) surfaces as listFiles() returning empty or
@@ -52,11 +61,18 @@ object SafLibraryScanner {
         for (child in children) {
             currentCoroutineContext().ensureActive()
             when {
-                child.isDirectory -> walk(child, into)
+                child.isDirectory -> walk(child, folders + (child.name ?: ""), into, onFound)
                 child.isFile -> {
                     val name = child.name ?: continue
                     if (AudioFormats.isSupportedExtension(name)) {
-                        into += DiscoveredLocation(uri = child.uri.toString(), filename = name, sizeBytes = child.length())
+                        into +=
+                            DiscoveredLocation(
+                                uri = child.uri.toString(),
+                                filename = name,
+                                sizeBytes = child.length(),
+                                relativeFolders = folders,
+                            )
+                        onFound(into.size)
                     }
                 }
             }

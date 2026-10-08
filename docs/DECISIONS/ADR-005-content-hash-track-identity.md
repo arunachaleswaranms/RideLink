@@ -135,3 +135,46 @@ new/still-present/missing over bare `quick_id` sets).
 
 No wire shape changed — `local_entry_id` is local-only bookkeeping, never sent, never persisted past
 a from-scratch reindex, exactly like `LocalTrackLocation`.
+
+## Amendment A2 — 9 October 2026 — reconciliation is scoped to the import that owns a row (Android)
+
+**Status of the ADR: still Accepted.** A1 made `location_uri` the row identity and kept
+"a location the last scan did not see is `MISSING`". That rule was applied against the wrong set:
+Android's `LibraryIndexer.reconcileAndIndex` compared each scan with **every** row
+(`missing = all rows − this scan`), so importing folder B marked every track of folder A — and every
+individually picked file — `MISSING` (STATUS §4 problem 115, found by code trace in Phase 9A).
+"Not under the folder I just walked" is not "gone from this phone".
+
+### Decision (amendment)
+
+**Every Android library row records its provenance, and a scan reconciles only the rows its own
+source owns.**
+
+- `tracks` gains `sourceKind` and `sourceKey` (Room schema version 3, `MIGRATION_2_3` — a real
+  migration, no destructive fallback). Kinds: `TREE` (one `ACTION_OPEN_DOCUMENT_TREE` grant, keyed by
+  the tree URI normalised through `DocumentsContract`), `MEDIA_STORE` (the device collection, one
+  scope) and `FILE` (one `ACTION_OPEN_DOCUMENT` pick, keyed by its own URI — a scope of one).
+- `ScopedReconciliation` (pure, `data.library`) restricts the previous set to rows the scan's source
+  owns **plus** rows the scan found, whoever owns them — so a location already known is reconciled
+  rather than inserted twice (`UNIQUE(locationUri)`), and is *adopted* by the scan that most recently
+  walked it. Nothing outside the scan's scope can be marked `MISSING`.
+- The migration derives an existing row's provenance from SAF's own URI structure (a tree child's
+  document URI names its tree), not from a display path. A row it cannot classify becomes `FILE`,
+  the kind that reconciles nothing but itself, so an unknown fails safe.
+- A folder import is now walk → user confirmation → index. Folders whose exact name says they hold
+  phone recordings are named in the confirmation, and the user decides whether to leave them out for
+  that import. A skipped file is neither indexed nor reconciled — it is never marked `MISSING`.
+- `local_entry_id`, `quick_id` and `content_hash` semantics are unchanged; no wire format changes.
+
+**Known limitation, unchanged by this amendment:** two *overlapping* trees (`Music` and
+`Music/Rock`) produce different document URIs for the same file, so they are two independent rows,
+exactly as before. Collapsing them would need location identity by document ID, which is a
+separate decision.
+
+**iOS is unaffected:** its library is the app container (ADR-009); imports copy files in and
+nothing rescans a user folder, so its `IndexReconciliation` has no production caller that could
+mis-scope.
+
+Regressions: `ScopedReconciliationTest` (JVM), `LibraryIndexerTest` cases A–D plus recording skip
+and progress (emulator), `SchemaMigrationTest` (2 → 3 and 1 → 3, emulator). Cases A–C fail with the
+scope removed.

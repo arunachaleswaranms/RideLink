@@ -4,8 +4,8 @@ import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.provider.OpenableColumns
+import androidx.documentfile.provider.DocumentFile
 import com.ridelink.core.library.DecodeStatus
-import com.ridelink.core.library.IndexReconciliation
 import com.ridelink.core.library.LibraryEntry
 import com.ridelink.core.library.LocalTrackLocation
 import com.ridelink.core.library.MetadataNormalizer
@@ -48,7 +48,13 @@ import java.util.UUID
  * [indexOrReindex] looks a location up and inserts it later, so two overlapping passes over the
  * same files both inserted, and the second crashed the app on `UNIQUE(locationUri)`. That was
  * reachable as soon as imports ran off the main thread (STATUS §4 problem 111's follow-up, found
- * on a physical phone).
+ * on a physical phone). A tree *walk* ([scanTree]) is read-only and takes no lock; indexing what it
+ * found ([importScan]) does.
+ *
+ * **Provenance (STATUS §4 problem 115, ADR-005 Amendment A2):** every write records the
+ * [ImportSource] that produced it, and a scan reconciles only its own source's rows through
+ * [ScopedReconciliation]. Importing folder B no longer marks folder A, or an individually picked
+ * file, missing.
  */
 class LibraryIndexer(
     private val context: Context,
@@ -60,15 +66,63 @@ class LibraryIndexer(
 ) {
     private val indexing = Mutex()
 
-    /** Primary Android import path (ARCHITECTURE §8.4): a SAF folder tree, persisted so future
-     *  rescans do not need the picker again. */
-    suspend fun importTree(treeUri: Uri) =
+    /**
+     * Walks an `ACTION_OPEN_DOCUMENT_TREE` grant and writes **nothing** (Phase 9A.5 §8/§9): the
+     * caller shows the result — folder name, track count, subfolders included, any recording-like
+     * folders — and only [importScan] indexes it. A walk is read-only, so it does not hold [indexing]
+     * and never queues behind the hashing pass.
+     */
+    suspend fun scanTree(
+        treeUri: Uri,
+        onProgress: (ImportProgress.Scanning) -> Unit = {},
+    ): TreeScan =
         withContext(ioDispatcher) {
-            indexing.withLock {
-                persistPermission(treeUri)
-                reconcileAndIndex(SafLibraryScanner.scanTree(context, treeUri))
+            val root = DocumentFile.fromTreeUri(context, treeUri)
+            if (root == null) {
+                TreeScan(ImportSourceKeys.forTree(treeUri), treeUri, folderName = "", discovered = emptyList())
+            } else {
+                scanDocumentTree(root, ImportSourceKeys.forTree(treeUri), treeUri, onProgress)
             }
         }
+
+    /** [scanTree] over any [DocumentFile] directory — the seam `LibraryIndexerTest` drives with
+     *  `DocumentFile.fromFile`, since the system folder picker cannot run in a test. */
+    suspend fun scanDocumentTree(
+        root: DocumentFile,
+        source: ImportSource,
+        grant: Uri? = null,
+        onProgress: (ImportProgress.Scanning) -> Unit = {},
+    ): TreeScan =
+        withContext(ioDispatcher) {
+            val folderName = root.name.orEmpty()
+            onProgress(ImportProgress.Scanning(folderName, 0))
+            val discovered = SafLibraryScanner.scanTree(root) { found -> onProgress(ImportProgress.Scanning(folderName, found)) }
+            TreeScan(source, grant, folderName, discovered)
+        }
+
+    /**
+     * Indexes a confirmed [TreeScan], reconciling **only** the rows its tree owns (STATUS §4 problem
+     * 115). With [skipRecordings], files under a [RecordingFolders] folder are neither indexed nor
+     * reconciled: a row already imported from one is left exactly as it was, never marked missing,
+     * because "the user chose to skip it this time" is not "the file is gone".
+     */
+    suspend fun importScan(
+        scan: TreeScan,
+        skipRecordings: Boolean,
+        onProgress: (ImportProgress) -> Unit = {},
+    ): ImportProgress.Complete =
+        withContext(ioDispatcher) {
+            indexing.withLock {
+                scan.grant?.let(::persistPermission)
+                val kept = if (skipRecordings) RecordingFolders.withoutRecordings(scan.discovered) else scan.discovered
+                val skipped = (scan.discovered - kept.toSet()).mapTo(mutableSetOf()) { LocalTrackLocation(it.uri) }
+                reconcileAndIndex(scan.source, kept, scan.folderName, skipped, onProgress)
+            }
+        }
+
+    /** Primary Android import path (ARCHITECTURE §8.4): a SAF folder tree, persisted so future
+     *  rescans do not need the picker again. Walk and index in one call, nothing skipped. */
+    suspend fun importTree(treeUri: Uri) = importScan(scanTree(treeUri), skipRecordings = false)
 
     /**
      * Explicit multi-select (`ACTION_OPEN_DOCUMENT`, brief §10's "multiple files import"). Unlike
@@ -76,25 +130,36 @@ class LibraryIndexer(
      * `test-media/synthetic/unsupported.xyz` exists exactly to prove this path answers
      * deterministically ([DecodeStatus.UNSUPPORTED]) rather than silently dropping a deliberate
      * user choice the way an incidental non-audio file in a scanned folder is dropped.
+     *
+     * Each file is its own [ImportSource.File] scope, so an explicit import reconciles nothing else.
      */
-    suspend fun importFiles(uris: List<Uri>) =
-        withContext(ioDispatcher) {
-            indexing.withLock {
-                val now = monotonicNowUs()
-                for (uri in uris) {
-                    currentCoroutineContext().ensureActive()
-                    persistPermission(uri)
-                    val filename = displayNameOf(uri) ?: uri.lastPathSegment ?: uri.toString()
-                    val sizeBytes = sizeOf(uri) ?: 0L
-                    indexExplicit(DiscoveredLocation(uri.toString(), filename, sizeBytes), now)
-                }
+    suspend fun importFiles(
+        uris: List<Uri>,
+        onProgress: (ImportProgress) -> Unit = {},
+    ) = withContext(ioDispatcher) {
+        indexing.withLock {
+            val now = monotonicNowUs()
+            var added = 0
+            uris.forEachIndexed { index, uri ->
+                currentCoroutineContext().ensureActive()
+                onProgress(ImportProgress.Indexing(null, ImportProgress.Stage.READING, index, uris.size))
+                persistPermission(uri)
+                val filename = displayNameOf(uri) ?: uri.lastPathSegment ?: uri.toString()
+                val sizeBytes = sizeOf(uri) ?: 0L
+                val location = DiscoveredLocation(uri.toString(), filename, sizeBytes)
+                if (indexExplicit(location, now, ImportSource.File(uri.toString()))) added++
             }
+            onProgress(ImportProgress.Complete(null, uris.size, added = added, missing = 0))
         }
+    }
 
-    /** Secondary "whole device library" convenience (ARCHITECTURE §8.4). */
+    /** Secondary "whole device library" convenience (ARCHITECTURE §8.4), reconciled against
+     *  [ImportSource.MediaStore]'s own rows only. */
     suspend fun rescanMediaStore() =
         withContext(ioDispatcher) {
-            indexing.withLock { reconcileAndIndex(MediaStoreLibraryScanner.scan(context)) }
+            indexing.withLock {
+                reconcileAndIndex(ImportSource.MediaStore, MediaStoreLibraryScanner.scan(context), null, emptySet()) {}
+            }
         }
 
     /**
@@ -105,11 +170,15 @@ class LibraryIndexer(
      * possibly-stale caller-supplied snapshot (this phase's closure-audit hardening pass) — so a
      * fresh call always resumes exactly the rows still missing a hash, whether that is because a
      * previous pass was cancelled or because new tracks were imported since.
+     *
+     * [onProgress] reports `(done, total)` for this pass (Phase 9A.5 §8).
      */
-    suspend fun completeContentHashing() =
+    suspend fun completeContentHashing(onProgress: (PreparingProgress) -> Unit = {}) =
         withContext(ioDispatcher) {
-            for (entry in repository.entriesMissingContentHash()) {
+            val pending = repository.entriesMissingContentHash()
+            pending.forEachIndexed { index, entry ->
                 currentCoroutineContext().ensureActive()
+                onProgress(PreparingProgress(index, pending.size))
                 indexing.withLock {
                     val hash =
                         runCatching {
@@ -118,23 +187,35 @@ class LibraryIndexer(
                     if (hash != null) repository.updateContentHash(entry.localEntryId, hash)
                 }
             }
+            onProgress(PreparingProgress(pending.size, pending.size))
         }
 
-    private suspend fun reconcileAndIndex(discovered: List<DiscoveredLocation>) {
+    @Suppress("LongMethod") // one pass: identify, reconcile, then index/touch/mark, reporting as it goes
+    private suspend fun reconcileAndIndex(
+        source: ImportSource,
+        discovered: List<DiscoveredLocation>,
+        folderName: String?,
+        skipped: Set<LocalTrackLocation>,
+        onProgress: (ImportProgress) -> Unit,
+    ): ImportProgress.Complete {
         val now = monotonicNowUs()
         val byLocation = LinkedHashMap<LocalTrackLocation, DiscoveredLocation>()
         val quickIdByLocation = LinkedHashMap<LocalTrackLocation, QuickId>()
-        for (location in discovered) {
+        discovered.forEachIndexed { index, location ->
             currentCoroutineContext().ensureActive()
+            onProgress(ImportProgress.Indexing(folderName, ImportProgress.Stage.CHECKING, index, discovered.size))
             val quickId =
                 runCatching { ContentHashing.computeQuickId(context.contentResolver, Uri.parse(location.uri)) }.getOrNull()
-                    ?: continue // unreadable: skip this scan pass rather than fabricate an identity for it
+                    ?: return@forEachIndexed // unreadable: skip this scan pass rather than fabricate an identity for it
             val loc = LocalTrackLocation(location.uri)
             byLocation[loc] = location
             quickIdByLocation[loc] = quickId
         }
 
-        val plan = IndexReconciliation.reconcile(repository.allLocationsAndQuickIds(), quickIdByLocation)
+        // Problem 115: only rows this source owns may be called missing, and a row the user chose to
+        // skip is left alone entirely.
+        val known = repository.allLocationsWithProvenance() - skipped
+        val plan = ScopedReconciliation.reconcile(source, known, quickIdByLocation).plan
 
         // New and changed locations both go through the same full pipeline; the only difference —
         // whether an existing row's LocalEntryId is preserved or a fresh one is generated — is
@@ -142,35 +223,48 @@ class LibraryIndexer(
         // from (this keeps a race between this scan and a concurrent one safe: at worst a location
         // is re-read once more than strictly necessary, never double-inserted, since locationUri is
         // UNIQUE at the schema level).
-        for (loc in plan.newLocations + plan.changedLocations) {
+        val toIndex = (plan.newLocations + plan.changedLocations).toList()
+        toIndex.forEachIndexed { index, loc ->
             currentCoroutineContext().ensureActive()
-            indexOrReindex(byLocation.getValue(loc), quickIdByLocation.getValue(loc), now)
+            onProgress(ImportProgress.Indexing(folderName, ImportProgress.Stage.READING, index, toIndex.size))
+            indexOrReindex(byLocation.getValue(loc), quickIdByLocation.getValue(loc), now, source)
         }
         for (loc in plan.unchangedLocations) {
             currentCoroutineContext().ensureActive()
-            repository.touchSeen(loc, now)
+            repository.touchSeen(loc, now, source)
         }
         for (loc in plan.missingLocations) {
             currentCoroutineContext().ensureActive()
             repository.markMissing(loc, now)
         }
+        val complete =
+            ImportProgress.Complete(
+                folderName = folderName,
+                trackCount = quickIdByLocation.size,
+                added = plan.newLocations.size,
+                missing = plan.missingLocations.size,
+            )
+        onProgress(complete)
+        return complete
     }
 
+    /** @return true if this created a new row. */
     private suspend fun indexExplicit(
         location: DiscoveredLocation,
         now: Long,
-    ) {
-        if (!AudioFormats.isSupportedExtension(location.filename)) {
-            upsertPlaceholder(location, now, DecodeStatus.UNSUPPORTED)
-            return
+        source: ImportSource,
+    ): Boolean {
+        val quickId =
+            if (AudioFormats.isSupportedExtension(location.filename)) {
+                runCatching { ContentHashing.computeQuickId(context.contentResolver, Uri.parse(location.uri)) }.getOrNull()
+            } else {
+                null
+            }
+        return when {
+            !AudioFormats.isSupportedExtension(location.filename) -> upsertPlaceholder(location, now, DecodeStatus.UNSUPPORTED, source)
+            quickId == null -> upsertPlaceholder(location, now, DecodeStatus.CORRUPT, source)
+            else -> indexOrReindex(location, quickId, now, source)
         }
-        val uri = Uri.parse(location.uri)
-        val quickId = runCatching { ContentHashing.computeQuickId(context.contentResolver, uri) }.getOrNull()
-        if (quickId == null) {
-            upsertPlaceholder(location, now, DecodeStatus.CORRUPT)
-            return
-        }
-        indexOrReindex(location, quickId, now)
     }
 
     /**
@@ -183,7 +277,8 @@ class LibraryIndexer(
         location: DiscoveredLocation,
         quickId: QuickId,
         now: Long,
-    ) {
+        source: ImportSource,
+    ): Boolean {
         val existing = repository.findByLocationUri(location.uri)
         val entry =
             buildEntry(
@@ -193,17 +288,20 @@ class LibraryIndexer(
                 now,
                 MetadataExtractor.extract(context, Uri.parse(location.uri)),
             )
-        if (existing == null) repository.insertNew(entry) else repository.updateReindexed(entry)
+        if (existing == null) repository.insertNew(entry, source) else repository.updateReindexed(entry, source)
+        return existing == null
     }
 
     private suspend fun upsertPlaceholder(
         location: DiscoveredLocation,
         now: Long,
         status: DecodeStatus,
-    ) {
+        source: ImportSource,
+    ): Boolean {
         val existing = repository.findByLocationUri(location.uri)
         val entry = placeholderEntry(existing?.localEntryId ?: newLocalEntryId(), location, now, status)
-        if (existing == null) repository.insertNew(entry) else repository.updateReindexed(entry)
+        if (existing == null) repository.insertNew(entry, source) else repository.updateReindexed(entry, source)
+        return existing == null
     }
 
     private fun buildEntry(
@@ -312,4 +410,18 @@ class LibraryIndexer(
         context.contentResolver.query(uri, arrayOf(OpenableColumns.SIZE), null, null, null)?.use { cursor ->
             if (cursor.moveToFirst() && !cursor.isNull(0)) cursor.getLong(0) else null
         }
+}
+
+/**
+ * A finished, read-only walk of one tree, waiting for the user's confirmation (Phase 9A.5 §9).
+ * [grant] is the tree URI whose permission [LibraryIndexer.importScan] persists — only once the
+ * user has actually chosen to import, so a cancelled summary leaves no lasting grant behind.
+ */
+class TreeScan(
+    val source: ImportSource,
+    val grant: Uri?,
+    val folderName: String,
+    val discovered: List<DiscoveredLocation>,
+) {
+    val recordingFolders: List<RecordingFolder> = RecordingFolders.detect(discovered)
 }

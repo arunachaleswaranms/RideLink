@@ -65,6 +65,15 @@ fun MusicSection(
             }
         }
     }
+    val importProgress by musicCoordinator.imports.progress.collectAsState()
+    val preparing by musicCoordinator.imports.preparing.collectAsState()
+    ImportStatusPanel(
+        progress = importProgress,
+        preparing = preparing,
+        onConfirm = musicCoordinator.imports::confirm,
+        onCancel = musicCoordinator.imports::cancel,
+        onDismiss = musicCoordinator.imports::dismiss,
+    )
     LibraryScreen(
         query = query,
         entries = entries,
