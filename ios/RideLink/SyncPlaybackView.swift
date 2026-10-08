@@ -2,8 +2,11 @@ import RideLinkCore
 import RideLinkPlatform
 import SwiftUI
 
-/// Phase 5's minimal affordance: enough to *drive and observe* synchronised playback on two phones,
-/// and nothing more. Mirrors Android's `SyncPlaybackCard`.
+/// Phase 5's synchronised playback on the main screen: whether both phones play together, a way back
+/// to this phone only, and a short preview of the shared queue. Mirrors Android's `SyncPlaybackCard`.
+/// The full queue and the catalogue are `SharedMusicScreen`, which is lazy (Phase 9A.5). The
+/// transport row moved into diagnostics: `MusicCoordinator`'s gate already routes the main Now
+/// Playing controls through the leader-ordered path while synchronised mode is active (ADR-024 A14).
 ///
 /// **This is deliberately not a ride screen.** Phase 7 owns Ride Mode, and a riding UI designed
 /// before anyone has ridden with this would be guesswork — the same reasoning ADR-020 already
@@ -18,68 +21,35 @@ struct SyncPlaybackView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: RideDesign.sm) {
-            Text("Synchronized Playback").font(.headline)
             Text(stateLabel).font(.subheadline)
-
-            if presenter.diagnostics.role == nil {
-                Text("No peer session — local playback only")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            } else {
-                controls
-                queueSection
-                playableSection
-                DisclosureGroup("Sync diagnostics") { diagnosticsSection }
+            if presenter.diagnostics.role != nil {
+                if presenter.isSynchronizedModeActive {
+                    Button("Play on this phone only") { presenter.leaveSynchronizedMode() }.buttonStyle(.bordered)
+                }
+                SharedQueueRows(queue: presenter.queueState, titles: titles, onRemove: presenter.removeFromQueue, previewLimit: 3)
+                DisclosureGroup("Sync diagnostics") {
+                    directCommands
+                    diagnosticsSection
+                }
             }
         }
-        .padding(RideDesign.md)
-        .background(Color.secondary.opacity(0.08))
-        .clipShape(RoundedRectangle(cornerRadius: 12))
     }
 
-    private var controls: some View {
+    private var titles: [String: String] {
+        Dictionary(sharedLibrary.remoteEntries.compactMap { entry in entry.contentHash.map { ($0.value, entry.title) } },
+                   uniquingKeysWith: { first, _ in first })
+    }
+
+    private var directCommands: some View {
         VStack(alignment: .leading, spacing: RideDesign.sm) {
-            LazyVGrid(columns: [GridItem(.adaptive(minimum: 120))], alignment: .leading, spacing: RideDesign.sm) {
+            Text("Direct synchronized commands").font(.caption).foregroundStyle(.secondary)
+            LazyVGrid(columns: [GridItem(.adaptive(minimum: 110))], alignment: .leading, spacing: RideDesign.sm) {
                 Button("Previous") { presenter.previous() }.buttonStyle(.bordered)
                 Button("Pause") { presenter.pause() }.buttonStyle(.bordered)
                 Button("Resume") { presenter.resume() }.buttonStyle(.bordered)
                 Button("Next") { presenter.next() }.buttonStyle(.bordered)
+                Button("Seek 0:00") { presenter.seek(positionMs: 0) }.buttonStyle(.bordered)
             }.disabled(!presenter.isSynchronizedModeActive)
-            HStack(spacing: RideDesign.sm) {
-                Button("Seek 0:00") { presenter.seek(positionMs: 0) }.buttonStyle(.bordered).disabled(!presenter.isSynchronizedModeActive)
-                Button("Play locally") { presenter.leaveSynchronizedMode() }.buttonStyle(.bordered)
-            }
-        }
-    }
-
-    private var queueSection: some View {
-        SharedQueueContent(queue: presenter.queueState,
-            titles: Dictionary(sharedLibrary.remoteEntries.compactMap { entry in
-                entry.contentHash.map { ($0.value, entry.title) }
-            }, uniquingKeysWith: { first, _ in first }), onRemove: presenter.removeFromQueue)
-    }
-
-    private var playableSection: some View {
-        VStack(alignment: .leading, spacing: RideDesign.xs) {
-            Text("Playable on both phones").font(.subheadline)
-            let playable = sharedLibrary.remoteEntries.filter { entry in
-                guard let hash = entry.contentHash else { return false }
-                return sharedLibrary.availability(for: entry).playableLocally && sharedLibrary.peerHasContent(hash)
-            }
-            if playable.isEmpty {
-                Text("Download a shared track to make it available on both phones.")
-                    .font(.caption)
-            }
-            ForEach(playable, id: \.rowId) { entry in
-                if let hash = entry.contentHash {
-                    VStack(alignment: .leading, spacing: RideDesign.sm) {
-                        Text(entry.title).font(.caption)
-                        Spacer()
-                        Button("Play synced") { presenter.playSynchronized(hash) }.buttonStyle(.bordered)
-                        Button("Queue") { presenter.enqueue(hash) }.buttonStyle(.bordered)
-                    }
-                }
-            }
         }
     }
 
@@ -125,25 +95,35 @@ struct SyncPlaybackView: View {
     private var stateLabel: String { UiPresentation.rideMusicLabel(status: .connected, state: presenter.diagnostics.syncState, ownsTransport: presenter.isSynchronizedModeActive) }
 }
 
-struct SharedQueueContent: View {
+/// Shared-queue rows. Duplicate hashes keep distinct queue item IDs; removal names the item, never the
+/// track. `previewLimit` bounds the main screen's preview; the full list is `SharedMusicScreen`.
+struct SharedQueueRows: View {
     let queue: SharedQueueState
     let titles: [String: String]
     let onRemove: (String) -> Void
+    var previewLimit: Int = .max
+
     var body: some View {
-        VStack(alignment: .leading, spacing: RideDesign.md) {
-            Text("Shared queue").font(.headline)
-            if queue.items.isEmpty { Text("Queue is empty. Add a track from the shared library.").font(.subheadline) }
-            ForEach(Array(queue.items.enumerated()), id: \.element.queueItemId) { index, item in
-                HStack {
-                    VStack(alignment: .leading, spacing: RideDesign.xs) {
-                        Text(titles[item.trackHash.value].flatMap { $0.isEmpty ? nil : $0 } ?? "Shared track").font(.body)
-                        Text(item.queueItemId == queue.currentItemId ? "Current item" : "Queue item \(index + 1)")
-                            .font(.caption).foregroundStyle(.secondary)
+        if queue.items.isEmpty {
+            Text("Nothing queued. Add a track from the other phone's music.").font(.subheadline).foregroundStyle(.secondary)
+        }
+        ForEach(Array(queue.items.prefix(previewLimit)), id: \.queueItemId) { item in
+            let title = titles[item.trackHash.value].flatMap { $0.isEmpty ? nil : $0 } ?? "Shared track"
+            HStack {
+                VStack(alignment: .leading, spacing: RideDesign.xs) {
+                    Text(title).font(.body).lineLimit(1)
+                    if item.queueItemId == queue.currentItemId {
+                        Text("Now playing").font(.caption).foregroundStyle(RideDesign.primary)
                     }
-                    Spacer()
-                    Button("Remove") { onRemove(item.queueItemId) }.buttonStyle(.bordered)
                 }
+                Spacer()
+                Button { onRemove(item.queueItemId) } label: { Image(systemName: "xmark.circle").frame(width: 44, height: 44) }
+                    .buttonStyle(.borderless)
+                    .accessibilityLabel("Remove \(title) from the shared queue")
             }
+        }
+        if queue.items.count > previewLimit {
+            Text("and \(queue.items.count - previewLimit) more").font(.caption).foregroundStyle(.secondary)
         }
     }
 }

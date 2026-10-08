@@ -2,51 +2,99 @@ import RideLinkCore
 import RideLinkPlatform
 import SwiftUI
 
-/// The whole local-library surface (this phase's brief §21): search, sort, artwork, an import entry
-/// point, and a track list with an add-to-queue affordance on each row. Narrow by design — no Ride
-/// Mode polish yet (Phase 7's job), just enough to browse and play what was imported. Mirrors
-/// `com.ridelink.app.ui.LibraryScreen`.
-struct LibraryView: View {
-    let query: LibraryQuery
-    let entries: [LibraryEntry]
-    let onSearchTextChange: (String) -> Void
-    let onSortChange: (LibrarySort) -> Void
-    let onImportFolder: () -> Void
-    let onImportFiles: () -> Void
-    let onAddToQueue: (LibraryEntry) -> Void
-    let onPlayNow: (LibraryEntry) -> Void
+/// The library as its own destination, rendered by a `List` — lazy, so only visible rows exist
+/// (Phase 9A.5 §5; the Android twin is `LibraryContent`). It used to be a `VStack` of every row inside
+/// the main screen's `ScrollView`, the same eager shape that, on Android with 3,460 tracks, spent ~20 s
+/// composing on a cold launch (STATUS §4 problem 114). No iPhone has run either version; the change
+/// removes the shape rather than claiming a measurement.
+///
+/// Owns the two document pickers (`.fileImporter`), handing `MusicCoordinator` the security-scoped
+/// URLs directly, as before.
+struct LibraryScreen: View {
+    let musicCoordinator: MusicCoordinator
+    var synchronized: Bool = false
+
+    @State private var showingFilePicker = false
+    @State private var showingFolderPicker = false
+    @State private var lastAdded: String?
 
     var body: some View {
-        VStack(alignment: .leading, spacing: RideDesign.sm) {
-            HStack(spacing: RideDesign.sm) {
-                Button("Import Folder", action: onImportFolder).buttonStyle(.bordered)
-                Button("Import Files", action: onImportFiles).buttonStyle(.bordered)
+        let entries = musicCoordinator.libraryEntries
+        let query = musicCoordinator.query
+        List {
+            Section {
+                Picker("Sort by", selection: Binding(get: { query.sort }, set: musicCoordinator.setSort)) {
+                    ForEach(sortOptions, id: \.self) { sort in Text(sortLabel(sort)).tag(sort) }
+                }
+                .pickerStyle(.segmented)
+                Text(countLabel(shown: entries.count, total: musicCoordinator.libraryCount, searching: !query.searchText.isEmpty))
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
             }
-
-            TextField("Search your music", text: Binding(get: { query.searchText }, set: onSearchTextChange))
-                .textFieldStyle(.roundedBorder)
-
-            Picker("Sort by", selection: Binding(get: { query.sort }, set: onSortChange)) {
-                ForEach(sortOptions, id: \.self) { sort in Text(sortLabel(sort)).tag(sort) }
-            }.pickerStyle(.menu)
-
-            Text(entries.isEmpty ? (query.searchText.isEmpty ? "No music yet. Import files to build your library." : "No matching tracks. Try another search.") : "\(entries.count) track(s)")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-
-            // A plain VStack, not a List/LazyVStack inside this screen's own parent ScrollView — the
-            // same reasoning `LibraryScreen.kt`'s doc comment gives for a plain Column on Android:
-            // fine for a "realistic personal library size" without virtualization, and a dedicated
-            // lazy library screen outside the shared scroll container is a Ride-Mode-era (Phase 7)
-            // concern, not this one.
-            VStack(alignment: .leading, spacing: RideDesign.xs) {
+            if entries.isEmpty {
+                Section {
+                    if query.searchText.isEmpty {
+                        VStack(alignment: .leading, spacing: RideDesign.sm) {
+                            Text("No music yet").font(.headline)
+                            Text("Import a folder or pick files. Your music stays on this phone.")
+                                .foregroundStyle(.secondary)
+                        }
+                    } else {
+                        Text("No tracks match “\(query.searchText.trimmingCharacters(in: .whitespaces))”.")
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
+            Section {
                 // Keyed by localEntryId, not track.quickId (ADR-005 Amendment A1) — quickId is not
                 // guaranteed unique across entries, and a duplicate SwiftUI `ForEach` id is undefined
                 // behaviour, not merely a display glitch.
                 ForEach(entries, id: \.localEntryId) { entry in
-                    TrackRow(entry: entry, onAddToQueue: { onAddToQueue(entry) }, onPlayNow: { onPlayNow(entry) })
+                    TrackRow(
+                        entry: entry,
+                        isCurrent: entry.localEntryId == musicCoordinator.nowPlayingEntry?.localEntryId,
+                        onPlayNow: { musicCoordinator.playNow(entry) },
+                        onAddToQueue: {
+                            musicCoordinator.addToQueue(entry)
+                            lastAdded = entry.track.title
+                        }
+                    )
                 }
             }
+        }
+        .listStyle(.plain)
+        .searchable(text: Binding(get: { query.searchText }, set: musicCoordinator.setSearchText), prompt: "Search title, artist or album")
+        .navigationTitle("Library")
+        .toolbar {
+            Menu {
+                Button("Import a folder…") { showingFolderPicker = true }
+                Button("Import files…") { showingFilePicker = true }
+            } label: {
+                Label("Import music", systemImage: "folder.badge.plus")
+            }
+        }
+        .safeAreaInset(edge: .bottom) {
+            if let lastAdded {
+                HStack {
+                    Text("Added “\(lastAdded)” to Up Next").lineLimit(1)
+                    Spacer()
+                    NavigationLink("View") { UpNextScreen(musicCoordinator: musicCoordinator, synchronized: synchronized) }
+                }
+                .padding(RideDesign.md)
+                .background(RideDesign.surface, in: RoundedRectangle(cornerRadius: RideDesign.radius))
+                .padding(RideDesign.md)
+                .task(id: lastAdded) {
+                    try? await Task.sleep(for: .seconds(3))
+                    self.lastAdded = nil
+                }
+                .accessibilityElement(children: .combine)
+            }
+        }
+        .fileImporter(isPresented: $showingFilePicker, allowedContentTypes: [.audio], allowsMultipleSelection: true) { result in
+            if case .success(let urls) = result, !urls.isEmpty { musicCoordinator.importFiles(urls) }
+        }
+        .fileImporter(isPresented: $showingFolderPicker, allowedContentTypes: [.folder]) { result in
+            if case .success(let url) = result { musicCoordinator.importFolder(url) }
         }
     }
 
@@ -60,36 +108,47 @@ struct LibraryView: View {
         case .recentlyAdded: "Recent"
         }
     }
+
+    private func countLabel(shown: Int, total: Int, searching: Bool) -> String {
+        let tracks = total == 1 ? "1 track" : "\(total.formatted()) tracks"
+        return searching ? "\(shown.formatted()) of \(tracks)" : tracks
+    }
 }
 
 private struct TrackRow: View {
     let entry: LibraryEntry
-    let onAddToQueue: () -> Void
+    let isCurrent: Bool
     let onPlayNow: () -> Void
+    let onAddToQueue: () -> Void
+
+    private var playable: Bool { entry.decodeStatus == .indexed }
 
     var body: some View {
         HStack(spacing: RideDesign.md) {
             Button(action: onPlayNow) {
-                HStack {
+                HStack(spacing: RideDesign.md) {
                     ArtworkThumbnail(artworkRef: entry.track.artworkRef)
                     VStack(alignment: .leading, spacing: RideDesign.xs) {
-                        Text(entry.track.title).font(.body).lineLimit(2)
-                        Text("\(entry.track.artist) — \(entry.track.album)").font(.caption).foregroundStyle(.secondary).lineLimit(2)
-                        if entry.decodeStatus != .indexed {
-                            Text(decodeStatusLabel(entry.decodeStatus)).font(.caption2)
-                        }
+                        Text(entry.track.title).font(.body).lineLimit(1)
+                            .foregroundStyle(isCurrent ? RideDesign.primary : Color.primary)
+                        Text(playable ? "\(entry.track.artist) · \(entry.track.album)" : decodeStatusLabel(entry.decodeStatus))
+                            .font(.caption)
+                            .foregroundStyle(playable ? Color.secondary : Color.red)
+                            .lineLimit(1)
                     }
+                    Spacer(minLength: 0)
                 }
-            }.buttonStyle(.plain).accessibilityLabel("Play \(entry.track.title)")
-            Spacer()
-            Button("Queue", action: onAddToQueue)
-                .buttonStyle(.bordered)
-                .disabled(entry.decodeStatus != .indexed)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.borderless)
+            .disabled(!playable)
+            .accessibilityLabel("Play \(entry.track.title)")
+            .accessibilityValue(isCurrent ? "Now playing" : "")
+            Button(action: onAddToQueue) { Image(systemName: "text.badge.plus").font(.title3).frame(width: 44, height: 44) }
+                .buttonStyle(.borderless)
+                .disabled(!playable)
+                .accessibilityLabel("Add \(entry.track.title) to Up Next")
         }
-        .padding(RideDesign.sm)
-        .background(Color.gray.opacity(0.08))
-        .cornerRadius(RideDesign.radius)
-        .contentShape(Rectangle())
     }
 
     private func decodeStatusLabel(_ status: DecodeStatus) -> String {
@@ -103,11 +162,11 @@ private struct TrackRow: View {
 }
 
 /// Bounded by `ArtworkProcessor` long before this ever loads it — this view just needs a
-/// placeholder for the (common) no-artwork case, per this phase's brief §18. Decoded off the main
-/// thread via `.task(id:)`, matching `LibraryScreen.kt`'s "no image-loading library for one small,
-/// already-bounded cache file" reasoning.
-private struct ArtworkThumbnail: View {
+/// placeholder for the (common) no-artwork case. Decoded off the main thread via `.task(id:)`, and
+/// only for rows the `List` actually shows.
+struct ArtworkThumbnail: View {
     let artworkRef: String?
+    var size: CGFloat = 48
 
     @State private var image: UIImage?
 
@@ -119,16 +178,18 @@ private struct ArtworkThumbnail: View {
                 Color.gray.opacity(0.2).overlay(Text("♪"))
             }
         }
-        .frame(width: 48, height: 48)
-        .clipShape(RoundedRectangle(cornerRadius: 4))
+        .frame(width: size, height: size)
+        .clipShape(RoundedRectangle(cornerRadius: 6))
+        .accessibilityHidden(true)
         .task(id: artworkRef) {
             guard let artworkRef else {
                 image = nil
                 return
             }
             let cache = ArtworkCache()
+            let pixels = size * 3
             image = await Task.detached(priority: .userInitiated) {
-                UIImage(contentsOfFile: cache.fileURL(for: artworkRef).path)
+                UIImage(contentsOfFile: cache.fileURL(for: artworkRef).path)?.preparingThumbnail(of: CGSize(width: pixels, height: pixels))
             }.value
         }
     }

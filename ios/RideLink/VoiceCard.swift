@@ -30,7 +30,6 @@ struct VoiceCard: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: RideDesign.sm) {
-            Text("Intercom").font(.headline)
             controls
             mode
             DisclosureGroup("Intercom diagnostics") {
@@ -65,8 +64,9 @@ struct VoiceCard: View {
         if voice.peerRequestedVoice, voice.status == .idle {
             // ARCHITECTURE §6.4: a peer asking is never enough to open this device's microphone. The
             // prompt is the only legal route, and it says so rather than opening the mic quietly.
-            Text("Your peer wants to talk. Start Intercom to open your microphone.")
+            Text("The other phone wants to talk. Start the intercom to turn on your microphone.")
                 .font(.subheadline)
+                .foregroundStyle(RideDesign.primary)
         }
         if let refusal {
             // Named, not "connection failed" (this phase's brief §41). FR-025: the session is untouched.
@@ -74,18 +74,21 @@ struct VoiceCard: View {
                 .font(.caption)
                 .foregroundStyle(.red)
         }
+        Text(UiPresentation.voiceLabel(voice.status)).font(.headline)
+        Text(UiPresentation.microphoneLabel(
+            localAudioOpen: voice.localAudioOpen, userMuted: voice.userMuted, transmitting: voice.transmitting
+        ))
+        .foregroundStyle(.secondary)
         HStack(spacing: RideDesign.sm) {
             if voice.status == .idle || voice.status == .failed {
-                Button("Start Intercom", action: onStartIntercom).buttonStyle(.borderedProminent).foregroundStyle(RideDesign.onPrimary)
+                Button("Start intercom", action: onStartIntercom).buttonStyle(.borderedProminent).foregroundStyle(RideDesign.onPrimary)
             } else {
-                Button("Stop Intercom", action: onStopIntercom).buttonStyle(.bordered)
+                Button("End intercom", action: onStopIntercom).buttonStyle(.bordered)
             }
             Button(voice.userMuted ? "Unmute" : "Mute", action: onToggleMute)
                 .buttonStyle(.bordered)
                 .disabled(!voice.localAudioOpen)
         }
-        Text(UiPresentation.voiceLabel(voice.status)).font(.headline)
-        Text(voice.userMuted ? "Muted" : voice.transmitting ? "Transmitting" : voice.localAudioOpen ? "Microphone ready" : "Microphone unavailable")
         if let failure = voice.lastFailure { Text(UiPresentation.voiceFailureLabel(failure)).foregroundStyle(.red) }
         DisclosureGroup("Voice details") {
             row("voice state", voice.status.rawValue)
@@ -130,7 +133,7 @@ struct VoiceCard: View {
             // tested, but no microphone-driven level exists on either platform yet, so the gate cannot
             // open. PENDING REAL AUDIO INPUT / LATER HARDENING.
             Text(
-                "Voice activation is unavailable. Choose Push to Talk or continuous intercom."
+                "Voice activation is unavailable. Choose push to talk or always on."
             )
             .font(.caption)
             .foregroundStyle(.red)

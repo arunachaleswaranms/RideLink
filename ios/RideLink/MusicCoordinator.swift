@@ -19,7 +19,18 @@ import RideLinkPlatform
 public final class MusicCoordinator {
     public private(set) var query = LibraryQuery()
     public private(set) var libraryEntries: [LibraryEntry] = []
-    public private(set) var queueState = LocalQueueState()
+    public private(set) var queueState = LocalQueueState() {
+        didSet {
+            if oldValue.currentItem?.localEntryId != queueState.currentItem?.localEntryId { resolveNowPlayingEntry() }
+        }
+    }
+    /// The library row for the queue's current item, looked up by `LocalEntryId` when the current item
+    /// changes (Phase 9A.5). It used to be found by scanning `libraryEntries`, which is filtered by the
+    /// library search, so typing in the search box made Now Playing — and the lock screen's
+    /// `MPNowPlayingInfoCenter` entry — lose the title of what was playing.
+    public private(set) var nowPlayingEntry: LibraryEntry?
+    /// The whole library's size, whatever the search says.
+    public private(set) var libraryCount = 0
     public private(set) var playerState = PlayerState()
     public private(set) var baseVolumePermille = CoexistenceState.fullGainPermille
     public var coexistenceEvents: (any CoexistenceEventSink)?
@@ -30,9 +41,20 @@ public final class MusicCoordinator {
     ///
     /// Matched by `localEntryId`, not `quickId` (ADR-005 Amendment A1) — `quickId` is not guaranteed
     /// unique across entries, so matching on it could show the wrong track's metadata/artwork here.
-    public var currentEntry: LibraryEntry? {
-        guard let item = queueState.currentItem else { return nil }
-        return libraryEntries.first { $0.localEntryId == item.localEntryId }
+    public var currentEntry: LibraryEntry? { nowPlayingEntry }
+
+    /// A queue entry's library row, by id — never by scanning the search-filtered list.
+    public func entry(for localEntryId: LocalEntryId) -> LibraryEntry? {
+        (try? repository.findByLocalEntryId(localEntryId)) ?? nil
+    }
+
+    /// A usable local row holding `contentHash`, if any — the shared library's "play it here" lookup.
+    public func localEntry(contentHash: ContentHash) -> LibraryEntry? {
+        (try? repository.findByContentHash(contentHash)) ?? nil
+    }
+
+    private func resolveNowPlayingEntry() {
+        nowPlayingEntry = queueState.currentItem.flatMap { entry(for: $0.localEntryId) }
     }
 
     private let repository: LibraryRepository
@@ -161,7 +183,10 @@ public final class MusicCoordinator {
         libraryObservationTask = Task { [weak self] in
             for await entries in stream {
                 guard !Task.isCancelled else { return }
-                await MainActor.run { self?.libraryEntries = entries }
+                await MainActor.run {
+                    self?.libraryEntries = entries
+                    self?.libraryCount = (try? self?.repository.count()) ?? entries.count
+                }
             }
         }
     }
