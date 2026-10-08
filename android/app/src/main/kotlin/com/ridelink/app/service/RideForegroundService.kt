@@ -172,6 +172,7 @@ class RideForegroundService : Service() {
      */
     private val playerListener =
         object : Media3Player.Listener {
+            @androidx.media3.common.util.UnstableApi // repostContent builds the session-token notification
             override fun onEvents(
                 player: Media3Player,
                 events: Media3Player.Events,
