@@ -5,39 +5,34 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.produceState
 import com.ridelink.app.music.MusicCoordinator
-import com.ridelink.core.library.LibraryEntry
+import com.ridelink.core.manifest.ManifestEntry
 
 /**
- * Local music, entirely below the intercom/session UI and untouched by its state — this phase's
- * brief §30's graceful-degradation rule made visible in the layout, not just in the coordinator
- * wiring.
+ * Local music on the home screen: Now Playing and its transport. Untouched by session state — this
+ * phase's brief §30's graceful-degradation rule made visible in the layout, not just in the
+ * coordinator wiring. The library itself is its own destination ([LibraryRoute]).
+ *
+ * Nothing here collects [MusicCoordinator.libraryEntries]: the current track comes from
+ * [MusicCoordinator.nowPlayingEntry], which does not depend on the Library screen's search.
  */
 @Composable
 fun MusicSection(
     musicCoordinator: MusicCoordinator,
     onPlayMusic: () -> Unit,
-    onPlayNow: (LibraryEntry) -> Unit,
-    onImportFolder: () -> Unit,
-    onImportFiles: () -> Unit,
-    sharedEntries: List<com.ridelink.core.manifest.ManifestEntry> = emptyList(),
+    sharedEntries: List<ManifestEntry> = emptyList(),
 ) {
-    val query by musicCoordinator.query.collectAsState()
-    val entries by musicCoordinator.libraryEntries.collectAsState()
     val queueState by musicCoordinator.queueState.collectAsState()
     val playerState by musicCoordinator.playerState.collectAsState()
+    val currentEntry by musicCoordinator.nowPlayingEntry.collectAsState()
     val lastMusicStartRefusal by musicCoordinator.lastMusicStartRefusal.collectAsState()
-    // Matched by localEntryId, not quickId (ADR-005 Amendment A1) — quickId is not guaranteed
-    // unique across entries, so matching on it could show the wrong track's metadata/artwork here.
-    val currentEntry = queueState.currentItem?.let { item -> entries.firstOrNull { it.localEntryId == item.localEntryId } }
-
-    Text("Local Music", style = MaterialTheme.typography.headlineSmall)
 
     // This phase's closure-audit hardening pass (Finding E): named rather than silent when Android
     // refuses to start the ride foreground service for music — never retried automatically.
     if (lastMusicStartRefusal != null) {
         Text(
-            "Could not start music — bring RideLink to the front and try again",
+            "Could not start music. Bring RideLink to the front and try again.",
             color = MaterialTheme.colorScheme.error,
             style = MaterialTheme.typography.bodySmall,
         )
@@ -58,30 +53,14 @@ fun MusicSection(
     )
 
     if (queueState.items.isNotEmpty()) {
+        val titles by produceState(emptyMap(), queueState.items) {
+            value = musicCoordinator.entriesFor(queueState.items.map { it.localEntryId }).mapValues { it.value.track.title }
+        }
         DiagnosticDisclosure("local queue") {
             queueState.items.forEachIndexed { index, item ->
-                val title = entries.firstOrNull { it.localEntryId == item.localEntryId }?.track?.title ?: "Shared track"
+                val title = titles[item.localEntryId] ?: "Shared track"
                 Text("${if (item.id == queueState.currentId) "Current" else "${index + 1}"} · $title")
             }
         }
     }
-    val importProgress by musicCoordinator.imports.progress.collectAsState()
-    val preparing by musicCoordinator.imports.preparing.collectAsState()
-    ImportStatusPanel(
-        progress = importProgress,
-        preparing = preparing,
-        onConfirm = musicCoordinator.imports::confirm,
-        onCancel = musicCoordinator.imports::cancel,
-        onDismiss = musicCoordinator.imports::dismiss,
-    )
-    LibraryScreen(
-        query = query,
-        entries = entries,
-        onSearchTextChange = musicCoordinator::setSearchText,
-        onSortChange = musicCoordinator::setSort,
-        onImportFolder = onImportFolder,
-        onImportFiles = onImportFiles,
-        onAddToQueue = musicCoordinator::addToQueue,
-        onPlayNow = onPlayNow,
-    )
 }

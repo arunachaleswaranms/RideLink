@@ -60,8 +60,8 @@ fun RideModeScreen(
     val peerAudioState by coordinator.peerAudioState.collectAsState()
     val playerState by musicCoordinator.playerState.collectAsState()
     val queueState by musicCoordinator.queueState.collectAsState()
-    val entries by musicCoordinator.libraryEntries.collectAsState()
-    val currentEntry = queueState.currentItem?.let { item -> entries.firstOrNull { it.localEntryId == item.localEntryId } }
+    // By local entry id, not by scanning the search-filtered library list (Phase 9A.5).
+    val currentEntry by musicCoordinator.nowPlayingEntry.collectAsState()
 
     val ui =
         rideModeUiState(

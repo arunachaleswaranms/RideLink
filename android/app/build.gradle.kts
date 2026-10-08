@@ -87,6 +87,8 @@ dependencies {
     androidTestImplementation(libs.junit4)
     androidTestImplementation(libs.kotlin.test)
     androidTestImplementation(libs.kotlinx.coroutines.test)
+    androidTestImplementation(platform(libs.compose.bom))
+    androidTestImplementation(libs.compose.ui.test.junit4)
 }
 
 tasks.withType<Test> {

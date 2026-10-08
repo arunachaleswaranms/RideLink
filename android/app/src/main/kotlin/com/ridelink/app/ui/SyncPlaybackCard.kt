@@ -5,8 +5,6 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.padding
-import androidx.compose.material3.Card
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
@@ -14,120 +12,68 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
-import com.ridelink.app.library.DownloadState
-import com.ridelink.app.library.SharedLibraryCoordinator
 import com.ridelink.app.music.CoexistenceDiagnostics
 import com.ridelink.app.session.SessionCoordinator
 import com.ridelink.app.sync.SyncPlaybackCoordinator
 import com.ridelink.core.audiopolicy.IntercomPolicy
 import com.ridelink.core.audiopolicy.RideStartDecision
-import com.ridelink.core.library.LibraryEntry
-import com.ridelink.core.manifest.ManifestEntry
 import com.ridelink.core.playback.PlaybackRole
 import com.ridelink.core.protocol.AudioStateMessage
+import com.ridelink.core.sessionfsm.SessionStatus
 import com.ridelink.network.voice.VoiceDiagnostics
 
 /**
- * Phase 5's minimal affordance: enough to *drive and observe* synchronised playback on two phones,
- * and nothing more.
+ * Phase 5's synchronised playback, as the home screen shows it: whether both phones are playing
+ * together, a way back to playing on this phone only, and a short preview of the shared queue. The
+ * full shared queue and the catalogue live on the other phone's music screen, which is lazy.
  *
- * **This is deliberately not a ride screen.** Phase 7 owns Ride Mode, and a riding UI designed
- * before anyone has ridden with this would be guesswork — the same reasoning ADR-020 already
- * applied to the intercom card next to it.
+ * **There are no transport buttons here any more** (Phase 9A.5). `MusicCoordinator`'s gate already
+ * routes the main Now Playing controls — and the lock screen's — through the leader-ordered path
+ * while synchronised mode is active (ADR-024 A14), so a second row of Prev/Pause/Resume/Next was two
+ * controls for one action. The coordinator's direct entry points stay reachable under diagnostics,
+ * where they always belonged.
  *
  * **The internal leader is never presented as a master.** ADR-010's rule is that both users get
- * identical, fully capable controls; the role is shown only in the diagnostics block, as a fact
- * about command ordering, and every control below works the same on both phones.
+ * identical controls; the role appears only in diagnostics, as a fact about command ordering.
  */
 @Composable
 fun SyncPlaybackCard(
     sync: SyncPlaybackCoordinator,
-    sharedEntries: List<ManifestEntry>,
-    localHashes: Set<String>,
+    titles: Map<String, String>,
 ) {
     val diagnostics by sync.diagnostics.collectAsState()
     val queue by sync.queueState.collectAsState()
 
-    Card(modifier = Modifier.fillMaxWidth()) {
-        Column(modifier = Modifier.padding(RideSpace.md), verticalArrangement = Arrangement.spacedBy(RideSpace.sm)) {
-            Text("Synchronized Playback", style = MaterialTheme.typography.titleMedium)
-            Text(
-                rideMusicLabel(
-                    com.ridelink.core.sessionfsm.SessionStatus.CONNECTED,
-                    diagnostics.syncState,
-                    sync.isSynchronizedModeActive(),
-                ),
-                style = MaterialTheme.typography.bodyMedium,
-            )
-
-            if (diagnostics.role == null) {
-                Text(
-                    "No peer session — local playback only",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-                return@Column
-            }
-
-            FlowRow(horizontalArrangement = Arrangement.spacedBy(RideSpace.sm)) {
-                OutlinedButton(onClick = { sync.previous() }, enabled = sync.isSynchronizedModeActive()) { Text("Prev") }
-                OutlinedButton(onClick = { sync.pause() }, enabled = sync.isSynchronizedModeActive()) { Text("Pause") }
-                OutlinedButton(onClick = { sync.resume() }, enabled = sync.isSynchronizedModeActive()) { Text("Resume") }
-                OutlinedButton(onClick = { sync.next() }, enabled = sync.isSynchronizedModeActive()) { Text("Next") }
-            }
-            FlowRow(horizontalArrangement = Arrangement.spacedBy(RideSpace.sm)) {
-                OutlinedButton(onClick = { sync.seek(0) }, enabled = sync.isSynchronizedModeActive()) { Text("Seek 0:00") }
-                OutlinedButton(onClick = { sync.leaveSynchronizedMode() }) { Text("Play locally") }
-            }
-
-            SharedQueueContent(queue, sharedEntries.associate { it.contentHash?.value.orEmpty() to it.title }, sync::removeFromQueue)
-
-            Text("Playable on both phones", style = MaterialTheme.typography.titleSmall)
-            val playable = sharedEntries.filter { it.contentHash != null && it.contentHash!!.value in localHashes }
-            if (playable.isEmpty()) {
-                Text(
-                    "Download a shared track to make it available on both phones.",
-                    style = MaterialTheme.typography.bodySmall,
-                )
-            }
-            playable.forEach { entry ->
-                val hash = entry.contentHash ?: return@forEach
-                Column(modifier = Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(RideSpace.sm)) {
-                    Text(entry.title, style = MaterialTheme.typography.bodySmall)
-                    OutlinedButton(onClick = { sync.playSynchronized(hash) }) { Text("Play synced") }
-                    OutlinedButton(onClick = { sync.enqueue(hash) }) { Text("Queue") }
-                }
-            }
-
-            DiagnosticDisclosure("sync diagnostics") { SyncDiagnosticsBlock(sync) }
+    Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(RideSpace.sm)) {
+        Text(
+            rideMusicLabel(SessionStatus.CONNECTED, diagnostics.syncState, sync.isSynchronizedModeActive()),
+            style = MaterialTheme.typography.bodyMedium,
+        )
+        if (diagnostics.role == null) return@Column
+        if (sync.isSynchronizedModeActive()) {
+            OutlinedButton(onClick = { sync.leaveSynchronizedMode() }) { Text("Play on this phone only") }
         }
+        SharedQueueContent(queue, titles, sync::removeFromQueue, previewLimit = SHARED_QUEUE_PREVIEW)
+        DiagnosticDisclosure("sync diagnostics") { SyncDiagnosticsBlock(sync) }
     }
 }
 
 /**
- * [MainScreen]'s post-trust-gate content (PROTOCOL §7.1: voice, catalogue and synchronisation all
- * require the trust gate the same way, so they share one guard at the call site and one extraction
- * here) — its own file/function for the same `config/detekt/detekt.yml` extract-rather-than-raise
- * reason [SharedLibraryAndSyncSections] already is.
+ * [MainScreen]'s post-trust-gate intercom content (PROTOCOL §7.1: voice, catalogue and
+ * synchronisation all require the trust gate the same way, so they share one guard at the call
+ * site).
  */
 @Suppress("LongParameterList") // one per existing MainScreen value this block already read directly
 @Composable
-fun AuthenticatedSections(
+fun AuthenticatedIntercomSection(
     coordinator: SessionCoordinator,
-    sharedLibraryCoordinator: SharedLibraryCoordinator,
-    syncPlaybackCoordinator: SyncPlaybackCoordinator,
     voice: VoiceDiagnostics,
     coexistence: CoexistenceDiagnostics,
     policy: IntercomPolicy,
     peerAudioState: AudioStateMessage?,
     intercomRefusal: RideStartDecision.Refused?,
-    remoteEntries: List<ManifestEntry>,
-    localEntries: List<LibraryEntry>,
-    downloadStates: Map<String, DownloadState>,
-    cachedHashes: Set<String>,
     onStartIntercom: () -> Unit,
     onStopIntercom: () -> Unit,
-    onPlaySharedTrackLocally: (ManifestEntry) -> Unit,
 ) {
     VoiceCard(
         voice = voice,
@@ -143,30 +89,26 @@ fun AuthenticatedSections(
         onPushToTalkHeld = coordinator::setPushToTalkHeld,
         onSelectPolicy = coordinator::selectIntercomPolicy,
     )
-
-    // PROTOCOL §8's catalogue plane and PROTOCOL §5/§9's synchronisation plane, both gated the
-    // same way voice is: brief §22 and ADR-024 §8 — an unpaired peer must never receive the
-    // shared library and can never move this phone's music.
-    SharedLibraryAndSyncSections(
-        sharedLibraryCoordinator = sharedLibraryCoordinator,
-        syncPlaybackCoordinator = syncPlaybackCoordinator,
-        remoteEntries = remoteEntries,
-        localEntries = localEntries,
-        downloadStates = downloadStates,
-        cachedHashes = cachedHashes,
-        onPlaySharedTrackLocally = onPlaySharedTrackLocally,
-    )
 }
 
 /**
  * FR-023's Phase 5 half. Every number is a measurement or a count of something refused — there is no
- * claim here about audible alignment, which only the real-device gate can produce.
+ * claim here about audible alignment, which only the real-device gate can produce. The coordinator's
+ * direct transport entry points are here for testing, labelled as such.
  */
 @Composable
 private fun SyncDiagnosticsBlock(sync: SyncPlaybackCoordinator) {
     val d by sync.diagnostics.collectAsState()
-    Text("Sync diagnostics", style = MaterialTheme.typography.titleSmall)
     Column(verticalArrangement = Arrangement.spacedBy(RideSpace.xs)) {
+        Text("Direct synchronized commands", style = MaterialTheme.typography.labelMedium)
+        FlowRow(horizontalArrangement = Arrangement.spacedBy(RideSpace.sm)) {
+            val active = sync.isSynchronizedModeActive()
+            OutlinedButton(onClick = { sync.previous() }, enabled = active) { Text("Previous") }
+            OutlinedButton(onClick = { sync.pause() }, enabled = active) { Text("Pause") }
+            OutlinedButton(onClick = { sync.resume() }, enabled = active) { Text("Resume") }
+            OutlinedButton(onClick = { sync.next() }, enabled = active) { Text("Next") }
+            OutlinedButton(onClick = { sync.seek(0) }, enabled = active) { Text("Seek 0:00") }
+        }
         SyncDiagnosticRow("sync state", d.syncState.name)
         SyncDiagnosticRow("transport ownership", if (sync.isSynchronizedModeActive()) "synchronized" else "local")
         SyncDiagnosticRow("role", if (d.role == PlaybackRole.LEADER) "orders commands" else "sends intents")
@@ -203,39 +145,4 @@ private fun SyncDiagnosticRow(
     }
 }
 
-/**
- * The two authenticated-session sections that sit below the intercom card: PROTOCOL §8's catalogue
- * plane and PROTOCOL §5/§9's synchronisation plane.
- *
- * Extracted from `MainScreen` rather than inlined because adding the sync card took that composable
- * past detekt's `LongMethod` ceiling — the same extract-rather-than-raise discipline
- * `config/detekt/detekt.yml` records for `ControlSessionManager`, applied one layer up.
- */
-@Composable
-fun SharedLibraryAndSyncSections(
-    sharedLibraryCoordinator: SharedLibraryCoordinator,
-    syncPlaybackCoordinator: SyncPlaybackCoordinator,
-    remoteEntries: List<ManifestEntry>,
-    localEntries: List<LibraryEntry>,
-    downloadStates: Map<String, DownloadState>,
-    cachedHashes: Set<String>,
-    onPlaySharedTrackLocally: (ManifestEntry) -> Unit,
-) {
-    SharedLibraryScreen(
-        remoteEntries = remoteEntries,
-        localEntries = localEntries,
-        downloadStates = downloadStates,
-        cachedHashes = cachedHashes,
-        onDownload = sharedLibraryCoordinator::requestDownload,
-        onCancel = { entry -> entry.contentHash?.let(sharedLibraryCoordinator::cancelDownload) },
-        onPlayLocally = onPlaySharedTrackLocally,
-    )
-
-    SyncPlaybackCard(
-        sync = syncPlaybackCoordinator,
-        sharedEntries = remoteEntries,
-        // Both provenances brief §19 admits: a Phase 3 library row with an authoritative hash, or a
-        // Phase 4 verified cache entry.
-        localHashes = localEntries.mapNotNull { it.track.contentHash?.value }.toSet() + cachedHashes,
-    )
-}
+private const val SHARED_QUEUE_PREVIEW = 3

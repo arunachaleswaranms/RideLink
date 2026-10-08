@@ -9,16 +9,16 @@ import com.ridelink.core.voice.VoiceStatus
 /** Read-only words, never command admission or authority. */
 internal fun connectionHint(status: SessionStatus): String =
     when (status) {
-        SessionStatus.IDLE -> "Connect both phones to the same Wi-Fi or hotspot, then find your peer."
-        SessionStatus.DISCOVERING -> "Looking for the other phone. Open RideLink and find peers there too."
-        SessionStatus.PAIRING -> "Compare the pairing digits on both phones."
-        SessionStatus.CONNECTING -> "Connecting securely to your peer…"
-        SessionStatus.CONNECTED -> "Paired and connected. Set up audio and music, then start your ride."
-        SessionStatus.RIDE_ACTIVE -> "Your ride is active."
-        SessionStatus.RECONNECTING -> "Trying to reconnect automatically. Local controls remain available."
-        SessionStatus.DISCONNECTED -> "Peer features are unavailable. Check the shared network and retry."
-        SessionStatus.ENDING -> "Ending the session…"
-        SessionStatus.ERROR -> "The session could not continue. See diagnostics for details."
+        SessionStatus.IDLE -> "Put both phones on the same Wi-Fi or hotspot, then tap Find other phone on each."
+        SessionStatus.DISCOVERING -> "Looking on this network. Open RideLink on the other phone and tap Find other phone."
+        SessionStatus.PAIRING -> "Make sure both phones show the same six digits."
+        SessionStatus.CONNECTING -> "Setting up an encrypted connection."
+        SessionStatus.CONNECTED -> "Ready. Start the intercom or music, then start your ride."
+        SessionStatus.RIDE_ACTIVE -> "Ride in progress."
+        SessionStatus.RECONNECTING -> "Trying to reach the other phone. Music on this phone keeps playing."
+        SessionStatus.DISCONNECTED -> "The other phone is out of reach. Check both are on the same network, then search again."
+        SessionStatus.ENDING -> "Closing the connection."
+        SessionStatus.ERROR -> "The session stopped. Connection diagnostics below have the details."
     }
 
 internal fun voiceLabel(status: VoiceStatus): String =

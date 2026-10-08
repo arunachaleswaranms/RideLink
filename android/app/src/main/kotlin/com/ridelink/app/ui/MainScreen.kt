@@ -1,14 +1,13 @@
 package com.ridelink.app.ui
 
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawingPadding
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -17,6 +16,7 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
@@ -38,7 +38,15 @@ import com.ridelink.network.control.ControlDiagnostics
 import com.ridelink.network.control.ControlState
 import com.ridelink.network.control.PairingPrompt
 
-/** Stationary setup. Production session state owns navigation, trust and all actions. */
+/**
+ * The stationary app. Production session state owns trust and every action; [destination] is only
+ * which part of it is on screen (Phase 9A.5 §5).
+ *
+ * The home screen is a short, bounded column: connection, intercom, Now Playing and links to the
+ * long lists. The library and the other phone's music are separate destinations because each is a
+ * lazy list that needs a finite height — STATUS §4 problem 114 was the library composed in full
+ * inside this screen's scroll.
+ */
 @Suppress("LongParameterList") // one callback per Activity-owned action; RideLinkRoot passes each through
 @Composable
 fun MainScreen(
@@ -66,98 +74,71 @@ fun MainScreen(
     onPlaySharedTrackLocally: (ManifestEntry) -> Unit,
     /** NFR-08: share the redacted event log. Routed through the Activity, which owns the share sheet. */
     onExportDiagnostics: () -> Unit,
+    destination: MainDestination = MainDestination.HOME,
+    onNavigate: (MainDestination) -> Unit = {},
 ) {
     val state by coordinator.state.collectAsState()
-    val peers by coordinator.discoveredPeers.collectAsState()
-    val discoveryCount by coordinator.discoveryCount.collectAsState()
-    val diagnostics by coordinator.controlDiagnostics.collectAsState()
-    val pairingPrompt by coordinator.pairingPrompt.collectAsState()
-    val securityAlert by coordinator.securityAlert.collectAsState()
-    val voice by coordinator.voiceDiagnostics.collectAsState()
-    val coexistence by coordinator.coexistenceDiagnostics.collectAsState()
-    val policy by coordinator.intercomPolicy.collectAsState()
-    val peerAudioState by coordinator.peerAudioState.collectAsState()
-    val intercomRefusal by coordinator.lastIntercomRefusal.collectAsState()
-    val remoteEntries by sharedLibraryCoordinator.remoteEntries.collectAsState()
-    val downloadStates by sharedLibraryCoordinator.downloadStates.collectAsState()
-    val cachedHashes by sharedLibraryCoordinator.cachedHashes.collectAsState()
-    val localEntries by musicCoordinator.libraryEntries.collectAsState()
-    val resyncDiagnostics by resyncCoordinator.diagnostics.collectAsState()
+    val authenticated = state.status == SessionStatus.CONNECTED || state.status == SessionStatus.RIDE_ACTIVE
+    // The other phone's music exists only past the trust gate; losing it returns home rather than
+    // leaving a screen whose actions can no longer be admitted.
+    LaunchedEffect(destination, authenticated) {
+        if (destination == MainDestination.SHARED_MUSIC && !authenticated) onNavigate(MainDestination.HOME)
+    }
 
     Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
-        Column(
-            modifier =
-                Modifier
-                    .fillMaxSize()
-                    .safeDrawingPadding()
-                    .verticalScroll(rememberScrollState())
-                    .padding(RideSpace.xl),
-            verticalArrangement = Arrangement.spacedBy(RideSpace.md, Alignment.Top),
-        ) {
-            Text("RideLink", style = MaterialTheme.typography.headlineMedium)
-
-            Text("Your ride, together", style = MaterialTheme.typography.bodyLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            ConnectionSummary(state.status, peers.size)
-
-            SessionActionButton(status = state.status, coordinator = coordinator)
-            StartRideButton(status = state.status, onStartRide = coordinator::startRide)
-
-            securityAlert?.let { code ->
-                SecurityAlertCard(code = code, onDismiss = coordinator::dismissSecurityAlert)
+        Box(Modifier.fillMaxSize().safeDrawingPadding()) {
+            when (destination) {
+                MainDestination.HOME ->
+                    HomeContent(
+                        coordinator = coordinator,
+                        musicCoordinator = musicCoordinator,
+                        sharedLibraryCoordinator = sharedLibraryCoordinator,
+                        syncPlaybackCoordinator = syncPlaybackCoordinator,
+                        resyncCoordinator = resyncCoordinator,
+                        deviceDescription = deviceDescription,
+                        onStartIntercom = onStartIntercom,
+                        onStopIntercom = onStopIntercom,
+                        onPlayMusic = onPlayMusic,
+                        onExportDiagnostics = onExportDiagnostics,
+                        onNavigate = onNavigate,
+                    )
+                MainDestination.LIBRARY ->
+                    LibraryRoute(
+                        musicCoordinator = musicCoordinator,
+                        actions =
+                            LibraryActions(
+                                onBack = { onNavigate(MainDestination.HOME) },
+                                onSearchTextChange = musicCoordinator::setSearchText,
+                                onSortChange = musicCoordinator::setSort,
+                                import =
+                                    ImportActions(
+                                        onImportFolder = onImportFolder,
+                                        onImportFiles = onImportFiles,
+                                        onConfirm = musicCoordinator.imports::confirm,
+                                        onCancel = musicCoordinator.imports::cancel,
+                                        onDismiss = musicCoordinator.imports::dismiss,
+                                    ),
+                                onPlayNow = onPlayNow,
+                                onAddToQueue = musicCoordinator::addToQueue,
+                                onOpenUpNext = { onNavigate(MainDestination.HOME) },
+                            ),
+                    )
+                MainDestination.SHARED_MUSIC ->
+                    SharedMusicRoute(
+                        sharedLibraryCoordinator = sharedLibraryCoordinator,
+                        syncPlaybackCoordinator = syncPlaybackCoordinator,
+                        musicCoordinator = musicCoordinator,
+                        onBack = { onNavigate(MainDestination.HOME) },
+                        onPlayHere = onPlaySharedTrackLocally,
+                    )
             }
-
-            pairingPrompt?.let { prompt ->
-                PairingCard(prompt = prompt, onDecision = coordinator::confirmPairing)
-            }
-
-            // PROTOCOL §7.1 in the UI: voice controls exist only once the trust gate has passed.
-            // A disabled button would still be a button; an absent card cannot be pressed.
-            if (state.status == SessionStatus.CONNECTED || state.status == SessionStatus.RIDE_ACTIVE) {
-                AuthenticatedSections(
-                    coordinator = coordinator,
-                    sharedLibraryCoordinator = sharedLibraryCoordinator,
-                    syncPlaybackCoordinator = syncPlaybackCoordinator,
-                    voice = voice,
-                    coexistence = coexistence,
-                    policy = policy,
-                    peerAudioState = peerAudioState,
-                    intercomRefusal = intercomRefusal,
-                    remoteEntries = remoteEntries,
-                    localEntries = localEntries,
-                    downloadStates = downloadStates,
-                    cachedHashes = cachedHashes,
-                    onStartIntercom = onStartIntercom,
-                    onStopIntercom = onStopIntercom,
-                    onPlaySharedTrackLocally = onPlaySharedTrackLocally,
-                )
-            }
-
-            // Deliberately independent of `state.status` — this phase's brief §28/§30: local music
-            // must be fully usable in airplane mode, with no peer, regardless of session state.
-            MusicSection(
-                musicCoordinator = musicCoordinator,
-                onPlayMusic = onPlayMusic,
-                onPlayNow = onPlayNow,
-                onImportFolder = onImportFolder,
-                onImportFiles = onImportFiles,
-                sharedEntries = remoteEntries,
-            )
-            ConnectionDiagnosticsSection(
-                deviceDescription = deviceDescription,
-                diagnostics = diagnostics,
-                discoveredPeerCount = peers.size,
-                discoveryCount = discoveryCount,
-                localIdentityPrefix = coordinator.localIdentityPrefix,
-                resyncDiagnostics = resyncDiagnostics,
-                onExportDiagnostics = onExportDiagnostics,
-            )
         }
     }
 }
 
 @Suppress("LongParameterList") // the section's own inputs, previously inline in MainScreen
 @Composable
-private fun ConnectionDiagnosticsSection(
+internal fun ConnectionDiagnosticsSection(
     deviceDescription: String,
     diagnostics: ControlDiagnostics,
     discoveredPeerCount: Int,

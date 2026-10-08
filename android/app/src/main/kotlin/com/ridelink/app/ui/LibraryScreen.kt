@@ -1,104 +1,279 @@
 package com.ridelink.app.ui
 
-import android.graphics.Bitmap
-import android.graphics.BitmapFactory
-import androidx.compose.foundation.Image
-import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material3.Button
-import androidx.compose.material3.Card
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.FilterChip
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.SnackbarResult
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.produceState
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.asImageBitmap
-import androidx.compose.ui.layout.ContentScale
-import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.heading
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
+import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.ridelink.app.R
+import com.ridelink.app.music.MusicCoordinator
 import com.ridelink.core.library.DecodeStatus
 import com.ridelink.core.library.LibraryEntry
 import com.ridelink.core.library.LibraryQuery
 import com.ridelink.core.library.LibrarySort
-import com.ridelink.data.library.ArtworkCache
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
+import com.ridelink.core.model.LocalEntryId
+import com.ridelink.data.library.ImportProgress
+import com.ridelink.data.library.PreparingProgress
+import kotlinx.coroutines.launch
+
+/** Everything the Library screen draws. A plain value, so tests can render it with any size. */
+internal data class LibraryUiState(
+    val query: LibraryQuery,
+    val entries: List<LibraryEntry>,
+    val totalCount: Int,
+    val currentEntryId: LocalEntryId?,
+    val importProgress: ImportProgress = ImportProgress.Idle,
+    val preparing: PreparingProgress = PreparingProgress(0, 0),
+    val importBusy: Boolean = false,
+)
+
+/** Everything the Library screen can ask for. Every action reaches an existing owner. */
+internal class LibraryActions(
+    val onBack: () -> Unit = {},
+    val onSearchTextChange: (String) -> Unit = {},
+    val onSortChange: (LibrarySort) -> Unit = {},
+    val import: ImportActions = ImportActions(),
+    val onPlayNow: (LibraryEntry) -> Unit = {},
+    val onAddToQueue: (LibraryEntry) -> Unit = {},
+    val onOpenUpNext: () -> Unit = {},
+)
+
+/** The import half: start one, then answer [ImportStatusPanel]'s summary. */
+internal class ImportActions(
+    val onImportFolder: () -> Unit = {},
+    val onImportFiles: () -> Unit = {},
+    val onConfirm: (Boolean) -> Unit = {},
+    val onCancel: () -> Unit = {},
+    val onDismiss: () -> Unit = {},
+)
 
 /**
- * The whole local-library surface (this phase's brief §21): search, sort, artwork, an import
- * entry point, and a track list with an add-to-queue affordance on each row. Narrow by design — no
- * Ride Mode polish yet (Phase 7's job), just enough to browse and play what was imported.
+ * The Library destination: collects [MusicCoordinator]'s state and hands it to [LibraryContent].
+ * It is the only screen that collects [MusicCoordinator.libraryEntries]; leaving it stops the
+ * library being re-read and re-sorted on every change.
  */
 @Composable
-fun LibraryScreen(
-    query: LibraryQuery,
-    entries: List<LibraryEntry>,
-    onSearchTextChange: (String) -> Unit,
-    onSortChange: (LibrarySort) -> Unit,
-    onImportFolder: () -> Unit,
-    onImportFiles: () -> Unit,
-    onAddToQueue: (LibraryEntry) -> Unit,
-    onPlayNow: (LibraryEntry) -> Unit,
+internal fun LibraryRoute(
+    musicCoordinator: MusicCoordinator,
+    actions: LibraryActions,
+    bottomBar: @Composable () -> Unit = {},
 ) {
-    Column(modifier = Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(RideSpace.sm)) {
-        FlowRow(horizontalArrangement = Arrangement.spacedBy(RideSpace.sm)) {
-            Button(onClick = onImportFolder) { Text("Import Folder") }
-            Button(onClick = onImportFiles) { Text("Import Files") }
+    val query by musicCoordinator.query.collectAsState()
+    val entries by musicCoordinator.libraryEntries.collectAsState()
+    val total by musicCoordinator.libraryCount.collectAsState()
+    val current by musicCoordinator.nowPlayingEntry.collectAsState()
+    val importProgress by musicCoordinator.imports.progress.collectAsState()
+    val preparing by musicCoordinator.imports.preparing.collectAsState()
+    LibraryContent(
+        state =
+            LibraryUiState(
+                query = query,
+                entries = entries,
+                totalCount = total,
+                currentEntryId = current?.localEntryId,
+                importProgress = importProgress,
+                preparing = preparing,
+                importBusy = importProgress is ImportProgress.Scanning || importProgress is ImportProgress.Indexing,
+            ),
+        actions = actions,
+        bottomBar = bottomBar,
+    )
+}
+
+/**
+ * The library as a **lazy** list (STATUS §4 problem 114).
+ *
+ * It used to be a plain `Column` that composed every row inside the home screen's own
+ * `verticalScroll`: with 3,460 tracks a cold launch spent ~20 s of main-thread time composing rows
+ * nobody could see, and a touch in that window was an ANR. A `LazyColumn` cannot live inside an
+ * unbounded `verticalScroll` (Compose refuses the infinite height), so the library is its own
+ * destination: this screen fills the window, the list takes the remaining height, and only the rows
+ * on screen — plus a small prefetch — exist. Search, sort and clearing a search replace the list's
+ * data, never its structure, so none of them composes thousands of rows either.
+ */
+@Composable
+internal fun LibraryContent(
+    state: LibraryUiState,
+    actions: LibraryActions,
+    bottomBar: @Composable () -> Unit = {},
+) {
+    val snackbar = remember { SnackbarHostState() }
+    val scope = rememberCoroutineScope()
+    val listState = rememberLazyListState()
+    val onAdd: (LibraryEntry) -> Unit = { entry ->
+        actions.onAddToQueue(entry)
+        scope.launch {
+            snackbar.currentSnackbarData?.dismiss()
+            val result = snackbar.showSnackbar("Added “${entry.track.title}” to Up Next", actionLabel = "View")
+            if (result == SnackbarResult.ActionPerformed) actions.onOpenUpNext()
         }
+    }
 
-        OutlinedTextField(
-            value = query.searchText,
-            onValueChange = onSearchTextChange,
-            modifier = Modifier.fillMaxWidth(),
-            label = { Text("Search your music") },
-            singleLine = true,
-        )
+    Column(Modifier.fillMaxSize()) {
+        LibraryHeader(state, actions)
+        Column(
+            Modifier.padding(horizontal = RideSpace.lg),
+            verticalArrangement = Arrangement.spacedBy(RideSpace.sm),
+        ) {
+            SearchField(state.query.searchText, actions.onSearchTextChange)
+            SortChips(state.query.sort, actions.onSortChange)
+            ImportStatusPanel(
+                progress = state.importProgress,
+                preparing = state.preparing,
+                onConfirm = actions.import.onConfirm,
+                onCancel = actions.import.onCancel,
+                onDismiss = actions.import.onDismiss,
+            )
+        }
+        Box(Modifier.weight(1f).fillMaxWidth()) {
+            when {
+                state.totalCount == 0 && state.entries.isEmpty() -> EmptyLibrary(actions, state.importBusy)
+                state.entries.isEmpty() && state.query.searchText.isNotBlank() ->
+                    CenteredNote("No tracks match “${state.query.searchText.trim()}”.")
+                else ->
+                    LazyColumn(
+                        state = listState,
+                        modifier = Modifier.fillMaxSize().testTag(LIBRARY_LIST_TAG),
+                        contentPadding = PaddingValues(bottom = RideSpace.sm),
+                    ) {
+                        item(key = "count", contentType = "count") {
+                            Text(
+                                libraryCountLabel(state.entries.size, state.totalCount, state.query.searchText),
+                                modifier = Modifier.padding(horizontal = RideSpace.lg, vertical = RideSpace.sm),
+                                style = MaterialTheme.typography.labelLarge,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                        items(state.entries, key = { it.localEntryId.value }, contentType = { "track" }) { entry ->
+                            TrackRow(
+                                entry = entry,
+                                isCurrent = entry.localEntryId == state.currentEntryId,
+                                onPlay = { actions.onPlayNow(entry) },
+                                onAdd = { onAdd(entry) },
+                            )
+                        }
+                    }
+            }
+            SnackbarHost(snackbar, Modifier.align(Alignment.BottomCenter))
+        }
+        bottomBar()
+    }
+}
 
-        FlowRow(horizontalArrangement = Arrangement.spacedBy(RideSpace.sm)) {
-            LibrarySort.entries.forEach { sort ->
-                val selected = query.sort == sort
-                FilterChip(selected = selected, onClick = { onSortChange(sort) }, label = { Text(sortLabel(sort)) })
+@Composable
+private fun LibraryHeader(
+    state: LibraryUiState,
+    actions: LibraryActions,
+) {
+    var menuOpen by remember { mutableStateOf(false) }
+    Row(
+        Modifier.fillMaxWidth().padding(horizontal = RideSpace.xs, vertical = RideSpace.xs),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        IconButton(onClick = actions.onBack) { Icon(painterResource(R.drawable.ic_back), contentDescription = "Back") }
+        Column(Modifier.weight(1f).padding(start = RideSpace.xs)) {
+            Text("Library", style = MaterialTheme.typography.titleLarge, modifier = Modifier.semantics { heading() })
+            Text(tracks(state.totalCount), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        Box {
+            IconButton(onClick = { menuOpen = true }, enabled = !state.importBusy) {
+                Icon(painterResource(R.drawable.ic_folder), contentDescription = "Import music")
+            }
+            DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
+                DropdownMenuItem(text = { Text("Import a folder…") }, onClick = {
+                    menuOpen = false
+                    actions.import.onImportFolder()
+                })
+                DropdownMenuItem(text = { Text("Import files…") }, onClick = {
+                    menuOpen = false
+                    actions.import.onImportFiles()
+                })
             }
         }
+    }
+}
 
-        Text(
-            if (entries.isEmpty() && query.searchText.isNotBlank()) {
-                "No matching tracks. Try another search."
-            } else if (entries.isEmpty()) {
-                "No music yet. Import files to build your library."
-            } else {
-                "${entries.size} track(s)"
-            },
-            style = MaterialTheme.typography.bodySmall,
-        )
-
-        // A plain Column, not LazyColumn: this screen already lives inside MainScreen's own
-        // Modifier.verticalScroll() Column, and nesting a lazy list inside a scrolling Column gives
-        // it an infinite height measurement constraint, which Compose refuses outright — a real
-        // crash found only by actually running this on the emulator (IllegalStateException:
-        // "Vertically scrollable component was measured with an infinity maximum height
-        // constraints"), not something a `./gradlew assembleDebug` compile catches. Fine for a
-        // "realistic personal library size" (REQUIREMENTS' own phrase) without virtualization; a
-        // dedicated lazy library screen outside the shared scroll container is a Ride-Mode-era
-        // (Phase 7) UI concern, not this one.
-        Column(verticalArrangement = Arrangement.spacedBy(RideSpace.xs)) {
-            entries.forEach { entry ->
-                TrackRow(entry = entry, onAddToQueue = { onAddToQueue(entry) }, onPlayNow = { onPlayNow(entry) })
+@Composable
+private fun SearchField(
+    text: String,
+    onChange: (String) -> Unit,
+) {
+    OutlinedTextField(
+        value = text,
+        onValueChange = onChange,
+        modifier = Modifier.fillMaxWidth(),
+        placeholder = { Text("Search title, artist or album") },
+        leadingIcon = { Icon(painterResource(R.drawable.ic_search), contentDescription = null) },
+        trailingIcon = {
+            if (text.isNotEmpty()) {
+                IconButton(onClick = { onChange("") }) { Icon(painterResource(R.drawable.ic_close), contentDescription = "Clear search") }
             }
+        },
+        singleLine = true,
+        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+        shape = MaterialTheme.shapes.medium,
+    )
+}
+
+@Composable
+private fun SortChips(
+    selected: LibrarySort,
+    onChange: (LibrarySort) -> Unit,
+) {
+    Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(RideSpace.sm)) {
+        LibrarySort.entries.forEach { sort ->
+            FilterChip(
+                selected = selected == sort,
+                onClick = { onChange(sort) },
+                label = { Text(sortLabel(sort)) },
+                leadingIcon =
+                    if (selected == sort) {
+                        { Icon(painterResource(R.drawable.ic_check), contentDescription = null, Modifier.padding(2.dp)) }
+                    } else {
+                        null
+                    },
+            )
         }
     }
 }
@@ -106,83 +281,80 @@ fun LibraryScreen(
 @Composable
 private fun TrackRow(
     entry: LibraryEntry,
-    onAddToQueue: () -> Unit,
-    onPlayNow: () -> Unit,
+    isCurrent: Boolean,
+    onPlay: () -> Unit,
+    onAdd: () -> Unit,
 ) {
-    Card(modifier = Modifier.fillMaxWidth().clickable(onClick = onPlayNow)) {
-        Row(
-            modifier = Modifier.padding(RideSpace.sm),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(RideSpace.md),
-        ) {
-            ArtworkThumbnail(entry)
-            Column(modifier = Modifier.weight(1f)) {
-                Text(entry.track.title, style = MaterialTheme.typography.bodyLarge, maxLines = 2)
-                Text("${entry.track.artist} — ${entry.track.album}", style = MaterialTheme.typography.bodySmall, maxLines = 2)
-                if (entry.decodeStatus != DecodeStatus.INDEXED) {
-                    Text(decodeStatusLabel(entry.decodeStatus), style = MaterialTheme.typography.labelSmall)
-                }
-            }
-            Button(onClick = onAddToQueue, enabled = entry.decodeStatus == DecodeStatus.INDEXED) { Text("Queue") }
-        }
-    }
-}
-
-/**
- * Bounded by [com.ridelink.data.library.ArtworkProcessor] long before this ever loads it — this
- * composable just needs a placeholder for the (common) no-artwork case, per this phase's brief
- * §18. Decoded with plain [BitmapFactory] off the main thread via [produceState] — a project this
- * size does not need an image-loading library for one small, already-bounded cache file.
- */
-@Composable
-private fun ArtworkThumbnail(entry: LibraryEntry) {
-    val context = LocalContext.current
-    val ref = entry.track.artworkRef
-    val bitmap by
-        produceState<Bitmap?>(initialValue = null, key1 = ref) {
-            value =
-                ref?.let {
-                    withContext(Dispatchers.IO) {
-                        runCatching { BitmapFactory.decodeFile(ArtworkCache(context).fileFor(it).absolutePath) }.getOrNull()
-                    }
-                }
-        }
-    Box(
-        modifier =
-            Modifier
-                .size(48.dp)
-                .clip(RoundedCornerShape(4.dp))
-                .background(MaterialTheme.colorScheme.surfaceVariant),
-        contentAlignment = Alignment.Center,
+    val playable = entry.decodeStatus == DecodeStatus.INDEXED
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .testTag(LIBRARY_ROW_TAG)
+            .heightIn(min = 64.dp)
+            .clickable(enabled = playable, onClickLabel = "Play", onClick = onPlay)
+            .padding(start = RideSpace.lg, end = RideSpace.xs, top = RideSpace.xs, bottom = RideSpace.xs)
+            .semantics(mergeDescendants = true) {
+                if (isCurrent) stateDescription = "Now playing"
+            },
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(RideSpace.md),
     ) {
-        val loaded = bitmap
-        if (loaded != null) {
-            Image(
-                bitmap = loaded.asImageBitmap(),
-                contentDescription = null,
-                modifier = Modifier.size(48.dp),
-                contentScale = ContentScale.Crop,
+        Artwork(entry.track.artworkRef, 48.dp)
+        Column(Modifier.weight(1f)) {
+            Text(
+                entry.track.title,
+                style = MaterialTheme.typography.bodyLarge,
+                color = if (isCurrent) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
             )
-        } else {
-            // A plain glyph rather than a vector-icon dependency — this app needs exactly one
-            // "no artwork" placeholder, which does not justify material-icons-extended.
-            Text("♪", style = MaterialTheme.typography.headlineSmall)
+            Text(
+                if (playable) "${entry.track.artist} · ${entry.track.album}" else decodeStatusLabel(entry.decodeStatus),
+                style = MaterialTheme.typography.bodySmall,
+                color = if (playable) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.error,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+        IconButton(
+            onClick = onAdd,
+            enabled = playable,
+            modifier = Modifier.semantics { contentDescription = "Add ${entry.track.title} to Up Next" },
+        ) {
+            Icon(painterResource(R.drawable.ic_queue_add), contentDescription = null)
         }
     }
 }
 
-private fun sortLabel(sort: LibrarySort): String =
-    when (sort) {
-        LibrarySort.TITLE -> "Title"
-        LibrarySort.ARTIST -> "Artist"
-        LibrarySort.ALBUM -> "Album"
-        LibrarySort.RECENTLY_ADDED -> "Recent"
+@Composable
+private fun EmptyLibrary(
+    actions: LibraryActions,
+    importBusy: Boolean,
+) {
+    Column(
+        Modifier.fillMaxSize().padding(RideSpace.xl),
+        verticalArrangement = Arrangement.spacedBy(RideSpace.md, Alignment.CenterVertically),
+        horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
+        Text("No music yet", style = MaterialTheme.typography.titleMedium)
+        Text(
+            "Import a folder or pick files. Your music stays on this phone.",
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Row(horizontalArrangement = Arrangement.spacedBy(RideSpace.sm)) {
+            OutlinedButton(onClick = actions.import.onImportFolder, enabled = !importBusy) { Text("Import a folder") }
+            OutlinedButton(onClick = actions.import.onImportFiles, enabled = !importBusy) { Text("Import files") }
+        }
     }
+}
 
-private fun decodeStatusLabel(status: DecodeStatus): String =
-    when (status) {
-        DecodeStatus.INDEXED -> ""
-        DecodeStatus.UNSUPPORTED -> "Unsupported format"
-        DecodeStatus.CORRUPT -> "File looks damaged"
-        DecodeStatus.MISSING -> "File not found"
+@Composable
+private fun CenteredNote(text: String) {
+    Box(Modifier.fillMaxSize().padding(RideSpace.xl), contentAlignment = Alignment.Center) {
+        Text(text, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
     }
+}
+
+internal const val LIBRARY_LIST_TAG = "library-list"
+internal const val LIBRARY_ROW_TAG = "library-row"
