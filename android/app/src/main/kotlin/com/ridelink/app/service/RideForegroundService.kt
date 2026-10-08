@@ -14,11 +14,19 @@ import android.support.v4.media.session.MediaSessionCompat
 import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
 import androidx.media.app.NotificationCompat.MediaStyle
+import androidx.media3.common.C
 import androidx.media3.session.MediaSession
+import com.ridelink.app.MainActivity
 import com.ridelink.app.R
 import com.ridelink.app.music.MusicCoordinator
 import com.ridelink.core.audiopolicy.ForegroundServiceTypeNeed
 import com.ridelink.core.audiopolicy.ForegroundServiceTypePolicy
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.MainScope
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.launch
+import java.util.Objects
 import java.util.concurrent.atomic.AtomicBoolean
 import androidx.media3.common.Player as Media3Player
 
@@ -79,6 +87,21 @@ object RideMediaSessionSource {
 }
 
 /**
+ * The voice facts the intercom notification shows, published by `AppContainer` from the voice
+ * controller's diagnostics (Phase 9A.5). One source for the in-app Mute button and the notification's
+ * own Mute action alike — the notification used to learn the mute state only from its own action's
+ * intent extra, so an in-app mute left it saying "Mute", and every other refresh reset it.
+ */
+object RideNotificationSource {
+    data class Voice(
+        val microphoneOpen: Boolean = false,
+        val muted: Boolean = false,
+    )
+
+    val voice = MutableStateFlow(Voice())
+}
+
+/**
  * The one ride foreground service (ARCHITECTURE §6.4).
  *
  * Its whole reason for existing is a platform rule, not a convenience: **modern Android forbids
@@ -132,6 +155,31 @@ class RideForegroundService : Service() {
      */
     private var mediaSession: MediaSession? = null
 
+    /** Lives exactly as long as this service instance; only observes, never owns session state. */
+    private var scope: CoroutineScope? = null
+
+    /** True once this instance has called `startForeground`, until it stops being foreground. */
+    private var foreground = false
+
+    /** What each notification id currently shows, so an unchanged notice is never re-posted. */
+    private val posted = mutableMapOf<Int, Any>()
+
+    /**
+     * STATUS §4 problem 116: SystemUI's shade and lock-screen media card re-read the session only when
+     * the media notification is posted, so a track change must re-post it. This listens to the one
+     * player for exactly the changes the card shows — item, metadata (title, artist, artwork),
+     * timeline (duration) and play state — never position, which the card tracks from the session.
+     */
+    private val playerListener =
+        object : Media3Player.Listener {
+            override fun onEvents(
+                player: Media3Player,
+                events: Media3Player.Events,
+            ) {
+                if (REPOST_EVENTS.any(events::contains)) repostContent()
+            }
+        }
+
     @androidx.media3.common.util.UnstableApi // MusicSessionPlayer (a ForwardingPlayer) is opt-in in this Media3 version.
     override fun onCreate() {
         super.onCreate()
@@ -142,8 +190,11 @@ class RideForegroundService : Service() {
                 MediaSession
                     .Builder(this, MusicSessionPlayer(player, coordinator))
                     .setId(MEDIA_SESSION_ID)
+                    .setSessionActivity(openAppIntent())
                     .build()
+            player.addListener(playerListener)
         }
+        scope = MainScope().also { scope -> scope.launch { RideNotificationSource.voice.collect { repostContent() } } }
     }
 
     override fun onDestroy() {
@@ -152,6 +203,15 @@ class RideForegroundService : Service() {
         // `ExoPlayer` behind [RideMediaSessionSource.player] is owned by `AppContainer`/
         // `ExoPlayerMusicPlayer` for the lifetime of the whole process, not by this service, which
         // the platform is free to create and destroy independently of a ride ever happening.
+        RideMediaSessionSource.player?.removeListener(playerListener)
+        scope?.cancel()
+        scope = null
+        // Both notifications belong to this service. The platform removes only the one in the
+        // foreground slot when a service stops; the other was posted with `notify` and would outlive
+        // it — found by IntercomNotificationSurfaceTest: a hard stop() during intercom + music left a
+        // stale media notification behind.
+        cancelAll()
+        foreground = false
         mediaSession?.release()
         mediaSession = null
         super.onDestroy()
@@ -159,16 +219,13 @@ class RideForegroundService : Service() {
 
     override fun onBind(intent: Intent?): IBinder? = null
 
-    // Lint-only, no behaviour change: refreshForegroundState (unmodified below) calls the
-    // @UnstableApi buildNotification, and the annotation must propagate to every caller in the
-    // chain up to here. onStartCommand's own action dispatch is exactly as it was before ADR-022.
-    @androidx.media3.common.util.UnstableApi
+    @androidx.media3.common.util.UnstableApi // buildMediaNotification uses MediaSession.platformToken (opt-in).
     override fun onStartCommand(
         intent: Intent?,
         flags: Int,
         startId: Int,
     ): Int {
-        ensureChannel()
+        ensureChannels()
         when (intent?.action) {
             ACTION_TOGGLE_MUTE -> RideCommandBus.dispatch(RideCommand.TOGGLE_MUTE)
             ACTION_END_INTERCOM -> {
@@ -183,11 +240,17 @@ class RideForegroundService : Service() {
                 RideCommandBus.dispatch(RideCommand.END_INTERCOM)
                 return START_NOT_STICKY
             }
+            ACTION_MEDIA_PREVIOUS -> RideMediaSessionSource.coordinator?.previous()
+            ACTION_MEDIA_PLAY_PAUSE ->
+                RideMediaSessionSource.coordinator?.let { music ->
+                    if (music.playerState.value.playing) music.pause() else music.play()
+                }
+            ACTION_MEDIA_NEXT -> RideMediaSessionSource.coordinator?.next()
             ACTION_START_INTERCOM -> intercomActive.set(true)
             ACTION_START_MUSIC -> musicPlaying.set(true)
             ACTION_UPDATE_MUSIC_PLAYING -> musicPlaying.set(intent.getBooleanExtra(EXTRA_MUSIC_PLAYING, false))
         }
-        refreshForegroundState(muted = intent?.getBooleanExtra(EXTRA_MUTED, false) == true)
+        refreshForegroundState()
         return START_NOT_STICKY
     }
 
@@ -207,12 +270,19 @@ class RideForegroundService : Service() {
      * [stopIfNothingActiveElseRefresh] already reaches from its own callers, just reached here too
      * so every path through [onStartCommand] is covered, not only the ones that go through
      * [stopIntercom]/[stopMusic].
+     *
+     * Phase 9A.5: the notification *content* is [RideNotificationPlanner]'s, and the foreground slot
+     * goes to whichever notification the plan puts there (the intercom's when it is on, otherwise
+     * the media notification). Types are still exactly [ForegroundServiceTypePolicy]'s.
      */
-    @androidx.media3.common.util.UnstableApi // buildNotification (below) is opt-in in this Media3 version.
-    private fun refreshForegroundState(muted: Boolean) {
+    @androidx.media3.common.util.UnstableApi
+    private fun refreshForegroundState() {
         val needs = ForegroundServiceTypePolicy.requiredTypes(intercomActive.get(), musicPlaying.get())
-        if (needs.isEmpty()) {
+        val plan = RideNotificationPlanner.plan(currentInputs())
+        if (needs.isEmpty() || plan == null) {
             stopForeground(STOP_FOREGROUND_REMOVE)
+            cancelAll()
+            foreground = false
             stopSelf()
             return
         }
@@ -224,10 +294,88 @@ class RideForegroundService : Service() {
                         ForegroundServiceTypeNeed.MEDIA_PLAYBACK -> ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK
                     }
             }
+        val foregroundId = idFor(plan.foreground)
+        val notice: Any = if (plan.foreground == RideSurface.INTERCOM) plan.intercom!! else plan.media!!
         // ServiceCompat, not startForeground directly: it is the call that carries the service type
         // across API levels, and getting the type wrong is a crash on API 34+, not a warning.
-        ServiceCompat.startForeground(this, NOTIFICATION_ID, buildNotification(muted = muted), platformTypes)
+        ServiceCompat.startForeground(this, foregroundId, build(notice), platformTypes)
+        posted[foregroundId] = notice
+        foreground = true
+        postSecondary(plan)
     }
+
+    /**
+     * Re-posts whatever content changed — a new track, a duration now known, play/pause, mute — and
+     * nothing else. Not a type change: those go through [refreshForegroundState]. Called on the
+     * main thread, from the player listener and the voice collector.
+     */
+    @androidx.media3.common.util.UnstableApi
+    private fun repostContent() {
+        if (!foreground) return
+        val plan = RideNotificationPlanner.plan(currentInputs()) ?: return
+        val foregroundId = idFor(plan.foreground)
+        val notice: Any = if (plan.foreground == RideSurface.INTERCOM) plan.intercom!! else plan.media!!
+        notifyIfChanged(foregroundId, notice)
+        postSecondary(plan)
+    }
+
+    /** Posts the plan's non-foreground notification if it has one, and cancels every id it does not use. */
+    @androidx.media3.common.util.UnstableApi
+    private fun postSecondary(plan: RideNotificationPlan) {
+        val wanted = mutableSetOf(idFor(plan.foreground))
+        if (plan.foreground == RideSurface.INTERCOM && plan.media != null) {
+            notifyIfChanged(MEDIA_NOTIFICATION_ID, plan.media)
+            wanted += MEDIA_NOTIFICATION_ID
+        }
+        (ALL_NOTIFICATION_IDS - wanted).forEach { id ->
+            if (posted.remove(id) != null) getSystemService(NotificationManager::class.java).cancel(id)
+        }
+    }
+
+    @androidx.media3.common.util.UnstableApi
+    private fun notifyIfChanged(
+        id: Int,
+        notice: Any,
+    ) {
+        if (posted[id] == notice) return
+        getSystemService(NotificationManager::class.java).notify(id, build(notice))
+        posted[id] = notice
+    }
+
+    private fun cancelAll() {
+        val manager = getSystemService(NotificationManager::class.java)
+        ALL_NOTIFICATION_IDS.forEach(manager::cancel)
+        posted.clear()
+    }
+
+    private fun currentInputs(): RideNotificationInputs {
+        val voice = RideNotificationSource.voice.value
+        val player = RideMediaSessionSource.player
+        val metadata = player?.mediaMetadata
+        return RideNotificationInputs(
+            intercomActive = intercomActive.get(),
+            microphoneOpen = voice.microphoneOpen,
+            muted = voice.muted,
+            musicActive = musicPlaying.get(),
+            musicPlaying = player?.isPlaying == true,
+            trackTitle = metadata?.title?.toString(),
+            trackArtist = metadata?.artist?.toString(),
+            mediaRevision =
+                Objects.hash(
+                    player?.currentMediaItem?.mediaId,
+                    metadata,
+                    player?.duration?.takeIf { it != C.TIME_UNSET },
+                ),
+        )
+    }
+
+    @androidx.media3.common.util.UnstableApi
+    private fun build(notice: Any): Notification =
+        when (notice) {
+            is IntercomNotice -> buildIntercomNotification(notice)
+            is MediaNotice -> buildMediaNotification(notice)
+            else -> error("unknown notice ${notice.javaClass.simpleName}")
+        }
 
     /**
      * ARCHITECTURE §6.4: a task swiped from Recents ends the session cleanly rather than leaving an
@@ -241,73 +389,108 @@ class RideForegroundService : Service() {
         super.onTaskRemoved(rootIntent)
     }
 
-    private fun ensureChannel() {
+    private fun ensureChannels() {
         val manager = getSystemService(NotificationManager::class.java)
-        if (manager.getNotificationChannel(CHANNEL_ID) != null) return
-        manager.createNotificationChannel(
-            NotificationChannel(CHANNEL_ID, getString(R.string.ride_channel_name), NotificationManager.IMPORTANCE_LOW)
-                .apply { description = getString(R.string.ride_channel_description) },
-        )
+        // Phase 9A.5: the intercom's channel alerts visually so its controls are allowed on the lock
+        // screen, but it makes no sound and no vibration. The music channel stays silent. The
+        // pre-9A.5 combined channel is removed rather than left orphaned.
+        manager.deleteNotificationChannel(LEGACY_CHANNEL_ID)
+        if (manager.getNotificationChannel(INTERCOM_CHANNEL_ID) == null) {
+            manager.createNotificationChannel(
+                NotificationChannel(INTERCOM_CHANNEL_ID, getString(R.string.intercom_channel_name), NotificationManager.IMPORTANCE_DEFAULT)
+                    .apply {
+                        description = getString(R.string.intercom_channel_description)
+                        setSound(null, null)
+                        enableVibration(false)
+                        lockscreenVisibility = Notification.VISIBILITY_PUBLIC
+                    },
+            )
+        }
+        if (manager.getNotificationChannel(MUSIC_CHANNEL_ID) == null) {
+            manager.createNotificationChannel(
+                NotificationChannel(MUSIC_CHANNEL_ID, getString(R.string.music_channel_name), NotificationManager.IMPORTANCE_LOW)
+                    .apply {
+                        description = getString(R.string.music_channel_description)
+                        lockscreenVisibility = Notification.VISIBILITY_PUBLIC
+                    },
+            )
+        }
     }
 
     /**
-     * Ongoing and non-dismissible while the service runs (ARCHITECTURE §6.4), and it carries the two
-     * actions the lock screen needs: mute and end-intercom — exactly as before ADR-022.
-     *
-     * It names no peer and no device: a notification is visible on a lock screen to anyone holding the
-     * phone, which makes it the same kind of surface as an mDNS TXT record (ARCHITECTURE §11).
-     *
-     * **ADR-022 addition**: `NotificationCompat.Builder`, not the bare platform `Notification.Builder`
-     * used before this ADR, so a `MediaStyle` (`androidx.media.app.NotificationCompat.MediaStyle`) can
-     * carry [mediaSession]'s compat token. That token is what turns this into a real, system-integrated
-     * media notification — the play/pause/skip-next/skip-previous transport controls it exposes reach
-     * the lock screen through the session itself ("the system reads transport-control affordances from
-     * a `MediaStyle` notification's session token regardless of what kind of component created that
-     * session," ADR-022 §2), never through a `PendingIntent` this method builds, and never by adding a
-     * third/fourth custom action here — [onStartCommand]'s action dispatch stays exactly as it was.
-     * [mediaSession] can be `null` (see its own KDoc); the notification degrades to its pre-ADR-022
-     * shape rather than crashing.
-     *
-     * The two custom actions keep their existing order in the compact view (this phase's judgement
-     * call — neither the ADR nor the brief pins an exact ordering): mute first, end-intercom second,
-     * unchanged from what shipped before this ADR.
+     * The intercom's notification (STATUS §4 problems 112/113). Deliberately **not** `MediaStyle`:
+     * on Android 13+ SystemUI draws a media-style notification as the media player and ignores its
+     * own actions, which is how Mute and End intercom disappeared. A plain notification's actions
+     * are rendered in the shade and on the lock screen. It names no peer and no device
+     * (ARCHITECTURE §11): anyone holding the phone can read it.
      */
-    @androidx.media3.common.util.UnstableApi // MediaSession.platformToken (below) is opt-in in this Media3 version.
-    private fun buildNotification(muted: Boolean): Notification {
+    private fun buildIntercomNotification(notice: IntercomNotice): Notification =
+        NotificationCompat
+            .Builder(this, INTERCOM_CHANNEL_ID)
+            .setContentTitle(notice.title)
+            .setContentText(notice.text)
+            .setSmallIcon(R.drawable.ic_launcher_foreground)
+            .setOngoing(true)
+            .setOnlyAlertOnce(true)
+            .setSilent(true)
+            .setCategory(NotificationCompat.CATEGORY_SERVICE)
+            .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+            .setContentIntent(openAppIntent())
+            .apply {
+                notice.actions.forEach { action ->
+                    val (label, intentAction, request) =
+                        when (action) {
+                            IntercomNoticeAction.MUTE -> Triple("Mute", ACTION_TOGGLE_MUTE, REQUEST_TOGGLE_MUTE)
+                            IntercomNoticeAction.UNMUTE -> Triple("Unmute", ACTION_TOGGLE_MUTE, REQUEST_TOGGLE_MUTE)
+                            IntercomNoticeAction.END_INTERCOM -> Triple("End intercom", ACTION_END_INTERCOM, REQUEST_END_INTERCOM)
+                        }
+                    addAction(NotificationCompat.Action.Builder(NO_ACTION_ICON, label, commandIntent(intentAction, request)).build())
+                }
+            }.build()
+
+    /**
+     * The music notification: `MediaStyle` carrying the one `MediaSession`'s token (ADR-022), so
+     * SystemUI draws it as the media player from the session. Title and text are the track's own,
+     * for surfaces that show the notification itself. On Android 12 (API 31–32), which still draws a
+     * media notification from its own actions, it carries Previous / Play-Pause / Next; Android 13+
+     * takes those from the session and they are left off.
+     */
+    @androidx.media3.common.util.UnstableApi // MediaSession.platformToken is opt-in in this Media3 version.
+    private fun buildMediaNotification(notice: MediaNotice): Notification {
         val builder =
             NotificationCompat
-                .Builder(this, CHANNEL_ID)
-                .setContentTitle(getString(R.string.ride_notification_title))
-                .setContentText(
-                    getString(
-                        if (muted) R.string.ride_notification_text_muted else R.string.ride_notification_text,
-                    ),
-                ).setSmallIcon(R.drawable.ic_launcher_foreground)
-                .setOngoing(true)
-                .addAction(
-                    NotificationCompat.Action
-                        .Builder(
-                            NO_ACTION_ICON,
-                            getString(if (muted) R.string.ride_action_unmute else R.string.ride_action_mute),
-                            commandIntent(ACTION_TOGGLE_MUTE, REQUEST_TOGGLE_MUTE),
-                        ).build(),
-                ).addAction(
-                    NotificationCompat.Action
-                        .Builder(
-                            NO_ACTION_ICON,
-                            getString(R.string.ride_action_end_intercom),
-                            commandIntent(ACTION_END_INTERCOM, REQUEST_END_INTERCOM),
-                        ).build(),
-                )
-        mediaSession?.let { session ->
-            builder.setStyle(
-                MediaStyle()
-                    .setMediaSession(MediaSessionCompat.Token.fromToken(session.platformToken))
-                    .setShowActionsInCompactView(MUTE_ACTION_INDEX, END_INTERCOM_ACTION_INDEX),
+                .Builder(this, MUSIC_CHANNEL_ID)
+                .setContentTitle(notice.title)
+                .setContentText(notice.text)
+                .setSmallIcon(R.drawable.ic_launcher_foreground)
+                .setOngoing(notice.playing)
+                .setOnlyAlertOnce(true)
+                .setSilent(true)
+                .setCategory(NotificationCompat.CATEGORY_TRANSPORT)
+                .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+                .setContentIntent(openAppIntent())
+        val style = MediaStyle()
+        mediaSession?.let { style.setMediaSession(MediaSessionCompat.Token.fromToken(it.platformToken)) }
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
+            builder.addAction(NO_ACTION_ICON, "Previous", commandIntent(ACTION_MEDIA_PREVIOUS, REQUEST_MEDIA_PREVIOUS))
+            builder.addAction(
+                NO_ACTION_ICON,
+                if (notice.playing) "Pause" else "Play",
+                commandIntent(ACTION_MEDIA_PLAY_PAUSE, REQUEST_MEDIA_PLAY_PAUSE),
             )
+            builder.addAction(NO_ACTION_ICON, "Next", commandIntent(ACTION_MEDIA_NEXT, REQUEST_MEDIA_NEXT))
+            style.setShowActionsInCompactView(0, 1, 2)
         }
-        return builder.build()
+        return builder.setStyle(style).build()
     }
+
+    private fun openAppIntent(): PendingIntent =
+        PendingIntent.getActivity(
+            this,
+            REQUEST_OPEN_APP,
+            Intent(this, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        )
 
     private fun commandIntent(
         action: String,
@@ -323,8 +506,29 @@ class RideForegroundService : Service() {
         )
 
     companion object {
-        private const val CHANNEL_ID = "ridelink.ride"
-        private const val NOTIFICATION_ID = 1
+        /** The pre-9A.5 single channel, deleted on first start (see [ensureChannels]). */
+        private const val LEGACY_CHANNEL_ID = "ridelink.ride"
+        private const val INTERCOM_CHANNEL_ID = "ridelink.intercom"
+        private const val MUSIC_CHANNEL_ID = "ridelink.music"
+        private const val INTERCOM_NOTIFICATION_ID = 1
+        private const val MEDIA_NOTIFICATION_ID = 2
+        private val ALL_NOTIFICATION_IDS = setOf(INTERCOM_NOTIFICATION_ID, MEDIA_NOTIFICATION_ID)
+
+        private fun idFor(surface: RideSurface): Int =
+            when (surface) {
+                RideSurface.INTERCOM -> INTERCOM_NOTIFICATION_ID
+                RideSurface.MEDIA -> MEDIA_NOTIFICATION_ID
+            }
+
+        /** Every player event that changes what the media card shows — and nothing positional. */
+        private val REPOST_EVENTS =
+            intArrayOf(
+                Media3Player.EVENT_MEDIA_ITEM_TRANSITION,
+                Media3Player.EVENT_MEDIA_METADATA_CHANGED,
+                Media3Player.EVENT_TIMELINE_CHANGED,
+                Media3Player.EVENT_IS_PLAYING_CHANGED,
+                Media3Player.EVENT_PLAYBACK_STATE_CHANGED,
+            )
 
         // ADR-022. A fixed id, not the Media3 default: this service only ever has one real session,
         // and the same reasoning "not a machine-specific detail" already applies elsewhere in this file.
@@ -333,22 +537,26 @@ class RideForegroundService : Service() {
         // NotificationCompat.Action's int-icon constructor with 0 means "no icon," matching the bare
         // platform Notification.Action.Builder's `null` icon this file used before ADR-022.
         private const val NO_ACTION_ICON = 0
-        private const val MUTE_ACTION_INDEX = 0
-        private const val END_INTERCOM_ACTION_INDEX = 1
         private const val ACTION_START_INTERCOM = "com.ridelink.ride.START_INTERCOM"
         private const val ACTION_START_MUSIC = "com.ridelink.ride.START_MUSIC"
         private const val ACTION_UPDATE_MUSIC_PLAYING = "com.ridelink.ride.UPDATE_MUSIC_PLAYING"
         private const val ACTION_TOGGLE_MUTE = "com.ridelink.ride.TOGGLE_MUTE"
         private const val ACTION_END_INTERCOM = "com.ridelink.ride.END_INTERCOM"
+        private const val ACTION_MEDIA_PREVIOUS = "com.ridelink.ride.MEDIA_PREVIOUS"
+        private const val ACTION_MEDIA_PLAY_PAUSE = "com.ridelink.ride.MEDIA_PLAY_PAUSE"
+        private const val ACTION_MEDIA_NEXT = "com.ridelink.ride.MEDIA_NEXT"
 
         /** No-op besides the type/notification recompute every `onStartCommand` already does at the
          *  end — used when one of [intercomActive]/[musicPlaying] changed via a path (like
          *  [stopIntercom]) that does not itself carry a more specific action. */
         private const val ACTION_REFRESH = "com.ridelink.ride.REFRESH"
-        private const val EXTRA_MUTED = "muted"
         private const val EXTRA_MUSIC_PLAYING = "music_playing"
         private const val REQUEST_TOGGLE_MUTE = 1
         private const val REQUEST_END_INTERCOM = 2
+        private const val REQUEST_OPEN_APP = 3
+        private const val REQUEST_MEDIA_PREVIOUS = 4
+        private const val REQUEST_MEDIA_PLAY_PAUSE = 5
+        private const val REQUEST_MEDIA_NEXT = 6
 
         /**
          * Companion-level, not instance state — deliberately (see the class KDoc). Exactly one real
@@ -389,23 +597,6 @@ class RideForegroundService : Service() {
             runCatching {
                 context.startForegroundService(
                     Intent(context, RideForegroundService::class.java).setAction(ACTION_START_MUSIC),
-                )
-            }.isSuccess
-
-        /**
-         * Refreshes the ongoing notification so the lock-screen surface reflects the current mute
-         * state. Safe from the background: the service is **already** foreground, so this is an update
-         * rather than a start, and it is a no-op if the service is not running.
-         */
-        fun updateMuteState(
-            context: Context,
-            muted: Boolean,
-        ): Boolean =
-            runCatching {
-                context.startService(
-                    Intent(context, RideForegroundService::class.java)
-                        .setAction(ACTION_TOGGLE_MUTE)
-                        .putExtra(EXTRA_MUTED, muted),
                 )
             }.isSuccess
 

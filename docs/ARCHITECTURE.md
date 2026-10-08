@@ -358,7 +358,7 @@ product (REQUIREMENTS §8) and the reason Phase 0 existed.
 | Concern | Mechanism |
 |---|---|
 | Music playback | `androidx.media3` `ExoPlayer`, with a real `androidx.media3.session.MediaSession` owned directly by the one ride foreground service (ADR-022 — **not** a `MediaSessionService` subclass; see ADR-022 §1 for the binding reason) |
-| Background / lock screen | One foreground service, declared `mediaPlayback` and (when the intercom is part of the ride) `microphone` — see §6.4. Lock-screen transport controls reach the system via a `MediaStyle` notification carrying the `MediaSession`'s token, alongside the service's own mute/end-intercom actions in the same notification (ADR-022) |
+| Background / lock screen | One foreground service, declared `mediaPlayback` and (when the intercom is part of the ride) `microphone` — see §6.4. Lock-screen transport controls reach the system via a `MediaStyle` notification carrying the `MediaSession`'s token (ADR-022). The intercom's Mute / End intercom live on a **separate, plain** notification posted by the same service, because Android 13+ ignores a media notification's own actions (ADR-022 Amendment A1) |
 | Voice | WebRTC `PeerConnection` with the built-in `AudioDeviceModule` (owns its own `AudioRecord`/`AudioTrack`, HW AEC/NS/AGC where present). Implemented in `network/voice/WebRtcVoiceEngine`; the session and route half is `audio/route/AndroidVoiceAudioSession`, and the two are deliberately separate calls to tear down (ADR-020 §6) |
 | Route + focus | `AudioManager` — `setCommunicationDevice()` (API 31+, our `minSdk`) for the helmet unit, `AudioFocusRequest` with `WILL_PAUSE_WHEN_DUCKED = false` so *we* control ducking, `AudioDeviceCallback` for connect/disconnect. That focus request belongs to the **voice** session. Local music requests no audio focus and does not observe `ACTION_AUDIO_BECOMING_NOISY` — an open gap, not a decision (STATUS §4 problem 104) |
 | Ducking | `ExoPlayer.volume` driven by the one coexistence coordinator through ten deterministic steps over 200 ms; stored/base volume is never overwritten (ADR-027) |
@@ -581,9 +581,11 @@ policy is exhausted by a laptop test on both platforms (`RideStartPolicyTest[s]`
 2^7 request cross-product asserting that **no** decision ever opens capture from the background);
 what remains untested off-device is the platform call itself, which is AF-01/AF-03/AF-04/AF-09.
 
-The ride notification carries the two lock-screen actions ARCHITECTURE requires — mute and
+The intercom notification carries the two lock-screen actions ARCHITECTURE requires — mute and
 end-intercom — dispatched to the session owner through a single direct handler with no queue, because
-a notification tap with no session to act on should be dropped rather than buffered. **End intercom
+a notification tap with no session to act on should be dropped rather than buffered. Since Phase 9A.5
+it is a plain notification of its own, never the `MediaStyle` music notification, whose own actions
+Android 13+ does not draw (ADR-022 Amendment A1, STATUS §4 problem 113). **End intercom
 is not end session:** PROTOCOL §7.8 keeps those separate, and the control session survives.
 
 **Manifest surface**
@@ -592,7 +594,7 @@ is not end session:** PROTOCOL §7.8 keeps those separate, and the control sessi
 |---|---|
 | `RECORD_AUDIO` (runtime) | intercom capture |
 | `INTERNET` | local TCP/TLS sockets and WebRTC. Cannot be scoped to the LAN; §11 records that no code path contacts a non-link-local address |
-| `POST_NOTIFICATIONS` (runtime, API 33+) | the foreground-service notification, which is also the lock-screen control surface |
+| `POST_NOTIFICATIONS` (runtime, API 33+) | the intercom notification, which is the intercom's lock-screen control surface. The music notification is a media-session notification and is exempt |
 | `BLUETOOTH_CONNECT` (runtime, API 31+) | enumerate and name the helmet unit for `setCommunicationDevice()` and for the readiness UI |
 | `FOREGROUND_SERVICE` | normal permission |
 | `FOREGROUND_SERVICE_MEDIA_PLAYBACK` | required for the `mediaPlayback` service type |
@@ -616,8 +618,14 @@ decision that must be settled by running discovery on the real device, not by re
 | Process death | Service is `START_NOT_STICKY`. Nothing restarts a microphone FGS in the background. On next launch the app restores persisted session state and the user starts the ride again explicitly |
 | Doze / battery optimisation | Handled by *being* a compliant foreground service with a media session. The user may be advised once, in the UI, to exempt RideLink for long rides. No programmatic bypass of platform background rules, ever |
 
-The notification is ongoing and non-dismissible while the service runs, and shows session state,
-intercom on/off, and actions for mute, play/pause and end-ride.
+What the notifications say is a pure projection of what is actually active
+(`RideNotificationPlanner`, ADR-022 Amendment A1): music only → one media notification, with the
+track's own title and no intercom or microphone wording; intercom only → one intercom notification
+("Intercom on", the microphone's state, Mute/Unmute and End intercom); both → the intercom
+notification holds the non-dismissible foreground slot and the media notification is posted beside
+it. The media notification is re-posted whenever the track, its metadata, its duration or the play
+state changes, because SystemUI reads the session only when it is posted (STATUS §4 problem 116).
+Neither names the other phone or a device.
 
 ### 6.5 The effective-audio-state model
 

@@ -19,6 +19,7 @@ import com.ridelink.app.service.RideCommand
 import com.ridelink.app.service.RideCommandBus
 import com.ridelink.app.service.RideForegroundService
 import com.ridelink.app.service.RideMediaSessionSource
+import com.ridelink.app.service.RideNotificationSource
 import com.ridelink.app.session.ForegroundServiceController
 import com.ridelink.app.session.RideSegmentOwner
 import com.ridelink.app.session.SessionCoordinator
@@ -65,6 +66,8 @@ import com.ridelink.network.voice.WebRtcVoiceEngine
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import java.io.File
 import java.util.UUID
@@ -365,6 +368,7 @@ class AppContainer(
                 releaseForegroundService = { RideForegroundService.stopIntercom(context) },
             )
         installRideNotificationCommands()
+        observeVoiceForNotification()
         observeMusicActivity()
         observeSyncAvailability()
         // ADR-022: hand RideForegroundService the one real player and the one real queue owner so
@@ -388,6 +392,20 @@ class AppContainer(
             musicCoordinator.isMusicActive.collect { active ->
                 RideForegroundService.updateMusicPlaying(context, active)
             }
+        }
+    }
+
+    /**
+     * Publishes the two voice facts the intercom notification shows — is the microphone open, is it
+     * muted — from the voice controller's own diagnostics (Phase 9A.5, STATUS §4 problem 112). The
+     * service only reads them; nothing here can open, close or mute anything.
+     */
+    private fun observeVoiceForNotification() {
+        appScope.launch {
+            sessionCoordinator.voiceDiagnostics
+                .map { RideNotificationSource.Voice(microphoneOpen = it.localAudioOpen, muted = it.userMuted) }
+                .distinctUntilChanged()
+                .collect { RideNotificationSource.voice.value = it }
         }
     }
 
@@ -427,11 +445,9 @@ class AppContainer(
     private fun installRideNotificationCommands() {
         RideCommandBus.handler = { command ->
             when (command) {
-                RideCommand.TOGGLE_MUTE -> {
-                    val muted = !sessionCoordinator.voiceDiagnostics.value.userMuted
-                    sessionCoordinator.setMicrophoneMuted(muted)
-                    RideForegroundService.updateMuteState(context, muted)
-                }
+                // The notification learns the new state from [observeVoiceForNotification], like an
+                // in-app mute — one source, so the two can never disagree.
+                RideCommand.TOGGLE_MUTE -> sessionCoordinator.setMicrophoneMuted(!sessionCoordinator.voiceDiagnostics.value.userMuted)
                 RideCommand.END_INTERCOM -> intercomStopOwner.requestStop()
             }
         }

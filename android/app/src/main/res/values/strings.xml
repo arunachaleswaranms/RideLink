@@ -1,19 +1,12 @@
 <resources>
     <string name="app_name">RideLink</string>
-    <string name="connection_idle">Idle</string>
-    <string name="start_discovery">Start Discovery</string>
-    <string name="label_device">Device:</string>
-    <string name="label_connection">Connection:</string>
-    <string name="ride_channel_name">Ride session</string>
-    <string name="ride_channel_description">Keeps the intercom and the peer link running while the screen is locked.</string>
-    <string name="ride_notification_title">RideLink intercom active</string>
     <!--
-        The notification is a lock-screen surface, visible to anyone holding the phone, so it names no
-        peer and no device (ARCHITECTURE §11) — the same rule that governs an mDNS TXT record.
+        Notification channels (Phase 9A.5). Notification text itself is projected by
+        RideNotificationPlanner from what is actually active, and names no peer and no device
+        (ARCHITECTURE §11): a notification is readable on a lock screen by anyone holding the phone.
     -->
-    <string name="ride_notification_text">Microphone open for the intercom.</string>
-    <string name="ride_notification_text_muted">Microphone open, muted.</string>
-    <string name="ride_action_mute">Mute</string>
-    <string name="ride_action_unmute">Unmute</string>
-    <string name="ride_action_end_intercom">End intercom</string>
+    <string name="intercom_channel_name">Intercom</string>
+    <string name="intercom_channel_description">Shown while the intercom is on, with Mute and End intercom. Makes no sound.</string>
+    <string name="music_channel_name">Music playback</string>
+    <string name="music_channel_description">What is playing, with playback controls.</string>
 </resources>
