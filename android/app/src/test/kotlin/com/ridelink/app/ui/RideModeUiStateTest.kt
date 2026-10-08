@@ -33,7 +33,7 @@ class RideModeUiStateTest {
     @Test
     fun `every sync state is overridden by loss of connection`() {
         com.ridelink.app.sync.SyncState.entries.forEach { sync ->
-            assertEquals("Waiting for peer", rideSyncLabel(SessionStatus.DISCONNECTED, sync))
+            assertEquals("Waiting for the other phone", rideSyncLabel(SessionStatus.DISCONNECTED, sync))
             assertEquals("Synchronizing when connection returns", rideSyncLabel(SessionStatus.RECONNECTING, sync))
         }
         assertEquals("Synchronized", rideSyncLabel(SessionStatus.RIDE_ACTIVE, com.ridelink.app.sync.SyncState.SYNCED))

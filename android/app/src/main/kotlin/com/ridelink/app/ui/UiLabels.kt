@@ -3,7 +3,6 @@ package com.ridelink.app.ui
 import com.ridelink.app.sync.SyncState
 import com.ridelink.core.audiopolicy.IntercomPolicy
 import com.ridelink.core.audiopolicy.VoiceFailure
-import com.ridelink.core.player.MusicFailure
 import com.ridelink.core.sessionfsm.SessionStatus
 import com.ridelink.core.voice.VoiceStatus
 import com.ridelink.network.control.ControlState
@@ -25,47 +24,56 @@ internal fun connectionHint(status: SessionStatus): String =
 
 internal fun voiceLabel(status: VoiceStatus): String =
     when (status) {
-        VoiceStatus.IDLE -> "Intercom not started"
-        VoiceStatus.NEGOTIATING, VoiceStatus.CONNECTING -> "Connecting intercom…"
-        VoiceStatus.ACTIVE -> "Intercom active"
+        VoiceStatus.IDLE -> "Intercom off"
+        VoiceStatus.NEGOTIATING, VoiceStatus.CONNECTING -> "Connecting the intercom…"
+        VoiceStatus.ACTIVE -> "Intercom on"
         VoiceStatus.FAILED -> "Intercom unavailable"
+    }
+
+/** The capture device's state in words — whether speech is being *sent* is a separate fact. */
+internal fun microphoneLabel(voice: com.ridelink.network.voice.VoiceDiagnostics): String =
+    when {
+        !voice.localAudioOpen -> "Microphone off"
+        voice.userMuted -> "Microphone muted"
+        voice.transmitting -> "Talking"
+        else -> "Microphone on"
     }
 
 internal fun voiceFailureLabel(failure: VoiceFailure): String =
     when (failure) {
-        VoiceFailure.MIC_PERMISSION_DENIED -> "Allow microphone access in Settings, then start Intercom again."
-        VoiceFailure.NO_AUDIO_ENDPOINT -> "Connect an audio device, then try again."
-        VoiceFailure.AUDIO_SESSION_ACTIVATION_FAILED -> "Audio is unavailable. Finish other audio activity, then try again."
+        VoiceFailure.MIC_PERMISSION_DENIED -> "Allow microphone access in Settings, then start the intercom again."
+        VoiceFailure.NO_AUDIO_ENDPOINT -> "Connect your helmet unit or earphones, then try again."
+        VoiceFailure.AUDIO_SESSION_ACTIVATION_FAILED -> "Audio is busy. Finish other audio activity, then try again."
         VoiceFailure.ROUTE_SELECTION_FAILED -> "Check your audio output, then try again."
-        VoiceFailure.CAPTURE_START_FAILED -> "The microphone could not start. Try Intercom again."
-        VoiceFailure.WEBRTC_FAILED -> "Intercom could not connect. Try Intercom again."
-        VoiceFailure.CONTROL_LINK_LOST -> "The peer connection was lost. Intercom needs a connected peer."
-        VoiceFailure.INTERRUPTED -> "Audio was interrupted by another app or call."
-        VoiceFailure.MEDIA_SERVICES_RESET -> "Audio was reset by the system. Try Intercom again."
+        VoiceFailure.CAPTURE_START_FAILED -> "The microphone did not start. Try the intercom again."
+        VoiceFailure.WEBRTC_FAILED -> "The intercom could not connect. Try again."
+        VoiceFailure.CONTROL_LINK_LOST -> "The connection to the other phone was lost."
+        VoiceFailure.INTERRUPTED -> "Audio was interrupted by another app or a call."
+        VoiceFailure.MEDIA_SERVICES_RESET -> "The system reset audio. Try the intercom again."
         VoiceFailure.BACKGROUND_START_REFUSED, VoiceFailure.FOREGROUND_SERVICE_START_FAILED ->
             "Bring RideLink to the front, then try again."
-        VoiceFailure.SESSION_NOT_AUTHENTICATED -> "Connect and verify your peer before starting Intercom."
+        VoiceFailure.SESSION_NOT_AUTHENTICATED -> "Connect to the other phone and check the code first."
     }
 
 internal fun syncLabel(state: SyncState): String =
     when (state) {
-        SyncState.INACTIVE -> "Local playback"
-        SyncState.CLOCK_UNREADY, SyncState.WAITING_FOR_QUEUE, SyncState.SCHEDULED -> "Preparing synchronized playback…"
+        SyncState.INACTIVE -> "Playing on this phone"
+        SyncState.CLOCK_UNREADY, SyncState.WAITING_FOR_QUEUE, SyncState.SCHEDULED -> "Getting both phones in step…"
         SyncState.WAITING_FOR_CONTENT -> "Waiting for the track to download…"
-        SyncState.SYNCED -> "Synchronized"
-        SyncState.DESYNCHRONIZED -> "Restoring music sync…"
+        SyncState.SYNCED -> "Playing on both phones"
+        SyncState.DESYNCHRONIZED -> "Getting back in step…"
         SyncState.SYNC_FAILED -> "Music sync paused"
-        SyncState.TRANSPORT_FAILED -> "Music command could not reach your peer"
+        SyncState.TRANSPORT_FAILED -> "Music command did not reach the other phone"
         SyncState.LOCAL_OVERLOAD -> "Music sync is busy. Try again shortly."
     }
 
 internal fun policyLabel(policy: IntercomPolicy): String =
     when (policy.id.name) {
-        "MODE_A" -> "A · Continuous / duck music"
-        "MODE_B" -> "B · Voice-activated / duck music"
-        "MODE_C" -> "C · Push to Talk / duck music"
-        "MODE_D" -> "D · Continuous / pause music"
-        "MODE_E" -> "E · Music only"
+        "MODE_A" -> "Always on · music lowered"
+        "MODE_B" -> "Voice-activated · music lowered"
+        "MODE_C" -> "Push to talk · music lowered"
+        "MODE_D" -> "Always on · music paused"
+        "MODE_E" -> "Music only · intercom off"
         else -> "Custom intercom mode"
     }
 
@@ -76,8 +84,8 @@ internal fun rideMusicLabel(
     ownsTransport: Boolean,
 ): String =
     when {
-        status == SessionStatus.RECONNECTING -> "Music sync waits for connection"
-        status != SessionStatus.CONNECTED && status != SessionStatus.RIDE_ACTIVE -> "Peer unavailable · Local controls"
+        status == SessionStatus.RECONNECTING -> "Music sync resumes when reconnected"
+        status != SessionStatus.CONNECTED && status != SessionStatus.RIDE_ACTIVE -> "Other phone unavailable · Playing on this phone"
         state in
             setOf(
                 SyncState.SYNC_FAILED,
@@ -86,38 +94,20 @@ internal fun rideMusicLabel(
                 SyncState.DESYNCHRONIZED,
             )
         -> syncLabel(state)
-        !ownsTransport -> "Local playback"
+        !ownsTransport -> "Playing on this phone"
         else -> syncLabel(state)
     }
-
-internal fun formatMs(ms: Long): String {
-    val totalSeconds = ms.coerceAtLeast(0) / MILLIS_PER_SECOND
-    return "%d:%02d".format(totalSeconds / SECONDS_PER_MINUTE, totalSeconds % SECONDS_PER_MINUTE)
-}
-
-internal fun playerFailureLabel(failure: MusicFailure): String =
-    when (failure) {
-        MusicFailure.DECODE_FAILED -> "This file could not be played. Try another track."
-        MusicFailure.FILE_MISSING -> "This file is no longer on the phone. Import it again."
-        MusicFailure.UNSUPPORTED_FORMAT -> "This audio format is not supported."
-        MusicFailure.STORAGE_IO -> "The file could not be read."
-        MusicFailure.CANCELLED -> "Playback cancelled."
-        MusicFailure.FOREGROUND_SERVICE_START_FAILED -> "Bring RideLink to the front and try again."
-    }
-
-private const val MILLIS_PER_SECOND = 1000L
-private const val SECONDS_PER_MINUTE = 60L
 
 internal fun securityAlertExplanation(code: String): String =
     when (code) {
         "pin_mismatch" ->
-            "This peer's identity key has changed. That happens after a reinstall — but it is also " +
-                "what an impersonation attempt looks like. RideLink will not reconnect until you " +
-                "forget this peer and pair again."
+            "The other phone's identity key has changed. That happens after a reinstall — but it is " +
+                "also what an impersonation attempt looks like. RideLink will not reconnect until you " +
+                "forget this phone and pair again."
         "certificate_invalid" ->
-            "The peer's certificate is outside its validity window. Check the date and time on both phones."
+            "The other phone's certificate is outside its validity window. Check the date and time on both phones."
         "identity_mismatch" ->
-            "The peer's stated identity did not match its certificate. The connection was refused."
+            "The other phone's stated identity did not match its certificate. The connection was refused."
         else -> "The connection was refused."
     }
 

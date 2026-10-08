@@ -287,7 +287,7 @@ internal fun PairingCard(
             modifier = Modifier.padding(RideSpace.lg),
             verticalArrangement = Arrangement.spacedBy(RideSpace.md),
         ) {
-            Text("Verify your peer", style = MaterialTheme.typography.titleMedium)
+            Text("Check the code", style = MaterialTheme.typography.titleMedium)
             Text(
                 prompt.peerDisplayName.ifEmpty { "Nearby phone" },
                 style = MaterialTheme.typography.bodyMedium,
@@ -300,7 +300,7 @@ internal fun PairingCard(
                 textAlign = TextAlign.Center,
             )
             Text(
-                "Both phones must show the same six digits. If they differ, do not confirm.",
+                "Both phones must show the same six digits. If they differ, tap They differ.",
                 style = MaterialTheme.typography.bodySmall,
             )
             FlowRow(

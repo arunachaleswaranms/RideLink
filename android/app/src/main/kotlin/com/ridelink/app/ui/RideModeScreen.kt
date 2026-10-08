@@ -85,13 +85,7 @@ fun RideModeScreen(
             ),
         syncText = rideMusicLabel(fsmState.status, syncDiagnostics.syncState, syncPlaybackCoordinator.isSynchronizedModeActive()),
         voiceText = voiceLabel(voice.status),
-        microphoneText =
-            when {
-                !voice.localAudioOpen -> "Microphone unavailable"
-                voice.userMuted -> "Muted"
-                voice.transmitting -> "Transmitting"
-                else -> "Microphone ready"
-            },
+        microphoneText = microphoneLabel(voice),
         policyText = policyLabel(voice.policy),
         onPrevious = musicCoordinator::previous,
         onPlayPause = { if (ui.isPlaying) musicCoordinator.pause() else onPlayMusic() },
@@ -130,7 +124,7 @@ internal fun RideModeContent(
                         .padding(RideSpace.xl),
                 verticalArrangement = Arrangement.spacedBy(RideSpace.xl),
             ) {
-                Text("RIDE MODE", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text("Riding", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 RideConnectionBanner(ui.connectionHealth, onReconnect)
                 Card(modifier = Modifier.fillMaxWidth()) {
                     Column(Modifier.padding(RideSpace.xl), verticalArrangement = Arrangement.spacedBy(RideSpace.sm)) {
@@ -148,7 +142,7 @@ internal fun RideModeContent(
                             } else if (ui.hasTrackLoaded) {
                                 "Paused"
                             } else {
-                                "Choose music in setup before your ride."
+                                "Pick music before you ride."
                             },
                         )
                         Text(syncText, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.primary)
@@ -231,10 +225,10 @@ private fun RideConnectionBanner(
         }
     Column(verticalArrangement = Arrangement.spacedBy(RideSpace.sm)) {
         Text(label, style = MaterialTheme.typography.headlineSmall, color = color)
-        if (health == RideConnectionHealth.DEGRADED) Text("Trying to reconnect automatically.")
+        if (health == RideConnectionHealth.DEGRADED) Text("Trying to reach the other phone. Music keeps playing.")
         if (health == RideConnectionHealth.DISCONNECTED) {
-            Text("Peer features are unavailable. Check the shared network.")
-            Button(onClick = onReconnect, modifier = Modifier.heightIn(min = RideSpace.rideTouch)) { Text("Reconnect") }
+            Text("The other phone is out of reach. Check both are on the same network.")
+            Button(onClick = onReconnect, modifier = Modifier.heightIn(min = RideSpace.rideTouch)) { Text("Search again") }
         }
     }
 }
