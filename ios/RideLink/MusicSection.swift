@@ -37,6 +37,7 @@ struct MusicSection: View {
                 } label: {
                     navigationRow("Library", systemImage: "music.note.list", detail: trackCount(musicCoordinator.libraryCount))
                 }
+                .buttonStyle(.plain)
                 Divider().padding(.leading, RideDesign.xl + RideDesign.lg)
                 NavigationLink {
                     UpNextScreen(musicCoordinator: musicCoordinator, synchronized: synchronized)
@@ -44,6 +45,7 @@ struct MusicSection: View {
                     let queue = musicCoordinator.queueState
                     navigationRow("Up Next", systemImage: "list.number", detail: upNextDetail(queue))
                 }
+                .buttonStyle(.plain)
             }
             .background(RideDesign.surface, in: RoundedRectangle(cornerRadius: RideDesign.radius))
         }
@@ -51,10 +53,10 @@ struct MusicSection: View {
 
     private func navigationRow(_ title: String, systemImage: String, detail: String) -> some View {
         HStack(spacing: RideDesign.lg) {
-            Image(systemName: systemImage).foregroundStyle(.secondary).frame(width: RideDesign.xl)
+            Image(systemName: systemImage).foregroundStyle(Color.secondary).frame(width: RideDesign.xl)
             VStack(alignment: .leading, spacing: 2) {
                 Text(title).foregroundStyle(Color.primary)
-                Text(detail).font(.caption).foregroundStyle(.secondary)
+                Text(detail).font(.caption).foregroundStyle(Color.secondary)
             }
             Spacer()
             Image(systemName: "chevron.right").font(.footnote).foregroundStyle(.tertiary)
