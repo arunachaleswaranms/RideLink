@@ -95,6 +95,13 @@ plays, and there is no add, remove, move or clear, and no "Play here". The refus
 `MusicCoordinator`'s, through `SyncPlaybackGate.localQueueLocked()` — the same ADR-024 A14 ownership as
 every transport press — so a stale screen cannot edit around it (ADR-024 Amendment A15).
 
+A second review found that the admission did not reach the player: an edit's `Load`, `Play` or `Stop`
+runs after suspensions, and synchronised mode could take over in between. The admission is now a token
+bound to one local-ownership lifetime, carried into every effect and re-proved before each player step
+(and before iOS activates the audio session); a later return to local is a new lifetime, so earlier
+work stays dead (A15 round 2). The admitted queue change itself is kept — the synchronised path
+replaces the local queue on its first selection anyway.
+
 ## 5. Copy
 
 "Your ride, together" is removed on both platforms. Primary UI says "other phone"; "peer" stays in

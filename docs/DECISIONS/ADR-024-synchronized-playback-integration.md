@@ -2403,3 +2403,70 @@ local via Play on this phone only and via End Ride), the A14 test's added lock a
 `MusicCoordinatorQueuePlayTest` (emulator, real coordinator and recording player: no Load/Play/Stop on
 refusal), `LocalQueueReadOnlyUiTest` (emulator), and the mirrored iOS tests in
 `SyncPlaybackTransportOwnershipTests`. No wire, vector or protocol change.
+
+### A15 round 2 — 9 October 2026 — the admission travels to the player effect
+
+**Found by the second independent review of PR #18.** Round 1 asked `localQueueLocked()` once,
+synchronously, and applied the queue mutation in the same step — correct for the *mutation*. But the
+mutation's player effects do not run in that step. On Android `MusicCoordinator.apply` launched a
+coroutine that suspended in the library lookup and again inside `Load`; on iOS each effect was a
+`Task` that awaited audio-session activation, the lookup and `Load`, each `await` releasing the main
+actor. Synchronised mode could take ownership inside any of those suspensions, and the stale local
+work then loaded, played or stopped on this phone only — exactly the second path round 1 closed,
+reopened one suspension later. A Boolean proves nothing after the instant it is read.
+
+Re-reading the Boolean before each effect would not fix it either. **Local A → synchronised B →
+local C** is "local" again, and a check of current ownership would let A's parked `Load` run under C
+— a lifetime that never authorised it. The question is not "is ownership local now?" but "is this the
+local lifetime that admitted the edit?".
+
+#### Decision (round 2)
+
+1. **The synchronisation owner numbers its local lifetimes.** Android's `SyncPlaybackCoordinator`
+   advances a lock-guarded lifetime in the same setter step that publishes ownership, and iOS's
+   `TransportOwnershipBox.store` advances it under its lock, **whenever `syncEnabled && role != nil`
+   flips** — LOCAL→SYNC and SYNC→LOCAL, whatever caused it: Play synced, an accepted authoritative
+   command, a served follower intent, End Ride, Play on this phone only, fail-closed exits and
+   control-lifetime resets. A role change inside synchronised mode does not move it, and nothing reads
+   `SyncState`; so old debt finishing as SCHEDULED/SYNCED after End Ride, with the role surviving,
+   neither locks the queue nor moves the lifetime. Lifetimes only increase, so a return to local is a
+   **new** lifetime and nothing earlier can match it.
+2. `SyncPlaybackGate` gains `admitLocalQueueEdit(): LocalQueueEditAdmission?` (`nil` while
+   synchronised) and `isLocalQueueEditStillValid(admission)`, answered by `SyncPlaybackGateAdapter`
+   from that lifetime. The admission is an opaque value only the gate can mint; `MusicCoordinator`
+   holds no ownership fact of its own. With no gate wired at all (no synchronised session ever built)
+   a fixed "ungated" admission stands for a lifetime that never ends.
+3. `LocalQueueEdits.reduce` returns the admission **with** the outcome. `MusicCoordinator.apply`
+   writes the queue state and hands the effects, with that same admission, to `LocalPlaybackEffects`
+   (Android `app.music`, iOS `RideLinkPlatform`, mirrored), which re-proves it **immediately before
+   every externally visible step**: audio-session activation (iOS), `Load`, then again before `Play`,
+   `Stop`, `Pause`, `Seek`. A failed proof ends that effect; nothing after it runs. No replacement
+   admission is ever minted after a suspension.
+4. **Local transport presses carry one too.** Play/Next/Previous and a local track-end (after the
+   intercept said "local") and Pause/Seek mint an admission in the same synchronous step and run
+   through `LocalPlaybackEffects`: a local press admitted just before activation has the same race as
+   an edit, and an un-fenced local `Pause` landing after activation would pause synchronised playback
+   on this phone only.
+5. **Queue state is not rolled back** when an effect is dropped. The mutation was a legitimate local
+   edit under its lifetime; the synchronised path that took over replaces the local queue wholesale on
+   its first selection (`syncSelect`) and clears it on stop (`syncClearSelection`). A rollback would be
+   a second local write racing that authority — the thing this amendment exists to prevent.
+6. **Synchronised effects are untouched.** `syncSelect`/`syncLoad`/`syncStart`/`syncPause`/
+   `syncSeek`/`syncSetRate`/`syncStop`/`syncClearSelection`, resync, accepted/delivered debt,
+   scheduled starts and drift correction never pass through `LocalPlaybackEffects`; their authority is
+   the synchronised coordinator's own, re-proved by `runOwnedSteps`. One player, one queue, one
+   `MediaSession`/Now Playing.
+
+Regressions: `LocalPlaybackEffectsLifetimeTest[s]` (JVM and SwiftPM, mirrored; the lifetime rule
+reproduced in a focused gate, effects parked at real suspension points — select before `Load`, clear
+before `Stop`, remove-current before the successor's `Load`, ABA, `Load`/`Play` split, last-entry
+`Stop`, normal local behaviour, a pre-activation `Pause`, and on iOS a pre-activation resume that must
+not activate the audio session); `LocalQueueEditOwnershipTest` and the iOS ownership suite (real
+coordinator and adapter: A dead after B, still dead under C, C admits); the A14 tests (a pre-ride
+admission dies at activation; after End Ride and old debt finishing as SYNCED with the role surviving,
+a fresh admission works); and `MusicCoordinatorLocalEffectLifetimeTest` (emulator, the real Android
+`MusicCoordinator` on a test dispatcher, proving it carries and re-proves the admission). The iOS app
+target still has no unit-test bundle, so iOS `MusicCoordinator`'s wiring — `apply` passes
+`edit.admission`, `dispatch`/`pause`/`seek` admit before their effect — is asserted by reading it.
+Mutants that drop any proof, or stop the lifetime advancing, fail on both platforms. No wire, vector
+or protocol change.

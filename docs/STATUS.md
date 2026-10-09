@@ -62,6 +62,24 @@ passed, 0 failed (+3); instrumented 80/80 (app 24, data 45, audio 11; +5); ktlin
 findings; gitleaks history clean (the working-tree scan's 22 hits are all in the untracked SwiftPM
 `.build/`). Mutants that ignore the gate fail on both platforms. No wire, vector or protocol change.
 
+**Second review follow-up (problem 120, round 2 — ADR-024 Amendment A15 round 2):** the round-1
+admission was a Boolean read once, synchronously, while the edit's player effects ran later behind
+suspensions (library lookup, `Load`, iOS audio-session activation), so synchronised activation inside
+one of them let stale local work load, play or stop on this phone only — and a plain re-check would
+have let local A's parked work run under a later local C. Now the synchronisation owner numbers its
+local ownership lifetimes (advanced on every LOCAL↔SYNC flip, never from `SyncState`), the gate mints
+a `LocalQueueEditAdmission` bound to one lifetime, and `LocalPlaybackEffects` (mirrored) re-proves
+that same admission before audio-session activation, `Load`, `Play`, `Stop`, `Pause` and `Seek`.
+Local transport presses carry one too. Queue state is not rolled back; synchronised `sync*` effects
+are untouched. After the fix: Android unit 1,165 passed, 0 failed (+10); instrumented 84/84 (app 28, data 45,
+audio 11; +4, including the real `MusicCoordinator` on the emulator); ktlint, detekt and lint (0
+errors) clean; Debug and Release assembled. iOS Core 363; Platform 694 executed, 0 failures,
+1 skipped (+11); Debug and Release simulator builds. Cross-platform gate 17/17; local-only audit
+0 findings; gitleaks history clean. Mutants that drop any effect proof, bypass it in the real Android
+`MusicCoordinator`, or stop the owner's lifetime advancing fail on both platforms. The iOS app target
+still has no unit-test bundle, so iOS `MusicCoordinator`'s wiring is asserted by reading it. No wire,
+vector or protocol change.
+
 **Not established:** any phone result for this branch, any SystemUI rendering of the new notifications
 on the OnePlus, any iPhone result. **Phase 9 is not complete; not V1-ready.**
 
@@ -8478,7 +8496,7 @@ as of this write-up — see §7.
 | 117 | **FIXED IN SOFTWARE 9 October 2026 (Phase 9A.5; both platforms; pre-existing; found by code review while restructuring).** Now Playing's current track was found by scanning the **search-filtered** library list (`MusicCoordinator.libraryEntries` / iOS `currentEntry`), so typing a search made Now Playing — and on iOS the lock screen's `MPNowPlayingInfoCenter` title — fall back to "Shared track", and Android's shared-track "play here" lookup could miss a track this phone holds and take the cache path | Low | Resolved by `LocalEntryId` / content hash in the repository (`nowPlayingEntry`, `findLocalByContentHash`; iOS `nowPlayingEntry`, `localEntry(contentHash:)`). `MusicCoordinatorQueuePlayTest.nowPlayingDoesNotDependOnTheLibrarySearch` |
 | 118 | **FIXED IN SOFTWARE 9 October 2026 (Phase 9A.5; both platforms; pre-existing).** The other phone's catalogue (`SharedLibraryScreen` / `SharedLibraryView`) and Phase 5's "playable on both phones" list composed every entry eagerly inside the main screen's scroll — problem 114's shape with the peer's library as input | Medium (an ANR waiting for a large peer library) | One lazy list on its own destination with the shared queue; content-free positional keys because peer entries may repeat a hash. Physical check needs a peer |
 | 119 | **RECORDED 9 October 2026 — consequence of ADR-022 Amendment A1 (Android).** The intercom notification is now a plain notification, which needs `POST_NOTIFICATIONS`; the old single notification carried a media-session token and was exempt. With notifications denied, the intercom runs (the foreground service is still listed by the system) but its Mute / End intercom controls are not shown | Low (the app asks for the permission before an intercom start; `RideStartPolicy` treats a denial as a warning) | By design; documented in ADR-022 A1, ARCHITECTURE §6.4 and TEST_PLAN AF-06 / N-04 |
-| 120 | **FIXED 9 October 2026 (found by independent review of PR #18; Phase 9A.5's own; both platforms).** The new local Up Next — and the library's play-now and add, and "Play here" — edited `LocalQueue` without `SyncPlaybackGate`. While synchronised transport owned playback, selecting a row loaded and played on this phone only, Clear or removing the current entry stopped or advanced this phone only, and Move/Add edited a queue the synchronised path replaces on every synchronised selection — a second path around the leader-ordered one | High (bypasses ADR-024 A14's single transport authority) | ADR-024 Amendment A15: `SyncPlaybackGate.localQueueLocked()` from the same ownership; `LocalQueueEdits` refuses every local edit at `MusicCoordinator`'s boundary with no effect; Up Next and the library read-only (controls absent) while synchronised. Mutants (gate ignored) fail on both platforms |
+| 120 | **FIXED 9 October 2026 (found by independent review of PR #18; Phase 9A.5's own; both platforms).** The new local Up Next — and the library's play-now and add, and "Play here" — edited `LocalQueue` without `SyncPlaybackGate`. While synchronised transport owned playback, selecting a row loaded and played on this phone only, Clear or removing the current entry stopped or advanced this phone only, and Move/Add edited a queue the synchronised path replaces on every synchronised selection — a second path around the leader-ordered one | High (bypasses ADR-024 A14's single transport authority) | ADR-024 Amendment A15: `SyncPlaybackGate.localQueueLocked()` from the same ownership; `LocalQueueEdits` refuses every local edit at `MusicCoordinator`'s boundary with no effect; Up Next and the library read-only (controls absent) while synchronised. Mutants (gate ignored) fail on both platforms. **Round 2 (second review, same day):** the round-1 Boolean admission did not reach the effects it authorised — they ran after suspensions (lookup, `Load`, iOS audio-session activation), and synchronised activation inside one let stale local work load, play or stop; a re-check of "local now" would also have revived local A's work under a later local C. Fixed by ADR-024 A15 round 2: a `LocalQueueEditAdmission` bound to the owner's local-ownership lifetime (advanced on every LOCAL↔SYNC flip), carried by `LocalPlaybackEffects` and re-proved before every activation/`Load`/`Play`/`Stop`/`Pause`/`Seek`; local transport presses carry one too. Mutants that drop any proof or freeze the lifetime fail on both platforms |
 
 Resolved 26 Aug 2026 session: `CLAUDE.md` in `.gitignore` (was problem 1); `.DS_Store` tracking
 (was problem 7 — the claim was incorrect; the files are untracked and now ignored); the ADR-015/
