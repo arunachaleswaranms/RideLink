@@ -2470,3 +2470,58 @@ target still has no unit-test bundle, so iOS `MusicCoordinator`'s wiring — `ap
 `edit.admission`, `dispatch`/`pause`/`seek` admit before their effect — is asserted by reading it.
 Mutants that drop any proof, or stop the lifetime advancing, fail on both platforms. No wire, vector
 or protocol change.
+
+### A15 round 3 — 9 October 2026 — the latest local intent wins inside one lifetime
+
+**Found by the third independent review of PR #18.** Round 2's admission answers *"is this still the
+local ownership lifetime that admitted the edit?"*. It cannot order two local operations **inside** one
+lifetime, and every local operation in a lifetime carries an identical, valid admission. So, with
+ownership local throughout:
+
+- Select A, its lookup parked; Clear, whose `Stop` completes; A released → A loaded and played after
+  the user cleared the queue.
+- Select A parked; Select B, which starts; A released → A replaced B.
+- Select A parked in its lookup or inside `Load`; Pause → A's `Play` defeated the newer pause.
+
+#### Decision (round 3)
+
+1. **The one local effect runner orders local operations** (`LocalPlaybackEffects`, owned by the one
+   `MusicCoordinator`; mirrored). Each effect is issued synchronously in the same step as the queue
+   mutation or press that caused it, and takes a **ticket** from two monotonic sequences at that moment:
+   - **selection** (*which track should be loaded?*), advanced by load-and-play and stop;
+   - **transport intent** (*should the player be running?*), advanced by load-and-play, stop, resume
+     and pause.
+2. **Both authorities are proved before every externally visible step and after every suspension that
+   precedes one**, and neither is ever re-minted after a suspension:
+   - audio-session activation (iOS), and the `Load` after the lookup: admission and selection;
+   - `Play` after `Load`: admission, selection and transport intent;
+   - `Stop`: admission, selection and transport intent;
+   - resume: admission and transport intent (before activation and before `Play`);
+   - `Pause`: admission and transport intent;
+   - `Seek`: admission and selection (a position on the current track; it advances neither).
+3. **Why two sequences, not one.** A single counter would make Pause cancel an in-flight `Load`, leaving
+   the queue naming a track the player never loaded, so the next Play would resume the *previous*
+   track. With two, Select A then Pause leaves A loaded and paused: the queue and the player agree, and
+   the pause is honoured. Neither platform's `Load` starts playback (Media3 keeps `playWhenReady`, which
+   the pause cleared; `AVAudioEnginePlayer.load` stops the node), so a load without its `Play` is
+   paused.
+4. **Harmless edits invalidate nothing.** Add, move and removing a non-current entry produce no player
+   effect, take no ticket and advance neither sequence; a selection in flight completes normally.
+5. **Nothing is reconstructed from queue state.** The tickets are the only order; the queue is not read
+   after a suspension to decide what should happen. Synchronised `sync*` effects never take a ticket
+   and never move either sequence; their authority remains the synchronised coordinator's.
+
+Regressions (mirrored `R3-*` cases in `LocalPlaybackEffectsLifetimeTest[s]`, each parked at a real
+suspension point): Clear after a parked select; Select B after a parked select; Pause with the select
+parked before `Load` and inside `Load`; ABA with newer work under the later lifetime; add/move/remove
+of non-current entries and a seek during a parked select. `MusicCoordinatorLocalEffectLifetimeTest`
+(emulator) proves the real Android `MusicCoordinator` is wired to it for the newer-selection and pause
+cases. Making both sequence checks always true fails exactly the Clear, Select B and both Pause cases
+on both platforms, and both coordinator cases on the emulator. No wire, vector or protocol change.
+
+**Separately (STATUS problem 121), the Android visible-UI start.** `MainActivity`'s shared-music Play
+checked `foregroundVisible` once and then suspended in two lookups before starting the foreground
+service on the cache path. `VisibleMusicStart` now reads visibility and the owner's local-queue lock
+immediately before every visible-UI foreground-service start, with no suspension between that read,
+the start and the coordinator call; `MusicCoordinator` remains the final admission authority. iOS has
+no equivalent: its lookup is synchronous and it has no foreground service.

@@ -102,6 +102,14 @@ bound to one local-ownership lifetime, carried into every effect and re-proved b
 work stays dead (A15 round 2). The admitted queue change itself is kept — the synchronised path
 replaces the local queue on its first selection anyway.
 
+A third review found that the admission orders lifetimes but not operations: inside one local lifetime
+a parked selection could load after Clear, replace a newer selection, or play over a newer Pause. Each
+local effect now also carries a ticket from two sequences — which track should be loaded, and whether
+the player should be running — proved before every player step, so the newest local intent wins; add
+and reorder do not cancel anything in flight (A15 round 3). On Android the shared-music Play now
+re-reads foreground visibility and the queue lock immediately before starting the foreground service,
+after its lookups rather than before them (problem 121).
+
 ## 5. Copy
 
 "Your ride, together" is removed on both platforms. Primary UI says "other phone"; "peer" stays in
@@ -173,8 +181,9 @@ PEER UNAVAILABLE.**
 
 ## 10. Validation
 
-The exact commands, counts and the one intermittent iOS stress-test observation are in
-[STATUS.md](STATUS.md)'s 9 October 2026 entry, recorded after the final source change: Android unit
-1,152/1,152, instrumented 75/75 (API 36 emulator), ktlint/detekt/lint clean, Debug and Release
-assembled; iOS Core 363, Platform 679 (0 failures, 1 skipped), Debug and Release simulator builds;
-cross-platform gate 17/17; local-only audit and gitleaks clean.
+The exact commands, counts and the intermittent iOS stress-test observation are in
+[STATUS.md](STATUS.md)'s 9 October 2026 entry. At the final head, after the third review's fixes:
+Android unit 1,179/1,179, instrumented 86/86 (API 36 emulator), ktlint/detekt/lint clean, Debug and
+Release assembled; iOS Core 363, Platform 701 (0 failures, 1 skipped), Debug and Release simulator
+builds; cross-platform gate 17/17; local-only audit and gitleaks clean. (Before the reviews: Android
+unit 1,152, instrumented 75; iOS Platform 679.)
