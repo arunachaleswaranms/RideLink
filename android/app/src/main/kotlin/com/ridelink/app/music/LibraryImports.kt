@@ -94,7 +94,8 @@ class LibraryImports(
         if (running?.isActive == true) {
             running.cancel()
         } else {
-            _progress.value = ImportProgress.Cancelled
+            // Declining a summary wrote nothing, so there is no "cancelled import" to report.
+            _progress.value = ImportProgress.Idle
         }
     }
 
