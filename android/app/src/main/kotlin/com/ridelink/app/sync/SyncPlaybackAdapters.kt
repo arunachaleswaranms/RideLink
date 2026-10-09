@@ -170,6 +170,9 @@ internal class SyncPlaybackGateAdapter(
             if (sync.diagnostics.value.role == com.ridelink.core.playback.PlaybackRole.LEADER) sync.next()
         }
 
+    /** The same ownership as every intercept, read at admission; nothing is forwarded. */
+    override fun localQueueLocked(): Boolean = sync.isSynchronizedModeActive()
+
     private inline fun intercept(crossinline action: () -> Unit): Boolean {
         if (!sync.isSynchronizedModeActive()) return false
         scope.launch { action() }

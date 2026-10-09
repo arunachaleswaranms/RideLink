@@ -32,6 +32,8 @@ import org.junit.runner.RunWith
 import java.util.Collections
 import java.util.concurrent.atomic.AtomicLong
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
+import kotlin.test.assertTrue
 
 /**
  * Phase 9A.5 §10/§11 against the real [MusicCoordinator], a real Room repository and a recording
@@ -48,6 +50,31 @@ class MusicCoordinatorQueuePlayTest {
     private val clock = AtomicLong(0)
     private val ids = AtomicLong(0)
     private val commands: MutableList<PlaybackCommand> = Collections.synchronizedList(mutableListOf())
+    private val gate = OwnershipGate()
+
+    /**
+     * Stands in for `SyncPlaybackGateAdapter`, whose ownership answer is proven against the real
+     * `SyncPlaybackCoordinator` in `LocalQueueEditOwnershipTest` (JVM). Here only the coordinator's
+     * own admission is under test, so the test flips ownership directly. The intercepts take nothing:
+     * no transport press is exercised while synchronised.
+     */
+    private class OwnershipGate : SyncPlaybackGate {
+        @Volatile var synchronized = false
+
+        override fun interceptPlay() = false
+
+        override fun interceptPause() = false
+
+        override fun interceptSeek(positionMs: Long) = false
+
+        override fun interceptNext() = false
+
+        override fun interceptPrevious() = false
+
+        override fun interceptTrackEnded() = false
+
+        override fun localQueueLocked() = synchronized
+    }
 
     private inner class RecordingPlayer : Player {
         override var state: PlayerState = PlayerState()
@@ -101,7 +128,8 @@ class MusicCoordinatorQueuePlayTest {
                 monotonicNowUs = { clock.incrementAndGet() },
                 nextQueueItemId = { "q${ids.incrementAndGet()}" },
             )
-        runBlocking { (1..2).forEach { repository.insertNew(entry(it), ImportSource.File("content://queue-play/$it")) } }
+        coordinator.syncGate = gate
+        runBlocking { (1..3).forEach { repository.insertNew(entry(it), ImportSource.File("content://queue-play/$it")) } }
     }
 
     @After
@@ -174,4 +202,95 @@ class MusicCoordinatorQueuePlayTest {
 
             assertEquals("Track 2", playing?.track?.title)
         }
+
+    // ---- PR #18 review: local Up Next is read-only while synchronised transport owns playback ----
+
+    /** q1, q2, q3 queued with q2 current and playing; commands cleared. */
+    private fun playingSecondOfThree() {
+        (1..3).forEach { assertTrue(coordinator.addToQueue(entry(it))) }
+        assertTrue(coordinator.selectQueueItem("q2"))
+        awaitCommands(2)
+        commands.clear()
+    }
+
+    private fun assertRefusedWithNoEffect(
+        what: String,
+        attempt: () -> Boolean,
+    ) {
+        val before = coordinator.queueState.value
+        assertFalse(attempt(), "$what was admitted while synchronised")
+        assertEquals(before, coordinator.queueState.value, "$what changed the local queue")
+        assertEquals(emptyList(), commands.toList(), "$what reached the player")
+    }
+
+    @Test
+    fun synchronisedOwnershipRefusesEveryLocalQueueEditWithNoPlayerEffect() {
+        playingSecondOfThree()
+        gate.synchronized = true
+
+        assertRefusedWithNoEffect("A: select") { coordinator.selectQueueItem("q3") }
+        assertRefusedWithNoEffect("B: clear") { coordinator.clearQueue() }
+        assertRefusedWithNoEffect("C: remove current") { coordinator.removeFromQueue("q2") }
+        assertRefusedWithNoEffect("D: move") { coordinator.moveInQueue("q3", 0) }
+        assertRefusedWithNoEffect("add") { coordinator.addToQueue(entry(1)) }
+        assertRefusedWithNoEffect("play now") { coordinator.playNow(entry(3)) }
+        assertEquals("q2", coordinator.queueState.value.currentId)
+        assertEquals(
+            listOf("q1", "q2", "q3"),
+            coordinator.queueState.value.items
+                .map { it.id },
+        )
+        assertTrue(coordinator.isLocalQueueLocked())
+    }
+
+    @Test
+    fun localOwnershipKeepsEveryLocalQueueRule() {
+        playingSecondOfThree()
+
+        // E: remove current advances to its successor and plays it.
+        assertTrue(coordinator.removeFromQueue("q2"))
+        awaitCommands(2)
+        assertEquals("q3", coordinator.queueState.value.currentId)
+        assertEquals(entry(3).localEntryId, (commands[0] as PlaybackCommand.Load).localEntryId)
+        commands.clear()
+
+        assertTrue(coordinator.moveInQueue("q3", 0))
+        assertEquals(
+            listOf("q3", "q1"),
+            coordinator.queueState.value.items
+                .map { it.id },
+        )
+
+        assertTrue(coordinator.clearQueue())
+        awaitCommands(1)
+        assertEquals(PlaybackCommand.Stop, commands.single())
+        assertTrue(
+            coordinator.queueState.value.items
+                .isEmpty(),
+        )
+    }
+
+    @Test
+    fun theSameCoordinatorAdmitsRefusesThenAdmitsAgainAsOwnershipMoves() {
+        playingSecondOfThree()
+
+        assertTrue(coordinator.moveInQueue("q3", 0), "F: local at first")
+        assertEquals(
+            listOf("q3", "q1", "q2"),
+            coordinator.queueState.value.items
+                .map { it.id },
+        )
+
+        gate.synchronized = true
+        assertRefusedWithNoEffect("F: while synchronised") { coordinator.moveInQueue("q2", 0) }
+
+        gate.synchronized = false
+        assertFalse(coordinator.isLocalQueueLocked(), "nothing cached the synchronised answer")
+        assertTrue(coordinator.moveInQueue("q2", 0), "F: local again once ownership returned")
+        assertEquals(
+            listOf("q2", "q3", "q1"),
+            coordinator.queueState.value.items
+                .map { it.id },
+        )
+    }
 }

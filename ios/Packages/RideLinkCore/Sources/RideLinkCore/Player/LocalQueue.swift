@@ -74,6 +74,12 @@ public enum LocalQueueEffect: Sendable, Equatable {
 public struct LocalQueueOutcome: Sendable, Equatable {
     public let state: LocalQueueState
     public let effects: [LocalQueueEffect]
+
+    /// Public so `RideLinkPlatform.LocalQueueEdits` can combine an edit made of several actions.
+    public init(state: LocalQueueState, effects: [LocalQueueEffect]) {
+        self.state = state
+        self.effects = effects
+    }
 }
 
 /// The local queue, as a pure `(state, action) -> (state, effects)` reducer — same shape as

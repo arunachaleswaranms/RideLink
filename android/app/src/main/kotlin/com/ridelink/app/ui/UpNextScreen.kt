@@ -89,6 +89,11 @@ internal fun UpNextRoute(
  * The local queue (Phase 9A.5 §10), lazy, with exactly the operations [com.ridelink.core.player.LocalQueue]
  * already has: select, remove, move, clear.
  *
+ * **Read-only while [synchronized]** (PR #18 review): no row plays, and there is no Remove, Move or
+ * Clear — not merely disabled, absent, so accessibility services cannot reach them either. The
+ * authority is not this screen: [com.ridelink.app.music.MusicCoordinator] refuses every local edit
+ * while synchronised transport owns playback, whatever any screen offers.
+ *
  * Every action names a **queue entry id**. The same track queued twice is two entries with two ids,
  * shown twice and removed one at a time — nothing here collapses duplicates or acts on "the" track.
  * Reordering is Move up / Move down, which a screen reader can operate and which maps one-to-one to
@@ -113,11 +118,12 @@ internal fun UpNextContent(
                 Text("Up Next", style = MaterialTheme.typography.titleLarge, modifier = Modifier.semantics { heading() })
                 Text(tracks(rows.size), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
-            if (rows.isNotEmpty()) TextButton(onClick = { confirmClear = true }) { Text("Clear") }
+            if (rows.isNotEmpty() && !synchronized) TextButton(onClick = { confirmClear = true }) { Text("Clear") }
         }
         if (synchronized) {
             Text(
-                "Playing on both phones. Change what plays together from the other phone's music.",
+                "Playing on both phones. Change what plays together from the other phone's music. " +
+                    "This phone's Up Next can't be changed until you choose Play on this phone only.",
                 modifier = Modifier.padding(horizontal = RideSpace.lg, vertical = RideSpace.xs),
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.tertiary,
@@ -148,6 +154,7 @@ internal fun UpNextContent(
                             last = index == rows.lastIndex,
                             isCurrent = row.id == queue.currentId,
                             actions = actions,
+                            readOnly = synchronized,
                         )
                     }
                 }
@@ -178,13 +185,14 @@ private fun UpNextItem(
     last: Boolean,
     isCurrent: Boolean,
     actions: UpNextActions,
+    readOnly: Boolean,
 ) {
     Row(
         Modifier
             .fillMaxWidth()
             .testTag(UP_NEXT_ROW_TAG)
             .heightIn(min = 64.dp)
-            .clickable(onClickLabel = "Play", onClick = { actions.onSelect(row.id) })
+            .then(if (readOnly) Modifier else Modifier.clickable(onClickLabel = "Play", onClick = { actions.onSelect(row.id) }))
             .padding(start = RideSpace.md, end = RideSpace.xs)
             .semantics(mergeDescendants = true) { if (isCurrent) stateDescription = "Now playing" },
         verticalAlignment = Alignment.CenterVertically,
@@ -214,6 +222,7 @@ private fun UpNextItem(
                 overflow = TextOverflow.Ellipsis,
             )
         }
+        if (readOnly) return@Row
         IconButton(onClick = { actions.onMove(row.id, position - 1) }, enabled = position > 0) {
             Icon(painterResource(R.drawable.ic_chevron_up), contentDescription = "Move ${row.title} up")
         }

@@ -205,9 +205,33 @@ class SyncPlaybackCoordinator(
 
     @Volatile
     private var role: PlaybackRole? = null
+        set(value) {
+            field = value
+            publishTransportOwnershipForDisplay()
+        }
 
     @Volatile
     private var syncEnabled = false
+        set(value) {
+            field = value
+            publishTransportOwnershipForDisplay()
+        }
+
+    private val _transportOwnershipForDisplay = MutableStateFlow(false)
+
+    /**
+     * [isSynchronizedModeActive], **published for rendering only** (Phase 9A.5, PR #18 review): the
+     * screens that make local Up Next read-only need to redraw when ownership changes, and not every
+     * assignment of [syncEnabled]/[role] publishes [diagnostics]. Written by those two properties'
+     * own setters — the Android counterpart of iOS's `didSet`-fed mirror — so no assignment can
+     * change ownership without it. **Never authority**: every admission still reads
+     * [isSynchronizedModeActive] synchronously at the moment it acts (ADR-024 Amendment A14).
+     */
+    val transportOwnershipForDisplay: StateFlow<Boolean> = _transportOwnershipForDisplay.asStateFlow()
+
+    private fun publishTransportOwnershipForDisplay() {
+        _transportOwnershipForDisplay.value = syncEnabled && role != null
+    }
 
     /**
      * The highest `command_seq` this device has taken responsibility for — *the* input to

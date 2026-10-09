@@ -23,6 +23,9 @@ import RideLinkCore
 public final class SyncPlaybackPresenter {
     public private(set) var diagnostics = SyncPlaybackDiagnostics()
     public private(set) var queueState = SharedQueueState()
+    /// Ownership published **for rendering only** (Phase 9A.5, PR #18 review): which local Up Next and
+    /// library controls to offer. `MusicCoordinator` re-asks the gate at the moment it admits an edit.
+    public private(set) var localQueueLocked = false
 
     private let coordinator: SyncPlaybackCoordinator
 
@@ -31,6 +34,9 @@ public final class SyncPlaybackPresenter {
         onDiagnostics: (@MainActor (SyncPlaybackDiagnostics) -> Void)? = nil
     ) {
         self.coordinator = coordinator
+        coordinator.transportOwnership.setDisplayObserver { [weak self] ownership in
+            Task { @MainActor in self?.localQueueLocked = ownership.isSynchronizedModeActive }
+        }
         Task { [weak self] in
             await coordinator.setDiagnosticsObserver { value in
                 Task { @MainActor in

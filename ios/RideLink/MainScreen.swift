@@ -134,7 +134,8 @@ struct MainScreen: View {
                 MusicSection(
                     musicCoordinator: musicCoordinator,
                     sharedEntries: coordinator.sharedLibrary?.remoteEntries ?? [],
-                    synchronized: syncPlayback?.isSynchronizedModeActive == true
+                    // Observable, for rendering only (PR #18 review); MusicCoordinator re-asks the gate.
+                    synchronized: syncPlayback?.localQueueLocked == true
                 )
             case .failure(let error):
                 Text("Local music unavailable. Restart RideLink to try again.")

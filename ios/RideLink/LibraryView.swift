@@ -21,7 +21,16 @@ struct LibraryScreen: View {
     var body: some View {
         let entries = musicCoordinator.libraryEntries
         let query = musicCoordinator.query
+        // While synchronised transport owns playback a row neither plays nor adds (PR #18 review);
+        // `MusicCoordinator` refuses both regardless.
+        let affordances = LocalQueueAffordances.forLocked(synchronized)
         List {
+            if synchronized {
+                Text("Playing on both phones. Tracks here can't be played or queued on this phone alone "
+                    + "until you choose Play on this phone only.")
+                    .font(.footnote)
+                    .foregroundStyle(RideDesign.warning)
+            }
             Section {
                 Picker("Sort by", selection: Binding(get: { query.sort }, set: { musicCoordinator.setSort($0) })) {
                     ForEach(sortOptions, id: \.self) { sort in Text(sortLabel(sort)).tag(sort) }
@@ -53,10 +62,10 @@ struct LibraryScreen: View {
                     TrackRow(
                         entry: entry,
                         isCurrent: entry.localEntryId == musicCoordinator.nowPlayingEntry?.localEntryId,
+                        affordances: affordances,
                         onPlayNow: { musicCoordinator.playNow(entry) },
                         onAddToQueue: {
-                            musicCoordinator.addToQueue(entry)
-                            lastAdded = entry.track.title
+                            if musicCoordinator.addToQueue(entry) { lastAdded = entry.track.title }
                         }
                     )
                 }
@@ -120,37 +129,46 @@ struct LibraryScreen: View {
 private struct TrackRow: View {
     let entry: LibraryEntry
     let isCurrent: Bool
+    let affordances: LocalQueueAffordances
     let onPlayNow: () -> Void
     let onAddToQueue: () -> Void
 
-    private var playable: Bool { entry.decodeStatus == .indexed }
+    private var indexed: Bool { entry.decodeStatus == .indexed }
+    private var playable: Bool { indexed && affordances.rowsPlay }
 
     var body: some View {
         HStack(spacing: RideDesign.md) {
-            Button(action: onPlayNow) {
+            if playable {
+                Button(action: onPlayNow) { rowContent }
+                    .buttonStyle(.borderless)
+                    .accessibilityLabel("Play \(entry.track.title)")
+                    .accessibilityValue(isCurrent ? "Now playing" : "")
+            } else {
+                rowContent.accessibilityElement(children: .combine)
+            }
+            if affordances.canAdd {
+                Button(action: onAddToQueue) { Image(systemName: "text.badge.plus").font(.title3).frame(width: 44, height: 44) }
+                    .buttonStyle(.borderless)
+                    .disabled(!indexed)
+                    .accessibilityLabel("Add \(entry.track.title) to Up Next")
+            }
+        }
+    }
+
+    private var rowContent: some View {
                 HStack(spacing: RideDesign.md) {
                     ArtworkThumbnail(artworkRef: entry.track.artworkRef)
                     VStack(alignment: .leading, spacing: RideDesign.xs) {
                         Text(entry.track.title).font(.body).lineLimit(1)
                             .foregroundStyle(isCurrent ? RideDesign.primary : Color.primary)
-                        Text(playable ? "\(entry.track.artist) · \(entry.track.album)" : decodeStatusLabel(entry.decodeStatus))
+                        Text(indexed ? "\(entry.track.artist) · \(entry.track.album)" : decodeStatusLabel(entry.decodeStatus))
                             .font(.caption)
-                            .foregroundStyle(playable ? Color.secondary : Color.red)
+                            .foregroundStyle(indexed ? Color.secondary : Color.red)
                             .lineLimit(1)
                     }
                     Spacer(minLength: 0)
                 }
                 .contentShape(Rectangle())
-            }
-            .buttonStyle(.borderless)
-            .disabled(!playable)
-            .accessibilityLabel("Play \(entry.track.title)")
-            .accessibilityValue(isCurrent ? "Now playing" : "")
-            Button(action: onAddToQueue) { Image(systemName: "text.badge.plus").font(.title3).frame(width: 44, height: 44) }
-                .buttonStyle(.borderless)
-                .disabled(!playable)
-                .accessibilityLabel("Add \(entry.track.title) to Up Next")
-        }
     }
 
     private func decodeStatusLabel(_ status: DecodeStatus) -> String {

@@ -37,4 +37,18 @@ interface SyncPlaybackGate {
      * the leader's command is correct, not a stall.
      */
     fun interceptTrackEnded(): Boolean
+
+    /**
+     * Whether the **local** queue is locked because a synchronised session owns transport (Phase
+     * 9A.5, PR #18 review). Unlike the intercepts above this takes nothing over and forwards nothing:
+     * local Up Next has no synchronised equivalent to forward to, so while synchronised mode owns
+     * playback a local select, remove, move, clear, add or play-now is simply **refused**. Otherwise
+     * each would change only this phone — `Select` loads and plays a track, `Clear` and removing the
+     * current entry stop or advance the player — around the leader-ordered path, and an addition would
+     * be silently discarded by the next synchronised selection, which replaces the local queue.
+     *
+     * Answered from the same ownership as every method here (ADR-024 Amendment A14), read
+     * synchronously at the moment [MusicCoordinator] admits the edit.
+     */
+    fun localQueueLocked(): Boolean
 }

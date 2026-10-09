@@ -1,4 +1,5 @@
 import RideLinkCore
+import RideLinkPlatform
 import SwiftUI
 
 /// Local music on the main screen: Now Playing and links to the library and Up Next — mirrors
@@ -92,9 +93,13 @@ struct UpNextScreen: View {
 
     var body: some View {
         let queue = musicCoordinator.queueState
+        // Read-only while synchronised transport owns playback (PR #18 review): nothing that edits the
+        // local queue is offered — absent, not disabled. `MusicCoordinator` refuses the edit anyway.
+        let affordances = LocalQueueAffordances.forLocked(synchronized)
         List {
             if synchronized {
-                Text("Playing on both phones. Change what plays together from the other phone's music.")
+                Text("Playing on both phones. Change what plays together from the other phone's music. "
+                    + "This phone's Up Next can't be changed until you choose Play on this phone only.")
                     .font(.footnote)
                     .foregroundStyle(RideDesign.warning)
             }
@@ -106,23 +111,23 @@ struct UpNextScreen: View {
                 }
             }
             ForEach(Array(queue.items.enumerated()), id: \.element.id) { index, item in
-                row(index: index, item: item, isCurrent: item.id == queue.currentId)
+                row(index: index, item: item, isCurrent: item.id == queue.currentId, playable: affordances.rowsPlay)
             }
-            .onDelete { offsets in
+            .onDelete(perform: affordances.canRemove ? { offsets in
                 offsets.map { queue.items[$0].id }.forEach { musicCoordinator.removeFromQueue(id: $0) }
-            }
-            .onMove { source, destination in
+            } : nil)
+            .onMove(perform: affordances.canReorder ? { source, destination in
                 guard let from = source.first else { return }
                 let to = destination > from ? destination - 1 : destination
                 musicCoordinator.moveInQueue(id: queue.items[from].id, toIndex: to)
-            }
+            } : nil)
         }
         .listStyle(.plain)
         .navigationTitle("Up Next")
         .toolbar {
             if !queue.items.isEmpty {
-                EditButton()
-                Button("Clear") { confirmClear = true }
+                if affordances.canReorder { EditButton() }
+                if affordances.canClear { Button("Clear") { confirmClear = true } }
             }
         }
         .confirmationDialog("Clear Up Next?", isPresented: $confirmClear, titleVisibility: .visible) {
@@ -132,10 +137,24 @@ struct UpNextScreen: View {
         }
     }
 
-    private func row(index: Int, item: LocalQueueItem, isCurrent: Bool) -> some View {
+    @ViewBuilder
+    private func row(index: Int, item: LocalQueueItem, isCurrent: Bool, playable: Bool) -> some View {
         let entry = musicCoordinator.entry(for: item.localEntryId)
         let title = entry?.track.title ?? "Shared track"
-        return Button { musicCoordinator.selectQueueItem(id: item.id) } label: {
+        if playable {
+            Button { musicCoordinator.selectQueueItem(id: item.id) } label: { rowContent(index, entry, title, isCurrent) }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Play \(title)")
+                .accessibilityValue(isCurrent ? "Now playing" : "Position \(index + 1)")
+        } else {
+            // A plain row: no button, so no tap and no VoiceOver activation either.
+            rowContent(index, entry, title, isCurrent)
+                .accessibilityElement(children: .combine)
+                .accessibilityValue(isCurrent ? "Now playing" : "Position \(index + 1)")
+        }
+    }
+
+    private func rowContent(_ index: Int, _ entry: LibraryEntry?, _ title: String, _ isCurrent: Bool) -> some View {
             HStack(spacing: RideDesign.md) {
                 Text(isCurrent ? "▶" : "\(index + 1)")
                     .frame(width: 28)
@@ -148,9 +167,5 @@ struct UpNextScreen: View {
                 Spacer(minLength: 0)
             }
             .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .accessibilityLabel("Play \(title)")
-        .accessibilityValue(isCurrent ? "Now playing" : "Position \(index + 1)")
     }
 }

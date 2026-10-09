@@ -234,7 +234,10 @@ class MainActivity : ComponentActivity() {
         musicCoordinator: MusicCoordinator,
         entry: LibraryEntry,
     ) {
-        if (!foregroundVisible) return
+        // Phase 9A.5, PR #18 review: while synchronised playback owns transport the coordinator
+        // refuses this play-now, so do not start the foreground service for it either. This read
+        // only avoids a needless start; `playNow` is what refuses.
+        if (!foregroundVisible || musicCoordinator.isLocalQueueLocked()) return
         if (!RideForegroundService.startMusicFromVisibleUi(this)) {
             musicCoordinator.onForegroundServiceStartFailed()
             return
@@ -247,7 +250,7 @@ class MainActivity : ComponentActivity() {
         musicCoordinator: MusicCoordinator,
         queueItemId: String,
     ) {
-        if (!foregroundVisible) return
+        if (!foregroundVisible || musicCoordinator.isLocalQueueLocked()) return
         if (!RideForegroundService.startMusicFromVisibleUi(this)) {
             musicCoordinator.onForegroundServiceStartFailed()
             return
@@ -272,8 +275,10 @@ class MainActivity : ComponentActivity() {
         sharedLibraryCoordinator: SharedLibraryCoordinator,
         entry: ManifestEntry,
     ) {
-        val hash = entry.contentHash ?: return
-        if (!foregroundVisible) return
+        val hash = entry.contentHash
+        // PR #18 review: refused by the coordinator while synchronised playback owns transport; not
+        // started (nor its foreground service) here either.
+        if (hash == null || !foregroundVisible || musicCoordinator.isLocalQueueLocked()) return
         lifecycleScope.launch {
             // Looked up in the repository, not in the Library screen's search-filtered, only-while-
             // collected list (Phase 9A.5): that list could be empty or filtered here, sending a track

@@ -39,6 +39,7 @@ struct SharedMusicScreen: View {
                         onDownload: { coordinator.requestDownload(entry) },
                         onCancel: { entry.contentHash.map(coordinator.cancelDownload) },
                         onPlayLocally: { onPlayLocally(entry) },
+                        playHereOffered: syncPlayback?.localQueueLocked != true,
                         onPlayOnBoth: bothPhones && syncPlayback?.diagnostics.role != nil
                             ? entry.contentHash.map { hash in { syncPlayback?.playSynchronized(hash) } } : nil,
                         onAddToSharedQueue: bothPhones && syncPlayback?.diagnostics.role != nil
@@ -66,6 +67,9 @@ struct SharedTrackRow: View {
     let onDownload: () -> Void
     let onCancel: () -> Void
     let onPlayLocally: () -> Void
+    /// False while synchronised transport owns playback: playing here would change only this phone
+    /// (PR #18 review). `MusicCoordinator` refuses it regardless.
+    var playHereOffered = true
     var onPlayOnBoth: (() -> Void)?
     var onAddToSharedQueue: (() -> Void)?
 
@@ -81,7 +85,7 @@ struct SharedTrackRow: View {
                 // Phase 3 imported row (`hasLocal`) *and* a verified Phase-4 cache-only file that
                 // was never imported (`hasCached`) — see `MusicCoordinator.playExternalVerifiedCachedTrack`.
                 if availability.hasLocal || availability.hasCached {
-                    Button("Play here", action: onPlayLocally).buttonStyle(.borderless)
+                    if playHereOffered { Button("Play here", action: onPlayLocally).buttonStyle(.borderless) }
                 } else if let download, activeStatuses.contains(download.status) {
                     Button("Cancel", action: onCancel).buttonStyle(.borderless)
                 } else {

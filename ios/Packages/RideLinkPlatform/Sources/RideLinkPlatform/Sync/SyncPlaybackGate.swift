@@ -35,6 +35,15 @@ public protocol SyncPlaybackGate {
     /// `NEXT` that both phones then schedule. A follower returns true and does nothing — waiting for
     /// the leader's command is correct, not a stall.
     func interceptTrackEnded() -> Bool
+
+    /// Whether the **local** queue is locked because a synchronised session owns transport (Phase
+    /// 9A.5, PR #18 review). Unlike the intercepts this takes nothing over and forwards nothing: local
+    /// Up Next has no synchronised equivalent, so while synchronised mode owns playback a local select,
+    /// remove, move, clear, add or play-now is simply **refused** (`LocalQueueEdits`). Otherwise each
+    /// would change only this phone around the leader-ordered path, and an addition would be silently
+    /// discarded by the next synchronised selection, which replaces the local queue. Answered from the
+    /// same ownership as every method here (ADR-024 Amendment A14), at the moment of admission.
+    func localQueueLocked() -> Bool
 }
 
 /// Bridges `MusicCoordinator`'s gate to the coordinator that owns synchronisation.
@@ -92,6 +101,9 @@ public struct SyncPlaybackGateAdapter: SyncPlaybackGate {
             return true
         }
     }
+
+    /// The same ownership as every intercept, read at admission; nothing is forwarded.
+    public func localQueueLocked() -> Bool { sync.transportOwnership.current.isSynchronizedModeActive }
 
     private func forward(_ action: @escaping @Sendable (SyncPlaybackCoordinator) async -> Void) -> Bool {
         guard sync.transportOwnership.current.isSynchronizedModeActive else { return false }

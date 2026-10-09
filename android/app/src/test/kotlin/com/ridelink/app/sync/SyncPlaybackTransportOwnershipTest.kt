@@ -72,6 +72,7 @@ class SyncPlaybackTransportOwnershipTest {
             assertFalse(gate.interceptNext(), "Next")
             assertFalse(gate.interceptPrevious(), "Previous")
             assertFalse(gate.interceptTrackEnded(), "TrackEnded: MusicCoordinator advances its own queue")
+            assertFalse(gate.localQueueLocked(), "SYNCED debt finishing after End Ride must not lock local Up Next (PR #18)")
             runCurrent()
             // C: the entry points the synchronised-playback card calls directly refuse fresh authority.
             coordinator.pause()
@@ -91,6 +92,7 @@ class SyncPlaybackTransportOwnershipTest {
             runCurrent()
             assertTrue(coordinator.isSynchronizedModeActive(), "Play synced reopened ownership")
             assertTrue(gate.interceptPause(), "Pause is intercepted again")
+            assertTrue(gate.localQueueLocked(), "a legitimate activation locks local Up Next again (PR #18)")
             runCurrent()
             assertTrue(gate.interceptSeek(7_000), "Seek is intercepted again")
             runCurrent()

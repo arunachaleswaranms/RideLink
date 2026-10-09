@@ -10,6 +10,7 @@ import com.ridelink.core.player.LocalQueue
 import com.ridelink.core.player.LocalQueueAction
 import com.ridelink.core.player.LocalQueueEffect
 import com.ridelink.core.player.LocalQueueItem
+import com.ridelink.core.player.LocalQueueOutcome
 import com.ridelink.core.player.LocalQueueState
 import com.ridelink.core.player.MusicFailure
 import com.ridelink.core.player.PlaybackCommand
@@ -218,19 +219,38 @@ class MusicCoordinator(
         _query.value = _query.value.copy(sort = sort)
     }
 
-    fun addToQueue(entry: LibraryEntry) {
-        dispatch(LocalQueueAction.Add(newItem(entry)))
-    }
+    /**
+     * Phase 9A.5, PR #18 review: every user edit of the local queue — [addToQueue], [playNow],
+     * [playExternalVerifiedCachedTrack], [removeFromQueue], [moveInQueue], [clearQueue],
+     * [selectQueueItem] — is admitted through [LocalQueueEdits], which refuses it while synchronised
+     * transport owns playback ([SyncPlaybackGate.localQueueLocked], ADR-024 Amendment A14). Each
+     * returns whether it was admitted. A refusal changes nothing: no queue mutation, no `Load`, no
+     * `Play`, no `Stop`. Additions are refused too, because the synchronised path replaces the local
+     * queue on every synchronised selection ([syncSelect]) and clears it on stop
+     * ([syncClearSelection]) — an entry "staged" during a synchronised ride would silently vanish.
+     */
+    fun addToQueue(entry: LibraryEntry): Boolean = edit(LocalQueueAction.Add(newItem(entry)))
+
+    /** Whether local queue edits are refused right now — for **rendering** only (which controls to
+     *  offer). Every edit re-asks at the moment it is admitted; this answer authorises nothing. */
+    fun isLocalQueueLocked(): Boolean = syncGate?.localQueueLocked() == true
 
     /** Adds [entry] to the queue and starts playing it immediately — the library screen's "tap a
      *  track" affordance, as one atomic queue operation rather than an add followed by a
      *  UI-observed "select the item I just added" that would race a second rapid tap. */
-    fun playNow(entry: LibraryEntry) {
+    fun playNow(entry: LibraryEntry): Boolean {
+        val item = newItem(entry)
+        val outcome =
+            LocalQueueEdits.reduce(
+                _queueState.value,
+                listOf(LocalQueueAction.Add(item), LocalQueueAction.Select(item.id)),
+                syncGate,
+            )
+        if (outcome == null) return false
         _lastMusicStartRefusal.value = null
         coexistenceEvents?.onPlaybackIntent(playing = true)
-        val item = newItem(entry)
-        dispatch(LocalQueueAction.Add(item))
-        dispatch(LocalQueueAction.Select(item.id))
+        apply(outcome)
+        return true
     }
 
     private fun newItem(entry: LibraryEntry): LocalQueueItem =
@@ -248,24 +268,32 @@ class MusicCoordinator(
         file: File,
         title: String?,
         artist: String?,
-    ) {
+    ): Boolean {
+        val entryId = LocalEntryId(UUID.randomUUID().toString())
+        val item = LocalQueueItem(id = nextQueueItemId(), localEntryId = entryId, insertedAtMonoUs = monotonicNowUs())
+        val outcome =
+            LocalQueueEdits.reduce(
+                _queueState.value,
+                listOf(LocalQueueAction.Add(item), LocalQueueAction.Select(item.id)),
+                syncGate,
+            )
+        if (outcome == null) return false
         _lastMusicStartRefusal.value = null
         coexistenceEvents?.onPlaybackIntent(playing = true)
-        val entryId = LocalEntryId(UUID.randomUUID().toString())
+        // Registered before the effects run: `loadAndPlay` resolves the source when it executes.
         externalCacheSources.register(entryId, ExternalCacheSource(contentHash, LocalTrackLocation(file.toURI().toString()), title, artist))
-        val item = LocalQueueItem(id = nextQueueItemId(), localEntryId = entryId, insertedAtMonoUs = monotonicNowUs())
-        dispatch(LocalQueueAction.Add(item))
-        dispatch(LocalQueueAction.Select(item.id))
+        apply(outcome)
+        return true
     }
 
-    fun removeFromQueue(id: String) = dispatch(LocalQueueAction.Remove(id))
+    fun removeFromQueue(id: String): Boolean = edit(LocalQueueAction.Remove(id))
 
     fun moveInQueue(
         id: String,
         toIndex: Int,
-    ) = dispatch(LocalQueueAction.Move(id, toIndex))
+    ): Boolean = edit(LocalQueueAction.Move(id, toIndex))
 
-    fun clearQueue() = dispatch(LocalQueueAction.Clear)
+    fun clearQueue(): Boolean = edit(LocalQueueAction.Clear)
 
     fun next() {
         if (syncGate?.interceptNext() == true) return
@@ -277,7 +305,7 @@ class MusicCoordinator(
         dispatch(LocalQueueAction.Previous)
     }
 
-    fun selectQueueItem(id: String) = dispatch(LocalQueueAction.Select(id))
+    fun selectQueueItem(id: String): Boolean = edit(LocalQueueAction.Select(id))
 
     /**
      * Play, from the app or the lock screen. A synchronised session owns it first (ADR-024 A14, via
@@ -402,8 +430,17 @@ class MusicCoordinator(
         trackToken: String,
     ): Boolean = player.resumeAfterVoice(generation, trackToken)
 
-    private fun dispatch(action: LocalQueueAction) {
-        val outcome = LocalQueue.reduce(_queueState.value, action)
+    /** A user's edit of the local queue, admitted or refused as one step — see [LocalQueueEdits]. */
+    private fun edit(action: LocalQueueAction): Boolean {
+        val outcome = LocalQueueEdits.reduce(_queueState.value, listOf(action), syncGate) ?: return false
+        apply(outcome)
+        return true
+    }
+
+    /** Transport and track-end actions: already decided by [syncGate]'s intercepts before reaching here. */
+    private fun dispatch(action: LocalQueueAction) = apply(LocalQueue.reduce(_queueState.value, action))
+
+    private fun apply(outcome: LocalQueueOutcome) {
         _queueState.value = outcome.state
         outcome.effects.forEach { effect ->
             when (effect) {

@@ -53,6 +53,8 @@ internal data class SharedMusicUiState(
     val sharedQueue: SharedQueueState,
     /** Whether a synchronised session exists at all — ADR-010's role is shown nowhere. */
     val syncAvailable: Boolean,
+    /** Synchronised transport owns playback, so "Play here" is not offered (display only — PR #18). */
+    val queueLocked: Boolean = false,
 )
 
 internal class SharedMusicActions(
@@ -74,6 +76,7 @@ internal fun SharedMusicRoute(
     onBack: () -> Unit,
     onPlayHere: (ManifestEntry) -> Unit,
 ) {
+    val queueLocked by syncPlaybackCoordinator.transportOwnershipForDisplay.collectAsState()
     val remote by sharedLibraryCoordinator.remoteEntries.collectAsState()
     val downloads by sharedLibraryCoordinator.downloadStates.collectAsState()
     val cached by sharedLibraryCoordinator.cachedHashes.collectAsState()
@@ -81,7 +84,15 @@ internal fun SharedMusicRoute(
     val queue by syncPlaybackCoordinator.queueState.collectAsState()
     val diagnostics by syncPlaybackCoordinator.diagnostics.collectAsState()
     SharedMusicContent(
-        SharedMusicUiState(remote, local + cached, local, downloads, queue, syncAvailable = diagnostics.role != null),
+        SharedMusicUiState(
+            remote,
+            local + cached,
+            local,
+            downloads,
+            queue,
+            syncAvailable = diagnostics.role != null,
+            queueLocked = queueLocked,
+        ),
         SharedMusicActions(
             onBack = onBack,
             onDownload = sharedLibraryCoordinator::requestDownload,
@@ -175,6 +186,7 @@ private fun SharedTrackRow(
                 )
             }
             when {
+                playableHere && state.queueLocked -> Unit
                 playableHere -> TextButton(onClick = { actions.onPlayHere(entry) }) { Text("Play here") }
                 downloading -> TextButton(onClick = { hash?.let(actions.onCancelDownload) }) { Text("Cancel") }
                 else -> TextButton(onClick = { actions.onDownload(entry) }, enabled = hash != null) { Text("Download") }

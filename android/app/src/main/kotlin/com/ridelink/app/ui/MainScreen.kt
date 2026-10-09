@@ -79,6 +79,9 @@ fun MainScreen(
     onNavigate: (MainDestination) -> Unit = {},
 ) {
     val state by coordinator.state.collectAsState()
+    // Rendering only (PR #18 review): which local-queue controls to offer. MusicCoordinator re-asks
+    // the authoritative ownership at the moment it admits each edit.
+    val queueLocked by syncPlaybackCoordinator.transportOwnershipForDisplay.collectAsState()
     val authenticated = state.status == SessionStatus.CONNECTED || state.status == SessionStatus.RIDE_ACTIVE
     // The other phone's music exists only past the trust gate; losing it returns home rather than
     // leaving a screen whose actions can no longer be admitted.
@@ -118,12 +121,13 @@ fun MainScreen(
                     LibraryRoute(
                         musicCoordinator = musicCoordinator,
                         actions = libraryActions(musicCoordinator, onNavigate, onPlayNow, onImportFolder, onImportFiles),
+                        queueLocked = queueLocked,
                         bottomBar = miniPlayer,
                     )
                 MainDestination.UP_NEXT ->
                     UpNextRoute(
                         musicCoordinator = musicCoordinator,
-                        synchronized = syncPlaybackCoordinator.isSynchronizedModeActive(),
+                        synchronized = queueLocked,
                         actions =
                             UpNextActions(
                                 onBack = { onNavigate(MainDestination.HOME) },

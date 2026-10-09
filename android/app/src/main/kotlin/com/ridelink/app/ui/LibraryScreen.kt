@@ -66,6 +66,8 @@ internal data class LibraryUiState(
     val importProgress: ImportProgress = ImportProgress.Idle,
     val preparing: PreparingProgress = PreparingProgress(0, 0),
     val importBusy: Boolean = false,
+    /** Synchronised transport owns playback: rows neither play nor add (display only — PR #18). */
+    val queueLocked: Boolean = false,
 )
 
 /** Everything the Library screen can ask for. Every action reaches an existing owner. */
@@ -75,7 +77,8 @@ internal class LibraryActions(
     val onSortChange: (LibrarySort) -> Unit = {},
     val import: ImportActions = ImportActions(),
     val onPlayNow: (LibraryEntry) -> Unit = {},
-    val onAddToQueue: (LibraryEntry) -> Unit = {},
+    /** Returns whether the coordinator admitted the edit; refused edits show no confirmation. */
+    val onAddToQueue: (LibraryEntry) -> Boolean = { true },
     val onOpenUpNext: () -> Unit = {},
 )
 
@@ -97,6 +100,7 @@ internal class ImportActions(
 internal fun LibraryRoute(
     musicCoordinator: MusicCoordinator,
     actions: LibraryActions,
+    queueLocked: Boolean = false,
     bottomBar: @Composable () -> Unit = {},
 ) {
     val query by musicCoordinator.query.collectAsState()
@@ -115,6 +119,7 @@ internal fun LibraryRoute(
                 importProgress = importProgress,
                 preparing = preparing,
                 importBusy = importProgress is ImportProgress.Scanning || importProgress is ImportProgress.Indexing,
+                queueLocked = queueLocked,
             ),
         actions = actions,
         bottomBar = bottomBar,
@@ -142,11 +147,12 @@ internal fun LibraryContent(
     val scope = rememberCoroutineScope()
     val listState = rememberLazyListState()
     val onAdd: (LibraryEntry) -> Unit = { entry ->
-        actions.onAddToQueue(entry)
-        scope.launch {
-            snackbar.currentSnackbarData?.dismiss()
-            val result = snackbar.showSnackbar("Added “${entry.track.title}” to Up Next", actionLabel = "View")
-            if (result == SnackbarResult.ActionPerformed) actions.onOpenUpNext()
+        if (actions.onAddToQueue(entry)) {
+            scope.launch {
+                snackbar.currentSnackbarData?.dismiss()
+                val result = snackbar.showSnackbar("Added “${entry.track.title}” to Up Next", actionLabel = "View")
+                if (result == SnackbarResult.ActionPerformed) actions.onOpenUpNext()
+            }
         }
     }
 
@@ -177,6 +183,17 @@ internal fun LibraryContent(
                         modifier = Modifier.fillMaxSize().testTag(LIBRARY_LIST_TAG),
                         contentPadding = PaddingValues(bottom = RideSpace.sm),
                     ) {
+                        if (state.queueLocked) {
+                            item(key = "locked", contentType = "note") {
+                                Text(
+                                    "Playing on both phones. Tracks here can't be played or queued on this phone " +
+                                        "alone until you choose Play on this phone only.",
+                                    modifier = Modifier.padding(horizontal = RideSpace.lg, vertical = RideSpace.sm),
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.tertiary,
+                                )
+                            }
+                        }
                         item(key = "count", contentType = "count") {
                             Text(
                                 libraryCountLabel(state.entries.size, state.totalCount, state.query.searchText),
@@ -191,6 +208,7 @@ internal fun LibraryContent(
                                 isCurrent = entry.localEntryId == state.currentEntryId,
                                 onPlay = { actions.onPlayNow(entry) },
                                 onAdd = { onAdd(entry) },
+                                locked = state.queueLocked,
                             )
                         }
                     }
@@ -284,14 +302,15 @@ private fun TrackRow(
     isCurrent: Boolean,
     onPlay: () -> Unit,
     onAdd: () -> Unit,
+    locked: Boolean,
 ) {
-    val playable = entry.decodeStatus == DecodeStatus.INDEXED
+    val playable = entry.decodeStatus == DecodeStatus.INDEXED && !locked
     Row(
         Modifier
             .fillMaxWidth()
             .testTag(LIBRARY_ROW_TAG)
             .heightIn(min = 64.dp)
-            .clickable(enabled = playable, onClickLabel = "Play", onClick = onPlay)
+            .then(if (playable) Modifier.clickable(onClickLabel = "Play", onClick = onPlay) else Modifier)
             .padding(start = RideSpace.lg, end = RideSpace.xs, top = RideSpace.xs, bottom = RideSpace.xs)
             .semantics(mergeDescendants = true) {
                 if (isCurrent) stateDescription = "Now playing"
@@ -309,13 +328,27 @@ private fun TrackRow(
                 overflow = TextOverflow.Ellipsis,
             )
             Text(
-                if (playable) "${entry.track.artist} · ${entry.track.album}" else decodeStatusLabel(entry.decodeStatus),
+                if (entry.decodeStatus ==
+                    DecodeStatus.INDEXED
+                ) {
+                    "${entry.track.artist} · ${entry.track.album}"
+                } else {
+                    decodeStatusLabel(entry.decodeStatus)
+                },
                 style = MaterialTheme.typography.bodySmall,
-                color = if (playable) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.error,
+                color =
+                    if (entry.decodeStatus ==
+                        DecodeStatus.INDEXED
+                    ) {
+                        MaterialTheme.colorScheme.onSurfaceVariant
+                    } else {
+                        MaterialTheme.colorScheme.error
+                    },
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
         }
+        if (locked) return@Row
         IconButton(
             onClick = onAdd,
             enabled = playable,

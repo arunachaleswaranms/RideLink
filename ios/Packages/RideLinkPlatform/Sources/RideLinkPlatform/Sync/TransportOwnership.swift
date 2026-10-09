@@ -59,7 +59,23 @@ public final class TransportOwnershipBox: @unchecked Sendable {
 
     func store(_ ownership: TransportOwnership) {
         lock.lock()
-        defer { lock.unlock() }
         value = ownership
+        let observer = self.observer
+        lock.unlock()
+        observer?(ownership)
+    }
+
+    private var observer: (@Sendable (TransportOwnership) -> Void)?
+
+    /// Phase 9A.5, PR #18 review: lets `SyncPlaybackPresenter` publish ownership **for rendering** —
+    /// which local-queue controls to offer — since `current` is not observable. Called after every
+    /// store, outside the lock. **Never authority**: admissions still read `current` at the moment
+    /// they act.
+    public func setDisplayObserver(_ observer: @escaping @Sendable (TransportOwnership) -> Void) {
+        lock.lock()
+        self.observer = observer
+        let value = self.value
+        lock.unlock()
+        observer(value)
     }
 }

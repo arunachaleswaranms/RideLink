@@ -223,18 +223,32 @@ public final class MusicCoordinator {
 
     // MARK: - Queue and playback
 
-    public func addToQueue(_ entry: LibraryEntry) {
-        dispatch(.add(newItem(entry)))
-    }
+    // Phase 9A.5, PR #18 review: every user edit of the local queue — add, play-now, cache play,
+    // remove, move, clear, select — is admitted through `LocalQueueEdits`, which refuses it while
+    // synchronised transport owns playback (`SyncPlaybackGate.localQueueLocked()`, ADR-024 Amendment
+    // A14). Each returns whether it was admitted; a refusal changes nothing — no queue mutation, no
+    // load, no play, no stop. Additions are refused too: the synchronised path replaces the local
+    // queue on every synchronised selection (`syncSelect`) and clears it on stop
+    // (`syncClearSelection`), so an entry "staged" during a synchronised ride would silently vanish.
+    // Mirrors Android's `MusicCoordinator`.
+
+    @discardableResult
+    public func addToQueue(_ entry: LibraryEntry) -> Bool { edit([.add(newItem(entry))]) }
+
+    /// Whether local queue edits are refused right now — for rendering only. Every edit re-asks at
+    /// the moment it is admitted; this answer authorises nothing.
+    public var isLocalQueueLocked: Bool { syncGate?.localQueueLocked() == true }
 
     /// Adds `entry` to the queue and starts playing it immediately — the library screen's "tap a
     /// track" affordance, as one atomic queue operation rather than an add followed by a
     /// UI-observed "select the item I just added" that would race a second rapid tap.
-    public func playNow(_ entry: LibraryEntry) {
-        coexistenceEvents?.onPlaybackIntent(playing: true)
+    @discardableResult
+    public func playNow(_ entry: LibraryEntry) -> Bool {
         let item = newItem(entry)
-        dispatch(.add(item))
-        dispatch(.select(id: item.id))
+        guard let outcome = LocalQueueEdits.reduce(queueState, [.add(item), .select(id: item.id)], gate: syncGate) else { return false }
+        coexistenceEvents?.onPlaybackIntent(playing: true)
+        apply(outcome)
+        return true
     }
 
     private func newItem(_ entry: LibraryEntry) -> LocalQueueItem {
@@ -246,18 +260,24 @@ public final class MusicCoordinator {
     /// the Phase 3 library — through the *existing* one player/one queue, exactly like `playNow`
     /// does for an imported `LibraryEntry`. brief §24: local-only playback on *this* device; no
     /// peer command, no synchronized playback, no second player.
-    public func playExternalVerifiedCachedTrack(_ contentHash: ContentHash, fileURL: URL) {
-        coexistenceEvents?.onPlaybackIntent(playing: true)
+    @discardableResult
+    public func playExternalVerifiedCachedTrack(_ contentHash: ContentHash, fileURL: URL) -> Bool {
         let entryId = LocalEntryId(UUID().uuidString.lowercased())
-        externalCacheSources[entryId] = ExternalCacheSource(contentHash: contentHash, location: LocalTrackLocation(uri: fileURL.absoluteString))
         let item = LocalQueueItem(id: UUID().uuidString, localEntryId: entryId, insertedAtMonoUs: monotonicNowUs())
-        dispatch(.add(item))
-        dispatch(.select(id: item.id))
+        guard let outcome = LocalQueueEdits.reduce(queueState, [.add(item), .select(id: item.id)], gate: syncGate) else { return false }
+        coexistenceEvents?.onPlaybackIntent(playing: true)
+        // Registered before the effects run: `loadAndPlay` resolves the source when it executes.
+        externalCacheSources[entryId] = ExternalCacheSource(contentHash: contentHash, location: LocalTrackLocation(uri: fileURL.absoluteString))
+        apply(outcome)
+        return true
     }
 
-    public func removeFromQueue(id: String) { dispatch(.remove(id: id)) }
-    public func moveInQueue(id: String, toIndex: Int) { dispatch(.move(id: id, toIndex: toIndex)) }
-    public func clearQueue() { dispatch(.clear) }
+    @discardableResult
+    public func removeFromQueue(id: String) -> Bool { edit([.remove(id: id)]) }
+    @discardableResult
+    public func moveInQueue(id: String, toIndex: Int) -> Bool { edit([.move(id: id, toIndex: toIndex)]) }
+    @discardableResult
+    public func clearQueue() -> Bool { edit([.clear]) }
 
     public func next() {
         if syncGate?.interceptNext() == true { return }
@@ -269,7 +289,8 @@ public final class MusicCoordinator {
         dispatch(.previous)
     }
 
-    public func selectQueueItem(id: String) { dispatch(.select(id: id)) }
+    @discardableResult
+    public func selectQueueItem(id: String) -> Bool { edit([.select(id: id)]) }
 
     /// Play, from the app or the lock screen. A synchronised session owns it first (ADR-024 A14, via
     /// `syncGate`); otherwise the local queue decides: with tracks queued and nothing selected it
@@ -368,8 +389,17 @@ public final class MusicCoordinator {
         }
     }
 
-    private func dispatch(_ action: LocalQueueAction) {
-        let outcome = LocalQueue.reduce(queueState, action)
+    /// A user's edit of the local queue, admitted or refused as one step — see `LocalQueueEdits`.
+    private func edit(_ actions: [LocalQueueAction]) -> Bool {
+        guard let outcome = LocalQueueEdits.reduce(queueState, actions, gate: syncGate) else { return false }
+        apply(outcome)
+        return true
+    }
+
+    /// Transport and track-end actions: already decided by `syncGate`'s intercepts before reaching here.
+    private func dispatch(_ action: LocalQueueAction) { apply(LocalQueue.reduce(queueState, action)) }
+
+    private func apply(_ outcome: LocalQueueOutcome) {
         queueState = outcome.state
         for effect in outcome.effects {
             switch effect {
