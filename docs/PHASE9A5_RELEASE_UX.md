@@ -88,6 +88,13 @@ and re-importing the folder finishes it. No quick ID, hash or URI is shown.
   ends. Library and Up Next carry a fixed-height mini player. Ride Mode keeps 72 dp targets with the
   same hierarchy.
 
+### Local Up Next while synchronised (independent review, problem 120)
+
+While synchronised transport owns playback, local Up Next and the library are **read-only**: no row
+plays, and there is no add, remove, move or clear, and no "Play here". The refusal is
+`MusicCoordinator`'s, through `SyncPlaybackGate.localQueueLocked()` — the same ADR-024 A14 ownership as
+every transport press — so a stale screen cannot edit around it (ADR-024 Amendment A15).
+
 ## 5. Copy
 
 "Your ride, together" is removed on both platforms. Primary UI says "other phone"; "peer" stays in

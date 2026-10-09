@@ -2369,3 +2369,37 @@ that had never activated synchronised mode; each now starts it the way a user wo
 track neither phone holds, which issues no playback command and spends no `command_seq`), with every
 assertion unchanged. No wire change, no protocol field, no vector: transport ownership is local.
 The command-gate trace is in [`PHASE8_DELIVERED_AUTHORITY.md`](../PHASE8_DELIVERED_AUTHORITY.md#amendment-a14--transport-ownership-after-distributed-debt).
+
+## Amendment A15 — 9 October 2026 — local queue edits are admitted through the same ownership
+
+**Status of the ADR: still Accepted. A14's ownership rule is unchanged; this applies it to one more
+entry point.** Phase 9A.5 (PR #18) added a local Up Next screen. Its select, remove, move and clear —
+and the library's play-now and add, and the other phone's music "Play here" — reached
+`MusicCoordinator`'s `LocalQueue` directly, without `SyncPlaybackGate`. During a synchronised ride a
+local `Select` loaded and played a track on this phone only, `Clear` or removing the current entry
+stopped or advanced this phone only, and `Move`/`Add` edited a queue the synchronised path replaces
+wholesale on every synchronised selection (`syncSelect`) and empties on stop (`clearSelection`). That
+is a second path around the leader-ordered one (found by independent review, STATUS §4 problem 120).
+
+### Decision (amendment)
+
+1. **While synchronised transport owns playback, local queue edits are refused**, not forwarded:
+   local Up Next has no shared-queue equivalent, and V1 adds no queue-protocol operation for one.
+2. `SyncPlaybackGate` gains `localQueueLocked()`, answered by `SyncPlaybackGateAdapter` from **the same
+   ownership as every intercept** — `isSynchronizedModeActive()` on Android, `transportOwnership` on
+   iOS (`syncEnabled && role != nil`). Not `SyncState`, not the role alone, not diagnostics, not a UI
+   flag; old distributed authority finishing after End Ride does not lock the local queue.
+3. `LocalQueueEdits.reduce` (Android `app.music`, iOS `RideLinkPlatform`, mirrored) asks once and, when
+   admitted, reduces every action of the edit in the same synchronous step; `MusicCoordinator` applies
+   only what it returns. No suspension separates the answer from the mutation. A refusal is no state
+   change and no player effect.
+4. For **rendering only**, ownership is published (`SyncPlaybackCoordinator.transportOwnershipForDisplay`
+   on Android, written by the `syncEnabled`/`role` setters; `TransportOwnershipBox.setDisplayObserver`
+   feeding `SyncPlaybackPresenter.localQueueLocked` on iOS). Screens use it to make Up Next and the
+   library read-only — controls absent, not disabled — and never to admit anything.
+
+Regressions: `LocalQueueEditOwnershipTest` (JVM, real coordinator and adapter: local → synchronised →
+local via Play on this phone only and via End Ride), the A14 test's added lock assertions,
+`MusicCoordinatorQueuePlayTest` (emulator, real coordinator and recording player: no Load/Play/Stop on
+refusal), `LocalQueueReadOnlyUiTest` (emulator), and the mirrored iOS tests in
+`SyncPlaybackTransportOwnershipTests`. No wire, vector or protocol change.
