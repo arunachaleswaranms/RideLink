@@ -1455,7 +1455,7 @@ removed, the new assertion times out. iOS has no equivalent captured-then-stale-
 | AF-03 | `RECORD_AUDIO` denied, then START RIDE | Ride starts music-only; amber "intercom unavailable"; **music plays** (FR-025); no crash; no mic FGS type requested | 6 |
 | AF-04 | Attempt to start the ride from a background entry point (debug-only broadcast receiver) | Refused with a clear message; `ForegroundServiceStartNotAllowedException` caught and logged as a state-machine event; **no silent retry** | 6 |
 | AF-05 | Start the ride, then lock the screen for 30 min | Session, playback and capture continue; `reconnect_count` unchanged; notification still present | 2/6 |
-| AF-06 | `POST_NOTIFICATIONS` denied, then START RIDE | Session runs; documented loss of the lock-screen control surface; no crash | 6 |
+| AF-06 | `POST_NOTIFICATIONS` denied, then START RIDE | Session runs; documented loss of the lock-screen control surface — since Phase 9A.5 the intercom notification is not shown at all, while the music media notification (session-exempt) still is (ADR-022 Amendment A1); no crash | 6 |
 | AF-07 | Swipe the task from Recents mid-ride | `onTaskRemoved` → `ENDING`: audio released, sockets closed, **no orphaned foreground service** | 6 |
 | AF-08 | Kill the app process mid-ride | Service does not restart in the background (`START_NOT_STICKY`); on relaunch, state is restored and the ride must be started explicitly again | 6 |
 | AF-09 | Enable the intercom while the app is backgrounded | Not attempted; UI instructs the user to bring RideLink to the front. **No background microphone-FGS start, ever** | 6 |
@@ -1535,6 +1535,34 @@ that A-01 will eventually exercise, but implemented none of the ducking/focus-ar
 A-01 tests, by design (Phase 6's job).
 
 ---
+
+### 4.3a Phase 9A.5 — release UX, large-library reliability and the ride notifications
+
+Phase 9A on the OnePlus Nord 5 found problems 112–116 (STATUS §4). What software now proves, and
+what only the phone can:
+
+| Problem | Software regression | Where it runs | Fails without the fix |
+|---|---|---|---|
+| 114 (library ANR) | `LibraryLazyCompositionTest` renders the real `LibraryContent` with 5,000 tracks and asserts ≤ 60 row nodes after cold render, clearing search, a sort change and scrolling to the end (12–13 observed) | API 36 emulator | Yes — the eager `Column` shape exhausted the emulator heap composing |
+| 114 / §6 (sort cost) | `LibraryRepositorySortTest`: total, deterministic order; runs on the sort dispatcher; 5,000-row sort timed (~1 ms JVM) | JVM | — (measurement, not a gate) |
+| 115 (scoped reconciliation) | `ScopedReconciliationTest` (cases A–D, MediaStore scope, fail-safe kind); `LibraryIndexerTest` cases A–D, recording skip and progress through the real SAF walk and Room; `SchemaMigrationTest` 2 → 3 and 1 → 3 (case E) | JVM + emulator | Yes — cases A, B and C fail with the scope removed |
+| Play from the queue (§11) | `LocalQueueTest` / `LocalQueueTests` (both platforms), `TransportAvailabilityTest`, `MusicCoordinatorQueuePlayTest` (real coordinator, Room, recording player) | JVM, SwiftPM, emulator | Yes — three `LocalQueueTest` cases |
+| 112 (notification copy) | `RideNotificationPlanTest` (all 32 input combinations); `RideNotificationMetadataTest` asserts no intercom notification and no intercom/microphone wording during music-only playback | JVM + emulator | — |
+| 113 (intercom controls) | `IntercomNotificationSurfaceTest`: the real service in intercom, muted, and intercom + music states; the intercom notification is plain (not `MediaStyle`), public, and carries Mute/Unmute and End intercom. **No microphone is opened** | Emulator | Yes — re-attaching the media session style fails it |
+| 116 (stale metadata) | `RideNotificationMetadataTest`: three real track changes through the real service, ExoPlayer and `MediaSession`; the media notification is re-posted with each track's title | Emulator | Yes — the notification keeps the first title |
+
+New physical rows (Android, OnePlus Nord 5, the reviewed and merged build only):
+
+| ID | Procedure | Pass condition | Needs |
+|---|---|---|---|
+| L-06 | Cold launch with ~3,460 tracks imported; open Library; touch immediately; search, clear the search, rapid scroll, change each sort | No ANR, no frozen frame of seconds; home appears promptly; clearing search is immediate | Phone |
+| L-07 | Import folder A, then folder B, then a single file; delete one file from A; re-import A | Only that file shows "File not found"; B's tracks and the single file stay playable | Phone |
+| L-08 | Import a whole `Music` folder that contains a call-recordings subfolder | The summary names the folder, the track count, "subfolders included" and the recordings folder; the choice to leave it out is honoured; progress shows real counts and the import can be cancelled | Phone |
+| Q-01 | Queue three tracks (one twice) without pressing Next; press Play; open Up Next; reorder, remove one copy of the duplicate, clear | Play starts the first queued track; exactly the chosen copy is removed; clear asks first and stops playback | Phone |
+| N-01 | Music only, shade and lock screen | Track title/artist and transport only; no "intercom" or "microphone" wording; no Mute / End intercom | Phone |
+| N-02 | Three consecutive track changes, checking the lock-screen card and the shade each time | Title, artist, artwork and duration match the playing track every time | Phone |
+| N-03 | Live intercom (authenticated peer): shade and lock screen | A separate "Intercom on" notification with Mute/Unmute and End intercom, both working; with music too, the media card is still present | Phone + peer — **PENDING — AUTHENTICATED PEER UNAVAILABLE** |
+| N-04 | `POST_NOTIFICATIONS` denied, then start the intercom (peer) | Intercom runs; no intercom notification is shown (ADR-022 A1 consequence); the system still lists the foreground service | Phone + peer |
 
 ### 4.4 Phase 5 scheduled playback and drift — what the laptop now proves, and what it cannot
 
