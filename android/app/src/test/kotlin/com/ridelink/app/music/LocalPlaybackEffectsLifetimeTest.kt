@@ -180,7 +180,7 @@ class LocalPlaybackEffectsLifetimeTest {
             assertEquals(listOf<PlaybackCommand>(PlaybackCommand.Stop), h.player.calls)
 
             val pause = assertNotNull(LocalQueueEdits.admit(h.gate))
-            h.effects.command(PlaybackCommand.Pause, pause)
+            h.effects.pause(pause)
             runCurrent()
             assertEquals(PlaybackCommand.Pause, h.player.calls.last())
         }
@@ -190,11 +190,133 @@ class LocalPlaybackEffectsLifetimeTest {
         runTest(StandardTestDispatcher()) {
             val h = Harness(this)
             val admission = assertNotNull(LocalQueueEdits.admit(h.gate))
-            h.effects.command(PlaybackCommand.Pause, admission)
+            h.effects.pause(admission)
             h.gate.activateSynchronised()
             runCurrent()
             assertEquals(emptyList(), h.player.calls)
             assertNull(LocalQueueEdits.admit(h.gate), "and no fresh local admission while synchronised")
+        }
+
+    // --- Round 3: latest local intent within one ownership lifetime ---------------------------------
+
+    private fun TestScope.applyEdit(
+        h: Harness,
+        state: LocalQueueState,
+        vararg actions: LocalQueueAction,
+    ): LocalQueueState {
+        val edit = assertNotNull(LocalQueueEdits.reduce(state, actions.toList(), h.gate))
+        h.effects.run(edit.effects, edit.admission)
+        runCurrent()
+        return edit.state
+    }
+
+    @Test
+    fun `R3-1 select A parked before Load, Clear stops, A released - A never loads or plays`() =
+        runTest(StandardTestDispatcher()) {
+            val h = Harness(this)
+            h.resolver.park(id(2))
+            val queue = applyEdit(h, threeWithFirstCurrent, LocalQueueAction.Select("q2"))
+            assertTrue(h.resolver.isParked(id(2)), "premise: A parked before its Load")
+
+            applyEdit(h, queue, LocalQueueAction.Clear)
+            assertEquals(listOf<PlaybackCommand>(PlaybackCommand.Stop), h.player.calls, "premise: the Stop completed")
+            h.resolver.release(id(2))
+            runCurrent()
+
+            assertEquals(listOf<PlaybackCommand>(PlaybackCommand.Stop), h.player.calls, "A loaded or played after Clear")
+        }
+
+    @Test
+    fun `R3-2 select A parked, select B starts, A released - A cannot replace B`() =
+        runTest(StandardTestDispatcher()) {
+            val h = Harness(this)
+            h.resolver.park(id(2))
+            val queue = applyEdit(h, threeWithFirstCurrent, LocalQueueAction.Select("q2"))
+            applyEdit(h, queue, LocalQueueAction.Select("q3"))
+            assertEquals(listOf(h.loadOf(3), PlaybackCommand.Play), h.player.calls, "premise: B started")
+
+            h.resolver.release(id(2))
+            runCurrent()
+
+            assertEquals(listOf(h.loadOf(3), PlaybackCommand.Play), h.player.calls, "A replaced B")
+        }
+
+    @Test
+    fun `R3-3a select A parked before Load, Pause, released - A loads but its Play cannot defeat the pause`() =
+        runTest(StandardTestDispatcher()) {
+            val h = Harness(this)
+            h.resolver.park(id(2))
+            applyEdit(h, threeWithFirstCurrent, LocalQueueAction.Select("q2"))
+            h.effects.pause(assertNotNull(LocalQueueEdits.admit(h.gate)))
+            runCurrent()
+
+            h.resolver.release(id(2))
+            runCurrent()
+
+            assertEquals(listOf(PlaybackCommand.Pause, h.loadOf(2)), h.player.calls, "the older Play defeated the newer pause")
+        }
+
+    @Test
+    fun `R3-3b select A parked inside Load, Pause, released - no Play after the pause`() =
+        runTest(StandardTestDispatcher()) {
+            val h = Harness(this)
+            h.player.parkOn = h.loadOf(2)
+            applyEdit(h, threeWithFirstCurrent, LocalQueueAction.Select("q2"))
+            assertTrue(h.player.parked.isActive, "premise: parked inside Load")
+            h.effects.pause(assertNotNull(LocalQueueEdits.admit(h.gate)))
+            runCurrent()
+
+            h.player.parked.complete(Unit)
+            runCurrent()
+
+            assertEquals(listOf(h.loadOf(2), PlaybackCommand.Pause), h.player.calls, "the older Play defeated the newer pause")
+        }
+
+    @Test
+    fun `R3-4 ABA - A parked under local A, newer local work under C runs, A stays dead`() =
+        runTest(StandardTestDispatcher()) {
+            val h = Harness(this)
+            h.resolver.park(id(2))
+            applyEdit(h, threeWithFirstCurrent, LocalQueueAction.Select("q2"))
+            h.gate.activateSynchronised()
+            h.gate.returnToLocal()
+
+            applyEdit(h, threeWithFirstCurrent, LocalQueueAction.Select("q3"))
+            h.resolver.release(id(2))
+            runCurrent()
+
+            assertEquals(listOf(h.loadOf(3), PlaybackCommand.Play), h.player.calls)
+        }
+
+    @Test
+    fun `R3-5 add, move and removing a non-current entry do not invalidate a selection in flight`() =
+        runTest(StandardTestDispatcher()) {
+            val h = Harness(this)
+            h.resolver.park(id(2))
+            var queue = applyEdit(h, threeWithFirstCurrent, LocalQueueAction.Select("q2"))
+            queue = applyEdit(h, queue, LocalQueueAction.Add(LocalQueueItem("q4", id(4), 4)))
+            queue = applyEdit(h, queue, LocalQueueAction.Move("q4", 0))
+            applyEdit(h, queue, LocalQueueAction.Remove("q1"))
+            assertEquals(emptyList(), h.player.calls, "premise: none of them touches the player")
+
+            h.resolver.release(id(2))
+            runCurrent()
+
+            assertEquals(listOf(h.loadOf(2), PlaybackCommand.Play), h.player.calls, "a harmless edit cancelled the selection")
+        }
+
+    @Test
+    fun `R3-5 a seek on the selection in flight does not cancel it, and a press after it plays normally`() =
+        runTest(StandardTestDispatcher()) {
+            val h = Harness(this)
+            h.resolver.park(id(2))
+            applyEdit(h, threeWithFirstCurrent, LocalQueueAction.Select("q2"))
+            h.effects.seek(1_000, assertNotNull(LocalQueueEdits.admit(h.gate)))
+            runCurrent()
+            h.resolver.release(id(2))
+            runCurrent()
+
+            assertEquals(listOf(PlaybackCommand.Seek(1_000), h.loadOf(2), PlaybackCommand.Play), h.player.calls)
         }
 
     // --- Fixtures ----------------------------------------------------------------------------------

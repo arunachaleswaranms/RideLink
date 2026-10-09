@@ -318,13 +318,13 @@ public final class MusicCoordinator {
         coexistenceEvents?.onPlaybackIntent(playing: false)
         if syncGate?.interceptPause() == true { return }
         guard let admission = LocalQueueEdits.admit(gate: syncGate) else { return }
-        localEffects.command(.pause, admission: admission)
+        localEffects.pause(admission: admission)
     }
 
     public func seek(positionMs: Int64) {
         if syncGate?.interceptSeek(positionMs) == true { return }
         guard let admission = LocalQueueEdits.admit(gate: syncGate) else { return }
-        localEffects.command(.seek(positionMs: positionMs), admission: admission)
+        localEffects.seek(positionMs: positionMs, admission: admission)
     }
 
     // MARK: - Phase 5's own entry points

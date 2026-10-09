@@ -331,13 +331,13 @@ class MusicCoordinator(
         coexistenceEvents?.onPlaybackIntent(playing = false)
         if (syncGate?.interceptPause() == true) return
         val admission = LocalQueueEdits.admit(syncGate) ?: return
-        localEffects.command(PlaybackCommand.Pause, admission)
+        localEffects.pause(admission)
     }
 
     fun seek(positionMs: Long) {
         if (syncGate?.interceptSeek(positionMs) == true) return
         val admission = LocalQueueEdits.admit(syncGate) ?: return
-        localEffects.command(PlaybackCommand.Seek(positionMs), admission)
+        localEffects.seek(positionMs, admission)
     }
 
     // --- Phase 5's own entry points ---------------------------------------------------------

@@ -51,13 +51,16 @@ class MusicCoordinatorLocalEffectLifetimeTest {
 
     private class ParkingPlayer : Player {
         val calls: MutableList<PlaybackCommand> = Collections.synchronizedList(mutableListOf())
-        var parkOnLoad = false
+
+        /** Parks inside the **next** `Load` only, so a later operation's `Load` runs normally. */
+        var parkNextLoad = false
         val parked = CompletableDeferred<Unit>()
         val reachedLoad = CompletableDeferred<Unit>()
 
         override suspend fun execute(command: PlaybackCommand): Result<Unit> {
             calls += command
-            if (parkOnLoad && command is PlaybackCommand.Load) {
+            if (parkNextLoad && command is PlaybackCommand.Load) {
+                parkNextLoad = false
                 reachedLoad.complete(Unit)
                 parked.await()
             }
@@ -153,9 +156,57 @@ class MusicCoordinatorLocalEffectLifetimeTest {
         assertEquals(PlaybackCommand.Play, player.calls.last())
     }
 
+    private fun playCached(n: Int) =
+        assertTrue(
+            coordinator.playExternalVerifiedCachedTrack(
+                ContentHash("sha256:" + "%064x".format(n)),
+                File(context.cacheDir, "t$n"),
+                "T$n",
+                "A",
+            ),
+        )
+
+    /** Round 3, through the real coordinator: a newer selection wins over an older one in flight. */
+    @Test
+    fun anOlderPlayNowParkedInsideLoadCannotReplaceANewerOne() {
+        player.parkNextLoad = true
+        playCached(1)
+        scheduler.runCurrent()
+        assertTrue(player.reachedLoad.isCompleted, "premise: A parked inside Load")
+
+        playCached(2)
+        scheduler.runCurrent()
+        assertEquals(3, player.calls.size, "premise: A parked, then B loaded and played: ${player.calls}")
+        assertTrue(player.calls[1] is PlaybackCommand.Load && player.calls[2] == PlaybackCommand.Play, "premise: ${player.calls}")
+
+        player.parked.complete(Unit)
+        scheduler.runCurrent()
+
+        assertEquals(PlaybackCommand.Play, player.calls.last(), "A's Play replaced B: ${player.calls}")
+        assertEquals(3, player.calls.size, "A acted after B: ${player.calls}")
+    }
+
+    /** Round 3, through the real coordinator: a newer Pause wins over an older Play in flight. */
+    @Test
+    fun aPauseAfterAPlayNowParkedInsideLoadIsNotDefeatedByItsPlay() {
+        player.parkNextLoad = true
+        playCached(1)
+        scheduler.runCurrent()
+        assertTrue(player.reachedLoad.isCompleted, "premise: parked inside Load")
+
+        coordinator.pause()
+        scheduler.runCurrent()
+        player.parked.complete(Unit)
+        scheduler.runCurrent()
+
+        assertEquals(2, player.calls.size, "Play ran after the newer pause: ${player.calls}")
+        assertTrue(player.calls[0] is PlaybackCommand.Load)
+        assertEquals(PlaybackCommand.Pause, player.calls[1])
+    }
+
     @Test
     fun aPlayNowParkedInsideLoadDoesNotPlayAfterSynchronisedActivation() {
-        player.parkOnLoad = true
+        player.parkNextLoad = true
         assertTrue(
             coordinator.playExternalVerifiedCachedTrack(
                 ContentHash("sha256:" + "%064x".format(9)),

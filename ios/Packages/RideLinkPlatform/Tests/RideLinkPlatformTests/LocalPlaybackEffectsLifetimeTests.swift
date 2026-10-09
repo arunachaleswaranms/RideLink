@@ -171,7 +171,7 @@ final class LocalPlaybackEffectsLifetimeTests: XCTestCase {
         XCTAssertEqual(calls, [.stop])
 
         let pause = try XCTUnwrap(LocalQueueEdits.admit(gate: gate))
-        await effects.command(.pause, admission: pause).value
+        await effects.pause(admission: pause).value
         calls = await player.takeCalls()
         XCTAssertEqual(calls, [.pause])
         XCTAssertGreaterThan(prepared, 0, "the audio session was activated for local playback")
@@ -190,13 +190,134 @@ final class LocalPlaybackEffectsLifetimeTests: XCTestCase {
 
     func testALocalPressAdmittedBeforeActivationDoesNotPauseSynchronisedPlayback() async throws {
         let admission = try XCTUnwrap(LocalQueueEdits.admit(gate: gate))
-        let task = effects.command(.pause, admission: admission)
+        let task = effects.pause(admission: admission)
         gate.activateSynchronised()
         await task.value
 
         let calls = await player.calls
         XCTAssertEqual(calls, [])
         XCTAssertNil(LocalQueueEdits.admit(gate: gate), "and no fresh local admission while synchronised")
+    }
+}
+
+// MARK: - Round 3: latest local intent within one ownership lifetime
+
+/// PR #18 review round 3. Mirrors Android's `R3-*` cases in `LocalPlaybackEffectsLifetimeTest`. The
+/// ownership admission stays valid throughout (one local lifetime) except in the ABA case; what
+/// decides each outcome is the playback ticket.
+extension LocalPlaybackEffectsLifetimeTests {
+    /// Applies one admitted edit, returning its state and its effects' tasks (not awaited).
+    private func issue(_ state: LocalQueueState, _ actions: [LocalQueueAction]) throws -> (LocalQueueState, [Task<Void, Never>]) {
+        let edit = try admitted(state, actions)
+        return (edit.state, effects.run(edit.effects, admission: edit.admission))
+    }
+
+    func testR3_1SelectAParkedThenClearStopsThenAReleasedNeverLoadsOrPlays() async throws {
+        let parked = resolver.park(Self.id(2))
+        let (queue, tasksA) = try issue(Self.threeWithFirstCurrent, [.select(id: "q2")])
+        await parked.waitForArrival()
+
+        let (_, clear) = try issue(queue, [.clear])
+        await awaitAll(clear)
+        var calls = await player.calls
+        XCTAssertEqual(calls, [.stop], "premise: the Stop completed")
+
+        await parked.release()
+        await awaitAll(tasksA)
+        calls = await player.calls
+        XCTAssertEqual(calls, [.stop], "A loaded or played after Clear")
+    }
+
+    func testR3_2SelectAParkedThenSelectBStartsThenAReleasedCannotReplaceB() async throws {
+        let parked = resolver.park(Self.id(2))
+        let (queue, tasksA) = try issue(Self.threeWithFirstCurrent, [.select(id: "q2")])
+        await parked.waitForArrival()
+
+        let (_, tasksB) = try issue(queue, [.select(id: "q3")])
+        await awaitAll(tasksB)
+        var calls = await player.calls
+        XCTAssertEqual(calls, [Self.load(3), .play], "premise: B started")
+
+        await parked.release()
+        await awaitAll(tasksA)
+        calls = await player.calls
+        XCTAssertEqual(calls, [Self.load(3), .play], "A replaced B")
+    }
+
+    func testR3_3aSelectAParkedBeforeLoadThenPauseALoadsButItsPlayCannotDefeatThePause() async throws {
+        let parked = resolver.park(Self.id(2))
+        let (_, tasksA) = try issue(Self.threeWithFirstCurrent, [.select(id: "q2")])
+        await parked.waitForArrival()
+        await effects.pause(admission: try XCTUnwrap(LocalQueueEdits.admit(gate: gate))).value
+
+        await parked.release()
+        await awaitAll(tasksA)
+
+        let calls = await player.calls
+        XCTAssertEqual(calls, [.pause, Self.load(2)], "the older Play defeated the newer pause")
+    }
+
+    func testR3_3bSelectAParkedInsideLoadThenPauseNoPlayAfterThePause() async throws {
+        let parked = await player.park(on: Self.load(2))
+        let (_, tasksA) = try issue(Self.threeWithFirstCurrent, [.select(id: "q2")])
+        await parked.waitForArrival()
+        await effects.pause(admission: try XCTUnwrap(LocalQueueEdits.admit(gate: gate))).value
+
+        await parked.release()
+        await awaitAll(tasksA)
+
+        let calls = await player.calls
+        XCTAssertEqual(calls, [Self.load(2), .pause], "the older Play defeated the newer pause")
+    }
+
+    func testR3_4AbaAParkedUnderLocalANewerWorkUnderCRunsAStaysDead() async throws {
+        let parked = resolver.park(Self.id(2))
+        let (_, tasksA) = try issue(Self.threeWithFirstCurrent, [.select(id: "q2")])
+        await parked.waitForArrival()
+        gate.activateSynchronised()
+        gate.returnToLocal()
+
+        let (_, tasksC) = try issue(Self.threeWithFirstCurrent, [.select(id: "q3")])
+        await awaitAll(tasksC)
+        await parked.release()
+        await awaitAll(tasksA)
+
+        let calls = await player.calls
+        XCTAssertEqual(calls, [Self.load(3), .play])
+    }
+
+    func testR3_5AddMoveAndRemovingANonCurrentEntryDoNotInvalidateASelectionInFlight() async throws {
+        let parked = resolver.park(Self.id(2))
+        var (queue, tasksA) = try issue(Self.threeWithFirstCurrent, [.select(id: "q2")])
+        await parked.waitForArrival()
+        for actions: [LocalQueueAction] in [
+            [.add(LocalQueueItem(id: "q4", localEntryId: Self.id(4), insertedAtMonoUs: 4))],
+            [.move(id: "q4", toIndex: 0)],
+            [.remove(id: "q1")],
+        ] {
+            let (next, tasks) = try issue(queue, actions)
+            XCTAssertTrue(tasks.isEmpty, "premise: \(actions) has no player effect")
+            queue = next
+        }
+
+        await parked.release()
+        await awaitAll(tasksA)
+
+        let calls = await player.calls
+        XCTAssertEqual(calls, [Self.load(2), .play], "a harmless edit cancelled the selection")
+    }
+
+    func testR3_5ASeekOnTheSelectionInFlightDoesNotCancelIt() async throws {
+        let parked = resolver.park(Self.id(2))
+        let (_, tasksA) = try issue(Self.threeWithFirstCurrent, [.select(id: "q2")])
+        await parked.waitForArrival()
+        await effects.seek(positionMs: 1_000, admission: try XCTUnwrap(LocalQueueEdits.admit(gate: gate))).value
+
+        await parked.release()
+        await awaitAll(tasksA)
+
+        let calls = await player.calls
+        XCTAssertEqual(calls, [.seek(positionMs: 1_000), Self.load(2), .play])
     }
 }
 

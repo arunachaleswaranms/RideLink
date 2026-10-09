@@ -237,25 +237,24 @@ class MainActivity : ComponentActivity() {
         // Phase 9A.5, PR #18 review: while synchronised playback owns transport the coordinator
         // refuses this play-now, so do not start the foreground service for it either. This read
         // only avoids a needless start; `playNow` is what refuses.
-        if (!foregroundVisible || musicCoordinator.isLocalQueueLocked()) return
-        if (!RideForegroundService.startMusicFromVisibleUi(this)) {
-            musicCoordinator.onForegroundServiceStartFailed()
-            return
-        }
-        musicCoordinator.playNow(entry)
+        visibleMusicStart(musicCoordinator).startThen { musicCoordinator.playNow(entry) }
     }
+
+    /** See [VisibleMusicStart]: visibility and local ownership, read immediately before the start. */
+    private fun visibleMusicStart(musicCoordinator: MusicCoordinator) =
+        VisibleMusicStart(
+            foregroundVisible = { foregroundVisible },
+            localQueueLocked = { musicCoordinator.isLocalQueueLocked() },
+            startForegroundService = { RideForegroundService.startMusicFromVisibleUi(this) },
+            onStartRefused = { musicCoordinator.onForegroundServiceStartFailed() },
+        )
 
     /** Up Next's "tap an entry to play it" (Phase 9A.5 §10): the same first-play discipline. */
     private fun attemptPlayQueueItem(
         musicCoordinator: MusicCoordinator,
         queueItemId: String,
     ) {
-        if (!foregroundVisible || musicCoordinator.isLocalQueueLocked()) return
-        if (!RideForegroundService.startMusicFromVisibleUi(this)) {
-            musicCoordinator.onForegroundServiceStartFailed()
-            return
-        }
-        musicCoordinator.selectQueueItem(queueItemId)
+        visibleMusicStart(musicCoordinator).startThen { musicCoordinator.selectQueueItem(queueItemId) }
     }
 
     /**
@@ -275,25 +274,24 @@ class MainActivity : ComponentActivity() {
         sharedLibraryCoordinator: SharedLibraryCoordinator,
         entry: ManifestEntry,
     ) {
-        val hash = entry.contentHash
+        val hash = entry.contentHash ?: return
+        val start = visibleMusicStart(musicCoordinator)
         // PR #18 review: refused by the coordinator while synchronised playback owns transport; not
         // started (nor its foreground service) here either.
-        if (hash == null || !foregroundVisible || musicCoordinator.isLocalQueueLocked()) return
+        if (!start.permitted()) return
         lifecycleScope.launch {
             // Looked up in the repository, not in the Library screen's search-filtered, only-while-
             // collected list (Phase 9A.5): that list could be empty or filtered here, sending a track
-            // this phone holds down the cache path instead.
-            val localEntry = musicCoordinator.findLocalByContentHash(hash)
-            if (localEntry != null) {
-                attemptPlayNow(musicCoordinator, localEntry)
-                return@launch
-            }
-            val file = sharedLibraryCoordinator.cachedFile(hash) ?: return@launch
-            if (!RideForegroundService.startMusicFromVisibleUi(this@MainActivity)) {
-                musicCoordinator.onForegroundServiceStartFailed()
-                return@launch
-            }
-            musicCoordinator.playExternalVerifiedCachedTrack(hash, file, entry.title, entry.artist)
+            // this phone holds down the cache path instead. Both lookups suspend, so `start` reads
+            // visibility and ownership again after them, immediately before the foreground-service
+            // start (PR #18 review round 3).
+            start.playSharedTrack(
+                hash = hash,
+                findLocal = musicCoordinator::findLocalByContentHash,
+                cachedFile = sharedLibraryCoordinator::cachedFile,
+                playNow = { localEntry -> musicCoordinator.playNow(localEntry) },
+                playCached = { file -> musicCoordinator.playExternalVerifiedCachedTrack(hash, file, entry.title, entry.artist) },
+            )
         }
     }
 
