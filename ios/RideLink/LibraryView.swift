@@ -23,7 +23,7 @@ struct LibraryScreen: View {
         let query = musicCoordinator.query
         List {
             Section {
-                Picker("Sort by", selection: Binding(get: { query.sort }, set: musicCoordinator.setSort)) {
+                Picker("Sort by", selection: Binding(get: { query.sort }, set: { musicCoordinator.setSort($0) })) {
                     ForEach(sortOptions, id: \.self) { sort in Text(sortLabel(sort)).tag(sort) }
                 }
                 .pickerStyle(.segmented)
@@ -63,7 +63,9 @@ struct LibraryScreen: View {
             }
         }
         .listStyle(.plain)
-        .searchable(text: Binding(get: { query.searchText }, set: musicCoordinator.setSearchText), prompt: "Search title, artist or album")
+        // Explicit closures, not method references: Xcode 26.6's Swift 6.3.3 crashes in IRGen on the
+        // @isolated(any) reabstraction thunk a main-actor method reference needs here (CI, PR #18).
+        .searchable(text: Binding(get: { query.searchText }, set: { musicCoordinator.setSearchText($0) }), prompt: "Search title, artist or album")
         .navigationTitle("Library")
         .toolbar {
             Menu {
