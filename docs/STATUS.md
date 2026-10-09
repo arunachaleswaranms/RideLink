@@ -40,6 +40,10 @@ synchronisation-authority change.
   `RideSegmentLifecycleTests.testFiftyCyclesOfRegression1AndRegression2SatisfyBothNewProperties`
   failed once; it passed 5/5 alone and in the final unloaded full run. This branch does not touch
   that code. Recorded, not explained.
+- **CI on PR #18:** the first push failed the iOS job: Xcode 26.6's Swift 6.3.3 crashed in IRGen on
+  the `@isolated(any)` reabstraction thunk for a main-actor method reference passed as a SwiftUI
+  `Binding` setter in `LibraryView` (Xcode 27, used locally, compiles it). Explicit closures fixed it;
+  the iOS and Android jobs pass on the fixed head.
 - **Cross-platform gate:** passed, 17/17.
 - **Security:** `tools/audit_local_only.py` 0 findings in 335 production files; gitleaks over 261
   commits, no leaks. One test-only dependency added (`androidx.compose.ui:ui-test-junit4`, BOM-pinned,
