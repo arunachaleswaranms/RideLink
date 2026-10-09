@@ -58,8 +58,15 @@ class MusicCoordinatorQueuePlayTest {
      * own admission is under test, so the test flips ownership directly. The intercepts take nothing:
      * no transport press is exercised while synchronised.
      */
-    private class OwnershipGate : SyncPlaybackGate {
+    internal class OwnershipGate : SyncPlaybackGate {
+        private var lifetime = 0L
+
+        /** Every flip advances the lifetime — the synchronisation owner's rule (ADR-024 A15). */
         @Volatile var synchronized = false
+            set(value) {
+                if (value != field) lifetime++
+                field = value
+            }
 
         override fun interceptPlay() = false
 
@@ -74,6 +81,10 @@ class MusicCoordinatorQueuePlayTest {
         override fun interceptTrackEnded() = false
 
         override fun localQueueLocked() = synchronized
+
+        override fun admitLocalQueueEdit() = if (synchronized) null else LocalQueueEditAdmission(lifetime)
+
+        override fun isLocalQueueEditStillValid(admission: LocalQueueEditAdmission) = !synchronized && admission.lifetime == lifetime
     }
 
     private inner class RecordingPlayer : Player {

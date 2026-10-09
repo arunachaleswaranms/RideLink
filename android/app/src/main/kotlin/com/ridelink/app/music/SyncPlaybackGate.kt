@@ -51,4 +51,37 @@ interface SyncPlaybackGate {
      * synchronously at the moment [MusicCoordinator] admits the edit.
      */
     fun localQueueLocked(): Boolean
+
+    /**
+     * Admits one local edit or local transport press **under the exact local-ownership lifetime in
+     * force now**, or returns `null` while synchronised transport owns playback (ADR-024 Amendment
+     * A15, PR #18 review round 2). The admission travels with every player effect the edit causes and
+     * is re-proved with [isLocalQueueEditStillValid] before each one: a proof taken when the edit was
+     * admitted does not authorise a `Load`, `Play` or `Stop` that runs after a suspension.
+     */
+    fun admitLocalQueueEdit(): LocalQueueEditAdmission?
+
+    /**
+     * Whether [admission]'s own local lifetime is still the one in force. A lifetime ends for good the
+     * moment synchronised mode takes transport; returning to local starts a **new** lifetime, so an
+     * admission from before the synchronised interval never becomes valid again (no ABA).
+     */
+    fun isLocalQueueEditStillValid(admission: LocalQueueEditAdmission): Boolean
+}
+
+/**
+ * Permission for one local edit's player effects, bound to the local transport-ownership lifetime
+ * that admitted it (ADR-024 Amendment A15). [lifetime] is minted by the synchronisation owner, never
+ * by [MusicCoordinator], and is never reused: every ownership change advances it. Compared, never
+ * re-derived.
+ */
+class LocalQueueEditAdmission internal constructor(
+    internal val lifetime: Long,
+) {
+    override fun toString() = "LocalQueueEditAdmission(lifetime=$lifetime)"
+
+    internal companion object {
+        /** No synchronisation owner was ever wired (no gate): a lifetime that never ends. */
+        val UNGATED = LocalQueueEditAdmission(lifetime = -1)
+    }
 }

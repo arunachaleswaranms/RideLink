@@ -45,6 +45,11 @@ public enum TransportOwnership: Sendable, Equatable {
 public final class TransportOwnershipBox: @unchecked Sendable {
     private let lock = NSLock()
     private var value: TransportOwnership = .local
+    /// ADR-024 Amendment A15 (PR #18 review round 2): the ownership **lifetime**. It advances on every
+    /// flip between local and synchronised — never on a role change inside synchronised mode — so
+    /// local A, synchronised B and local C are three lifetimes, and an admission minted under A can
+    /// never be mistaken for one minted under C.
+    private var lifetime: Int64 = 0
 
     init() {}
 
@@ -59,10 +64,21 @@ public final class TransportOwnershipBox: @unchecked Sendable {
 
     func store(_ ownership: TransportOwnership) {
         lock.lock()
+        if ownership.isSynchronizedModeActive != value.isSynchronizedModeActive { lifetime += 1 }
         value = ownership
         let observer = self.observer
         lock.unlock()
         observer?(ownership)
+    }
+
+    /// The current **local** ownership lifetime, or `nil` while synchronised mode owns transport —
+    /// one read under the lock, so the answer and the lifetime come from the same instant. This is
+    /// what `SyncPlaybackGateAdapter` mints a `LocalQueueEditAdmission` from and compares one against;
+    /// nothing else reads it.
+    func localLifetime() -> Int64? {
+        lock.lock()
+        defer { lock.unlock() }
+        return value.isSynchronizedModeActive ? nil : lifetime
     }
 
     private var observer: (@Sendable (TransportOwnership) -> Void)?

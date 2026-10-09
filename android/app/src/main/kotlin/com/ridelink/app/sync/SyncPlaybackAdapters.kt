@@ -173,6 +173,17 @@ internal class SyncPlaybackGateAdapter(
     /** The same ownership as every intercept, read at admission; nothing is forwarded. */
     override fun localQueueLocked(): Boolean = sync.isSynchronizedModeActive()
 
+    /** Minted from the synchronisation owner's own lifetime (ADR-024 Amendment A15). */
+    override fun admitLocalQueueEdit(): com.ridelink.app.music.LocalQueueEditAdmission? =
+        sync.localOwnershipLifetime()?.let {
+            com.ridelink.app.music
+                .LocalQueueEditAdmission(it)
+        }
+
+    /** The same lifetime, or nothing: a later local lifetime is a different number. */
+    override fun isLocalQueueEditStillValid(admission: com.ridelink.app.music.LocalQueueEditAdmission): Boolean =
+        sync.localOwnershipLifetime() == admission.lifetime
+
     private inline fun intercept(crossinline action: () -> Unit): Boolean {
         if (!sync.isSynchronizedModeActive()) return false
         scope.launch { action() }

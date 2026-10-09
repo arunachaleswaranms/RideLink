@@ -101,6 +101,33 @@ class LocalQueueEditOwnershipTest {
             assertLocalRulesApply(gate)
         }
 
+    /**
+     * ADR-024 Amendment A15, round 2: the admission's lifetime comes from the real coordinator, and a
+     * return to local is a **new** lifetime — local A, synchronised B, local C never revives A.
+     */
+    @Test
+    fun `an admission from local lifetime A is dead after synchronised B, even once local C begins`() =
+        runTest(StandardTestDispatcher()) {
+            build(backgroundScope)
+            connect(this)
+            val gate = SyncPlaybackGateAdapter(backgroundScope, coordinator)
+            val underA = assertNotNull(gate.admitLocalQueueEdit(), "premise: local lifetime A admits")
+            assertTrue(gate.isLocalQueueEditStillValid(underA))
+
+            coordinator.playSynchronized(HASH_UNHELD)
+            runCurrent()
+            assertTrue(coordinator.isSynchronizedModeActive(), "premise: B")
+            assertFalse(gate.isLocalQueueEditStillValid(underA), "A survived synchronised activation")
+            assertNull(gate.admitLocalQueueEdit(), "a fresh local admission under B")
+
+            coordinator.leaveSynchronizedMode()
+            runCurrent()
+            assertFalse(coordinator.isSynchronizedModeActive(), "premise: C")
+            assertFalse(gate.isLocalQueueEditStillValid(underA), "A was resurrected by a later local lifetime")
+            val underC = assertNotNull(gate.admitLocalQueueEdit(), "C admits fresh edits")
+            assertTrue(gate.isLocalQueueEditStillValid(underC))
+        }
+
     @Test
     fun `no gate at all — no synchronised session was ever built — is plain local behaviour`() {
         edits.forEach { assertNotNull(LocalQueueEdits.reduce(queue, listOf(it), gate = null), "$it") }

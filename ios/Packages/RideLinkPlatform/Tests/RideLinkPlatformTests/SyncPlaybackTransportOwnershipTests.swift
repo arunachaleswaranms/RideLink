@@ -656,6 +656,46 @@ extension SyncPlaybackTransportOwnershipTests {
         assertLocalQueueRules(gate)
     }
 
+    /// ADR-024 Amendment A15 round 2: the admission's lifetime comes from the real coordinator, and a
+    /// return to local is a **new** lifetime — local A, synchronised B, local C never revives A.
+    func testAnAdmissionFromLocalLifetimeAIsDeadAfterSynchronisedBEvenOnceLocalCBegins() async throws {
+        await build(localPeerId: SyncTestValues.leaderPeerId, withPresenter: false)
+        await connect(asLeader: true)
+        let gate = SyncPlaybackGateAdapter(sync: coordinator)
+        let underA = try XCTUnwrap(gate.admitLocalQueueEdit(), "premise: local lifetime A admits")
+        XCTAssertTrue(gate.isLocalQueueEditStillValid(underA))
+
+        await coordinator.playSynchronized(Self.hashB)
+        await assertOwnership(.synchronized(.leader), "premise: B")
+        XCTAssertFalse(gate.isLocalQueueEditStillValid(underA), "A survived synchronised activation")
+        XCTAssertNil(gate.admitLocalQueueEdit(), "a fresh local admission under B")
+
+        await coordinator.leaveSynchronizedMode()
+        await assertOwnership(.local, "premise: C")
+        XCTAssertFalse(gate.isLocalQueueEditStillValid(underA), "A was resurrected by a later local lifetime")
+        let underC = try XCTUnwrap(gate.admitLocalQueueEdit(), "C admits fresh edits")
+        XCTAssertTrue(gate.isLocalQueueEditStillValid(underC))
+        XCTAssertNotEqual(underA, underC)
+    }
+
+    /// The A14 scenario with an admission in hand: a pre-ride local admission dies at activation; End
+    /// Ride and old debt finishing as SYNCED (the role surviving) neither keep the queue locked nor
+    /// revive it; a fresh admission afterwards works.
+    func testAPreRideAdmissionDiesAtActivationAndAFreshOneAfterEndRideAndOldDebtWorks() async throws {
+        await build(localPeerId: SyncTestValues.followerPeerId, withPresenter: false)
+        let gate = SyncPlaybackGateAdapter(sync: coordinator)
+        let beforeRide = try XCTUnwrap(gate.admitLocalQueueEdit(), "premise: local before the ride")
+        _ = await followerFinishesAcceptedDebtAfterEndRide()
+        let state = await coordinator.diagnostics.syncState
+        XCTAssertEqual(state, .synced, "premise: SYNCED on display")
+        let role = await coordinator.role
+        XCTAssertEqual(role, .follower, "premise: the role survives End Ride")
+
+        XCTAssertFalse(gate.isLocalQueueEditStillValid(beforeRide), "a pre-ride admission survived the ride")
+        let fresh = try XCTUnwrap(gate.admitLocalQueueEdit(), "End Ride and old debt left the local queue locked")
+        XCTAssertTrue(gate.isLocalQueueEditStillValid(fresh))
+    }
+
     func testNoGateIsPlainLocalBehaviourAndTheAffordancesFollowTheLock() {
         for edit in Self.localEdits {
             XCTAssertNotNil(LocalQueueEdits.reduce(Self.localQueue, [edit], gate: nil), "\(edit)")

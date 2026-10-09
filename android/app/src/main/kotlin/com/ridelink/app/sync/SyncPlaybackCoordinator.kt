@@ -220,6 +220,16 @@ class SyncPlaybackCoordinator(
     private val _transportOwnershipForDisplay = MutableStateFlow(false)
 
     /**
+     * ADR-024 Amendment A15: the local transport-ownership **lifetime**. It advances every time
+     * ownership flips — local to synchronised and back — so the local lifetime that admitted an edit
+     * ends for good when synchronised mode takes over, and a later return to local is a newer one.
+     * Guarded by [ownershipLock] together with [ownedForLifetime], so the pair is read consistently.
+     */
+    private val ownershipLock = Any()
+    private var ownershipLifetime = 0L
+    private var ownedForLifetime = false
+
+    /**
      * [isSynchronizedModeActive], **published for rendering only** (Phase 9A.5, PR #18 review): the
      * screens that make local Up Next read-only need to redraw when ownership changes, and not every
      * assignment of [syncEnabled]/[role] publishes [diagnostics]. Written by those two properties'
@@ -230,8 +240,23 @@ class SyncPlaybackCoordinator(
     val transportOwnershipForDisplay: StateFlow<Boolean> = _transportOwnershipForDisplay.asStateFlow()
 
     private fun publishTransportOwnershipForDisplay() {
-        _transportOwnershipForDisplay.value = syncEnabled && role != null
+        val owned = syncEnabled && role != null
+        synchronized(ownershipLock) {
+            if (owned != ownedForLifetime) {
+                ownedForLifetime = owned
+                ownershipLifetime++
+            }
+        }
+        _transportOwnershipForDisplay.value = owned
     }
+
+    /**
+     * The local transport-ownership lifetime in force, or `null` while synchronised mode owns transport
+     * (ADR-024 Amendment A15). Written only by [syncEnabled]'s and [role]'s setters, so it cannot
+     * disagree with [isSynchronizedModeActive] beyond the instant between a field write and its setter
+     * finishing. Never derived from [diagnostics].
+     */
+    fun localOwnershipLifetime(): Long? = synchronized(ownershipLock) { if (ownedForLifetime) null else ownershipLifetime }
 
     /**
      * The highest `command_seq` this device has taken responsibility for — *the* input to

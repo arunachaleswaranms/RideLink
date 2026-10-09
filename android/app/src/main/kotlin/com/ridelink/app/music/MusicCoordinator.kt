@@ -10,7 +10,6 @@ import com.ridelink.core.player.LocalQueue
 import com.ridelink.core.player.LocalQueueAction
 import com.ridelink.core.player.LocalQueueEffect
 import com.ridelink.core.player.LocalQueueItem
-import com.ridelink.core.player.LocalQueueOutcome
 import com.ridelink.core.player.LocalQueueState
 import com.ridelink.core.player.MusicFailure
 import com.ridelink.core.player.PlaybackCommand
@@ -235,6 +234,15 @@ class MusicCoordinator(
      *  offer). Every edit re-asks at the moment it is admitted; this answer authorises nothing. */
     fun isLocalQueueLocked(): Boolean = syncGate?.localQueueLocked() == true
 
+    /** ADR-024 Amendment A15: every local player effect runs under the admission that caused it. */
+    private val localEffects =
+        LocalPlaybackEffects(
+            scope = scope,
+            player = player,
+            resolve = ::resolveLoad,
+            stillValid = { admission -> LocalQueueEdits.stillValid(syncGate, admission) },
+        )
+
     /** Adds [entry] to the queue and starts playing it immediately — the library screen's "tap a
      *  track" affordance, as one atomic queue operation rather than an add followed by a
      *  UI-observed "select the item I just added" that would race a second rapid tap. */
@@ -322,12 +330,14 @@ class MusicCoordinator(
     fun pause() {
         coexistenceEvents?.onPlaybackIntent(playing = false)
         if (syncGate?.interceptPause() == true) return
-        scope.launch { player.execute(PlaybackCommand.Pause) }
+        val admission = LocalQueueEdits.admit(syncGate) ?: return
+        localEffects.command(PlaybackCommand.Pause, admission)
     }
 
     fun seek(positionMs: Long) {
         if (syncGate?.interceptSeek(positionMs) == true) return
-        scope.launch { player.execute(PlaybackCommand.Seek(positionMs)) }
+        val admission = LocalQueueEdits.admit(syncGate) ?: return
+        localEffects.command(PlaybackCommand.Seek(positionMs), admission)
     }
 
     // --- Phase 5's own entry points ---------------------------------------------------------
@@ -437,30 +447,35 @@ class MusicCoordinator(
         return true
     }
 
-    /** Transport and track-end actions: already decided by [syncGate]'s intercepts before reaching here. */
-    private fun dispatch(action: LocalQueueAction) = apply(LocalQueue.reduce(_queueState.value, action))
-
-    private fun apply(outcome: LocalQueueOutcome) {
-        _queueState.value = outcome.state
-        outcome.effects.forEach { effect ->
-            when (effect) {
-                is LocalQueueEffect.LoadAndPlay -> scope.launch { loadAndPlay(effect.localEntryId) }
-                LocalQueueEffect.StopPlayback -> scope.launch { player.execute(PlaybackCommand.Stop) }
-                LocalQueueEffect.ResumePlayback -> scope.launch { player.execute(PlaybackCommand.Play) }
-            }
-        }
+    /**
+     * Local transport and track-end actions, after [syncGate]'s intercept said "local". They are fresh
+     * local presses, so they are admitted too, and their player effects carry that admission exactly
+     * as an edit's do (ADR-024 Amendment A15): a press the intercept saw as local, whose effect runs
+     * after synchronised mode took transport, must not reach the player either.
+     */
+    private fun dispatch(action: LocalQueueAction) {
+        val admission = LocalQueueEdits.admit(syncGate) ?: return
+        apply(AdmittedEdit(LocalQueue.reduce(_queueState.value, action), admission))
     }
 
-    private suspend fun loadAndPlay(localEntryId: LocalEntryId) {
+    /**
+     * Queue state first, synchronously, under a valid admission; player effects after, each re-proving
+     * the same admission. If an effect is later dropped the local queue keeps the admitted state — that
+     * is what the user asked for under local ownership, and the synchronised path replaces the local
+     * queue wholesale at its next selection (`syncSelect`) anyway. No rollback crosses an ownership
+     * boundary (ADR-024 Amendment A15).
+     */
+    private fun apply(edit: AdmittedEdit) {
+        _queueState.value = edit.state
+        localEffects.run(edit.effects, edit.admission)
+    }
+
+    private suspend fun resolveLoad(localEntryId: LocalEntryId): PlaybackCommand.Load? {
         val external = externalCacheSources[localEntryId]
-        if (external != null) {
-            player.execute(PlaybackCommand.Load(localEntryId, external.location, external.title, external.artist))
-            player.execute(PlaybackCommand.Play)
-            return
+        if (external != null) return PlaybackCommand.Load(localEntryId, external.location, external.title, external.artist)
+        return repository.findByLocalEntryId(localEntryId)?.let { entry ->
+            PlaybackCommand.Load(localEntryId, entry.location, entry.track.title, entry.track.artist)
         }
-        val entry = repository.findByLocalEntryId(localEntryId) ?: return
-        player.execute(PlaybackCommand.Load(localEntryId, entry.location, entry.track.title, entry.track.artist))
-        player.execute(PlaybackCommand.Play)
     }
 
     private companion object {

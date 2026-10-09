@@ -90,6 +90,19 @@ public final class MusicCoordinator {
     public var syncGate: (any SyncPlaybackGate)?
 
     private let player: any Player
+    /// ADR-024 Amendment A15 round 2: where every local queue edit's and local transport press's
+    /// player effects run, each carrying the admission it was minted with and re-proving it before
+    /// audio-session activation, `Load`, `Play`, `Stop`, `Pause` and `Seek`. The authority is the
+    /// synchronisation owner's lifetime (`syncGate`), never a fact held here.
+    @ObservationIgnored private lazy var localEffects = LocalPlaybackEffects(
+        player: player,
+        prepare: { [weak self] in await self?.activateAudioSessionIfNeeded() },
+        resolve: { [weak self] localEntryId in self?.resolveLocation(localEntryId) },
+        stillValid: { [weak self] admission in
+            guard let self else { return false }
+            return LocalQueueEdits.stillValid(admission, gate: self.syncGate)
+        }
+    )
     private let musicAudioSession: MusicAudioSession
     private var audioSessionActivated = false
     private let monotonicNowUs: @Sendable () -> Int64
@@ -245,9 +258,9 @@ public final class MusicCoordinator {
     @discardableResult
     public func playNow(_ entry: LibraryEntry) -> Bool {
         let item = newItem(entry)
-        guard let outcome = LocalQueueEdits.reduce(queueState, [.add(item), .select(id: item.id)], gate: syncGate) else { return false }
+        guard let edit = LocalQueueEdits.reduce(queueState, [.add(item), .select(id: item.id)], gate: syncGate) else { return false }
         coexistenceEvents?.onPlaybackIntent(playing: true)
-        apply(outcome)
+        apply(edit)
         return true
     }
 
@@ -264,11 +277,11 @@ public final class MusicCoordinator {
     public func playExternalVerifiedCachedTrack(_ contentHash: ContentHash, fileURL: URL) -> Bool {
         let entryId = LocalEntryId(UUID().uuidString.lowercased())
         let item = LocalQueueItem(id: UUID().uuidString, localEntryId: entryId, insertedAtMonoUs: monotonicNowUs())
-        guard let outcome = LocalQueueEdits.reduce(queueState, [.add(item), .select(id: item.id)], gate: syncGate) else { return false }
+        guard let edit = LocalQueueEdits.reduce(queueState, [.add(item), .select(id: item.id)], gate: syncGate) else { return false }
         coexistenceEvents?.onPlaybackIntent(playing: true)
-        // Registered before the effects run: `loadAndPlay` resolves the source when it executes.
+        // Registered before the effects run: `resolveLocation` reads it when the effect executes.
         externalCacheSources[entryId] = ExternalCacheSource(contentHash: contentHash, location: LocalTrackLocation(uri: fileURL.absoluteString))
-        apply(outcome)
+        apply(edit)
         return true
     }
 
@@ -304,12 +317,14 @@ public final class MusicCoordinator {
     public func pause() {
         coexistenceEvents?.onPlaybackIntent(playing: false)
         if syncGate?.interceptPause() == true { return }
-        Task { await player.execute(.pause) }
+        guard let admission = LocalQueueEdits.admit(gate: syncGate) else { return }
+        localEffects.command(.pause, admission: admission)
     }
 
     public func seek(positionMs: Int64) {
         if syncGate?.interceptSeek(positionMs) == true { return }
-        Task { await player.execute(.seek(positionMs: positionMs)) }
+        guard let admission = LocalQueueEdits.admit(gate: syncGate) else { return }
+        localEffects.command(.seek(positionMs: positionMs), admission: admission)
     }
 
     // MARK: - Phase 5's own entry points
@@ -391,44 +406,37 @@ public final class MusicCoordinator {
 
     /// A user's edit of the local queue, admitted or refused as one step — see `LocalQueueEdits`.
     private func edit(_ actions: [LocalQueueAction]) -> Bool {
-        guard let outcome = LocalQueueEdits.reduce(queueState, actions, gate: syncGate) else { return false }
-        apply(outcome)
+        guard let edit = LocalQueueEdits.reduce(queueState, actions, gate: syncGate) else { return false }
+        apply(edit)
         return true
     }
 
-    /// Transport and track-end actions: already decided by `syncGate`'s intercepts before reaching here.
-    private func dispatch(_ action: LocalQueueAction) { apply(LocalQueue.reduce(queueState, action)) }
-
-    private func apply(_ outcome: LocalQueueOutcome) {
-        queueState = outcome.state
-        for effect in outcome.effects {
-            switch effect {
-            case .loadAndPlay(let localEntryId):
-                Task {
-                    await self.activateAudioSessionIfNeeded()
-                    await self.loadAndPlay(localEntryId)
-                }
-            case .stopPlayback:
-                Task { await self.player.execute(.stop) }
-            case .resumePlayback:
-                Task {
-                    await self.activateAudioSessionIfNeeded()
-                    await self.player.execute(.play)
-                }
-            }
-        }
+    /// Transport and track-end actions: already decided by `syncGate`'s intercepts before reaching
+    /// here, and admitted now — in the same synchronous step as the queue mutation — for the effects
+    /// that follow. A `nil` admission means synchronised ownership arrived between the intercept's
+    /// read and this one; the press then does nothing locally (ADR-024 A15 round 2).
+    private func dispatch(_ action: LocalQueueAction) {
+        guard let admission = LocalQueueEdits.admit(gate: syncGate) else { return }
+        apply(AdmittedLocalQueueEdit(outcome: LocalQueue.reduce(queueState, action), admission: admission))
     }
 
-    private func loadAndPlay(_ localEntryId: LocalEntryId) async {
-        if let external = externalCacheSources[localEntryId] {
-            await player.execute(.load(localEntryId: localEntryId, location: external.location))
-            await player.execute(.play)
-            return
-        }
-        guard let entry = try? repository.findByLocalEntryId(localEntryId) else { return }
-        let resolvedUri = indexer.resolvedUrl(for: entry).absoluteString
-        await player.execute(.load(localEntryId: localEntryId, location: LocalTrackLocation(uri: resolvedUri)))
-        await player.execute(.play)
+    /// ADR-024 Amendment A15 round 2. The queue mutation is applied **now**, under the admission;
+    /// the player effects run later and carry that same admission, re-proved before each step
+    /// (`LocalPlaybackEffects`). If an effect is then dropped because synchronised ownership took
+    /// over, the admitted local queue state is deliberately **not** rolled back: it was a legitimate
+    /// local edit when it was made, and the synchronised path that took over replaces the local queue
+    /// wholesale on its first selection (`syncSelect`) and clears it on stop (`syncClearSelection`).
+    /// A rollback would itself be a local write racing that authority.
+    private func apply(_ edit: AdmittedLocalQueueEdit) {
+        queueState = edit.state
+        localEffects.run(edit.effects, admission: edit.admission)
+    }
+
+    /// Where an entry's file is: a verified cache file, or an imported library entry; `nil` if gone.
+    private func resolveLocation(_ localEntryId: LocalEntryId) -> LocalTrackLocation? {
+        if let external = externalCacheSources[localEntryId] { return external.location }
+        guard let entry = try? repository.findByLocalEntryId(localEntryId) else { return nil }
+        return LocalTrackLocation(uri: indexer.resolvedUrl(for: entry).absoluteString)
     }
 
     /// A track ending or its file going missing both mean "move on" — the queue owner's job

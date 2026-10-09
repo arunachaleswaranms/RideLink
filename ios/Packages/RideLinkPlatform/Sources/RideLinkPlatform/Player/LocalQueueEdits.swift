@@ -12,16 +12,37 @@ import RideLinkCore
 /// disabled control. It lives in this package, beside the gate, because the app target has no unit
 /// test bundle and the real `SyncPlaybackGateAdapter` has to be exercised against it.
 ///
-/// `reduce` asks `SyncPlaybackGate.localQueueLocked()` once and, when admitted, reduces every action in
-/// the same synchronous step, so no suspension separates the answer from the mutation it authorises,
-/// and an edit made of several actions (add-then-select) is admitted as one. `nil` means refused: no
-/// state change and no effect at all.
+/// `reduce` admits once (`admit`) and, when admitted, reduces every action in the same synchronous
+/// step, so no suspension separates the admission from the queue mutation it authorises, and an edit
+/// made of several actions (add-then-select) is admitted as one. `nil` means refused: no state change
+/// and no effect at all.
+///
+/// **Round 2 (ADR-024 Amendment A15): the admission is returned with the outcome.** The queue mutation
+/// is synchronous, but its player effects are not — they run in `Task`s, behind audio-session
+/// activation and a library lookup — so the `LocalQueueEditAdmission` travels with them and is
+/// re-proved before every player call (`LocalPlaybackEffects`). A Boolean "is the queue locked?" taken
+/// here would authorise nothing after the first suspension, and `@MainActor` does not change that:
+/// every `await` releases the main actor to whatever activates synchronised mode next.
 public enum LocalQueueEdits {
+    /// The admission for a fresh local edit or press, or `nil` while synchronised mode owns transport.
+    @MainActor
+    public static func admit(gate: (any SyncPlaybackGate)?) -> LocalQueueEditAdmission? {
+        guard let gate else { return .ungated }
+        return gate.admitLocalQueueEdit()
+    }
+
+    /// Whether `admission` — never a freshly minted one — still holds.
+    @MainActor
+    public static func stillValid(_ admission: LocalQueueEditAdmission, gate: (any SyncPlaybackGate)?) -> Bool {
+        guard let gate else { return admission == .ungated }
+        return gate.isLocalQueueEditStillValid(admission)
+    }
+
     @MainActor
     public static func reduce(
         _ state: LocalQueueState, _ actions: [LocalQueueAction], gate: (any SyncPlaybackGate)?
-    ) -> LocalQueueOutcome? {
-        if gate?.localQueueLocked() == true { return nil }
+    ) -> AdmittedLocalQueueEdit? {
+        guard let admission = admit(gate: gate) else { return nil }
         var current = state
         var effects: [LocalQueueEffect] = []
         for action in actions {
@@ -29,8 +50,22 @@ public enum LocalQueueEdits {
             current = outcome.state
             effects += outcome.effects
         }
-        return LocalQueueOutcome(state: current, effects: effects)
+        return AdmittedLocalQueueEdit(outcome: LocalQueueOutcome(state: current, effects: effects), admission: admission)
     }
+}
+
+/// An admitted edit: its queue outcome and the admission its player effects must carry.
+public struct AdmittedLocalQueueEdit: Sendable {
+    public let outcome: LocalQueueOutcome
+    public let admission: LocalQueueEditAdmission
+
+    public init(outcome: LocalQueueOutcome, admission: LocalQueueEditAdmission) {
+        self.outcome = outcome
+        self.admission = admission
+    }
+
+    public var state: LocalQueueState { outcome.state }
+    public var effects: [LocalQueueEffect] { outcome.effects }
 }
 
 /// Which local-queue controls a screen offers — the presentation half of `LocalQueueEdits`, so the
