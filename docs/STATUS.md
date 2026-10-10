@@ -1,5 +1,22 @@
 # RideLink — Status
 
+**10 October 2026 — Phase 9A.5 Android evidence READY FOR INDEPENDENT REVIEW WITH EXPLICIT LIMITATIONS.**
+N-01 and N-02 now have user-confirmed real lock-screen/audio observations on three actual music
+tracks. Background/unlock state consistency and lock-screen Pause/Resume were user-confirmed;
+scoped MediaSession and fresh Quick Settings comparisons support them. Compact Quick Settings
+duration/progress is NOT AVAILABLE. Clear→Pause stopped/removed the track, but the cleared UI
+had no Pause control and app receipt of a later Pause was not established. Q-01B physical load/Play
+overlap remains INCONCLUSIVE; existing deterministic software regression PASS is separate.
+The user confirmed final audible Clear/no-restart and delegated submission judgment: retain Q-01B
+as physically INCONCLUSIVE for independent review. No unconditional physical qualification PASS;
+acceptance remains for review. No new product defect confirmed. L-06 normal-library use is USER-REPORTED PASS and the original ~3,460-track stress
+criterion is explicitly WAIVED with large-scale performance unverified; private call recordings
+were not imported. Installed APK/signer hashes were verified again without reinstall or data clear.
+L-07 and scoped L-08 evidence remain unchanged. See [the report](PHASE9A5_ANDROID_PHYSICAL.md).
+PR #19 stays draft. No Phase 9B, Phase 9 completion or V1 readiness is claimed.
+
+The entry below records the earlier partial physical run.
+
 **10 October 2026 — Phase 9A.5 merged; Android physical qualification BLOCKED.**
 PR #18 merged at `4104e81fa5ce9bd197d2d1b6769966e47be590d1`, tree
 `71f5fd0bec0c7c2621be4f69b2a274e6e55cf0f5`. The signed merged APK was installed in place on the
