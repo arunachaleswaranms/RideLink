@@ -93,7 +93,7 @@ fun MainScreen(
     // reachable while browsing, at a fixed height so the list above it never shifts.
     val miniPlayer: @Composable () -> Unit = {
         MiniPlayer(
-            rememberNowPlaying(musicCoordinator),
+            rememberNowPlaying(musicCoordinator, synchronized = queueLocked),
             onPlay = onPlayMusic,
             onPause = musicCoordinator::pause,
             onNext = musicCoordinator::next,

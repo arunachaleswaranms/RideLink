@@ -19,6 +19,7 @@ import com.ridelink.app.music.MusicCoordinator
 fun MusicSection(
     musicCoordinator: MusicCoordinator,
     onPlayMusic: () -> Unit,
+    synchronized: Boolean = false,
 ) {
     val lastMusicStartRefusal by musicCoordinator.lastMusicStartRefusal.collectAsState()
 
@@ -33,7 +34,7 @@ fun MusicSection(
     }
 
     NowPlayingCard(
-        ui = rememberNowPlaying(musicCoordinator),
+        ui = rememberNowPlaying(musicCoordinator, synchronized),
         onPlay = onPlayMusic,
         onPause = musicCoordinator::pause,
         onSeek = musicCoordinator::seek,

@@ -63,9 +63,11 @@ sealed class LocalQueueAction {
 
     /**
      * The user pressed Play (Phase 9A.5 §11). With items queued and nothing selected — a fresh
-     * queue, or one that played past its end — it starts the first item; otherwise it resumes
-     * whatever is loaded. Before this, Play was disabled until Next had been pressed, although the
-     * queue was visibly full.
+     * queue, or one that played past its end — it starts the first item; with a current item it
+     * resumes it. Before this, Play was disabled until Next had been pressed, although the queue was
+     * visibly full. **With an empty queue it does nothing** (PR #18 review round 4): there is no
+     * local track to resume, and a resume would restart whatever the player still held from before
+     * a Clear — a track the user has just removed.
      */
     object Play : LocalQueueAction()
 }
@@ -124,10 +126,10 @@ object LocalQueue {
 
     private fun play(state: LocalQueueState): LocalQueueOutcome {
         val first = state.items.firstOrNull()
-        return if (state.currentItem == null && first != null) {
-            LocalQueueOutcome(state.copy(currentId = first.id), listOf(LocalQueueEffect.LoadAndPlay(first.localEntryId)))
-        } else {
-            LocalQueueOutcome(state, listOf(LocalQueueEffect.ResumePlayback))
+        return when {
+            state.currentItem != null -> LocalQueueOutcome(state, listOf(LocalQueueEffect.ResumePlayback))
+            first != null -> LocalQueueOutcome(state.copy(currentId = first.id), listOf(LocalQueueEffect.LoadAndPlay(first.localEntryId)))
+            else -> LocalQueueOutcome(state, emptyList())
         }
     }
 

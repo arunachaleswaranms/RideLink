@@ -321,6 +321,85 @@ extension LocalPlaybackEffectsLifetimeTests {
     }
 }
 
+// MARK: - Round 4: a Stop belongs to its selection, and the newest Play intent is carried
+
+/// PR #18 review round 4. Mirrors Android's `R4-*` cases. A `Task` created here cannot run until the
+/// test suspends (the main actor is the test's), so a press issued right after an edit is queued
+/// before that edit's effects have run — the reviewer's ordering, without a sleep.
+extension LocalPlaybackEffectsLifetimeTests {
+    private func issueR4(_ state: LocalQueueState, _ actions: [LocalQueueAction]) throws -> (LocalQueueState, [Task<Void, Never>]) {
+        let edit = try XCTUnwrap(LocalQueueEdits.reduce(state, actions, gate: gate))
+        return (edit.state, effects.run(edit.effects, admission: edit.admission))
+    }
+
+    func testR4_1ClearThenPauseBeforeTheStopRunsTheQueueStaysEmptyAndPlaybackStops() async throws {
+        let (cleared, clear) = try issueR4(Self.threeWithFirstCurrent, [.clear])
+        let pause = effects.pause(admission: try XCTUnwrap(LocalQueueEdits.admit(gate: gate)))
+        await awaitAll(clear + [pause])
+
+        XCTAssertTrue(cleared.items.isEmpty)
+        let calls = await player.calls
+        XCTAssertEqual(calls, [.stop, .pause], "a later Pause discarded the Clear's Stop")
+    }
+
+    func testR4_2ClearThenPlayOnTheEmptyQueueBeforeTheStopRunsNothingResumes() async throws {
+        let (cleared, clear) = try issueR4(Self.threeWithFirstCurrent, [.clear])
+        let (_, play) = try issueR4(cleared, [.play])
+        await awaitAll(clear + play)
+
+        let calls = await player.calls
+        XCTAssertEqual(calls, [.stop], "the cleared track resumed or kept playing")
+    }
+
+    func testR4_5SelectAParkedThenPlayAStartsOnceLoadedAndThePreviousTrackNeverPlays() async throws {
+        let parked = resolver.park(Self.id(2))
+        let (queue, tasksA) = try issueR4(Self.threeWithFirstCurrent, [.select(id: "q2")])
+        await parked.waitForArrival()
+        let (_, play) = try issueR4(queue, [.play]) // q2 is current: a resume, while A's load is in flight
+        await awaitAll(play)
+        var calls = await player.calls
+        XCTAssertEqual(calls, [], "the previous track played while A was loading")
+
+        await parked.release()
+        await awaitAll(tasksA)
+        calls = await player.calls
+        XCTAssertEqual(calls, [Self.load(2), .play], "the newest Play was lost before the load")
+    }
+
+    func testR4_5SelectAParkedPauseThenPlayTheNewestIntentIsPlaySoAStartsOnceLoaded() async throws {
+        let parked = resolver.park(Self.id(2))
+        let (queue, tasksA) = try issueR4(Self.threeWithFirstCurrent, [.select(id: "q2")])
+        await parked.waitForArrival()
+        let pause = effects.pause(admission: try XCTUnwrap(LocalQueueEdits.admit(gate: gate)))
+        let (_, play) = try issueR4(queue, [.play])
+        await awaitAll([pause] + play)
+
+        await parked.release()
+        await awaitAll(tasksA)
+        let calls = await player.calls
+        XCTAssertEqual(calls, [Self.load(2), .play])
+    }
+
+    func testR4_7ClearThenANewSelectionBeforeTheStopRunsSupersedesItAndPlays() async throws {
+        let (cleared, clear) = try issueR4(Self.threeWithFirstCurrent, [.clear])
+        let (_, select) = try issueR4(cleared, [.add(LocalQueueItem(id: "q4", localEntryId: Self.id(4), insertedAtMonoUs: 4)), .select(id: "q4")])
+        await awaitAll(clear + select)
+
+        let calls = await player.calls
+        XCTAssertEqual(calls, [Self.load(4), .play])
+    }
+
+    func testR4_7ClearWhoseStopHasRunThenANewSelectionPlaysNormally() async throws {
+        let (cleared, clear) = try issueR4(Self.threeWithFirstCurrent, [.clear])
+        await awaitAll(clear)
+        let (_, select) = try issueR4(cleared, [.add(LocalQueueItem(id: "q4", localEntryId: Self.id(4), insertedAtMonoUs: 4)), .select(id: "q4")])
+        await awaitAll(select)
+
+        let calls = await player.calls
+        XCTAssertEqual(calls, [.stop, Self.load(4), .play])
+    }
+}
+
 // MARK: - Fixtures
 
 /// The synchronisation owner's lifetime rule: every ownership flip advances the lifetime.

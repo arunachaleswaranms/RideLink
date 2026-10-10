@@ -14,6 +14,8 @@ struct NowPlayingCard: View {
     let queueSize: Int
     var title: String? = nil
     var artist: String? = nil
+    /// Rendering only: whether Play is forwarded to a synchronised session (display ownership).
+    var synchronized: Bool = false
     let onPlay: () -> Void
     let onPause: () -> Void
     let onSeek: (Int64) -> Void
@@ -22,7 +24,10 @@ struct NowPlayingCard: View {
 
     @State private var dragging: Double?
 
-    private var canPlay: Bool { playerState.playing || playerState.localEntryId != nil || queueSize > 0 }
+    /// Mirrors Android's `transportAvailability`. Under local ownership an empty queue's Play does
+    /// nothing (`LocalQueue.play`, PR #18 review round 4), so a track the player merely still holds
+    /// after a Clear is not offered; while synchronised, Play is the session's and stays enabled.
+    private var canPlay: Bool { playerState.playing || queueSize > 0 || (synchronized && playerState.localEntryId != nil) }
     private var canSkip: Bool { queueSize > 0 }
     private var duration: Double { Double(max(playerState.durationMs, 0)) }
 

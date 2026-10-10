@@ -204,6 +204,57 @@ class MusicCoordinatorLocalEffectLifetimeTest {
         assertEquals(PlaybackCommand.Pause, player.calls[1])
     }
 
+    /** Round 4, through the real coordinator: a later Pause does not discard a Clear's Stop. */
+    @Test
+    fun clearThenPauseBeforeTheStopRunsStillStops() {
+        playCached(1)
+        scheduler.runCurrent()
+        player.calls.clear()
+
+        assertTrue(coordinator.clearQueue())
+        coordinator.pause()
+        scheduler.runCurrent()
+
+        assertTrue(
+            coordinator.queueState.value.items
+                .isEmpty(),
+        )
+        assertEquals(listOf(PlaybackCommand.Stop, PlaybackCommand.Pause), player.calls.toList())
+    }
+
+    /** Round 4, through the real coordinator: Play on the queue a Clear emptied resumes nothing. */
+    @Test
+    fun clearThenPlayOnTheEmptyQueueResumesNothing() {
+        playCached(1)
+        scheduler.runCurrent()
+        player.calls.clear()
+
+        assertTrue(coordinator.clearQueue())
+        coordinator.play()
+        scheduler.runCurrent()
+
+        assertEquals(listOf<PlaybackCommand>(PlaybackCommand.Stop), player.calls.toList(), "the cleared track resumed")
+    }
+
+    /** Round 4, through the real coordinator: Play pressed while the selection loads is carried by it. */
+    @Test
+    fun playPressedWhileTheSelectionLoadsStartsItOnceLoaded() {
+        player.parkNextLoad = true
+        playCached(1)
+        scheduler.runCurrent()
+        assertTrue(player.reachedLoad.isCompleted, "premise: parked inside Load")
+
+        coordinator.play()
+        scheduler.runCurrent()
+        assertEquals(1, player.calls.size, "Play reached the player while the selection was still loading: ${player.calls}")
+        player.parked.complete(Unit)
+        scheduler.runCurrent()
+
+        assertEquals(2, player.calls.size, "the Play pressed during the load was lost: ${player.calls}")
+        assertTrue(player.calls[0] is PlaybackCommand.Load)
+        assertEquals(PlaybackCommand.Play, player.calls[1])
+    }
+
     @Test
     fun aPlayNowParkedInsideLoadDoesNotPlayAfterSynchronisedActivation() {
         player.parkNextLoad = true

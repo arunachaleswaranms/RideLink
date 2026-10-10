@@ -15,22 +15,29 @@ class TransportAvailabilityTest {
 
     @Test
     fun `a queue with nothing selected can be started with Play`() {
-        val available = transportAvailability(queued, PlayerState())
+        val available = transportAvailability(queued, PlayerState(), synchronized = false)
         assertTrue(available.canPlayPause, "Play used to stay disabled here until Next was pressed")
         assertTrue(available.canSkip)
     }
 
     @Test
     fun `nothing queued and nothing loaded offers no transport`() {
-        val available = transportAvailability(LocalQueueState(), PlayerState())
+        val available = transportAvailability(LocalQueueState(), PlayerState(), synchronized = false)
         assertFalse(available.canPlayPause)
         assertFalse(available.canSkip)
     }
 
     @Test
-    fun `a loaded track can be resumed even with an empty queue`() {
-        assertTrue(transportAvailability(LocalQueueState(), PlayerState(localEntryId = track)).canPlayPause)
-        assertTrue(transportAvailability(LocalQueueState(), PlayerState(playing = true)).canPlayPause)
+    fun `a track the player still holds after a Clear is not offered locally - it was removed`() {
+        val stopped = PlayerState(localEntryId = track)
+        assertFalse(transportAvailability(LocalQueueState(), stopped, synchronized = false).canPlayPause, "Play would do nothing")
+        assertTrue(transportAvailability(LocalQueueState(), PlayerState(playing = true), synchronized = false).canPlayPause, "Pause stays")
+    }
+
+    @Test
+    fun `while synchronised a loaded track keeps Play, which the session takes`() {
+        assertTrue(transportAvailability(LocalQueueState(), PlayerState(localEntryId = track), synchronized = true).canPlayPause)
+        assertFalse(transportAvailability(LocalQueueState(), PlayerState(), synchronized = true).canPlayPause)
     }
 
     @Test

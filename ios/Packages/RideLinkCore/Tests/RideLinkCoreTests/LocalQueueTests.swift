@@ -184,10 +184,16 @@ final class LocalQueueTests: XCTestCase {
         XCTAssertEqual([.resumePlayback], outcome.effects)
     }
 
-    func testPlayWithAnEmptyQueueOnlyAsksThePlayerToResume() {
+    func testPlayWithAnEmptyQueueDoesNothingThereIsNoLocalTrackToResume() {
         let outcome = LocalQueue.reduce(LocalQueueState(), .play)
         XCTAssertEqual(LocalQueueState(), outcome.state)
-        XCTAssertEqual([.resumePlayback], outcome.effects)
+        XCTAssertEqual([], outcome.effects, "a resume here would restart the track a Clear just removed")
+    }
+
+    func testPlayAfterClearDoesNotResumeTheClearedTrack() {
+        let cleared = LocalQueue.reduce(LocalQueueState(items: [item("a1")], currentId: "a1"), .clear)
+        XCTAssertEqual([.stopPlayback], cleared.effects)
+        XCTAssertEqual([], LocalQueue.reduce(cleared.state, .play).effects)
     }
 
     func testRemovingOneOfTwoCopiesOfTheCurrentTrackRemovesExactlyThatEntry() {

@@ -25,6 +25,7 @@ struct MusicSection: View {
                 queueSize: musicCoordinator.queueState.items.count,
                 title: musicCoordinator.currentEntry?.track.title ?? cachedEntry?.title,
                 artist: musicCoordinator.currentEntry?.track.artist ?? cachedEntry?.artist,
+                synchronized: synchronized,
                 onPlay: musicCoordinator.play,
                 onPause: musicCoordinator.pause,
                 onSeek: { musicCoordinator.seek(positionMs: $0) },

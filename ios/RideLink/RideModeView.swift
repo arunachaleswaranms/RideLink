@@ -17,7 +17,11 @@ struct RideModeView: View {
             artist: music.currentEntry?.track.artist ?? cachedEntry?.artist,
             playing: music.playerState.playing,
             hasTrack: music.playerState.localEntryId != nil,
-            canStart: !music.queueState.items.isEmpty,
+            // PR #18 review round 4 (mirrors Android's `transportAvailability`): under local ownership
+            // an empty queue's Play does nothing, so a track merely still held after a Clear is not
+            // offered; while synchronised, Play is the session's.
+            canStart: !music.queueState.items.isEmpty
+                || (syncPlayback?.isSynchronizedModeActive == true && music.playerState.localEntryId != nil),
             syncText: UiPresentation.rideMusicLabel(status: coordinator.state.status,
                 state: syncPlayback?.diagnostics.syncState ?? .inactive,
                 ownsTransport: syncPlayback?.isSynchronizedModeActive == true),
@@ -85,7 +89,7 @@ struct RideModeContent: View {
                 HStack(alignment: .center, spacing: RideDesign.md) {
                     transport("Previous", icon: "backward.end.fill", action: onPrevious)
                     transport(playing ? "Pause" : "Play", icon: playing ? "pause.fill" : "play.fill", prominent: true, action: onPlayPause)
-                        .disabled(!hasTrack && !playing && !canStart)
+                        .disabled(!playing && !canStart)
                         .layoutPriority(1)
                     transport("Next", icon: "forward.end.fill", action: onNext)
                 }

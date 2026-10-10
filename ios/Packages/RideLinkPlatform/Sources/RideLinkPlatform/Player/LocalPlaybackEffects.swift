@@ -16,14 +16,20 @@ import RideLinkCore
 ///    edit. Synchronised mode taking transport — or a later return to local, which is a new lifetime —
 ///    ends it. Never re-read "is ownership local now?" in its place: local A → synchronised B → local C
 ///    is local again, and A's work must still be dead.
-/// 2. **The playback ticket** (round 3): this effect's place in the local operation order, so an older
-///    local operation cannot overtake a newer one inside the same lifetime. Two sequences, because they
-///    answer two questions:
+/// 2. **The playback ticket** (rounds 3 and 4): this effect's place in the local operation order, so
+///    an older local operation cannot overtake a newer one inside the same lifetime. Two sequences,
+///    because they answer two questions:
 ///    - **selection** — *which track should be loaded?* Advanced by a load-and-play and by a stop. A
-///      newer selection or stop ends an older `Load` and its `Play`.
+///      newer selection or stop ends an older `Load` and its `Play`. A stop is ended **only** by a
+///      newer selection: a Clear's `Stop` is what removes the cleared track from the player, and a
+///      later Pause or Play press must not discard it (round 4).
 ///    - **transport intent** — *should the player be running?* Advanced by a load-and-play, a stop, a
-///      resume and a pause. A newer intent ends an older `Play` (Select A, then Pause: A may still load,
-///      so the player holds the track the queue names, but A's `Play` cannot defeat the pause).
+///      resume and a pause, each recording whether it wants playback. A Pause or resume press acts only
+///      while it is still the newest intent. A load's trailing `Play` runs only if the newest intent
+///      **wants playback** — so Select A then Pause leaves A loaded but paused, and Select A then Play
+///      starts A once it has loaded rather than losing the Play (round 4). A resume pressed while its
+///      own selection's load is still in flight leaves the `Play` to that load, so the previous track
+///      never plays in between.
 ///
 ///    Add, move and removing a non-current entry have no player effect and advance neither. A seek is a
 ///    position on the current selection: it advances nothing and is dropped only if the selection moved.
@@ -41,12 +47,15 @@ public final class LocalPlaybackEffects {
     private let resolve: @MainActor (LocalEntryId) async -> LocalTrackLocation?
     private let stillValid: @MainActor (LocalQueueEditAdmission) -> Bool
     private var selection: Int64 = 0
-    private var transport: Int64 = 0
+    private var intent: Int64 = 0
+    private var intentWantsPlay = false
+    /// The selection whose load-and-play is still in flight, if any.
+    private var loadPending: Int64?
 
     /// A local effect's place in the operation order, captured when it is issued.
     private struct Ticket {
         let selection: Int64
-        let transport: Int64
+        let intent: Int64
     }
 
     /// - Parameters:
@@ -71,16 +80,16 @@ public final class LocalPlaybackEffects {
         effects.map { effect in
             switch effect {
             case .loadAndPlay(let localEntryId):
-                let ticket = issue(newSelection: true, newTransport: true)
+                let ticket = issue(newSelection: true, wantsPlay: true, loads: true)
                 return Task { await self.loadAndPlay(localEntryId, admission, ticket) }
             case .stopPlayback:
-                let ticket = issue(newSelection: true, newTransport: true)
+                let ticket = issue(newSelection: true, wantsPlay: false)
                 return Task {
-                    guard self.stillValid(admission), self.selectionCurrent(ticket), self.transportCurrent(ticket) else { return }
+                    guard self.stillValid(admission), self.selectionCurrent(ticket) else { return }
                     await self.player.execute(.stop)
                 }
             case .resumePlayback:
-                let ticket = issue(newSelection: false, newTransport: true)
+                let ticket = issue(newSelection: false, wantsPlay: true)
                 return Task { await self.resume(admission, ticket) }
             }
         }
@@ -89,9 +98,9 @@ public final class LocalPlaybackEffects {
     /// A local Pause press: a newer transport intent than anything issued before it.
     @discardableResult
     public func pause(admission: LocalQueueEditAdmission) -> Task<Void, Never> {
-        let ticket = issue(newSelection: false, newTransport: true)
+        let ticket = issue(newSelection: false, wantsPlay: false)
         return Task {
-            guard self.stillValid(admission), self.transportCurrent(ticket) else { return }
+            guard self.stillValid(admission), self.intentCurrent(ticket) else { return }
             await self.player.execute(.pause)
         }
     }
@@ -99,39 +108,52 @@ public final class LocalPlaybackEffects {
     /// A local seek: a position on the current selection, dropped if the selection has moved on.
     @discardableResult
     public func seek(positionMs: Int64, admission: LocalQueueEditAdmission) -> Task<Void, Never> {
-        let ticket = issue(newSelection: false, newTransport: false)
+        let ticket = Ticket(selection: selection, intent: intent)
         return Task {
             guard self.stillValid(admission), self.selectionCurrent(ticket) else { return }
             await self.player.execute(.seek(positionMs: positionMs))
         }
     }
 
-    private func issue(newSelection: Bool, newTransport: Bool) -> Ticket {
+    private func issue(newSelection: Bool, wantsPlay: Bool, loads: Bool = false) -> Ticket {
         if newSelection { selection += 1 }
-        if newTransport { transport += 1 }
-        return Ticket(selection: selection, transport: transport)
+        intent += 1
+        intentWantsPlay = wantsPlay
+        if loads {
+            loadPending = selection
+        } else if newSelection {
+            loadPending = nil
+        }
+        return Ticket(selection: selection, intent: intent)
     }
 
     private func selectionCurrent(_ ticket: Ticket) -> Bool { selection == ticket.selection }
 
-    private func transportCurrent(_ ticket: Ticket) -> Bool { transport == ticket.transport }
+    private func intentCurrent(_ ticket: Ticket) -> Bool { intent == ticket.intent }
+
+    private func loadInFlight(_ ticket: Ticket) -> Bool { loadPending == ticket.selection }
+
+    private func loadSettled(_ ticket: Ticket) {
+        if loadPending == ticket.selection { loadPending = nil }
+    }
 
     private func loadAndPlay(_ localEntryId: LocalEntryId, _ admission: LocalQueueEditAdmission, _ ticket: Ticket) async {
+        defer { loadSettled(ticket) }
         guard stillValid(admission), selectionCurrent(ticket) else { return }
         await prepare()
         guard let location = await resolve(localEntryId) else { return }
         guard stillValid(admission), selectionCurrent(ticket) else { return }
         await player.execute(.load(localEntryId: localEntryId, location: location))
-        // Neither proof taken before `Load` authorises `Play`: `Load` suspends, and a newer pause,
-        // resume, stop or selection may have been issued meanwhile.
-        guard stillValid(admission), selectionCurrent(ticket), transportCurrent(ticket) else { return }
+        // No proof taken before `Load` authorises `Play`: `Load` suspends, and a newer selection, stop
+        // or pause may have been issued meanwhile — or a newer Play, which this load carries.
+        guard stillValid(admission), selectionCurrent(ticket), intentWantsPlay else { return }
         await player.execute(.play)
     }
 
     private func resume(_ admission: LocalQueueEditAdmission, _ ticket: Ticket) async {
-        guard stillValid(admission), transportCurrent(ticket) else { return }
+        guard stillValid(admission), intentCurrent(ticket), selectionCurrent(ticket), !loadInFlight(ticket) else { return }
         await prepare()
-        guard stillValid(admission), transportCurrent(ticket) else { return }
+        guard stillValid(admission), intentCurrent(ticket), selectionCurrent(ticket), !loadInFlight(ticket) else { return }
         await player.execute(.play)
     }
 }

@@ -57,8 +57,9 @@ public enum LocalQueueAction: Sendable, Equatable {
     case previous
     case select(id: String)
     /// The user pressed Play (Phase 9A.5 §11). With items queued and nothing selected — a fresh
-    /// queue, or one that played past its end — it starts the first item; otherwise it resumes
-    /// whatever is loaded.
+    /// queue, or one that played past its end — it starts the first item; with a current item it
+    /// resumes it. With an empty queue it does nothing (PR #18 review round 4): there is no local
+    /// track to resume, and a resume would restart a track a Clear just removed.
     case play
 }
 
@@ -119,13 +120,18 @@ public enum LocalQueue {
     }
 
     private static func play(_ state: LocalQueueState) -> LocalQueueOutcome {
-        if state.currentItem == nil, let first = state.items.first {
+        if state.currentItem != nil {
+            return LocalQueueOutcome(state: state, effects: [.resumePlayback])
+        }
+        if let first = state.items.first {
             return LocalQueueOutcome(
                 state: LocalQueueState(items: state.items, currentId: first.id),
                 effects: [.loadAndPlay(first.localEntryId)]
             )
         }
-        return LocalQueueOutcome(state: state, effects: [.resumePlayback])
+        // PR #18 review round 4: an empty queue has no local track to resume, and a resume would
+        // restart whatever the player still held from before a Clear — a track the user removed.
+        return LocalQueueOutcome(state: state, effects: [])
     }
 
     /// Removing an item that is not current only ever shifts positions, never identity or playback.

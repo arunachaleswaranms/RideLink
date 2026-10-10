@@ -56,19 +56,28 @@ internal data class TransportAvailability(
  * first item. Previous/Next act on the queue, so they need one. In a synchronised session the gate
  * takes these presses before the local queue sees them; the local queue then holds the one
  * materialised track, so the same rule keeps them enabled.
+ *
+ * PR #18 review round 4: under local ownership an empty queue's Play does nothing (`LocalQueue.Play`),
+ * so a track the player merely still holds after a Clear is not offered — it was removed. While
+ * [synchronized] (display ownership, rendering only) Play is forwarded to the synchronised session
+ * instead, so a loaded track keeps it enabled as before.
  */
 internal fun transportAvailability(
     queue: LocalQueueState,
     player: PlayerState,
+    synchronized: Boolean,
 ): TransportAvailability =
     TransportAvailability(
-        canPlayPause = player.playing || player.localEntryId != null || queue.items.isNotEmpty(),
+        canPlayPause = player.playing || queue.items.isNotEmpty() || (synchronized && player.localEntryId != null),
         canSkip = queue.items.isNotEmpty(),
     )
 
 /** Collects the one player's state for [NowPlayingCard] and [MiniPlayer]. */
 @Composable
-internal fun rememberNowPlaying(musicCoordinator: MusicCoordinator): NowPlayingUi {
+internal fun rememberNowPlaying(
+    musicCoordinator: MusicCoordinator,
+    synchronized: Boolean,
+): NowPlayingUi {
     val queue by musicCoordinator.queueState.collectAsState()
     val player by musicCoordinator.playerState.collectAsState()
     val entry by musicCoordinator.nowPlayingEntry.collectAsState()
@@ -79,7 +88,7 @@ internal fun rememberNowPlaying(musicCoordinator: MusicCoordinator): NowPlayingU
         title = entry?.track?.title ?: external?.first,
         artist = entry?.track?.artist ?: external?.second,
         artworkRef = entry?.track?.artworkRef,
-        transport = transportAvailability(queue, player),
+        transport = transportAvailability(queue, player, synchronized),
     )
 }
 

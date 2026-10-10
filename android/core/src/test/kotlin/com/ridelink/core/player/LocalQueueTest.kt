@@ -214,10 +214,17 @@ class LocalQueueTest {
     }
 
     @Test
-    fun `play with an empty queue only asks the player to resume`() {
+    fun `play with an empty queue does nothing - there is no local track to resume`() {
         val outcome = LocalQueue.reduce(LocalQueueState(), LocalQueueAction.Play)
         assertEquals(LocalQueueState(), outcome.state)
-        assertEquals(listOf<LocalQueueEffect>(LocalQueueEffect.ResumePlayback), outcome.effects)
+        assertEquals(emptyList(), outcome.effects, "a resume here would restart the track a Clear just removed")
+    }
+
+    @Test
+    fun `play after Clear does not resume the cleared track`() {
+        val cleared = LocalQueue.reduce(LocalQueueState(listOf(item("a1")), currentId = "a1"), LocalQueueAction.Clear)
+        assertEquals(listOf<LocalQueueEffect>(LocalQueueEffect.StopPlayback), cleared.effects)
+        assertEquals(emptyList(), LocalQueue.reduce(cleared.state, LocalQueueAction.Play).effects)
     }
 
     @Test

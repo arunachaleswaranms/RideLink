@@ -65,6 +65,8 @@ internal fun HomeContent(
     val remoteEntries by sharedLibraryCoordinator.remoteEntries.collectAsState()
     val libraryCount by musicCoordinator.libraryCount.collectAsState()
     val queue by musicCoordinator.queueState.collectAsState()
+    // Rendering only: whether Now Playing's Play is forwarded to a synchronised session.
+    val synchronizedForDisplay by syncPlaybackCoordinator.transportOwnershipForDisplay.collectAsState()
     val importProgress by musicCoordinator.imports.progress.collectAsState()
     val preparing by musicCoordinator.imports.preparing.collectAsState()
     val resyncDiagnostics by resyncCoordinator.diagnostics.collectAsState()
@@ -111,7 +113,7 @@ internal fun HomeContent(
         // Deliberately independent of `state.status` — local music must be fully usable in
         // airplane mode, with no peer, regardless of session state.
         HomeSection("Music") {
-            MusicSection(musicCoordinator = musicCoordinator, onPlayMusic = onPlayMusic)
+            MusicSection(musicCoordinator = musicCoordinator, onPlayMusic = onPlayMusic, synchronized = synchronizedForDisplay)
             ImportStatusPanel(
                 progress = importProgress,
                 preparing = preparing,

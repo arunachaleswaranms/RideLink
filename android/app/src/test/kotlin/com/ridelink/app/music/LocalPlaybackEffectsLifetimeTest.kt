@@ -319,6 +319,99 @@ class LocalPlaybackEffectsLifetimeTest {
             assertEquals(listOf(PlaybackCommand.Seek(1_000), h.loadOf(2), PlaybackCommand.Play), h.player.calls)
         }
 
+    // --- Round 4: a Stop belongs to its selection, and the newest Play intent is carried ------------
+
+    /** Issues an edit's effects **without** running them, so a later press is queued before they run. */
+    private fun issueEdit(
+        h: Harness,
+        state: LocalQueueState,
+        vararg actions: LocalQueueAction,
+    ): LocalQueueState {
+        val edit = assertNotNull(LocalQueueEdits.reduce(state, actions.toList(), h.gate))
+        h.effects.run(edit.effects, edit.admission)
+        return edit.state
+    }
+
+    @Test
+    fun `R4-1 Clear a playing queue, Pause before its Stop runs - the queue stays empty and playback stops`() =
+        runTest(StandardTestDispatcher()) {
+            val h = Harness(this)
+            val cleared = issueEdit(h, threeWithFirstCurrent, LocalQueueAction.Clear)
+            h.effects.pause(assertNotNull(LocalQueueEdits.admit(h.gate)))
+            runCurrent()
+
+            assertTrue(cleared.items.isEmpty())
+            assertEquals(listOf(PlaybackCommand.Stop, PlaybackCommand.Pause), h.player.calls, "a later Pause discarded the Clear's Stop")
+        }
+
+    @Test
+    fun `R4-2 Clear a playing queue, Play on the empty queue before its Stop runs - nothing resumes`() =
+        runTest(StandardTestDispatcher()) {
+            val h = Harness(this)
+            val cleared = issueEdit(h, threeWithFirstCurrent, LocalQueueAction.Clear)
+            issueEdit(h, cleared, LocalQueueAction.Play)
+            runCurrent()
+
+            assertEquals(listOf<PlaybackCommand>(PlaybackCommand.Stop), h.player.calls, "the cleared track resumed or kept playing")
+        }
+
+    @Test
+    fun `R4-5 Select A parked, then Play - A starts once loaded and the previous track never plays in between`() =
+        runTest(StandardTestDispatcher()) {
+            val h = Harness(this)
+            h.resolver.park(id(2))
+            val queue = issueEdit(h, threeWithFirstCurrent, LocalQueueAction.Select("q2"))
+            runCurrent()
+            issueEdit(h, queue, LocalQueueAction.Play) // q2 is current: a resume, while A's load is in flight
+            runCurrent()
+            assertEquals(emptyList(), h.player.calls, "the previous track played while A was loading")
+
+            h.resolver.release(id(2))
+            runCurrent()
+
+            assertEquals(listOf(h.loadOf(2), PlaybackCommand.Play), h.player.calls, "the newest Play was lost before the load")
+        }
+
+    @Test
+    fun `R4-5 Select A parked, Pause then Play - the newest intent is Play, so A starts once loaded`() =
+        runTest(StandardTestDispatcher()) {
+            val h = Harness(this)
+            h.resolver.park(id(2))
+            val queue = issueEdit(h, threeWithFirstCurrent, LocalQueueAction.Select("q2"))
+            runCurrent()
+            h.effects.pause(assertNotNull(LocalQueueEdits.admit(h.gate)))
+            issueEdit(h, queue, LocalQueueAction.Play)
+            runCurrent()
+
+            h.resolver.release(id(2))
+            runCurrent()
+
+            assertEquals(listOf(h.loadOf(2), PlaybackCommand.Play), h.player.calls)
+        }
+
+    @Test
+    fun `R4-7 Clear, then a new selection before the Stop runs - the selection supersedes it and plays`() =
+        runTest(StandardTestDispatcher()) {
+            val h = Harness(this)
+            val cleared = issueEdit(h, threeWithFirstCurrent, LocalQueueAction.Clear)
+            issueEdit(h, cleared, LocalQueueAction.Add(LocalQueueItem("q4", id(4), 4)), LocalQueueAction.Select("q4"))
+            runCurrent()
+
+            assertEquals(listOf(h.loadOf(4), PlaybackCommand.Play), h.player.calls)
+        }
+
+    @Test
+    fun `R4-7 Clear whose Stop has run, then a new selection - it plays normally`() =
+        runTest(StandardTestDispatcher()) {
+            val h = Harness(this)
+            val cleared = issueEdit(h, threeWithFirstCurrent, LocalQueueAction.Clear)
+            runCurrent()
+            issueEdit(h, cleared, LocalQueueAction.Add(LocalQueueItem("q4", id(4), 4)), LocalQueueAction.Select("q4"))
+            runCurrent()
+
+            assertEquals(listOf(PlaybackCommand.Stop, h.loadOf(4), PlaybackCommand.Play), h.player.calls)
+        }
+
     // --- Fixtures ----------------------------------------------------------------------------------
 
     private inner class Harness(

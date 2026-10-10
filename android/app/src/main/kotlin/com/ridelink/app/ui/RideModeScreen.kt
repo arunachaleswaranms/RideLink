@@ -81,7 +81,12 @@ fun RideModeScreen(
             ui.copy(
                 trackTitle = ui.trackTitle ?: cachedEntry?.title,
                 trackArtist = ui.trackArtist ?: cachedEntry?.artist,
-                queueCanStart = transportAvailability(queueState, playerState).canPlayPause,
+                queueCanStart =
+                    transportAvailability(
+                        queueState,
+                        playerState,
+                        syncPlaybackCoordinator.isSynchronizedModeActive(),
+                    ).canPlayPause,
             ),
         syncText = rideMusicLabel(fsmState.status, syncDiagnostics.syncState, syncPlaybackCoordinator.isSynchronizedModeActive()),
         voiceText = voiceLabel(voice.status),
@@ -199,7 +204,7 @@ private fun RideTransportRow(
             if (ui.isPlaying) R.drawable.ic_transport_pause else R.drawable.ic_transport_play,
             Modifier.weight(PRIMARY_WEIGHT).heightIn(min = RideSpace.rideTouch + RideSpace.lg),
             onPlayPause,
-            enabled = ui.hasTrackLoaded || ui.isPlaying || ui.queueCanStart,
+            enabled = ui.isPlaying || ui.queueCanStart,
             primary = true,
         )
         RideTransportButton("Next", R.drawable.ic_transport_next, Modifier.weight(1f), onNext)
