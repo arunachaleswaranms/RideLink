@@ -16,7 +16,7 @@ lifecycleRuntimeKtx = "2.10.0"
 kotlinxCoroutines = "1.11.0"
 kotlinxSerializationJson = "1.11.0"
 junitJupiter = "6.1.3"
-kotlinTest = "2.4.10"
+kotlinTest = "2.4.20"
 ktlint = "14.2.0"
 detekt = "1.23.8"
 # Test-only. See network/build.gradle.kts for why this is here and why it is never shipped.
