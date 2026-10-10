@@ -110,6 +110,12 @@ and reorder do not cancel anything in flight (A15 round 3). On Android the share
 re-reads foreground visibility and the queue lock immediately before starting the foreground service,
 after its lookups rather than before them (problem 121).
 
+A fourth review found the ordering too strict in two places. A Clear's Stop is now ended only by a
+newer selection — a later Pause or Play cannot cancel it — and a Play pressed while the selected track
+is still loading starts that track once it has loaded instead of being lost. Play on an empty queue no
+longer resumes anything (it used to restart the track the user had just cleared), and Now Playing and
+Ride Mode no longer offer Play for a cleared track unless the synchronised session owns it (A15 round 4).
+
 ## 5. Copy
 
 "Your ride, together" is removed on both platforms. Primary UI says "other phone"; "peer" stays in
@@ -182,8 +188,8 @@ PEER UNAVAILABLE.**
 ## 10. Validation
 
 The exact commands, counts and the intermittent iOS stress-test observation are in
-[STATUS.md](STATUS.md)'s 9 October 2026 entry. At the final head, after the third review's fixes:
-Android unit 1,179/1,179, instrumented 86/86 (API 36 emulator), ktlint/detekt/lint clean, Debug and
-Release assembled; iOS Core 363, Platform 701 (0 failures, 1 skipped), Debug and Release simulator
+[STATUS.md](STATUS.md)'s 9 October 2026 entry. At the final head, after the fourth review's fixes:
+Android unit 1,187/1,187, instrumented 89/89 (API 36 emulator), ktlint/detekt/lint clean, Debug and
+Release assembled; iOS Core 364, Platform 707 (0 failures, 1 skipped), Debug and Release simulator
 builds; cross-platform gate 17/17; local-only audit and gitleaks clean. (Before the reviews: Android
 unit 1,152, instrumented 75; iOS Platform 679.)

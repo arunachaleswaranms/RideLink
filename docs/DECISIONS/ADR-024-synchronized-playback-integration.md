@@ -2525,3 +2525,53 @@ service on the cache path. `VisibleMusicStart` now reads visibility and the owne
 immediately before every visible-UI foreground-service start, with no suspension between that read,
 the start and the coordinator call; `MusicCoordinator` remains the final admission authority. iOS has
 no equivalent: its lookup is synchronous and it has no foreground service.
+
+### A15 round 4 — 10 October 2026 — a Stop belongs to its selection; the newest Play is carried
+
+**Found by the fourth independent review of PR #18.** Round 3 made a `Stop` advance both sequences
+and require both to stay current, and made a load's trailing `Play` require its own transport ticket.
+Both were too strict, and the empty-queue `Play` reducer let the first one matter:
+
+- Clear a playing queue, then Pause before the `Stop` runs: the Pause advanced the transport intent,
+  the `Stop` was discarded, and the cleared track stayed loaded (paused) with the queue empty.
+- Clear, then Play on the empty queue: `LocalQueue.Play` returned `ResumePlayback` for an empty queue
+  (on both platforms), whose newer intent discarded the `Stop` — and the resume restarted the track
+  the user had just cleared.
+- Select A with its load pending, then Play: the resume played the *previous* track at once, and A's
+  trailing `Play`, no longer the newest intent, was dropped — A loaded but never started.
+
+#### Decision (round 4)
+
+1. **A `Stop` is ended only by a newer selection.** It still advances both sequences when issued, but
+   it is proved against the admission and its **selection** only. A later Pause or resume cannot
+   discard it; a genuine new selection after Clear supersedes it and plays.
+2. **The transport intent records what it asked for.** Each intent (load-and-play, resume: play;
+   pause, stop: not) stores whether it wants playback. A Pause or resume press still acts only while it
+   is the newest intent. A load's trailing `Play` runs if the **newest intent wants playback** —
+   whichever press issued it — so Select A then Play starts A once loaded, Select A then Pause leaves
+   A loaded but paused, and Pause then Play during the load starts A.
+3. **A resume defers to a load of its own selection that is still in flight** (the runner records
+   which selection's load-and-play has not yet settled), so the previous track never plays while the
+   selected one loads; the load's `Play` carries the press.
+4. **`LocalQueue.Play` on an empty queue does nothing** (both reducers; previously `ResumePlayback`).
+   There is no local track to resume, and a resume would restart a track the user removed. The
+   Now Playing and Ride Mode Play controls follow: a track the player merely still holds after a Clear
+   is not offered under local ownership. While synchronised (display ownership, rendering only) a
+   loaded track keeps Play enabled, because the gate forwards it to the session — unchanged.
+5. Unchanged: the ownership admission and its lifetime, effect-level revalidation before every player
+   step, add/move/non-current removal taking no ticket, and every synchronised path. Nothing is
+   reconstructed from queue state: the runner's sequences, intent and in-flight record are its own
+   bookkeeping, written only when an effect is issued or settles.
+
+Regressions (mirrored `R4-*` in `LocalPlaybackEffectsLifetimeTest[s]`, issued so a later press is queued
+before the earlier effect runs): Clear then Pause; Clear then Play on the empty queue; Select A parked
+then Play, and then Pause-then-Play; Clear then a new selection before and after the `Stop` ran. Three
+real-`MusicCoordinator` cases on the emulator (Clear then Pause, Clear then Play, Play while the
+selection loads). The reducer change is pinned in `LocalQueueTest[s]`, the availability change in
+`TransportAvailabilityTest`. The reviewer's other scenarios stay pinned by round 3's cases (Clear or a
+newer selection during a parked select, Pause during a pending selection, ABA, harmless edits).
+Against unmodified round-3 production, four `R4-*` cases fail on each platform and all three emulator
+cases fail. Removing each new guard alone fails exactly its own cases on both platforms: the `Stop`
+intent requirement restored → R4-1; empty-queue resume restored → R4-2; the load's `Play` requiring
+its own intent → both R4-5; the in-flight deferral removed → both R4-5. No wire, vector or protocol
+change.
