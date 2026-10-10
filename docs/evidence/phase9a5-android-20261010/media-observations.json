@@ -1,0 +1,551 @@
+[
+  {
+    "evidence": "QA-Alpha-playback.txt",
+    "session_present": true,
+    "state": "PLAYING",
+    "position_ms": 0,
+    "speed": 1.0,
+    "metadata_sha256": "2abe90ce4cb846b51e4f0eca942e9b125c400ad2aae807447950775c43246f06",
+    "synthetic_title": "QA-Alpha"
+  },
+  {
+    "evidence": "QA-Bravo-playback.txt",
+    "session_present": true,
+    "state": "PLAYING",
+    "position_ms": 0,
+    "speed": 1.0,
+    "metadata_sha256": "0eafd30f5dc4e9ca2b4f50132bf1e949189756582298ccec954eae84350f2275",
+    "synthetic_title": "QA-Bravo"
+  },
+  {
+    "evidence": "QA-Charlie-playback.txt",
+    "session_present": true,
+    "state": "PLAYING",
+    "position_ms": 0,
+    "speed": 1.0,
+    "metadata_sha256": "4f38cec14f8b6013fcc9c542c5ba1c8a17d084c5953437837cb83c399793ac10",
+    "synthetic_title": "QA-Charlie"
+  },
+  {
+    "evidence": "active-before-clear-session.txt",
+    "session_present": true,
+    "state": "PLAYING",
+    "position_ms": 5716,
+    "speed": 1.0,
+    "metadata_sha256": "2abe90ce4cb846b51e4f0eca942e9b125c400ad2aae807447950775c43246f06",
+    "synthetic_title": "QA-Alpha"
+  },
+  {
+    "evidence": "active-clear-immediate.txt",
+    "session_present": false,
+    "state": null,
+    "position_ms": null,
+    "speed": null,
+    "metadata_sha256": null,
+    "synthetic_title": null
+  },
+  {
+    "evidence": "active-clear-later.txt",
+    "session_present": false,
+    "state": null,
+    "position_ms": null,
+    "speed": null,
+    "metadata_sha256": null,
+    "synthetic_title": null
+  },
+  {
+    "evidence": "active-exit-session.txt",
+    "session_present": false,
+    "state": null,
+    "position_ms": null,
+    "speed": null,
+    "metadata_sha256": null,
+    "synthetic_title": null
+  },
+  {
+    "evidence": "after-clear-play-later-session.txt",
+    "session_present": false,
+    "state": null,
+    "position_ms": null,
+    "speed": null,
+    "metadata_sha256": null,
+    "synthetic_title": null
+  },
+  {
+    "evidence": "after-clear-play-session.txt",
+    "session_present": false,
+    "state": null,
+    "position_ms": null,
+    "speed": null,
+    "metadata_sha256": null,
+    "synthetic_title": null
+  },
+  {
+    "evidence": "after-clear-session.txt",
+    "session_present": false,
+    "state": null,
+    "position_ms": null,
+    "speed": null,
+    "metadata_sha256": null,
+    "synthetic_title": null
+  },
+  {
+    "evidence": "background-sample-00.txt",
+    "session_present": true,
+    "state": "PLAYING",
+    "position_ms": 100672,
+    "speed": 1.0,
+    "metadata_sha256": "e6f8f9228240d6c7f687eac8d2bdd98bbce2d95d39f51693314a957d6b06d114",
+    "synthetic_title": null
+  },
+  {
+    "evidence": "background-sample-01.txt",
+    "session_present": true,
+    "state": "PLAYING",
+    "position_ms": 106483,
+    "speed": 1.0,
+    "metadata_sha256": "e6f8f9228240d6c7f687eac8d2bdd98bbce2d95d39f51693314a957d6b06d114",
+    "synthetic_title": null
+  },
+  {
+    "evidence": "background-sample-02.txt",
+    "session_present": true,
+    "state": "PLAYING",
+    "position_ms": 112594,
+    "speed": 1.0,
+    "metadata_sha256": "e6f8f9228240d6c7f687eac8d2bdd98bbce2d95d39f51693314a957d6b06d114",
+    "synthetic_title": null
+  },
+  {
+    "evidence": "background-sample-03.txt",
+    "session_present": true,
+    "state": "PLAYING",
+    "position_ms": 118675,
+    "speed": 1.0,
+    "metadata_sha256": "e6f8f9228240d6c7f687eac8d2bdd98bbce2d95d39f51693314a957d6b06d114",
+    "synthetic_title": null
+  },
+  {
+    "evidence": "background-sample-04.txt",
+    "session_present": true,
+    "state": "PLAYING",
+    "position_ms": 124561,
+    "speed": 1.0,
+    "metadata_sha256": "e6f8f9228240d6c7f687eac8d2bdd98bbce2d95d39f51693314a957d6b06d114",
+    "synthetic_title": null
+  },
+  {
+    "evidence": "background-sample-05.txt",
+    "session_present": true,
+    "state": "PLAYING",
+    "position_ms": 132641,
+    "speed": 1.0,
+    "metadata_sha256": "e6f8f9228240d6c7f687eac8d2bdd98bbce2d95d39f51693314a957d6b06d114",
+    "synthetic_title": null
+  },
+  {
+    "evidence": "background-sample-06.txt",
+    "session_present": true,
+    "state": "PLAYING",
+    "position_ms": 138535,
+    "speed": 1.0,
+    "metadata_sha256": "e6f8f9228240d6c7f687eac8d2bdd98bbce2d95d39f51693314a957d6b06d114",
+    "synthetic_title": null
+  },
+  {
+    "evidence": "background-sample-07.txt",
+    "session_present": true,
+    "state": "PLAYING",
+    "position_ms": 144619,
+    "speed": 1.0,
+    "metadata_sha256": "e6f8f9228240d6c7f687eac8d2bdd98bbce2d95d39f51693314a957d6b06d114",
+    "synthetic_title": null
+  },
+  {
+    "evidence": "background-sample-08.txt",
+    "session_present": true,
+    "state": "PLAYING",
+    "position_ms": 150467,
+    "speed": 1.0,
+    "metadata_sha256": "e6f8f9228240d6c7f687eac8d2bdd98bbce2d95d39f51693314a957d6b06d114",
+    "synthetic_title": null
+  },
+  {
+    "evidence": "background-sample-09.txt",
+    "session_present": true,
+    "state": "PLAYING",
+    "position_ms": 156589,
+    "speed": 1.0,
+    "metadata_sha256": "e6f8f9228240d6c7f687eac8d2bdd98bbce2d95d39f51693314a957d6b06d114",
+    "synthetic_title": null
+  },
+  {
+    "evidence": "background-sample-10.txt",
+    "session_present": true,
+    "state": "PLAYING",
+    "position_ms": 162699,
+    "speed": 1.0,
+    "metadata_sha256": "e6f8f9228240d6c7f687eac8d2bdd98bbce2d95d39f51693314a957d6b06d114",
+    "synthetic_title": null
+  },
+  {
+    "evidence": "background-sample-11.txt",
+    "session_present": true,
+    "state": "PLAYING",
+    "position_ms": 168582,
+    "speed": 1.0,
+    "metadata_sha256": "e6f8f9228240d6c7f687eac8d2bdd98bbce2d95d39f51693314a957d6b06d114",
+    "synthetic_title": null
+  },
+  {
+    "evidence": "background-sample-12.txt",
+    "session_present": true,
+    "state": "PLAYING",
+    "position_ms": 174653,
+    "speed": 1.0,
+    "metadata_sha256": "e6f8f9228240d6c7f687eac8d2bdd98bbce2d95d39f51693314a957d6b06d114",
+    "synthetic_title": null
+  },
+  {
+    "evidence": "final-session.txt",
+    "session_present": false,
+    "state": null,
+    "position_ms": null,
+    "speed": null,
+    "metadata_sha256": null,
+    "synthetic_title": null
+  },
+  {
+    "evidence": "fresh-rotation-0-session.txt",
+    "session_present": true,
+    "state": "PLAYING",
+    "position_ms": 0,
+    "speed": 1.0,
+    "metadata_sha256": "2abe90ce4cb846b51e4f0eca942e9b125c400ad2aae807447950775c43246f06",
+    "synthetic_title": "QA-Alpha"
+  },
+  {
+    "evidence": "fresh-rotation-1-session.txt",
+    "session_present": true,
+    "state": "PLAYING",
+    "position_ms": 0,
+    "speed": 1.0,
+    "metadata_sha256": "2abe90ce4cb846b51e4f0eca942e9b125c400ad2aae807447950775c43246f06",
+    "synthetic_title": "QA-Alpha"
+  },
+  {
+    "evidence": "fresh-rotation-2-session.txt",
+    "session_present": true,
+    "state": "PLAYING",
+    "position_ms": 2835,
+    "speed": 1.0,
+    "metadata_sha256": "2abe90ce4cb846b51e4f0eca942e9b125c400ad2aae807447950775c43246f06",
+    "synthetic_title": "QA-Alpha"
+  },
+  {
+    "evidence": "fresh-rotation-3-session.txt",
+    "session_present": true,
+    "state": "PLAYING",
+    "position_ms": 2835,
+    "speed": 1.0,
+    "metadata_sha256": "2abe90ce4cb846b51e4f0eca942e9b125c400ad2aae807447950775c43246f06",
+    "synthetic_title": "QA-Alpha"
+  },
+  {
+    "evidence": "fresh-rotation-4-session.txt",
+    "session_present": true,
+    "state": "PLAYING",
+    "position_ms": 5966,
+    "speed": 1.0,
+    "metadata_sha256": "2abe90ce4cb846b51e4f0eca942e9b125c400ad2aae807447950775c43246f06",
+    "synthetic_title": "QA-Alpha"
+  },
+  {
+    "evidence": "fresh-rotation-restored-session.txt",
+    "session_present": true,
+    "state": "PLAYING",
+    "position_ms": 5966,
+    "speed": 1.0,
+    "metadata_sha256": "2abe90ce4cb846b51e4f0eca942e9b125c400ad2aae807447950775c43246f06",
+    "synthetic_title": "QA-Alpha"
+  },
+  {
+    "evidence": "fresh-rotation-start-session.txt",
+    "session_present": true,
+    "state": "PLAYING",
+    "position_ms": 0,
+    "speed": 1.0,
+    "metadata_sha256": "2abe90ce4cb846b51e4f0eca942e9b125c400ad2aae807447950775c43246f06",
+    "synthetic_title": "QA-Alpha"
+  },
+  {
+    "evidence": "home-0-session.txt",
+    "session_present": true,
+    "state": "PLAYING",
+    "position_ms": 62741,
+    "speed": 1.0,
+    "metadata_sha256": "4f38cec14f8b6013fcc9c542c5ba1c8a17d084c5953437837cb83c399793ac10",
+    "synthetic_title": "QA-Charlie"
+  },
+  {
+    "evidence": "home-1-session.txt",
+    "session_present": true,
+    "state": "PLAYING",
+    "position_ms": 68751,
+    "speed": 1.0,
+    "metadata_sha256": "4f38cec14f8b6013fcc9c542c5ba1c8a17d084c5953437837cb83c399793ac10",
+    "synthetic_title": "QA-Charlie"
+  },
+  {
+    "evidence": "home-return-0-session.txt",
+    "session_present": true,
+    "state": "PLAYING",
+    "position_ms": 65871,
+    "speed": 1.0,
+    "metadata_sha256": "4f38cec14f8b6013fcc9c542c5ba1c8a17d084c5953437837cb83c399793ac10",
+    "synthetic_title": "QA-Charlie"
+  },
+  {
+    "evidence": "home-return-1-session.txt",
+    "session_present": true,
+    "state": "PLAYING",
+    "position_ms": 71822,
+    "speed": 1.0,
+    "metadata_sha256": "4f38cec14f8b6013fcc9c542c5ba1c8a17d084c5953437837cb83c399793ac10",
+    "synthetic_title": "QA-Charlie"
+  },
+  {
+    "evidence": "metadata-session-0.txt",
+    "session_present": true,
+    "state": "PLAYING",
+    "position_ms": 0,
+    "speed": 1.0,
+    "metadata_sha256": "2abe90ce4cb846b51e4f0eca942e9b125c400ad2aae807447950775c43246f06",
+    "synthetic_title": "QA-Alpha"
+  },
+  {
+    "evidence": "metadata-session-1.txt",
+    "session_present": true,
+    "state": "PLAYING",
+    "position_ms": 0,
+    "speed": 1.0,
+    "metadata_sha256": "0eafd30f5dc4e9ca2b4f50132bf1e949189756582298ccec954eae84350f2275",
+    "synthetic_title": "QA-Bravo"
+  },
+  {
+    "evidence": "metadata-session-2.txt",
+    "session_present": true,
+    "state": "PLAYING",
+    "position_ms": 0,
+    "speed": 1.0,
+    "metadata_sha256": "4f38cec14f8b6013fcc9c542c5ba1c8a17d084c5953437837cb83c399793ac10",
+    "synthetic_title": "QA-Charlie"
+  },
+  {
+    "evidence": "normal-exit-session.txt",
+    "session_present": false,
+    "state": null,
+    "position_ms": null,
+    "speed": null,
+    "metadata_sha256": null,
+    "synthetic_title": null
+  },
+  {
+    "evidence": "queue-first-session.txt",
+    "session_present": true,
+    "state": "PLAYING",
+    "position_ms": 0,
+    "speed": 1.0,
+    "metadata_sha256": "38821606c658a2cf3f3c36cd6bd5f86dab8bf16c53f23d0dc9f5c0c6a22a7b8a",
+    "synthetic_title": null
+  },
+  {
+    "evidence": "queue-fixture-first-session.txt",
+    "session_present": true,
+    "state": "PLAYING",
+    "position_ms": 0,
+    "speed": 1.0,
+    "metadata_sha256": "2abe90ce4cb846b51e4f0eca942e9b125c400ad2aae807447950775c43246f06",
+    "synthetic_title": "QA-Alpha"
+  },
+  {
+    "evidence": "queue-fixture-next-session.txt",
+    "session_present": false,
+    "state": null,
+    "position_ms": null,
+    "speed": null,
+    "metadata_sha256": null,
+    "synthetic_title": null
+  },
+  {
+    "evidence": "queue-selected-session.txt",
+    "session_present": true,
+    "state": "PLAYING",
+    "position_ms": 0,
+    "speed": 1.0,
+    "metadata_sha256": "e6f8f9228240d6c7f687eac8d2bdd98bbce2d95d39f51693314a957d6b06d114",
+    "synthetic_title": null
+  },
+  {
+    "evidence": "rapid-clear-play-immediate.txt",
+    "session_present": false,
+    "state": null,
+    "position_ms": null,
+    "speed": null,
+    "metadata_sha256": null,
+    "synthetic_title": null
+  },
+  {
+    "evidence": "rapid-clear-play-later.txt",
+    "session_present": false,
+    "state": null,
+    "position_ms": null,
+    "speed": null,
+    "metadata_sha256": null,
+    "synthetic_title": null
+  },
+  {
+    "evidence": "rapid-selection-final.txt",
+    "session_present": true,
+    "state": "PLAYING",
+    "position_ms": 0,
+    "speed": 1.0,
+    "metadata_sha256": "4f38cec14f8b6013fcc9c542c5ba1c8a17d084c5953437837cb83c399793ac10",
+    "synthetic_title": "QA-Charlie"
+  },
+  {
+    "evidence": "rotation-0-session.txt",
+    "session_present": true,
+    "state": "PLAYING",
+    "position_ms": 116906,
+    "speed": 1.0,
+    "metadata_sha256": "4f38cec14f8b6013fcc9c542c5ba1c8a17d084c5953437837cb83c399793ac10",
+    "synthetic_title": "QA-Charlie"
+  },
+  {
+    "evidence": "rotation-1-session.txt",
+    "session_present": true,
+    "state": "PLAYING",
+    "position_ms": 116906,
+    "speed": 1.0,
+    "metadata_sha256": "4f38cec14f8b6013fcc9c542c5ba1c8a17d084c5953437837cb83c399793ac10",
+    "synthetic_title": "QA-Charlie"
+  },
+  {
+    "evidence": "rotation-2-session.txt",
+    "session_present": false,
+    "state": null,
+    "position_ms": null,
+    "speed": null,
+    "metadata_sha256": null,
+    "synthetic_title": null
+  },
+  {
+    "evidence": "rotation-3-session.txt",
+    "session_present": false,
+    "state": null,
+    "position_ms": null,
+    "speed": null,
+    "metadata_sha256": null,
+    "synthetic_title": null
+  },
+  {
+    "evidence": "rotation-4-session.txt",
+    "session_present": false,
+    "state": null,
+    "position_ms": null,
+    "speed": null,
+    "metadata_sha256": null,
+    "synthetic_title": null
+  },
+  {
+    "evidence": "rotation-restored-session.txt",
+    "session_present": false,
+    "state": null,
+    "position_ms": null,
+    "speed": null,
+    "metadata_sha256": null,
+    "synthetic_title": null
+  },
+  {
+    "evidence": "settings-return-session.txt",
+    "session_present": true,
+    "state": "PLAYING",
+    "position_ms": 74835,
+    "speed": 1.0,
+    "metadata_sha256": "4f38cec14f8b6013fcc9c542c5ba1c8a17d084c5953437837cb83c399793ac10",
+    "synthetic_title": "QA-Charlie"
+  },
+  {
+    "evidence": "settings-task-session.txt",
+    "session_present": true,
+    "state": "PLAYING",
+    "position_ms": 71822,
+    "speed": 1.0,
+    "metadata_sha256": "4f38cec14f8b6013fcc9c542c5ba1c8a17d084c5953437837cb83c399793ac10",
+    "synthetic_title": "QA-Charlie"
+  },
+  {
+    "evidence": "stable-alpha.txt",
+    "session_present": true,
+    "state": "PLAYING",
+    "position_ms": 0,
+    "speed": 1.0,
+    "metadata_sha256": "2abe90ce4cb846b51e4f0eca942e9b125c400ad2aae807447950775c43246f06",
+    "synthetic_title": "QA-Alpha"
+  },
+  {
+    "evidence": "stable-next.txt",
+    "session_present": true,
+    "state": "PLAYING",
+    "position_ms": 0,
+    "speed": 1.0,
+    "metadata_sha256": "2abe90ce4cb846b51e4f0eca942e9b125c400ad2aae807447950775c43246f06",
+    "synthetic_title": "QA-Alpha"
+  },
+  {
+    "evidence": "stable-pause1.txt",
+    "session_present": true,
+    "state": "PAUSED",
+    "position_ms": 3441,
+    "speed": 0.0,
+    "metadata_sha256": "2abe90ce4cb846b51e4f0eca942e9b125c400ad2aae807447950775c43246f06",
+    "synthetic_title": "QA-Alpha"
+  },
+  {
+    "evidence": "stable-pause2.txt",
+    "session_present": true,
+    "state": "PAUSED",
+    "position_ms": 3441,
+    "speed": 0.0,
+    "metadata_sha256": "2abe90ce4cb846b51e4f0eca942e9b125c400ad2aae807447950775c43246f06",
+    "synthetic_title": "QA-Alpha"
+  },
+  {
+    "evidence": "stable-previous.txt",
+    "session_present": true,
+    "state": "PLAYING",
+    "position_ms": 0,
+    "speed": 1.0,
+    "metadata_sha256": "2abe90ce4cb846b51e4f0eca942e9b125c400ad2aae807447950775c43246f06",
+    "synthetic_title": "QA-Alpha"
+  },
+  {
+    "evidence": "stable-resume.txt",
+    "session_present": true,
+    "state": "PLAYING",
+    "position_ms": 3607,
+    "speed": 1.0,
+    "metadata_sha256": "2abe90ce4cb846b51e4f0eca942e9b125c400ad2aae807447950775c43246f06",
+    "synthetic_title": "QA-Alpha"
+  },
+  {
+    "evidence": "track2-session.txt",
+    "session_present": true,
+    "state": "PLAYING",
+    "position_ms": 32795,
+    "speed": 1.0,
+    "metadata_sha256": "e6f8f9228240d6c7f687eac8d2bdd98bbce2d95d39f51693314a957d6b06d114",
+    "synthetic_title": null
+  }
+]

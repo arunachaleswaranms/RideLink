@@ -1,0 +1,991 @@
+[
+  {
+    "capture": "A3-preview",
+    "observed_nodes": [
+      {
+        "text": "53 tracks",
+        "bounds": "[196,260][382,316]"
+      },
+      {
+        "text": "Import \u201cA\u201d?",
+        "bounds": "[112,813][407,897]"
+      },
+      {
+        "text": "2 tracks in this folder and its subfolders. RideLink imports every supported audio file it finds there.",
+        "bounds": "[112,925][1160,1135]"
+      },
+      {
+        "text": "Import 2 tracks",
+        "bounds": "[196,1212][538,1282]"
+      },
+      {
+        "text": "Cancel",
+        "bounds": "[692,1212][848,1282]"
+      },
+      {
+        "text": "53 tracks",
+        "bounds": "[56,1415][268,1485]"
+      },
+      {
+        "control": "Play",
+        "bounds": "[922,2646][1006,2730]"
+      },
+      {
+        "control": "Next track",
+        "bounds": "[1132,2646][1216,2730]"
+      }
+    ],
+    "recording_exclusion_checked": null
+  },
+  {
+    "capture": "A3-complete",
+    "observed_nodes": [
+      {
+        "text": "55 tracks",
+        "bounds": "[196,260][383,316]"
+      },
+      {
+        "text": "Imported \u201cA\u201d",
+        "bounds": "[112,827][400,897]"
+      },
+      {
+        "text": "2 tracks \u00b7 2 new",
+        "bounds": "[112,911][435,967]"
+      },
+      {
+        "text": "55 tracks",
+        "bounds": "[56,1065][269,1135]"
+      },
+      {
+        "control": "Play",
+        "bounds": "[922,2646][1006,2730]"
+      },
+      {
+        "control": "Next track",
+        "bounds": "[1132,2646][1216,2730]"
+      }
+    ],
+    "recording_exclusion_checked": null
+  },
+  {
+    "capture": "B2-complete",
+    "observed_nodes": [
+      {
+        "text": "56 tracks",
+        "bounds": "[196,260][383,316]"
+      },
+      {
+        "text": "Imported \u201cB\u201d",
+        "bounds": "[112,827][405,897]"
+      },
+      {
+        "text": "1 track \u00b7 1 new",
+        "bounds": "[112,911][399,967]"
+      },
+      {
+        "text": "56 tracks",
+        "bounds": "[56,1065][269,1135]"
+      },
+      {
+        "control": "Play",
+        "bounds": "[922,2646][1006,2730]"
+      },
+      {
+        "control": "Next track",
+        "bounds": "[1132,2646][1216,2730]"
+      }
+    ],
+    "recording_exclusion_checked": null
+  },
+  {
+    "capture": "single-complete",
+    "observed_nodes": [
+      {
+        "text": "57 tracks",
+        "bounds": "[196,260][381,316]"
+      },
+      {
+        "text": "1 track \u00b7 1 new",
+        "bounds": "[112,911][399,967]"
+      },
+      {
+        "text": "57 tracks",
+        "bounds": "[56,1065][267,1135]"
+      },
+      {
+        "control": "Play",
+        "bounds": "[922,2646][1006,2730]"
+      },
+      {
+        "control": "Next track",
+        "bounds": "[1132,2646][1216,2730]"
+      }
+    ],
+    "recording_exclusion_checked": null
+  },
+  {
+    "capture": "A-rescan-complete",
+    "observed_nodes": [
+      {
+        "text": "57 tracks",
+        "bounds": "[196,260][381,316]"
+      },
+      {
+        "text": "Imported \u201cA\u201d",
+        "bounds": "[112,827][400,897]"
+      },
+      {
+        "text": "1 track \u00b7 0 new \u00b7 1 no longer found",
+        "bounds": "[112,911][795,967]"
+      },
+      {
+        "text": "57 tracks",
+        "bounds": "[56,1065][267,1135]"
+      },
+      {
+        "control": "Play",
+        "bounds": "[922,2646][1006,2730]"
+      },
+      {
+        "control": "Next track",
+        "bounds": "[1132,2646][1216,2730]"
+      }
+    ],
+    "recording_exclusion_checked": null
+  },
+  {
+    "capture": "reconciliation-results",
+    "observed_nodes": [
+      {
+        "text": "57 tracks",
+        "bounds": "[196,260][381,316]"
+      },
+      {
+        "text": "QA-",
+        "bounds": "[56,337][1216,533]"
+      },
+      {
+        "text": "4 of 57 tracks",
+        "bounds": "[56,757][367,827]"
+      },
+      {
+        "text": "QA-Alpha",
+        "bounds": "[266,897][520,981]"
+      },
+      {
+        "text": "QA-Bravo",
+        "bounds": "[266,1121][521,1205]"
+      },
+      {
+        "text": "QA-Charlie",
+        "bounds": "[266,1345][555,1429]"
+      },
+      {
+        "text": "QA-DeleteOnlyThisFixture",
+        "bounds": "[266,1569][945,1653]"
+      },
+      {
+        "text": "File not found",
+        "bounds": "[266,1653][539,1709]"
+      },
+      {
+        "control": "Play",
+        "bounds": "[922,2646][1006,2730]"
+      },
+      {
+        "control": "Next track",
+        "bounds": "[1132,2646][1216,2730]"
+      }
+    ],
+    "recording_exclusion_checked": null
+  },
+  {
+    "capture": "privacy-preview",
+    "observed_nodes": [
+      {
+        "text": "57 tracks",
+        "bounds": "[196,260][381,316]"
+      },
+      {
+        "text": "Import \u201cPrivacyMusic\u201d?",
+        "bounds": "[112,813][724,897]"
+      },
+      {
+        "text": "2 tracks in this folder and its subfolders. RideLink imports every supported audio file it finds there.",
+        "bounds": "[112,925][1160,1135]"
+      },
+      {
+        "text": "Some folders look like phone recordings: Recordings (1).",
+        "bounds": "[112,1163][1160,1303]"
+      },
+      {
+        "text": "Leave out recordings (1 track)",
+        "bounds": "[112,1366][936,1436]"
+      },
+      {
+        "text": "Import 1 track",
+        "bounds": "[196,1548][504,1618]"
+      },
+      {
+        "text": "Cancel",
+        "bounds": "[658,1548][814,1618]"
+      },
+      {
+        "text": "57 tracks",
+        "bounds": "[56,1751][267,1821]"
+      },
+      {
+        "text": "QA-Charlie",
+        "bounds": "[238,2625][485,2695]"
+      },
+      {
+        "text": "Unknown Artist",
+        "bounds": "[238,2695][546,2751]"
+      },
+      {
+        "control": "Pause",
+        "bounds": "[922,2646][1006,2730]"
+      },
+      {
+        "control": "Next track",
+        "bounds": "[1132,2646][1216,2730]"
+      }
+    ],
+    "recording_exclusion_checked": "true"
+  },
+  {
+    "capture": "privacy-complete",
+    "observed_nodes": [
+      {
+        "text": "58 tracks",
+        "bounds": "[196,260][383,316]"
+      },
+      {
+        "text": "Imported \u201cPrivacyMusic\u201d",
+        "bounds": "[112,827][675,897]"
+      },
+      {
+        "text": "1 track \u00b7 1 new",
+        "bounds": "[112,911][399,967]"
+      },
+      {
+        "text": "58 tracks",
+        "bounds": "[56,1065][269,1135]"
+      },
+      {
+        "text": "QA-Charlie",
+        "bounds": "[238,2625][485,2695]"
+      },
+      {
+        "text": "Unknown Artist",
+        "bounds": "[238,2695][546,2751]"
+      },
+      {
+        "control": "Pause",
+        "bounds": "[922,2646][1006,2730]"
+      },
+      {
+        "control": "Next track",
+        "bounds": "[1132,2646][1216,2730]"
+      }
+    ],
+    "recording_exclusion_checked": null
+  },
+  {
+    "capture": "privacy-results",
+    "observed_nodes": [
+      {
+        "text": "58 tracks",
+        "bounds": "[196,260][383,316]"
+      },
+      {
+        "text": "QA-",
+        "bounds": "[56,337][1216,533]"
+      },
+      {
+        "text": "5 of 58 tracks",
+        "bounds": "[56,757][368,827]"
+      },
+      {
+        "text": "QA-Alpha",
+        "bounds": "[266,897][520,981]"
+      },
+      {
+        "text": "QA-Bravo",
+        "bounds": "[266,1121][521,1205]"
+      },
+      {
+        "text": "QA-Charlie",
+        "bounds": "[266,1345][555,1429]"
+      },
+      {
+        "text": "QA-DeleteOnlyThisFixture",
+        "bounds": "[266,1569][945,1653]"
+      },
+      {
+        "text": "File not found",
+        "bounds": "[266,1653][539,1709]"
+      },
+      {
+        "text": "QA-Nested",
+        "bounds": "[266,1793][556,1877]"
+      },
+      {
+        "text": "QA-Charlie",
+        "bounds": "[238,2625][485,2695]"
+      },
+      {
+        "text": "Unknown Artist",
+        "bounds": "[238,2695][546,2751]"
+      },
+      {
+        "control": "Pause",
+        "bounds": "[922,2646][1006,2730]"
+      },
+      {
+        "control": "Next track",
+        "bounds": "[1132,2646][1216,2730]"
+      }
+    ],
+    "recording_exclusion_checked": null
+  },
+  {
+    "capture": "queue-reordered",
+    "observed_nodes": [
+      {
+        "text": "3 tracks",
+        "bounds": "[196,260][355,316]"
+      },
+      {
+        "text": "Clear",
+        "bounds": "[1095,204][1216,274]"
+      },
+      {
+        "text": "Now playing",
+        "bounds": "[336,687][582,743]"
+      },
+      {
+        "control": "Pause",
+        "bounds": "[922,2646][1006,2730]"
+      },
+      {
+        "control": "Next track",
+        "bounds": "[1132,2646][1216,2730]"
+      }
+    ],
+    "recording_exclusion_checked": null
+  },
+  {
+    "capture": "queue-one-duplicate-removed",
+    "observed_nodes": [
+      {
+        "text": "2 tracks",
+        "bounds": "[196,260][354,316]"
+      },
+      {
+        "text": "Clear",
+        "bounds": "[1095,204][1216,274]"
+      },
+      {
+        "text": "Now playing",
+        "bounds": "[336,687][582,743]"
+      },
+      {
+        "control": "Pause",
+        "bounds": "[922,2646][1006,2730]"
+      },
+      {
+        "control": "Next track",
+        "bounds": "[1132,2646][1216,2730]"
+      }
+    ],
+    "recording_exclusion_checked": null
+  },
+  {
+    "capture": "clear-confirm",
+    "observed_nodes": [
+      {
+        "text": "Clear Up Next?",
+        "bounds": "[160,1190][715,1302]"
+      },
+      {
+        "text": "Cancel",
+        "bounds": "[681,1631][837,1701]"
+      },
+      {
+        "text": "Clear",
+        "bounds": "[949,1631][1070,1701]"
+      }
+    ],
+    "recording_exclusion_checked": null
+  },
+  {
+    "capture": "clear-cancelled",
+    "observed_nodes": [
+      {
+        "text": "5 tracks",
+        "bounds": "[196,260][356,316]"
+      },
+      {
+        "text": "Clear",
+        "bounds": "[1095,204][1216,274]"
+      },
+      {
+        "text": "QA-Alpha",
+        "bounds": "[336,827][590,911]"
+      },
+      {
+        "text": "Unknown Artist",
+        "bounds": "[336,911][644,967]"
+      },
+      {
+        "text": "QA-Bravo",
+        "bounds": "[336,1051][591,1135]"
+      },
+      {
+        "text": "Unknown Artist",
+        "bounds": "[336,1135][644,1191]"
+      },
+      {
+        "text": "QA-Charlie",
+        "bounds": "[336,1275][625,1359]"
+      },
+      {
+        "text": "Now playing",
+        "bounds": "[336,1359][582,1415]"
+      },
+      {
+        "text": "QA-Charlie",
+        "bounds": "[238,2625][485,2695]"
+      },
+      {
+        "text": "Unknown Artist",
+        "bounds": "[238,2695][546,2751]"
+      },
+      {
+        "control": "Pause",
+        "bounds": "[922,2646][1006,2730]"
+      },
+      {
+        "control": "Next track",
+        "bounds": "[1132,2646][1216,2730]"
+      }
+    ],
+    "recording_exclusion_checked": null
+  },
+  {
+    "capture": "queue-cleared",
+    "observed_nodes": [
+      {
+        "text": "0 tracks",
+        "bounds": "[196,260][357,316]"
+      },
+      {
+        "text": "Up Next is empty",
+        "bounds": "[415,1215][858,1299]"
+      },
+      {
+        "control": "Play",
+        "bounds": "[922,2646][1006,2730]"
+      },
+      {
+        "control": "Next track",
+        "bounds": "[1132,2646][1216,2730]"
+      }
+    ],
+    "recording_exclusion_checked": null
+  },
+  {
+    "capture": "empty-play-ui",
+    "observed_nodes": [
+      {
+        "text": "0 tracks",
+        "bounds": "[196,260][357,316]"
+      },
+      {
+        "text": "Up Next is empty",
+        "bounds": "[415,1215][858,1299]"
+      },
+      {
+        "control": "Play",
+        "bounds": "[922,2646][1006,2730]"
+      },
+      {
+        "control": "Next track",
+        "bounds": "[1132,2646][1216,2730]"
+      }
+    ],
+    "recording_exclusion_checked": null
+  },
+  {
+    "capture": "stable-upnext",
+    "observed_nodes": [
+      {
+        "text": "4 tracks",
+        "bounds": "[196,260][357,316]"
+      },
+      {
+        "text": "Clear",
+        "bounds": "[1095,204][1216,274]"
+      },
+      {
+        "text": "QA-Alpha",
+        "bounds": "[336,379][590,463]"
+      },
+      {
+        "text": "Unknown Artist",
+        "bounds": "[336,463][644,519]"
+      },
+      {
+        "text": "QA-Alpha",
+        "bounds": "[336,603][590,687]"
+      },
+      {
+        "text": "Unknown Artist",
+        "bounds": "[336,687][644,743]"
+      },
+      {
+        "text": "QA-Bravo",
+        "bounds": "[336,827][591,911]"
+      },
+      {
+        "text": "Unknown Artist",
+        "bounds": "[336,911][644,967]"
+      },
+      {
+        "text": "QA-Charlie",
+        "bounds": "[336,1051][625,1135]"
+      },
+      {
+        "text": "Unknown Artist",
+        "bounds": "[336,1135][644,1191]"
+      },
+      {
+        "control": "Play",
+        "bounds": "[922,2646][1006,2730]"
+      },
+      {
+        "control": "Next track",
+        "bounds": "[1132,2646][1216,2730]"
+      }
+    ],
+    "recording_exclusion_checked": null
+  },
+  {
+    "capture": "stable-transport-home",
+    "observed_nodes": [
+      {
+        "text": "QA-Alpha",
+        "bounds": "[392,1156][645,1240]"
+      },
+      {
+        "text": "Unknown Artist",
+        "bounds": "[392,1240][735,1310]"
+      },
+      {
+        "control": "Previous track",
+        "bounds": "[279,1730][377,1828]"
+      },
+      {
+        "control": "Pause",
+        "bounds": "[580,1723][692,1835]"
+      },
+      {
+        "control": "Next track",
+        "bounds": "[895,1730][993,1828]"
+      },
+      {
+        "text": "58 tracks",
+        "bounds": "[252,2115][439,2171]"
+      },
+      {
+        "text": "Track 2 of 4",
+        "bounds": "[252,2311][487,2367]"
+      }
+    ],
+    "recording_exclusion_checked": null
+  },
+  {
+    "capture": "paused-ui",
+    "observed_nodes": [
+      {
+        "text": "QA-Alpha",
+        "bounds": "[392,1156][645,1240]"
+      },
+      {
+        "text": "Unknown Artist",
+        "bounds": "[392,1240][735,1310]"
+      },
+      {
+        "control": "Previous track",
+        "bounds": "[279,1730][377,1828]"
+      },
+      {
+        "control": "Play",
+        "bounds": "[580,1723][692,1835]"
+      },
+      {
+        "control": "Next track",
+        "bounds": "[895,1730][993,1828]"
+      },
+      {
+        "text": "58 tracks",
+        "bounds": "[252,2115][439,2171]"
+      },
+      {
+        "text": "Track 1 of 4",
+        "bounds": "[252,2311][480,2367]"
+      }
+    ],
+    "recording_exclusion_checked": null
+  },
+  {
+    "capture": "metadata-QS-0",
+    "observed_nodes": [
+      {
+        "text": "QA-Alpha",
+        "bounds": "[177,936][583,1002]"
+      },
+      {
+        "text": "Unknown Artist",
+        "bounds": "[177,1002][583,1059]"
+      },
+      {
+        "control": "Previous track",
+        "bounds": "[177,1078][261,1162]"
+      },
+      {
+        "control": "Pause",
+        "bounds": "[328,1078][412,1162]"
+      },
+      {
+        "control": "Next track",
+        "bounds": "[478,1078][562,1162]"
+      }
+    ],
+    "recording_exclusion_checked": null
+  },
+  {
+    "capture": "metadata-QS-1",
+    "observed_nodes": [
+      {
+        "text": "QA-Bravo",
+        "bounds": "[177,936][583,1002]"
+      },
+      {
+        "text": "Unknown Artist",
+        "bounds": "[177,1002][583,1059]"
+      },
+      {
+        "control": "Previous track",
+        "bounds": "[177,1078][261,1162]"
+      },
+      {
+        "control": "Pause",
+        "bounds": "[328,1078][412,1162]"
+      },
+      {
+        "control": "Next track",
+        "bounds": "[478,1078][562,1162]"
+      }
+    ],
+    "recording_exclusion_checked": null
+  },
+  {
+    "capture": "metadata-QS-2",
+    "observed_nodes": [],
+    "recording_exclusion_checked": null
+  },
+  {
+    "capture": "charlie-panel-check",
+    "observed_nodes": [
+      {
+        "text": "QA-Charlie",
+        "bounds": "[177,936][583,1002]"
+      },
+      {
+        "text": "Unknown Artist",
+        "bounds": "[177,1002][583,1059]"
+      },
+      {
+        "control": "Previous track",
+        "bounds": "[177,1078][261,1162]"
+      },
+      {
+        "control": "Pause",
+        "bounds": "[328,1078][412,1162]"
+      },
+      {
+        "control": "Next track",
+        "bounds": "[478,1078][562,1162]"
+      }
+    ],
+    "recording_exclusion_checked": null
+  },
+  {
+    "capture": "rapid-selection-queue",
+    "observed_nodes": [
+      {
+        "text": "4 tracks",
+        "bounds": "[196,260][357,316]"
+      },
+      {
+        "text": "Clear",
+        "bounds": "[1095,204][1216,274]"
+      },
+      {
+        "text": "QA-Alpha",
+        "bounds": "[336,379][590,463]"
+      },
+      {
+        "text": "Unknown Artist",
+        "bounds": "[336,463][644,519]"
+      },
+      {
+        "text": "QA-Alpha",
+        "bounds": "[336,603][590,687]"
+      },
+      {
+        "text": "Unknown Artist",
+        "bounds": "[336,687][644,743]"
+      },
+      {
+        "text": "QA-Bravo",
+        "bounds": "[336,827][591,911]"
+      },
+      {
+        "text": "Unknown Artist",
+        "bounds": "[336,911][644,967]"
+      },
+      {
+        "text": "QA-Charlie",
+        "bounds": "[336,1051][625,1135]"
+      },
+      {
+        "text": "Now playing",
+        "bounds": "[336,1135][582,1191]"
+      },
+      {
+        "text": "QA-Charlie",
+        "bounds": "[238,2625][485,2695]"
+      },
+      {
+        "text": "Unknown Artist",
+        "bounds": "[238,2695][546,2751]"
+      },
+      {
+        "control": "Pause",
+        "bounds": "[922,2646][1006,2730]"
+      },
+      {
+        "control": "Next track",
+        "bounds": "[1132,2646][1216,2730]"
+      }
+    ],
+    "recording_exclusion_checked": null
+  },
+  {
+    "capture": "active-clear-empty",
+    "observed_nodes": [
+      {
+        "text": "0 tracks",
+        "bounds": "[196,260][357,316]"
+      },
+      {
+        "text": "Up Next is empty",
+        "bounds": "[415,1215][858,1299]"
+      },
+      {
+        "control": "Play",
+        "bounds": "[922,2646][1006,2730]"
+      },
+      {
+        "control": "Next track",
+        "bounds": "[1132,2646][1216,2730]"
+      }
+    ],
+    "recording_exclusion_checked": null
+  },
+  {
+    "capture": "cancel20-preview",
+    "observed_nodes": [
+      {
+        "text": "58 tracks",
+        "bounds": "[196,260][383,316]"
+      },
+      {
+        "text": "QA-",
+        "bounds": "[56,337][1216,533]"
+      },
+      {
+        "text": "20 tracks in this folder and its subfolders. RideLink imports every supported audio file it finds there.",
+        "bounds": "[112,925][1160,1135]"
+      },
+      {
+        "text": "Import 20 tracks",
+        "bounds": "[196,1212][569,1282]"
+      },
+      {
+        "text": "Cancel",
+        "bounds": "[723,1212][879,1282]"
+      },
+      {
+        "text": "5 of 58 tracks",
+        "bounds": "[56,1415][368,1485]"
+      },
+      {
+        "text": "QA-Alpha",
+        "bounds": "[266,1555][520,1639]"
+      },
+      {
+        "text": "QA-Bravo",
+        "bounds": "[266,1779][521,1863]"
+      },
+      {
+        "text": "QA-Charlie",
+        "bounds": "[266,2003][555,2087]"
+      },
+      {
+        "text": "QA-DeleteOnlyThisFixture",
+        "bounds": "[266,2227][945,2311]"
+      },
+      {
+        "text": "File not found",
+        "bounds": "[266,2311][539,2367]"
+      },
+      {
+        "text": "QA-Nested",
+        "bounds": "[266,2451][556,2535]"
+      },
+      {
+        "control": "Play",
+        "bounds": "[922,2646][1006,2730]"
+      },
+      {
+        "control": "Next track",
+        "bounds": "[1132,2646][1216,2730]"
+      }
+    ],
+    "recording_exclusion_checked": null
+  },
+  {
+    "capture": "indexing-cancel-result",
+    "observed_nodes": [
+      {
+        "text": "58 tracks",
+        "bounds": "[196,260][383,316]"
+      },
+      {
+        "text": "QA-",
+        "bounds": "[56,337][1216,533]"
+      },
+      {
+        "text": "Import cancelled",
+        "bounds": "[112,827][488,897]"
+      },
+      {
+        "text": "Tracks already read stay in your library.",
+        "bounds": "[112,911][889,967]"
+      },
+      {
+        "text": "5 of 58 tracks",
+        "bounds": "[56,1065][368,1135]"
+      },
+      {
+        "text": "QA-Alpha",
+        "bounds": "[266,1205][520,1289]"
+      },
+      {
+        "text": "QA-Bravo",
+        "bounds": "[266,1429][521,1513]"
+      },
+      {
+        "text": "QA-Charlie",
+        "bounds": "[266,1653][555,1737]"
+      },
+      {
+        "text": "QA-DeleteOnlyThisFixture",
+        "bounds": "[266,1877][945,1961]"
+      },
+      {
+        "text": "File not found",
+        "bounds": "[266,1961][539,2017]"
+      },
+      {
+        "text": "QA-Nested",
+        "bounds": "[266,2101][556,2185]"
+      },
+      {
+        "control": "Play",
+        "bounds": "[922,2646][1006,2730]"
+      },
+      {
+        "control": "Next track",
+        "bounds": "[1132,2646][1216,2730]"
+      }
+    ],
+    "recording_exclusion_checked": null
+  },
+  {
+    "capture": "cancel20-retry-complete",
+    "observed_nodes": [
+      {
+        "text": "78 tracks",
+        "bounds": "[196,260][380,316]"
+      },
+      {
+        "text": "QA-",
+        "bounds": "[56,337][1216,533]"
+      },
+      {
+        "text": "Imported \u201cCancelImport\u201d",
+        "bounds": "[112,827][678,897]"
+      },
+      {
+        "text": "20 tracks \u00b7 20 new",
+        "bounds": "[112,911][490,967]"
+      },
+      {
+        "text": "25 of 78 tracks",
+        "bounds": "[56,1065][393,1135]"
+      },
+      {
+        "text": "QA-Alpha",
+        "bounds": "[266,1205][520,1289]"
+      },
+      {
+        "text": "QA-Bravo",
+        "bounds": "[266,1429][521,1513]"
+      },
+      {
+        "text": "QA-Cancel-00",
+        "bounds": "[266,1653][648,1737]"
+      },
+      {
+        "text": "QA-Cancel-01",
+        "bounds": "[266,1877][635,1961]"
+      },
+      {
+        "text": "QA-Cancel-02",
+        "bounds": "[266,2101][644,2185]"
+      },
+      {
+        "text": "QA-Cancel-03",
+        "bounds": "[266,2325][645,2409]"
+      },
+      {
+        "text": "QA-Cancel-04",
+        "bounds": "[266,2549][648,2569]"
+      },
+      {
+        "control": "Play",
+        "bounds": "[922,2646][1006,2730]"
+      },
+      {
+        "control": "Next track",
+        "bounds": "[1132,2646][1216,2730]"
+      }
+    ],
+    "recording_exclusion_checked": null
+  }
+]

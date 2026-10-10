@@ -1567,6 +1567,29 @@ New physical rows (Android, OnePlus Nord 5, the reviewed and merged build only):
 | N-03 | Live intercom (authenticated peer): shade and lock screen | A separate "Intercom on" notification with Mute/Unmute and End intercom, both working; with music too, the media card is still present | Phone + peer — **PENDING — AUTHENTICATED PEER UNAVAILABLE** |
 | N-04 | `POST_NOTIFICATIONS` denied, then start the intercom (peer) | Intercom runs; no intercom notification is shown (ADR-022 A1 consequence); the system still lists the foreground service | Phone + peer |
 
+**Earlier 10 October 2026 physical result on merged `4104e81`, OnePlus Nord 5 (before final continuation):** L-07 PASS;
+L-08 PASS for the disposable-fixture acceptance checks (cancellation observed during Checking,
+not after partial indexing writes). L-06 BLOCKED; Q-01, N-01, N-02 and lifecycle remain
+MANUAL REQUIRED with passing subchecks and explicit gaps. See
+[PHASE9A5_ANDROID_PHYSICAL.md](PHASE9A5_ANDROID_PHYSICAL.md). The earlier software regressions
+above and historical Phase 9A results do not close those gaps.
+
+Final manual continuation: the user confirms normal-library functional use and explicitly waives
+the original ~3,460-track L-06 scale criterion for this Phase 9A.5 qualification. The criterion above
+was not executed; performance at that scale remains unverified. Personal call recordings are not
+part of the intended music collection and must not be imported to satisfy the count. This waiver
+did not itself close Q-01, N-01/N-02 or lifecycle checks. In the subsequent continuation, user
+observations completed N-01 and the three-actual-track lock-screen portion of N-02, audible
+Pause/Resume and background/unlock state consistency. Fresh Quick Settings title/artist/controls
+matched all three tracks; compact-card duration/progress is NOT AVAILABLE. Q-01A physical stop
+and removal passed with no Pause control available after Clear; app receipt of the later media
+Pause is not proven. Q-01B remains physically INCONCLUSIVE despite existing deterministic software
+regression PASS. The user confirmed final Clear/no-restart audio and delegated submission judgment;
+the evidence is READY FOR INDEPENDENT REVIEW WITH EXPLICIT LIMITATIONS, retaining physical Q-01B
+INCONCLUSIVE and unverified load/Play overlap. No unconditional physical qualification PASS.
+See the physical report and its separate final continuation evidence; original criteria and prior
+physical/software results remain retained.
+
 ### 4.4 Phase 5 scheduled playback and drift — what the laptop now proves, and what it cannot
 
 Added by the thirty-fifth session (`docs/STATUS.md` §2al.3, closing §4 problem 41). STATUS previously

@@ -1,0 +1,93 @@
+[
+  {
+    "sample": 0,
+    "state": "PLAYING",
+    "position_ms": 100672,
+    "foreground_service": true,
+    "service_type": []
+  },
+  {
+    "sample": 1,
+    "state": "PLAYING",
+    "position_ms": 106483,
+    "foreground_service": true,
+    "service_type": []
+  },
+  {
+    "sample": 2,
+    "state": "PLAYING",
+    "position_ms": 112594,
+    "foreground_service": true,
+    "service_type": []
+  },
+  {
+    "sample": 3,
+    "state": "PLAYING",
+    "position_ms": 118675,
+    "foreground_service": true,
+    "service_type": []
+  },
+  {
+    "sample": 4,
+    "state": "PLAYING",
+    "position_ms": 124561,
+    "foreground_service": true,
+    "service_type": []
+  },
+  {
+    "sample": 5,
+    "state": "PLAYING",
+    "position_ms": 132641,
+    "foreground_service": true,
+    "service_type": []
+  },
+  {
+    "sample": 6,
+    "state": "PLAYING",
+    "position_ms": 138535,
+    "foreground_service": true,
+    "service_type": []
+  },
+  {
+    "sample": 7,
+    "state": "PLAYING",
+    "position_ms": 144619,
+    "foreground_service": true,
+    "service_type": []
+  },
+  {
+    "sample": 8,
+    "state": "PLAYING",
+    "position_ms": 150467,
+    "foreground_service": true,
+    "service_type": []
+  },
+  {
+    "sample": 9,
+    "state": "PLAYING",
+    "position_ms": 156589,
+    "foreground_service": true,
+    "service_type": []
+  },
+  {
+    "sample": 10,
+    "state": "PLAYING",
+    "position_ms": 162699,
+    "foreground_service": true,
+    "service_type": []
+  },
+  {
+    "sample": 11,
+    "state": "PLAYING",
+    "position_ms": 168582,
+    "foreground_service": true,
+    "service_type": []
+  },
+  {
+    "sample": 12,
+    "state": "PLAYING",
+    "position_ms": 174653,
+    "foreground_service": true,
+    "service_type": []
+  }
+]

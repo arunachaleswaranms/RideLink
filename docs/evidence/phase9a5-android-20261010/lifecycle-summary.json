@@ -1,0 +1,52 @@
+{
+  "fresh_rotation_event_start_device_local": "10-10 19:10:59.000",
+  "fresh_rotation_event_end_device_local": "10-10 19:11:06.999",
+  "current_run_fault_events": {
+    "am_anr": 0,
+    "am_crash": 0,
+    "am_proc_died": 0
+  },
+  "activity_events": {
+    "wm_on_create_called": 6,
+    "wm_on_destroy_called": 6,
+    "wm_on_resume_called": 6,
+    "am_anr": 0,
+    "am_crash": 0,
+    "am_proc_died": 0
+  },
+  "rotation_service_samples": [
+    {
+      "sample": 0,
+      "foreground": true,
+      "media_playback_type": true
+    },
+    {
+      "sample": 1,
+      "foreground": true,
+      "media_playback_type": true
+    },
+    {
+      "sample": 2,
+      "foreground": true,
+      "media_playback_type": true
+    },
+    {
+      "sample": 3,
+      "foreground": true,
+      "media_playback_type": true
+    },
+    {
+      "sample": 4,
+      "foreground": true,
+      "media_playback_type": true
+    }
+  ],
+  "original_rotation_settings": {
+    "accelerometer_rotation": "0",
+    "user_rotation": "0"
+  },
+  "rapid_clear_play": {
+    "seconds_between_clear_tap_return_and_play_tap_return": 0.34331775000000064
+  },
+  "exit_service_present": false
+}
