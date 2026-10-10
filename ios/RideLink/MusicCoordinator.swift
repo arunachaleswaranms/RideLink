@@ -19,7 +19,18 @@ import RideLinkPlatform
 public final class MusicCoordinator {
     public private(set) var query = LibraryQuery()
     public private(set) var libraryEntries: [LibraryEntry] = []
-    public private(set) var queueState = LocalQueueState()
+    public private(set) var queueState = LocalQueueState() {
+        didSet {
+            if oldValue.currentItem?.localEntryId != queueState.currentItem?.localEntryId { resolveNowPlayingEntry() }
+        }
+    }
+    /// The library row for the queue's current item, looked up by `LocalEntryId` when the current item
+    /// changes (Phase 9A.5). It used to be found by scanning `libraryEntries`, which is filtered by the
+    /// library search, so typing in the search box made Now Playing — and the lock screen's
+    /// `MPNowPlayingInfoCenter` entry — lose the title of what was playing.
+    public private(set) var nowPlayingEntry: LibraryEntry?
+    /// The whole library's size, whatever the search says.
+    public private(set) var libraryCount = 0
     public private(set) var playerState = PlayerState()
     public private(set) var baseVolumePermille = CoexistenceState.fullGainPermille
     public var coexistenceEvents: (any CoexistenceEventSink)?
@@ -30,9 +41,20 @@ public final class MusicCoordinator {
     ///
     /// Matched by `localEntryId`, not `quickId` (ADR-005 Amendment A1) — `quickId` is not guaranteed
     /// unique across entries, so matching on it could show the wrong track's metadata/artwork here.
-    public var currentEntry: LibraryEntry? {
-        guard let item = queueState.currentItem else { return nil }
-        return libraryEntries.first { $0.localEntryId == item.localEntryId }
+    public var currentEntry: LibraryEntry? { nowPlayingEntry }
+
+    /// A queue entry's library row, by id — never by scanning the search-filtered list.
+    public func entry(for localEntryId: LocalEntryId) -> LibraryEntry? {
+        (try? repository.findByLocalEntryId(localEntryId)) ?? nil
+    }
+
+    /// A usable local row holding `contentHash`, if any — the shared library's "play it here" lookup.
+    public func localEntry(contentHash: ContentHash) -> LibraryEntry? {
+        (try? repository.findByContentHash(contentHash)) ?? nil
+    }
+
+    private func resolveNowPlayingEntry() {
+        nowPlayingEntry = queueState.currentItem.flatMap { entry(for: $0.localEntryId) }
     }
 
     private let repository: LibraryRepository
@@ -68,6 +90,19 @@ public final class MusicCoordinator {
     public var syncGate: (any SyncPlaybackGate)?
 
     private let player: any Player
+    /// ADR-024 Amendment A15 round 2: where every local queue edit's and local transport press's
+    /// player effects run, each carrying the admission it was minted with and re-proving it before
+    /// audio-session activation, `Load`, `Play`, `Stop`, `Pause` and `Seek`. The authority is the
+    /// synchronisation owner's lifetime (`syncGate`), never a fact held here.
+    @ObservationIgnored private lazy var localEffects = LocalPlaybackEffects(
+        player: player,
+        prepare: { [weak self] in await self?.activateAudioSessionIfNeeded() },
+        resolve: { [weak self] localEntryId in self?.resolveLocation(localEntryId) },
+        stillValid: { [weak self] admission in
+            guard let self else { return false }
+            return LocalQueueEdits.stillValid(admission, gate: self.syncGate)
+        }
+    )
     private let musicAudioSession: MusicAudioSession
     private var audioSessionActivated = false
     private let monotonicNowUs: @Sendable () -> Int64
@@ -161,7 +196,10 @@ public final class MusicCoordinator {
         libraryObservationTask = Task { [weak self] in
             for await entries in stream {
                 guard !Task.isCancelled else { return }
-                await MainActor.run { self?.libraryEntries = entries }
+                await MainActor.run {
+                    self?.libraryEntries = entries
+                    self?.libraryCount = (try? self?.repository.count()) ?? entries.count
+                }
             }
         }
     }
@@ -198,18 +236,32 @@ public final class MusicCoordinator {
 
     // MARK: - Queue and playback
 
-    public func addToQueue(_ entry: LibraryEntry) {
-        dispatch(.add(newItem(entry)))
-    }
+    // Phase 9A.5, PR #18 review: every user edit of the local queue — add, play-now, cache play,
+    // remove, move, clear, select — is admitted through `LocalQueueEdits`, which refuses it while
+    // synchronised transport owns playback (`SyncPlaybackGate.localQueueLocked()`, ADR-024 Amendment
+    // A14). Each returns whether it was admitted; a refusal changes nothing — no queue mutation, no
+    // load, no play, no stop. Additions are refused too: the synchronised path replaces the local
+    // queue on every synchronised selection (`syncSelect`) and clears it on stop
+    // (`syncClearSelection`), so an entry "staged" during a synchronised ride would silently vanish.
+    // Mirrors Android's `MusicCoordinator`.
+
+    @discardableResult
+    public func addToQueue(_ entry: LibraryEntry) -> Bool { edit([.add(newItem(entry))]) }
+
+    /// Whether local queue edits are refused right now — for rendering only. Every edit re-asks at
+    /// the moment it is admitted; this answer authorises nothing.
+    public var isLocalQueueLocked: Bool { syncGate?.localQueueLocked() == true }
 
     /// Adds `entry` to the queue and starts playing it immediately — the library screen's "tap a
     /// track" affordance, as one atomic queue operation rather than an add followed by a
     /// UI-observed "select the item I just added" that would race a second rapid tap.
-    public func playNow(_ entry: LibraryEntry) {
-        coexistenceEvents?.onPlaybackIntent(playing: true)
+    @discardableResult
+    public func playNow(_ entry: LibraryEntry) -> Bool {
         let item = newItem(entry)
-        dispatch(.add(item))
-        dispatch(.select(id: item.id))
+        guard let edit = LocalQueueEdits.reduce(queueState, [.add(item), .select(id: item.id)], gate: syncGate) else { return false }
+        coexistenceEvents?.onPlaybackIntent(playing: true)
+        apply(edit)
+        return true
     }
 
     private func newItem(_ entry: LibraryEntry) -> LocalQueueItem {
@@ -221,18 +273,24 @@ public final class MusicCoordinator {
     /// the Phase 3 library — through the *existing* one player/one queue, exactly like `playNow`
     /// does for an imported `LibraryEntry`. brief §24: local-only playback on *this* device; no
     /// peer command, no synchronized playback, no second player.
-    public func playExternalVerifiedCachedTrack(_ contentHash: ContentHash, fileURL: URL) {
-        coexistenceEvents?.onPlaybackIntent(playing: true)
+    @discardableResult
+    public func playExternalVerifiedCachedTrack(_ contentHash: ContentHash, fileURL: URL) -> Bool {
         let entryId = LocalEntryId(UUID().uuidString.lowercased())
-        externalCacheSources[entryId] = ExternalCacheSource(contentHash: contentHash, location: LocalTrackLocation(uri: fileURL.absoluteString))
         let item = LocalQueueItem(id: UUID().uuidString, localEntryId: entryId, insertedAtMonoUs: monotonicNowUs())
-        dispatch(.add(item))
-        dispatch(.select(id: item.id))
+        guard let edit = LocalQueueEdits.reduce(queueState, [.add(item), .select(id: item.id)], gate: syncGate) else { return false }
+        coexistenceEvents?.onPlaybackIntent(playing: true)
+        // Registered before the effects run: `resolveLocation` reads it when the effect executes.
+        externalCacheSources[entryId] = ExternalCacheSource(contentHash: contentHash, location: LocalTrackLocation(uri: fileURL.absoluteString))
+        apply(edit)
+        return true
     }
 
-    public func removeFromQueue(id: String) { dispatch(.remove(id: id)) }
-    public func moveInQueue(id: String, toIndex: Int) { dispatch(.move(id: id, toIndex: toIndex)) }
-    public func clearQueue() { dispatch(.clear) }
+    @discardableResult
+    public func removeFromQueue(id: String) -> Bool { edit([.remove(id: id)]) }
+    @discardableResult
+    public func moveInQueue(id: String, toIndex: Int) -> Bool { edit([.move(id: id, toIndex: toIndex)]) }
+    @discardableResult
+    public func clearQueue() -> Bool { edit([.clear]) }
 
     public func next() {
         if syncGate?.interceptNext() == true { return }
@@ -244,26 +302,29 @@ public final class MusicCoordinator {
         dispatch(.previous)
     }
 
-    public func selectQueueItem(id: String) { dispatch(.select(id: id)) }
+    @discardableResult
+    public func selectQueueItem(id: String) -> Bool { edit([.select(id: id)]) }
 
+    /// Play, from the app or the lock screen. A synchronised session owns it first (ADR-024 A14, via
+    /// `syncGate`); otherwise the local queue decides: with tracks queued and nothing selected it
+    /// starts the first one, and otherwise resumes the player (Phase 9A.5 §11, `LocalQueueAction.play`).
     public func play() {
         coexistenceEvents?.onPlaybackIntent(playing: true)
         if syncGate?.interceptPlay() == true { return }
-        Task {
-            await activateAudioSessionIfNeeded()
-            await player.execute(.play)
-        }
+        dispatch(.play)
     }
 
     public func pause() {
         coexistenceEvents?.onPlaybackIntent(playing: false)
         if syncGate?.interceptPause() == true { return }
-        Task { await player.execute(.pause) }
+        guard let admission = LocalQueueEdits.admit(gate: syncGate) else { return }
+        localEffects.pause(admission: admission)
     }
 
     public func seek(positionMs: Int64) {
         if syncGate?.interceptSeek(positionMs) == true { return }
-        Task { await player.execute(.seek(positionMs: positionMs)) }
+        guard let admission = LocalQueueEdits.admit(gate: syncGate) else { return }
+        localEffects.seek(positionMs: positionMs, admission: admission)
     }
 
     // MARK: - Phase 5's own entry points
@@ -343,32 +404,39 @@ public final class MusicCoordinator {
         }
     }
 
-    private func dispatch(_ action: LocalQueueAction) {
-        let outcome = LocalQueue.reduce(queueState, action)
-        queueState = outcome.state
-        for effect in outcome.effects {
-            switch effect {
-            case .loadAndPlay(let localEntryId):
-                Task {
-                    await self.activateAudioSessionIfNeeded()
-                    await self.loadAndPlay(localEntryId)
-                }
-            case .stopPlayback:
-                Task { await self.player.execute(.stop) }
-            }
-        }
+    /// A user's edit of the local queue, admitted or refused as one step — see `LocalQueueEdits`.
+    private func edit(_ actions: [LocalQueueAction]) -> Bool {
+        guard let edit = LocalQueueEdits.reduce(queueState, actions, gate: syncGate) else { return false }
+        apply(edit)
+        return true
     }
 
-    private func loadAndPlay(_ localEntryId: LocalEntryId) async {
-        if let external = externalCacheSources[localEntryId] {
-            await player.execute(.load(localEntryId: localEntryId, location: external.location))
-            await player.execute(.play)
-            return
-        }
-        guard let entry = try? repository.findByLocalEntryId(localEntryId) else { return }
-        let resolvedUri = indexer.resolvedUrl(for: entry).absoluteString
-        await player.execute(.load(localEntryId: localEntryId, location: LocalTrackLocation(uri: resolvedUri)))
-        await player.execute(.play)
+    /// Transport and track-end actions: already decided by `syncGate`'s intercepts before reaching
+    /// here, and admitted now — in the same synchronous step as the queue mutation — for the effects
+    /// that follow. A `nil` admission means synchronised ownership arrived between the intercept's
+    /// read and this one; the press then does nothing locally (ADR-024 A15 round 2).
+    private func dispatch(_ action: LocalQueueAction) {
+        guard let admission = LocalQueueEdits.admit(gate: syncGate) else { return }
+        apply(AdmittedLocalQueueEdit(outcome: LocalQueue.reduce(queueState, action), admission: admission))
+    }
+
+    /// ADR-024 Amendment A15 round 2. The queue mutation is applied **now**, under the admission;
+    /// the player effects run later and carry that same admission, re-proved before each step
+    /// (`LocalPlaybackEffects`). If an effect is then dropped because synchronised ownership took
+    /// over, the admitted local queue state is deliberately **not** rolled back: it was a legitimate
+    /// local edit when it was made, and the synchronised path that took over replaces the local queue
+    /// wholesale on its first selection (`syncSelect`) and clears it on stop (`syncClearSelection`).
+    /// A rollback would itself be a local write racing that authority.
+    private func apply(_ edit: AdmittedLocalQueueEdit) {
+        queueState = edit.state
+        localEffects.run(edit.effects, admission: edit.admission)
+    }
+
+    /// Where an entry's file is: a verified cache file, or an imported library entry; `nil` if gone.
+    private func resolveLocation(_ localEntryId: LocalEntryId) -> LocalTrackLocation? {
+        if let external = externalCacheSources[localEntryId] { return external.location }
+        guard let entry = try? repository.findByLocalEntryId(localEntryId) else { return nil }
+        return LocalTrackLocation(uri: indexer.resolvedUrl(for: entry).absoluteString)
     }
 
     /// A track ending or its file going missing both mean "move on" — the queue owner's job

@@ -46,7 +46,8 @@ public struct LocalQueueState: Sendable, Equatable {
     }
 }
 
-/// Exactly the actions this phase's brief §14 lists — add/remove/move/clear/next/previous/select.
+/// The actions this phase's brief §14 lists — add/remove/move/clear/next/previous/select — plus
+/// Phase 9A.5's `.play`. Mirrors `com.ridelink.core.player.LocalQueueAction`.
 public enum LocalQueueAction: Sendable, Equatable {
     case add(LocalQueueItem)
     case remove(id: String)
@@ -55,6 +56,11 @@ public enum LocalQueueAction: Sendable, Equatable {
     case next
     case previous
     case select(id: String)
+    /// The user pressed Play (Phase 9A.5 §11). With items queued and nothing selected — a fresh
+    /// queue, or one that played past its end — it starts the first item; with a current item it
+    /// resumes it. With an empty queue it does nothing (PR #18 review round 4): there is no local
+    /// track to resume, and a resume would restart a track a Clear just removed.
+    case play
 }
 
 /// What the queue owner must do in response — a diff, not a restatement (same convention as
@@ -62,11 +68,19 @@ public enum LocalQueueAction: Sendable, Equatable {
 public enum LocalQueueEffect: Sendable, Equatable {
     case loadAndPlay(LocalEntryId)
     case stopPlayback
+    /// Resume the player as it is — nothing in the queue's selection changed.
+    case resumePlayback
 }
 
 public struct LocalQueueOutcome: Sendable, Equatable {
     public let state: LocalQueueState
     public let effects: [LocalQueueEffect]
+
+    /// Public so `RideLinkPlatform.LocalQueueEdits` can combine an edit made of several actions.
+    public init(state: LocalQueueState, effects: [LocalQueueEffect]) {
+        self.state = state
+        self.effects = effects
+    }
 }
 
 /// The local queue, as a pure `(state, action) -> (state, effects)` reducer — same shape as
@@ -100,7 +114,24 @@ public enum LocalQueue {
             return step(state, delta: -1)
         case let .select(id):
             return select(state, id)
+        case .play:
+            return play(state)
         }
+    }
+
+    private static func play(_ state: LocalQueueState) -> LocalQueueOutcome {
+        if state.currentItem != nil {
+            return LocalQueueOutcome(state: state, effects: [.resumePlayback])
+        }
+        if let first = state.items.first {
+            return LocalQueueOutcome(
+                state: LocalQueueState(items: state.items, currentId: first.id),
+                effects: [.loadAndPlay(first.localEntryId)]
+            )
+        }
+        // PR #18 review round 4: an empty queue has no local track to resume, and a resume would
+        // restart whatever the player still held from before a Clear — a track the user removed.
+        return LocalQueueOutcome(state: state, effects: [])
     }
 
     /// Removing an item that is not current only ever shifts positions, never identity or playback.

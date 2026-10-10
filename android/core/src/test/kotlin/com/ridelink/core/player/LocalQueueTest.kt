@@ -186,4 +186,62 @@ class LocalQueueTest {
             }
         }
     }
+
+    // ---- Phase 9A.5 §11: Play with a queue and no selection -----------------------------------
+
+    @Test
+    fun `play with items queued and nothing selected starts the first item`() {
+        val outcome = LocalQueue.reduce(LocalQueueState(items = listOf(item("a1"), item("b2"))), LocalQueueAction.Play)
+        assertEquals("a1", outcome.state.currentId)
+        assertEquals(listOf<LocalQueueEffect>(LocalQueueEffect.LoadAndPlay(localId("a1"))), outcome.effects)
+    }
+
+    @Test
+    fun `play after the queue ran past its end starts it again from the first item`() {
+        val ended = LocalQueue.reduce(LocalQueueState(listOf(item("a1")), currentId = "a1"), LocalQueueAction.Next).state
+        assertNull(ended.currentId)
+        val outcome = LocalQueue.reduce(ended, LocalQueueAction.Play)
+        assertEquals("a1", outcome.state.currentId)
+        assertEquals(listOf<LocalQueueEffect>(LocalQueueEffect.LoadAndPlay(localId("a1"))), outcome.effects)
+    }
+
+    @Test
+    fun `play with a current item resumes it and changes nothing`() {
+        val state = LocalQueueState(listOf(item("a1"), item("b2")), currentId = "b2")
+        val outcome = LocalQueue.reduce(state, LocalQueueAction.Play)
+        assertEquals(state, outcome.state)
+        assertEquals(listOf<LocalQueueEffect>(LocalQueueEffect.ResumePlayback), outcome.effects)
+    }
+
+    @Test
+    fun `play with an empty queue does nothing - there is no local track to resume`() {
+        val outcome = LocalQueue.reduce(LocalQueueState(), LocalQueueAction.Play)
+        assertEquals(LocalQueueState(), outcome.state)
+        assertEquals(emptyList(), outcome.effects, "a resume here would restart the track a Clear just removed")
+    }
+
+    @Test
+    fun `play after Clear does not resume the cleared track`() {
+        val cleared = LocalQueue.reduce(LocalQueueState(listOf(item("a1")), currentId = "a1"), LocalQueueAction.Clear)
+        assertEquals(listOf<LocalQueueEffect>(LocalQueueEffect.StopPlayback), cleared.effects)
+        assertEquals(emptyList(), LocalQueue.reduce(cleared.state, LocalQueueAction.Play).effects)
+    }
+
+    @Test
+    fun `play starts the first entry even when the same track is queued twice`() {
+        val sameTrack = localId("aa")
+        val state = LocalQueueState(listOf(LocalQueueItem("q1", sameTrack, 0), LocalQueueItem("q2", sameTrack, 1)))
+        val outcome = LocalQueue.reduce(state, LocalQueueAction.Play)
+        assertEquals("q1", outcome.state.currentId, "the first queue entry, by entry id — not either copy of the track")
+    }
+
+    @Test
+    fun `removing one of two copies of the current track removes exactly that entry`() {
+        val sameTrack = localId("aa")
+        val state = LocalQueueState(listOf(LocalQueueItem("q1", sameTrack, 0), LocalQueueItem("q2", sameTrack, 1)), currentId = "q2")
+        val outcome = LocalQueue.reduce(state, LocalQueueAction.Remove("q1"))
+        assertEquals(listOf("q2"), outcome.state.items.map { it.id })
+        assertEquals("q2", outcome.state.currentId)
+        assertTrue(outcome.effects.isEmpty(), "removing the other copy must not restart the one playing")
+    }
 }

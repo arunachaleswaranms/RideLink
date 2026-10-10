@@ -82,21 +82,21 @@ class RideVisualTest {
                                 ui = ui,
                                 syncText =
                                     when (name) {
-                                        "reconnecting" -> "Music sync waits for connection"
+                                        "reconnecting" -> "Music sync resumes when reconnected"
                                         "sync-problem" -> "Music sync paused"
                                         "waiting" -> "Waiting for the track to download…"
-                                        "idle", "intercom", "disconnected" -> "Local playback"
-                                        else -> "Synchronized"
+                                        "idle", "intercom", "disconnected" -> "Playing on this phone"
+                                        else -> "Playing on both phones"
                                     },
-                                voiceText = if (name in setOf("idle", "music")) "Intercom not started" else "Intercom active",
+                                voiceText = if (name in setOf("idle", "music")) "Intercom off" else "Intercom on",
                                 microphoneText =
                                     when (name) {
-                                        "idle", "music" -> "Microphone unavailable"
-                                        "muted" -> "Muted"
-                                        "ptt" -> "Transmitting"
-                                        else -> "Microphone ready"
+                                        "idle", "music" -> "Microphone off"
+                                        "muted" -> "Microphone muted"
+                                        "ptt" -> "Talking"
+                                        else -> "Microphone on"
                                     },
-                                policyText = "C · Push to Talk / duck music",
+                                policyText = "Push to talk · music lowered",
                                 onPrevious = {},
                                 onPlayPause = {},
                                 onNext = {},

@@ -581,3 +581,164 @@ private extension PlaybackMessage {
     var isSeek: Bool { if case .seek = self { true } else { false } }
     var isNext: Bool { if case .next = self { true } else { false } }
 }
+
+// MARK: - Phase 9A.5, PR #18 review: local Up Next is read-only while synchronised ownership holds
+
+/// Mirrors Android's `LocalQueueEditOwnershipTest`. The real `SyncPlaybackCoordinator`, the real
+/// `SyncPlaybackGateAdapter` and the real `SyncPlaybackPresenter`; `LocalQueueEdits` is the one
+/// admission `MusicCoordinator` applies to select, remove, move, clear, add and play-now. A `nil`
+/// outcome is a refusal with no state change and no effect. The app target has no unit-test bundle,
+/// so `MusicCoordinator`'s own player half is asserted by reading it (`edit` and `playNow` apply only
+/// what `LocalQueueEdits.reduce` returns), not by running it — Android's
+/// `MusicCoordinatorQueuePlayTest` runs the equivalent coordinator on the emulator.
+extension SyncPlaybackTransportOwnershipTests {
+    private static func localId(_ n: Int) -> LocalEntryId { LocalEntryId("00000000-0000-4000-8000-00000000000\(n)") }
+
+    /// Three entries, the second current — so removing it would advance, and clearing would stop.
+    private static let localQueue = LocalQueueState(
+        items: (1...3).map { LocalQueueItem(id: "q\($0)", localEntryId: localId($0), insertedAtMonoUs: Int64($0)) },
+        currentId: "q2"
+    )
+
+    private static let localEdits: [LocalQueueAction] = [
+        .select(id: "q3"), .clear, .remove(id: "q2"), .move(id: "q3", toIndex: 0),
+        .add(LocalQueueItem(id: "q4", localEntryId: localId(4), insertedAtMonoUs: 4)),
+    ]
+
+    private static let playNow: [LocalQueueAction] = [
+        .add(LocalQueueItem(id: "q5", localEntryId: localId(5), insertedAtMonoUs: 5)), .select(id: "q5"),
+    ]
+
+    func testLocalQueueEditsAreRefusedWhileSynchronisedAndAdmittedAgainAfterPlayLocally() async {
+        await build(localPeerId: SyncTestValues.leaderPeerId, withPresenter: true)
+        await connect(asLeader: true)
+        let gate = SyncPlaybackGateAdapter(sync: coordinator)
+
+        // E: local ownership — every edit admitted with exactly LocalQueue's effects.
+        await assertOwnership(.local, "premise: connected but not synchronised")
+        assertLocalQueueRules(gate)
+
+        // A–D: synchronised ownership — every edit refused, with nothing to apply.
+        await coordinator.playSynchronized(Self.hashB)
+        await assertOwnership(.synchronized(.leader), "premise: Play synced is an activation")
+        assertEveryLocalEditRefused(gate)
+        await expectMain("the presenter publishes the lock for rendering") { self.presenter?.localQueueLocked == true }
+
+        // F: ownership genuinely returns local — the same gate admits again, nothing cached.
+        await coordinator.leaveSynchronizedMode()
+        await assertOwnership(.local, "Play on this phone only ended ownership")
+        assertLocalQueueRules(gate)
+        await expectMain("the presenter publishes the release") { self.presenter?.localQueueLocked == false }
+    }
+
+    func testEndRideReturnsTheLocalQueueAndTheSurvivingRoleDoesNotLockIt() async {
+        await build(localPeerId: SyncTestValues.leaderPeerId, withPresenter: false)
+        await connect(asLeader: true)
+        let gate = SyncPlaybackGateAdapter(sync: coordinator)
+        _ = coordinator.rideEpochs.next()
+        await coordinator.playSynchronized(Self.hashB)
+        await assertOwnership(.synchronized(.leader), "premise")
+        assertEveryLocalEditRefused(gate)
+
+        _ = await coordinator.endRideSegment(rideEpoch: coordinator.rideEpochs.next())
+        await assertOwnership(.local, "End Ride ended ownership")
+        let role = await coordinator.role
+        XCTAssertEqual(role, .leader, "premise: the role survives End Ride")
+        assertLocalQueueRules(gate)
+    }
+
+    func testOldDebtFinishingAfterEndRideDoesNotLockTheLocalQueue() async {
+        await build(localPeerId: SyncTestValues.followerPeerId, withPresenter: false)
+        _ = await followerFinishesAcceptedDebtAfterEndRide()
+        let gate = SyncPlaybackGateAdapter(sync: coordinator)
+        let state = await coordinator.diagnostics.syncState
+        XCTAssertEqual(state, .synced, "premise: SYNCED on display")
+        assertLocalQueueRules(gate)
+    }
+
+    /// ADR-024 Amendment A15 round 2: the admission's lifetime comes from the real coordinator, and a
+    /// return to local is a **new** lifetime — local A, synchronised B, local C never revives A.
+    func testAnAdmissionFromLocalLifetimeAIsDeadAfterSynchronisedBEvenOnceLocalCBegins() async throws {
+        await build(localPeerId: SyncTestValues.leaderPeerId, withPresenter: false)
+        await connect(asLeader: true)
+        let gate = SyncPlaybackGateAdapter(sync: coordinator)
+        let underA = try XCTUnwrap(gate.admitLocalQueueEdit(), "premise: local lifetime A admits")
+        XCTAssertTrue(gate.isLocalQueueEditStillValid(underA))
+
+        await coordinator.playSynchronized(Self.hashB)
+        await assertOwnership(.synchronized(.leader), "premise: B")
+        XCTAssertFalse(gate.isLocalQueueEditStillValid(underA), "A survived synchronised activation")
+        XCTAssertNil(gate.admitLocalQueueEdit(), "a fresh local admission under B")
+
+        await coordinator.leaveSynchronizedMode()
+        await assertOwnership(.local, "premise: C")
+        XCTAssertFalse(gate.isLocalQueueEditStillValid(underA), "A was resurrected by a later local lifetime")
+        let underC = try XCTUnwrap(gate.admitLocalQueueEdit(), "C admits fresh edits")
+        XCTAssertTrue(gate.isLocalQueueEditStillValid(underC))
+        XCTAssertNotEqual(underA, underC)
+    }
+
+    /// The A14 scenario with an admission in hand: a pre-ride local admission dies at activation; End
+    /// Ride and old debt finishing as SYNCED (the role surviving) neither keep the queue locked nor
+    /// revive it; a fresh admission afterwards works.
+    func testAPreRideAdmissionDiesAtActivationAndAFreshOneAfterEndRideAndOldDebtWorks() async throws {
+        await build(localPeerId: SyncTestValues.followerPeerId, withPresenter: false)
+        let gate = SyncPlaybackGateAdapter(sync: coordinator)
+        let beforeRide = try XCTUnwrap(gate.admitLocalQueueEdit(), "premise: local before the ride")
+        _ = await followerFinishesAcceptedDebtAfterEndRide()
+        let state = await coordinator.diagnostics.syncState
+        XCTAssertEqual(state, .synced, "premise: SYNCED on display")
+        let role = await coordinator.role
+        XCTAssertEqual(role, .follower, "premise: the role survives End Ride")
+
+        XCTAssertFalse(gate.isLocalQueueEditStillValid(beforeRide), "a pre-ride admission survived the ride")
+        let fresh = try XCTUnwrap(gate.admitLocalQueueEdit(), "End Ride and old debt left the local queue locked")
+        XCTAssertTrue(gate.isLocalQueueEditStillValid(fresh))
+    }
+
+    func testNoGateIsPlainLocalBehaviourAndTheAffordancesFollowTheLock() {
+        for edit in Self.localEdits {
+            XCTAssertNotNil(LocalQueueEdits.reduce(Self.localQueue, [edit], gate: nil), "\(edit)")
+        }
+        XCTAssertEqual(
+            LocalQueueAffordances.forLocked(true),
+            LocalQueueAffordances(rowsPlay: false, canRemove: false, canReorder: false, canClear: false, canAdd: false),
+            "a locked Up Next or library offers no edit at all"
+        )
+        XCTAssertEqual(
+            LocalQueueAffordances.forLocked(false),
+            LocalQueueAffordances(rowsPlay: true, canRemove: true, canReorder: true, canClear: true, canAdd: true)
+        )
+    }
+
+    private func assertEveryLocalEditRefused(_ gate: SyncPlaybackGateAdapter, file: StaticString = #filePath, line: UInt = #line) {
+        XCTAssertTrue(gate.localQueueLocked(), file: file, line: line)
+        for edit in Self.localEdits {
+            XCTAssertNil(LocalQueueEdits.reduce(Self.localQueue, [edit], gate: gate), "\(edit) admitted while synchronised", file: file, line: line)
+        }
+        XCTAssertNil(LocalQueueEdits.reduce(Self.localQueue, Self.playNow, gate: gate), "play-now admitted", file: file, line: line)
+    }
+
+    private func assertLocalQueueRules(_ gate: SyncPlaybackGateAdapter, file: StaticString = #filePath, line: UInt = #line) {
+        XCTAssertFalse(gate.localQueueLocked(), file: file, line: line)
+        let select = LocalQueueEdits.reduce(Self.localQueue, [.select(id: "q3")], gate: gate)
+        XCTAssertEqual(select?.state.currentId, "q3", file: file, line: line)
+        XCTAssertEqual(select?.effects, [.loadAndPlay(Self.localId(3))], file: file, line: line)
+
+        let clear = LocalQueueEdits.reduce(Self.localQueue, [.clear], gate: gate)
+        XCTAssertEqual(clear?.state.items.isEmpty, true, file: file, line: line)
+        XCTAssertEqual(clear?.effects, [.stopPlayback], file: file, line: line)
+
+        let remove = LocalQueueEdits.reduce(Self.localQueue, [.remove(id: "q2")], gate: gate)
+        XCTAssertEqual(remove?.state.currentId, "q3", "removing the current entry advances", file: file, line: line)
+        XCTAssertEqual(remove?.effects, [.loadAndPlay(Self.localId(3))], file: file, line: line)
+
+        let move = LocalQueueEdits.reduce(Self.localQueue, [.move(id: "q3", toIndex: 0)], gate: gate)
+        XCTAssertEqual(move?.state.items.map(\.id), ["q3", "q1", "q2"], file: file, line: line)
+        XCTAssertEqual(move?.effects, [], file: file, line: line)
+
+        let played = LocalQueueEdits.reduce(Self.localQueue, Self.playNow, gate: gate)
+        XCTAssertEqual(played?.state.currentId, "q5", file: file, line: line)
+        XCTAssertEqual(played?.effects, [.loadAndPlay(Self.localId(5))], file: file, line: line)
+    }
+}

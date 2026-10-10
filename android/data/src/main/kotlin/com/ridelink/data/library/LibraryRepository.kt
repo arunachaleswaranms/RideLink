@@ -8,7 +8,11 @@ import com.ridelink.core.model.ContentHash
 import com.ridelink.core.model.LocalEntryId
 import com.ridelink.core.model.QuickId
 import com.ridelink.data.database.TrackDao
+import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.map
 
 /**
@@ -19,7 +23,9 @@ import kotlinx.coroutines.flow.map
  * Sorting happens here, in Kotlin, over an already-FTS-matched result set — this phase's brief §13
  * requires the *matching* to be database-native (done), not the sort, and a personal library's
  * result set is small enough that sorting it in memory is simpler than four near-duplicate
- * `ORDER BY` queries in [TrackDao].
+ * `ORDER BY` queries in [TrackDao]. Phase 9A.5 re-measured that at 5,000 rows (recorded in
+ * `LibraryRepositorySortTest`) and kept it, moving the work off the main thread ([sortDispatcher])
+ * and making the order total ([sorted]) rather than pushing it into SQL.
  *
  * **Identity note (ADR-005 Amendment A1):** every method below is keyed by
  * [com.ridelink.core.model.LocalEntryId] or by [LocalTrackLocation] — never by
@@ -28,17 +34,42 @@ import kotlinx.coroutines.flow.map
  */
 class LibraryRepository(
     private val dao: TrackDao,
+    /**
+     * Where mapping and sorting run (Phase 9A.5 §6). Room delivers rows on its own executor, but a
+     * `map` operator runs in the *collector's* context, and the collector is `MusicCoordinator`'s
+     * main-thread scope — so 3,460 rows were converted and sorted on the main thread on every
+     * library change, including once per inserted row during an import. Measured cost is recorded in
+     * `LibraryRepositorySortTest`.
+     */
+    private val sortDispatcher: CoroutineDispatcher = Dispatchers.Default,
 ) {
     fun observe(query: LibraryQuery): Flow<List<LibraryEntry>> {
         val rows = if (query.searchText.isBlank()) dao.observeAll() else dao.observeSearch(ftsQueryFor(query.searchText))
-        return rows.map { entities -> sorted(entities.map { it.toDomain() }, query.sort) }
+        return rows.map { entities -> sorted(entities.map { it.toDomain() }, query.sort) }.flowOn(sortDispatcher)
     }
+
+    /** The whole library's row count, without reading the rows. */
+    fun observeCount(): Flow<Int> = dao.observeCount().distinctUntilChanged()
+
+    /** Every content hash a usable local row holds, independent of any search filter. */
+    fun observeIndexedContentHashes(): Flow<Set<String>> =
+        dao
+            .observeIndexedContentHashes()
+            .map { it.toSet() }
+            .distinctUntilChanged()
+            .flowOn(sortDispatcher)
 
     /** Every currently-known location and the `quickId` last recorded for it — exactly what
      *  [com.ridelink.core.library.IndexReconciliation] needs to decide new/unchanged/changed/missing,
      *  and nothing else (never a full row read for a whole-library scan). */
     suspend fun allLocationsAndQuickIds(): Map<LocalTrackLocation, QuickId> =
         dao.allLocationsAndQuickIds().associate { LocalTrackLocation(it.locationUri) to QuickId(it.quickId) }
+
+    /** [allLocationsAndQuickIds] plus each row's owner — the input [ScopedReconciliation] needs. */
+    suspend fun allLocationsWithProvenance(): Map<LocalTrackLocation, KnownLocation> =
+        dao.allLocationsWithProvenance().associate { row ->
+            LocalTrackLocation(row.locationUri) to KnownLocation(QuickId(row.quickId), ImportSource.of(row.sourceKind, row.sourceKey))
+        }
 
     suspend fun findByLocalEntryId(localEntryId: LocalEntryId): LibraryEntry? = dao.findByLocalEntryId(localEntryId.value)?.toDomain()
 
@@ -56,15 +87,21 @@ class LibraryRepository(
 
     /** A location never indexed before — [entry] carries a freshly-generated
      *  [com.ridelink.core.model.LocalEntryId] the caller must have already assigned. */
-    suspend fun insertNew(entry: LibraryEntry) {
-        dao.insertNew(entry.toEntity())
+    suspend fun insertNew(
+        entry: LibraryEntry,
+        source: ImportSource,
+    ) {
+        dao.insertNew(entry.toEntity().copy(sourceKind = source.kind.name, sourceKey = source.key))
     }
 
     /** The same [com.ridelink.core.library.IndexReconciliation.ReconciliationPlan.changedLocations]
      *  row, re-indexed after an in-place edit: [entry] must carry the *existing* row's
      *  [com.ridelink.core.model.LocalEntryId] and [LocalTrackLocation] unchanged — only its
      *  metadata/`quickId`/`contentHash`/decode status are refreshed. */
-    suspend fun updateReindexed(entry: LibraryEntry) {
+    suspend fun updateReindexed(
+        entry: LibraryEntry,
+        source: ImportSource,
+    ) {
         dao.updateReindexed(
             localEntryId = entry.localEntryId.value,
             quickId = entry.track.quickId.value,
@@ -79,6 +116,8 @@ class LibraryRepository(
             sizeBytes = entry.track.sizeBytes,
             decodeStatus = entry.decodeStatus.name,
             lastSeenAtMonoUs = entry.lastSeenAtMonoUs,
+            sourceKind = source.kind.name,
+            sourceKey = source.key,
         )
     }
 
@@ -100,8 +139,9 @@ class LibraryRepository(
     suspend fun touchSeen(
         location: LocalTrackLocation,
         atMonoUs: Long,
+        source: ImportSource,
     ) {
-        dao.touchSeen(location.uri, atMonoUs)
+        dao.touchSeen(location.uri, atMonoUs, source.kind.name, source.key)
     }
 
     /** A previously-indexed location this scan did not find —
@@ -119,17 +159,6 @@ class LibraryRepository(
 
     suspend fun count(): Int = dao.count()
 
-    private fun sorted(
-        entries: List<LibraryEntry>,
-        sort: LibrarySort,
-    ): List<LibraryEntry> =
-        when (sort) {
-            LibrarySort.TITLE -> entries.sortedBy { it.track.title.lowercase() }
-            LibrarySort.ARTIST -> entries.sortedBy { it.track.artist.lowercase() }
-            LibrarySort.ALBUM -> entries.sortedBy { it.track.album.lowercase() }
-            LibrarySort.RECENTLY_ADDED -> entries.sortedByDescending { it.indexedAtMonoUs }
-        }
-
     /**
      * Turns free-text search into a safe FTS4 MATCH expression (this phase's brief §13: "no SQL
      * injection / unsafe raw interpolation"). Room's `:ftsQuery` bind parameter already rules out
@@ -146,7 +175,67 @@ class LibraryRepository(
             .filter { it.isNotBlank() }
             .joinToString(" ") { token -> "\"${token.replace("\"", "\"\"")}\"*" }
 
-    private companion object {
-        val WHITESPACE = Regex("\\s+")
+    companion object {
+        private val WHITESPACE = Regex("\\s+")
+
+        /**
+         * The library's ordering — total and deterministic. Search results arrive in FTS order and a
+         * plain `sortedBy(title)` left equal titles in whatever order SQLite produced, so two
+         * identical queries could list tied rows differently. Every sort now ends in
+         * [LibraryEntry.localEntryId], which is unique, and each key is computed once per row rather
+         * than once per comparison.
+         */
+        fun sorted(
+            entries: List<LibraryEntry>,
+            sort: LibrarySort,
+        ): List<LibraryEntry> {
+            val keyed = entries.map { SortKey(it, sort) }
+            return keyed.sortedWith(SORT_ORDER).map { it.entry }
+        }
+
+        private val SORT_ORDER: Comparator<SortKey> =
+            compareBy<SortKey>({ it.primary }, { it.secondary }, { it.tertiary }, { it.descendingRecent })
+                .thenBy { it.entry.localEntryId.value }
+    }
+}
+
+/** One row's precomputed sort keys. `descendingRecent` is negated so one ascending comparator
+ *  serves every sort; it is zero for every sort but [LibrarySort.RECENTLY_ADDED]. */
+private class SortKey(
+    val entry: LibraryEntry,
+    sort: LibrarySort,
+) {
+    private val title = entry.track.title.lowercase()
+    private val artist = entry.track.artist.lowercase()
+    private val album = entry.track.album.lowercase()
+    val primary: String
+    val secondary: String
+    val tertiary: String
+    val descendingRecent: Long
+
+    init {
+        when (sort) {
+            LibrarySort.TITLE -> {
+                primary = title
+                secondary = artist
+                tertiary = album
+            }
+            LibrarySort.ARTIST -> {
+                primary = artist
+                secondary = album
+                tertiary = title
+            }
+            LibrarySort.ALBUM -> {
+                primary = album
+                secondary = artist
+                tertiary = title
+            }
+            LibrarySort.RECENTLY_ADDED -> {
+                primary = ""
+                secondary = ""
+                tertiary = ""
+            }
+        }
+        descendingRecent = if (sort == LibrarySort.RECENTLY_ADDED) -entry.indexedAtMonoUs else 0L
     }
 }

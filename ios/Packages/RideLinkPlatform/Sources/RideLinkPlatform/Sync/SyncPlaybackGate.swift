@@ -35,6 +35,42 @@ public protocol SyncPlaybackGate {
     /// `NEXT` that both phones then schedule. A follower returns true and does nothing — waiting for
     /// the leader's command is correct, not a stall.
     func interceptTrackEnded() -> Bool
+
+    /// Whether the **local** queue is locked because a synchronised session owns transport (Phase
+    /// 9A.5, PR #18 review). Unlike the intercepts this takes nothing over and forwards nothing: local
+    /// Up Next has no synchronised equivalent, so while synchronised mode owns playback a local select,
+    /// remove, move, clear, add or play-now is simply **refused** (`LocalQueueEdits`). Otherwise each
+    /// would change only this phone around the leader-ordered path, and an addition would be silently
+    /// discarded by the next synchronised selection, which replaces the local queue. Answered from the
+    /// same ownership as every method here (ADR-024 Amendment A14), at the moment of admission.
+    func localQueueLocked() -> Bool
+
+    /// ADR-024 Amendment A15 (PR #18 review round 2): admits a local queue edit or local transport
+    /// press **for one local ownership lifetime**, or `nil` while synchronised mode owns transport.
+    /// The queue mutation is synchronous but its player effects are not, so the admission travels
+    /// with them and `isLocalQueueEditStillValid` is asked before each one.
+    func admitLocalQueueEdit() -> LocalQueueEditAdmission?
+
+    /// Whether `admission`'s lifetime is still the live local one. Once ownership has left local it
+    /// is false forever, even after ownership returns local: that return is a new lifetime.
+    func isLocalQueueEditStillValid(_ admission: LocalQueueEditAdmission) -> Bool
+}
+
+/// A non-reusable admission for a local queue edit's (or local transport press's) player effects,
+/// bound to the local transport-ownership lifetime it was minted in (ADR-024 Amendment A15). Mirrors
+/// Android's `com.ridelink.app.music.LocalQueueEditAdmission`. Only the synchronisation owner's gate
+/// can mint one; a holder may only hand it back to be compared, never re-derive it.
+public struct LocalQueueEditAdmission: Sendable, Equatable, CustomStringConvertible {
+    let lifetime: Int64
+
+    init(lifetime: Int64) {
+        self.lifetime = lifetime
+    }
+
+    /// No synchronisation owner was ever wired (no gate): a lifetime that never ends.
+    static let ungated = LocalQueueEditAdmission(lifetime: -1)
+
+    public var description: String { "LocalQueueEditAdmission(lifetime: \(lifetime))" }
 }
 
 /// Bridges `MusicCoordinator`'s gate to the coordinator that owns synchronisation.
@@ -91,6 +127,17 @@ public struct SyncPlaybackGateAdapter: SyncPlaybackGate {
             dispatch { await $0.next() }
             return true
         }
+    }
+
+    /// The same ownership as every intercept, read at admission; nothing is forwarded.
+    public func localQueueLocked() -> Bool { sync.transportOwnership.current.isSynchronizedModeActive }
+
+    public func admitLocalQueueEdit() -> LocalQueueEditAdmission? {
+        sync.transportOwnership.localLifetime().map { LocalQueueEditAdmission(lifetime: $0) }
+    }
+
+    public func isLocalQueueEditStillValid(_ admission: LocalQueueEditAdmission) -> Bool {
+        sync.transportOwnership.localLifetime() == admission.lifetime
     }
 
     private func forward(_ action: @escaping @Sendable (SyncPlaybackCoordinator) async -> Void) -> Bool {

@@ -5,6 +5,7 @@ import com.ridelink.core.model.SpkiHash
 import com.ridelink.core.model.TransferId
 import com.ridelink.core.protocol.ManifestMessage
 import com.ridelink.core.protocol.TransferMessage
+import com.ridelink.data.database.LocationProvenanceRow
 import com.ridelink.data.database.LocationQuickIdRow
 import com.ridelink.data.database.TrackDao
 import com.ridelink.data.database.TrackEntity
@@ -261,6 +262,8 @@ class UnusedTrackDao : TrackDao {
 
     override suspend fun allLocationsAndQuickIds(): List<LocationQuickIdRow> = error("not used by this test")
 
+    override suspend fun allLocationsWithProvenance(): List<LocationProvenanceRow> = error("not used by this test")
+
     override suspend fun findMissingContentHash(): List<TrackEntity> = error("not used by this test")
 
     override suspend fun findAllSyncEligible(): List<TrackEntity> = error("not used by this test")
@@ -282,6 +285,8 @@ class UnusedTrackDao : TrackDao {
         sizeBytes: Long,
         decodeStatus: String,
         lastSeenAtMonoUs: Long,
+        sourceKind: String,
+        sourceKey: String,
     ): Unit = error("not used by this test")
 
     override suspend fun updateContentHash(
@@ -292,6 +297,8 @@ class UnusedTrackDao : TrackDao {
     override suspend fun touchSeen(
         locationUri: String,
         lastSeenAtMonoUs: Long,
+        sourceKind: String,
+        sourceKey: String,
     ): Unit = error("not used by this test")
 
     override suspend fun markMissing(
@@ -306,6 +313,10 @@ class UnusedTrackDao : TrackDao {
     override fun observeSearch(ftsQuery: String): Flow<List<TrackEntity>> = error("not used by this test")
 
     override suspend fun count(): Int = error("not used by this test")
+
+    override fun observeCount(): Flow<Int> = error("not used by this test")
+
+    override fun observeIndexedContentHashes(): Flow<List<String>> = error("not used by this test")
 
     override suspend fun deleteAll(): Unit = error("not used by this test")
 }

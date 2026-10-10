@@ -35,7 +35,8 @@ data class LocalQueueState(
     val currentItem: LocalQueueItem? get() = currentId?.let { id -> items.firstOrNull { it.id == id } }
 }
 
-/** Exactly the actions this phase's brief §14 lists — add/remove/move/clear/next/previous/select. */
+/** The actions this phase's brief §14 lists — add/remove/move/clear/next/previous/select — plus
+ *  Phase 9A.5's [Play]. */
 sealed class LocalQueueAction {
     data class Add(
         val item: LocalQueueItem,
@@ -59,6 +60,16 @@ sealed class LocalQueueAction {
     data class Select(
         val id: String,
     ) : LocalQueueAction()
+
+    /**
+     * The user pressed Play (Phase 9A.5 §11). With items queued and nothing selected — a fresh
+     * queue, or one that played past its end — it starts the first item; with a current item it
+     * resumes it. Before this, Play was disabled until Next had been pressed, although the queue was
+     * visibly full. **With an empty queue it does nothing** (PR #18 review round 4): there is no
+     * local track to resume, and a resume would restart whatever the player still held from before
+     * a Clear — a track the user has just removed.
+     */
+    object Play : LocalQueueAction()
 }
 
 /** What the queue owner must do in response — a diff, not a restatement (same convention as
@@ -69,6 +80,9 @@ sealed class LocalQueueEffect {
     ) : LocalQueueEffect()
 
     object StopPlayback : LocalQueueEffect()
+
+    /** Resume the player as it is — nothing in the queue's selection changed. */
+    object ResumePlayback : LocalQueueEffect()
 }
 
 data class LocalQueueOutcome(
@@ -107,7 +121,17 @@ object LocalQueue {
             LocalQueueAction.Next -> step(state, delta = 1)
             LocalQueueAction.Previous -> step(state, delta = -1)
             is LocalQueueAction.Select -> select(state, action.id)
+            LocalQueueAction.Play -> play(state)
         }
+
+    private fun play(state: LocalQueueState): LocalQueueOutcome {
+        val first = state.items.firstOrNull()
+        return when {
+            state.currentItem != null -> LocalQueueOutcome(state, listOf(LocalQueueEffect.ResumePlayback))
+            first != null -> LocalQueueOutcome(state.copy(currentId = first.id), listOf(LocalQueueEffect.LoadAndPlay(first.localEntryId)))
+            else -> LocalQueueOutcome(state, emptyList())
+        }
+    }
 
     /**
      * Removing an item that is not current only ever shifts positions, never identity or playback.

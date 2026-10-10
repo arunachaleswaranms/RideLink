@@ -4,9 +4,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.Button
-import androidx.compose.material3.Card
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
@@ -51,17 +49,12 @@ internal fun VoiceCard(
     onPushToTalkHeld: (Boolean) -> Unit,
     onSelectPolicy: (IntercomPolicy) -> Unit,
 ) {
-    Card(modifier = Modifier.fillMaxWidth()) {
-        Column(
-            modifier = Modifier.fillMaxWidth().padding(RideSpace.lg),
-            verticalArrangement = Arrangement.spacedBy(RideSpace.sm),
-        ) {
-            Text("Intercom", style = MaterialTheme.typography.titleSmall)
-            IntercomControls(voice, refusal, onStartIntercom, onStopIntercom, onToggleMute)
-            IntercomModeControls(voice, policy, onSelectPolicy, onPushToTalkHeld)
-            DiagnosticDisclosure("intercom diagnostics") {
-                IntercomDiagnosticsSections(voice, coexistence, peerAudioState)
-            }
+    // A section under the home screen's "Intercom" heading, not a card of its own (Phase 9A.5 §19).
+    Column(modifier = Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(RideSpace.sm)) {
+        IntercomControls(voice, refusal, onStartIntercom, onStopIntercom, onToggleMute)
+        IntercomModeControls(voice, policy, onSelectPolicy, onPushToTalkHeld)
+        DiagnosticDisclosure("intercom diagnostics") {
+            IntercomDiagnosticsSections(voice, coexistence, peerAudioState)
         }
     }
 }
@@ -78,8 +71,9 @@ private fun IntercomControls(
         // ARCHITECTURE §6.4: a peer asking is never enough to open this device's microphone. The
         // prompt is the only legal route, and it says so rather than opening the mic quietly.
         Text(
-            "Your peer wants to talk. Start Intercom to open your microphone.",
+            "The other phone wants to talk. Start the intercom to turn on your microphone.",
             style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.primary,
         )
     }
 
@@ -92,27 +86,18 @@ private fun IntercomControls(
         )
     }
 
+    Text(voiceLabel(voice.status), style = MaterialTheme.typography.titleMedium)
+    Text(microphoneLabel(voice), style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
     FlowRow(horizontalArrangement = Arrangement.spacedBy(RideSpace.sm)) {
         if (voice.status == VoiceStatus.IDLE || voice.status == VoiceStatus.FAILED) {
-            Button(onClick = onStartIntercom) { Text("Start Intercom") }
+            Button(onClick = onStartIntercom) { Text("Start intercom") }
         } else {
-            OutlinedButton(onClick = onStopIntercom) { Text("Stop Intercom") }
+            OutlinedButton(onClick = onStopIntercom) { Text("End intercom") }
         }
         OutlinedButton(onClick = onToggleMute, enabled = voice.localAudioOpen) {
             Text(if (voice.userMuted) "Unmute" else "Mute")
         }
     }
-
-    Text(voiceLabel(voice.status), style = MaterialTheme.typography.titleMedium)
-    Text(
-        if (voice.userMuted) {
-            "Muted"
-        } else if (voice.transmitting) {
-            "Transmitting"
-        } else {
-            if (voice.localAudioOpen) "Microphone ready" else "Microphone unavailable"
-        },
-    )
     voice.lastFailure?.let { Text(voiceFailureLabel(it), color = MaterialTheme.colorScheme.error) }
     DiagnosticDisclosure("voice details") {
         DiagnosticRow("voice state", voice.status.name)

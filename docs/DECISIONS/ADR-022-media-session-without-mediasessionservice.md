@@ -117,3 +117,71 @@ owns a real `androidx.media3.session.MediaSession` directly, wired to the same `
 | A second, separate `MediaSessionService` alongside `RideForegroundService` | ADR-021 and this phase's brief are explicit: **one** ride foreground service. Two services holding overlapping audio/notification responsibility is exactly the "duplicate notification/service owner" failure mode both this ADR and ADR-021 forbid |
 | Leave FR-019 unimplemented, document the gap | Rejected: the audit's instruction is to implement the architecture-selected functionality unless a genuinely binding platform reason makes the documented architecture wrong — here the *class choice* (`MediaSessionService`) was wrong, but the *feature* (a real, system-integrated `MediaSession`) is achievable and is implemented |
 | `MediaSessionService` with all automatic foreground/notification behaviour manually overridden off | Technically possible in principle but relies on suppressing library-internal behaviour that is not a supported/stable contract to disable piecemeal, for a benefit (inheriting `MediaSessionService`'s binder-based `MediaBrowser` discovery) this product does not need — there are no external `MediaController` clients (Android Auto, Assistant) in V1 scope |
+
+## Amendment A1 — 9 October 2026 — two notification surfaces, one service, one session (Phase 9A.5)
+
+**Status of the ADR: still Accepted.** The one ride foreground service and the one `MediaSession` it
+owns are unchanged. What changes is how many notifications that service posts, and what drives a
+re-post. Physical testing on the OnePlus Nord 5 (Phase 9A) found three defects in the single
+notification this ADR built:
+
+- **Problem 112** — it carried fixed intercom copy ("RideLink intercom active" / "Microphone open for
+  the intercom") and Mute / End intercom actions during **music-only** playback, with no microphone
+  open.
+- **Problem 113** — on Android 13+ SystemUI renders a `MediaStyle` notification that carries a session
+  token as the **media player**, with buttons from the session's `PlaybackState`, and ignores the
+  notification's own actions. Mute and End intercom were therefore never drawn, on the shade or the
+  lock screen. §2's "the system reads transport-control affordances from a `MediaStyle`
+  notification's session token" was right, and is exactly why custom actions on that same
+  notification cannot work.
+- **Problem 116** — the media card kept the **first** track's title, artist, artwork and duration for
+  the whole queue while the session's metadata moved on. SystemUI reads the session when the
+  notification is posted; the service re-posted only on a foreground-type or mute change.
+
+### Decision (amendment)
+
+1. **Content is a pure projection.** `RideNotificationPlanner` maps
+   `(intercom active, microphone open, muted, music active, playing, track title/artist, media
+   revision)` to a plan: which notifications exist and which one holds the foreground slot. Every
+   combination is a JVM test (`RideNotificationPlanTest`). Nothing mentions an intercom or a
+   microphone unless the intercom is on.
+2. **Two surfaces.** Music is a `MediaStyle` notification carrying the session token (this ADR's §2,
+   unchanged in kind). The intercom is a **plain** notification whose Mute/Unmute and End intercom
+   actions Android renders. Intercom only → the intercom notification is the foreground one. Music
+   only → the media notification is. Both → the intercom notification holds the foreground slot (it is
+   the privacy-relevant one and must not be dismissible) and the media notification is posted beside
+   it. Still one service, one `MediaSession`, one player; no second media notification.
+3. **Re-post on what the card shows.** The service listens to the one Media3 player for item
+   transition, metadata, timeline (duration) and play-state changes — never position — and re-posts
+   only when the projected notice actually changed (`MediaNotice.revision` covers item, metadata
+   including artwork, and duration).
+4. **Voice facts have one source.** `AppContainer` publishes the voice controller's
+   `localAudioOpen`/`userMuted` to `RideNotificationSource`; the in-app Mute and the notification's own
+   Mute now update the notification the same way (previously only the notification's own action did,
+   and every other refresh reset it to "Mute").
+5. **Channels.** The intercom gets `ridelink.intercom` at `IMPORTANCE_DEFAULT` with sound and
+   vibration off, so its controls are allowed on the lock screen; music gets `ridelink.music` at
+   `IMPORTANCE_LOW`. The pre-9A.5 `ridelink.ride` channel is deleted. Both notifications are
+   `VISIBILITY_PUBLIC` and name no peer and no device (ARCHITECTURE §11).
+6. **The service cancels both notifications in `onDestroy`.** Found by the new instrumented test: the
+   platform removes only the foreground notification when a service stops, so a hard `stop()` during
+   intercom + music left a stale media notification behind.
+7. **Android 12 (API 31–32)** still draws a media notification from the notification's own actions,
+   so the media notification carries Previous / Play-Pause / Next there, routed to `MusicCoordinator`
+   exactly as the session's commands are. Android 13+ takes them from the session.
+
+### Consequences
+
+- **The intercom notification now needs `POST_NOTIFICATIONS`.** A media-session notification is exempt
+  from that permission; a plain one is not. `MainActivity` already requests it before an intercom
+  start and `RideStartPolicy` treats a denial as a warning, not a refusal — so with notifications
+  denied, the intercom still runs (the foreground service is still listed by the system) but its
+  lock-screen controls are absent. Recorded, not hidden.
+- Media session custom commands were considered for Mute/End and rejected: they would put intercom
+  controls inside the *music* player, which does not exist when only the intercom runs, and SystemUI
+  places at most two custom actions per card at its own discretion.
+- Not verified physically. `RideNotificationMetadataTest` (three real track changes through the real
+  service, player and session) and `IntercomNotificationSurfaceTest` (the real service in intercom,
+  muted and intercom + music states, with no microphone opened) prove the posts, on an emulator. What
+  SystemUI draws on the OnePlus — three-track lock-screen progression, music-only copy — is the
+  post-merge physical check; the intercom half stays **PENDING — AUTHENTICATED PEER UNAVAILABLE**.

@@ -1,11 +1,13 @@
 package com.ridelink.app.ui
 
+import androidx.activity.compose.BackHandler
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import com.ridelink.app.library.SharedLibraryCoordinator
 import com.ridelink.app.music.MusicCoordinator
@@ -36,6 +38,7 @@ fun RideLinkRoot(
     onStopIntercom: () -> Unit,
     onPlayMusic: () -> Unit,
     onPlayNow: (LibraryEntry) -> Unit,
+    onPlayQueueItem: (String) -> Unit,
     onImportFolder: () -> Unit,
     onImportFiles: () -> Unit,
     onPlaySharedTrackLocally: (ManifestEntry) -> Unit,
@@ -43,6 +46,10 @@ fun RideLinkRoot(
 ) {
     val state by coordinator.state.collectAsState()
     var showRideMode by remember { mutableStateOf(false) }
+    // Presentation-only: which part of the stationary app is on screen. Never session state, never
+    // authority — Ride Mode above still comes from the FSM alone.
+    var destination by rememberSaveable { mutableStateOf(MainDestination.HOME) }
+    BackHandler(enabled = !showRideMode && destination != MainDestination.HOME) { destination = MainDestination.HOME }
     LaunchedEffect(state.status, state.returnTo) {
         showRideMode = nextRideModeVisibility(showRideMode, state.status, state.returnTo)
     }
@@ -67,10 +74,19 @@ fun RideLinkRoot(
             onStopIntercom = onStopIntercom,
             onPlayMusic = onPlayMusic,
             onPlayNow = onPlayNow,
+            onPlayQueueItem = onPlayQueueItem,
             onImportFolder = onImportFolder,
             onImportFiles = onImportFiles,
             onPlaySharedTrackLocally = onPlaySharedTrackLocally,
             onExportDiagnostics = onExportDiagnostics,
+            destination = destination,
+            onNavigate = { destination = it },
         )
     }
 }
+
+/**
+ * The stationary app's destinations (Phase 9A.5 §5). Each long list lives on its own destination so
+ * it can be a lazy list with a finite height — the home screen's scroll cannot host one.
+ */
+enum class MainDestination { HOME, LIBRARY, UP_NEXT, SHARED_MUSIC }

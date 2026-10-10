@@ -2369,3 +2369,209 @@ that had never activated synchronised mode; each now starts it the way a user wo
 track neither phone holds, which issues no playback command and spends no `command_seq`), with every
 assertion unchanged. No wire change, no protocol field, no vector: transport ownership is local.
 The command-gate trace is in [`PHASE8_DELIVERED_AUTHORITY.md`](../PHASE8_DELIVERED_AUTHORITY.md#amendment-a14--transport-ownership-after-distributed-debt).
+
+## Amendment A15 — 9 October 2026 — local queue edits are admitted through the same ownership
+
+**Status of the ADR: still Accepted. A14's ownership rule is unchanged; this applies it to one more
+entry point.** Phase 9A.5 (PR #18) added a local Up Next screen. Its select, remove, move and clear —
+and the library's play-now and add, and the other phone's music "Play here" — reached
+`MusicCoordinator`'s `LocalQueue` directly, without `SyncPlaybackGate`. During a synchronised ride a
+local `Select` loaded and played a track on this phone only, `Clear` or removing the current entry
+stopped or advanced this phone only, and `Move`/`Add` edited a queue the synchronised path replaces
+wholesale on every synchronised selection (`syncSelect`) and empties on stop (`clearSelection`). That
+is a second path around the leader-ordered one (found by independent review, STATUS §4 problem 120).
+
+### Decision (amendment)
+
+1. **While synchronised transport owns playback, local queue edits are refused**, not forwarded:
+   local Up Next has no shared-queue equivalent, and V1 adds no queue-protocol operation for one.
+2. `SyncPlaybackGate` gains `localQueueLocked()`, answered by `SyncPlaybackGateAdapter` from **the same
+   ownership as every intercept** — `isSynchronizedModeActive()` on Android, `transportOwnership` on
+   iOS (`syncEnabled && role != nil`). Not `SyncState`, not the role alone, not diagnostics, not a UI
+   flag; old distributed authority finishing after End Ride does not lock the local queue.
+3. `LocalQueueEdits.reduce` (Android `app.music`, iOS `RideLinkPlatform`, mirrored) asks once and, when
+   admitted, reduces every action of the edit in the same synchronous step; `MusicCoordinator` applies
+   only what it returns. No suspension separates the answer from the mutation. A refusal is no state
+   change and no player effect.
+4. For **rendering only**, ownership is published (`SyncPlaybackCoordinator.transportOwnershipForDisplay`
+   on Android, written by the `syncEnabled`/`role` setters; `TransportOwnershipBox.setDisplayObserver`
+   feeding `SyncPlaybackPresenter.localQueueLocked` on iOS). Screens use it to make Up Next and the
+   library read-only — controls absent, not disabled — and never to admit anything.
+
+Regressions: `LocalQueueEditOwnershipTest` (JVM, real coordinator and adapter: local → synchronised →
+local via Play on this phone only and via End Ride), the A14 test's added lock assertions,
+`MusicCoordinatorQueuePlayTest` (emulator, real coordinator and recording player: no Load/Play/Stop on
+refusal), `LocalQueueReadOnlyUiTest` (emulator), and the mirrored iOS tests in
+`SyncPlaybackTransportOwnershipTests`. No wire, vector or protocol change.
+
+### A15 round 2 — 9 October 2026 — the admission travels to the player effect
+
+**Found by the second independent review of PR #18.** Round 1 asked `localQueueLocked()` once,
+synchronously, and applied the queue mutation in the same step — correct for the *mutation*. But the
+mutation's player effects do not run in that step. On Android `MusicCoordinator.apply` launched a
+coroutine that suspended in the library lookup and again inside `Load`; on iOS each effect was a
+`Task` that awaited audio-session activation, the lookup and `Load`, each `await` releasing the main
+actor. Synchronised mode could take ownership inside any of those suspensions, and the stale local
+work then loaded, played or stopped on this phone only — exactly the second path round 1 closed,
+reopened one suspension later. A Boolean proves nothing after the instant it is read.
+
+Re-reading the Boolean before each effect would not fix it either. **Local A → synchronised B →
+local C** is "local" again, and a check of current ownership would let A's parked `Load` run under C
+— a lifetime that never authorised it. The question is not "is ownership local now?" but "is this the
+local lifetime that admitted the edit?".
+
+#### Decision (round 2)
+
+1. **The synchronisation owner numbers its local lifetimes.** Android's `SyncPlaybackCoordinator`
+   advances a lock-guarded lifetime in the same setter step that publishes ownership, and iOS's
+   `TransportOwnershipBox.store` advances it under its lock, **whenever `syncEnabled && role != nil`
+   flips** — LOCAL→SYNC and SYNC→LOCAL, whatever caused it: Play synced, an accepted authoritative
+   command, a served follower intent, End Ride, Play on this phone only, fail-closed exits and
+   control-lifetime resets. A role change inside synchronised mode does not move it, and nothing reads
+   `SyncState`; so old debt finishing as SCHEDULED/SYNCED after End Ride, with the role surviving,
+   neither locks the queue nor moves the lifetime. Lifetimes only increase, so a return to local is a
+   **new** lifetime and nothing earlier can match it.
+2. `SyncPlaybackGate` gains `admitLocalQueueEdit(): LocalQueueEditAdmission?` (`nil` while
+   synchronised) and `isLocalQueueEditStillValid(admission)`, answered by `SyncPlaybackGateAdapter`
+   from that lifetime. The admission is an opaque value only the gate can mint; `MusicCoordinator`
+   holds no ownership fact of its own. With no gate wired at all (no synchronised session ever built)
+   a fixed "ungated" admission stands for a lifetime that never ends.
+3. `LocalQueueEdits.reduce` returns the admission **with** the outcome. `MusicCoordinator.apply`
+   writes the queue state and hands the effects, with that same admission, to `LocalPlaybackEffects`
+   (Android `app.music`, iOS `RideLinkPlatform`, mirrored), which re-proves it **immediately before
+   every externally visible step**: audio-session activation (iOS), `Load`, then again before `Play`,
+   `Stop`, `Pause`, `Seek`. A failed proof ends that effect; nothing after it runs. No replacement
+   admission is ever minted after a suspension.
+4. **Local transport presses carry one too.** Play/Next/Previous and a local track-end (after the
+   intercept said "local") and Pause/Seek mint an admission in the same synchronous step and run
+   through `LocalPlaybackEffects`: a local press admitted just before activation has the same race as
+   an edit, and an un-fenced local `Pause` landing after activation would pause synchronised playback
+   on this phone only.
+5. **Queue state is not rolled back** when an effect is dropped. The mutation was a legitimate local
+   edit under its lifetime; the synchronised path that took over replaces the local queue wholesale on
+   its first selection (`syncSelect`) and clears it on stop (`syncClearSelection`). A rollback would be
+   a second local write racing that authority — the thing this amendment exists to prevent.
+6. **Synchronised effects are untouched.** `syncSelect`/`syncLoad`/`syncStart`/`syncPause`/
+   `syncSeek`/`syncSetRate`/`syncStop`/`syncClearSelection`, resync, accepted/delivered debt,
+   scheduled starts and drift correction never pass through `LocalPlaybackEffects`; their authority is
+   the synchronised coordinator's own, re-proved by `runOwnedSteps`. One player, one queue, one
+   `MediaSession`/Now Playing.
+
+Regressions: `LocalPlaybackEffectsLifetimeTest[s]` (JVM and SwiftPM, mirrored; the lifetime rule
+reproduced in a focused gate, effects parked at real suspension points — select before `Load`, clear
+before `Stop`, remove-current before the successor's `Load`, ABA, `Load`/`Play` split, last-entry
+`Stop`, normal local behaviour, a pre-activation `Pause`, and on iOS a pre-activation resume that must
+not activate the audio session); `LocalQueueEditOwnershipTest` and the iOS ownership suite (real
+coordinator and adapter: A dead after B, still dead under C, C admits); the A14 tests (a pre-ride
+admission dies at activation; after End Ride and old debt finishing as SYNCED with the role surviving,
+a fresh admission works); and `MusicCoordinatorLocalEffectLifetimeTest` (emulator, the real Android
+`MusicCoordinator` on a test dispatcher, proving it carries and re-proves the admission). The iOS app
+target still has no unit-test bundle, so iOS `MusicCoordinator`'s wiring — `apply` passes
+`edit.admission`, `dispatch`/`pause`/`seek` admit before their effect — is asserted by reading it.
+Mutants that drop any proof, or stop the lifetime advancing, fail on both platforms. No wire, vector
+or protocol change.
+
+### A15 round 3 — 9 October 2026 — the latest local intent wins inside one lifetime
+
+**Found by the third independent review of PR #18.** Round 2's admission answers *"is this still the
+local ownership lifetime that admitted the edit?"*. It cannot order two local operations **inside** one
+lifetime, and every local operation in a lifetime carries an identical, valid admission. So, with
+ownership local throughout:
+
+- Select A, its lookup parked; Clear, whose `Stop` completes; A released → A loaded and played after
+  the user cleared the queue.
+- Select A parked; Select B, which starts; A released → A replaced B.
+- Select A parked in its lookup or inside `Load`; Pause → A's `Play` defeated the newer pause.
+
+#### Decision (round 3)
+
+1. **The one local effect runner orders local operations** (`LocalPlaybackEffects`, owned by the one
+   `MusicCoordinator`; mirrored). Each effect is issued synchronously in the same step as the queue
+   mutation or press that caused it, and takes a **ticket** from two monotonic sequences at that moment:
+   - **selection** (*which track should be loaded?*), advanced by load-and-play and stop;
+   - **transport intent** (*should the player be running?*), advanced by load-and-play, stop, resume
+     and pause.
+2. **Both authorities are proved before every externally visible step and after every suspension that
+   precedes one**, and neither is ever re-minted after a suspension:
+   - audio-session activation (iOS), and the `Load` after the lookup: admission and selection;
+   - `Play` after `Load`: admission, selection and transport intent;
+   - `Stop`: admission, selection and transport intent;
+   - resume: admission and transport intent (before activation and before `Play`);
+   - `Pause`: admission and transport intent;
+   - `Seek`: admission and selection (a position on the current track; it advances neither).
+3. **Why two sequences, not one.** A single counter would make Pause cancel an in-flight `Load`, leaving
+   the queue naming a track the player never loaded, so the next Play would resume the *previous*
+   track. With two, Select A then Pause leaves A loaded and paused: the queue and the player agree, and
+   the pause is honoured. Neither platform's `Load` starts playback (Media3 keeps `playWhenReady`, which
+   the pause cleared; `AVAudioEnginePlayer.load` stops the node), so a load without its `Play` is
+   paused.
+4. **Harmless edits invalidate nothing.** Add, move and removing a non-current entry produce no player
+   effect, take no ticket and advance neither sequence; a selection in flight completes normally.
+5. **Nothing is reconstructed from queue state.** The tickets are the only order; the queue is not read
+   after a suspension to decide what should happen. Synchronised `sync*` effects never take a ticket
+   and never move either sequence; their authority remains the synchronised coordinator's.
+
+Regressions (mirrored `R3-*` cases in `LocalPlaybackEffectsLifetimeTest[s]`, each parked at a real
+suspension point): Clear after a parked select; Select B after a parked select; Pause with the select
+parked before `Load` and inside `Load`; ABA with newer work under the later lifetime; add/move/remove
+of non-current entries and a seek during a parked select. `MusicCoordinatorLocalEffectLifetimeTest`
+(emulator) proves the real Android `MusicCoordinator` is wired to it for the newer-selection and pause
+cases. Making both sequence checks always true fails exactly the Clear, Select B and both Pause cases
+on both platforms, and both coordinator cases on the emulator. No wire, vector or protocol change.
+
+**Separately (STATUS problem 121), the Android visible-UI start.** `MainActivity`'s shared-music Play
+checked `foregroundVisible` once and then suspended in two lookups before starting the foreground
+service on the cache path. `VisibleMusicStart` now reads visibility and the owner's local-queue lock
+immediately before every visible-UI foreground-service start, with no suspension between that read,
+the start and the coordinator call; `MusicCoordinator` remains the final admission authority. iOS has
+no equivalent: its lookup is synchronous and it has no foreground service.
+
+### A15 round 4 — 10 October 2026 — a Stop belongs to its selection; the newest Play is carried
+
+**Found by the fourth independent review of PR #18.** Round 3 made a `Stop` advance both sequences
+and require both to stay current, and made a load's trailing `Play` require its own transport ticket.
+Both were too strict, and the empty-queue `Play` reducer let the first one matter:
+
+- Clear a playing queue, then Pause before the `Stop` runs: the Pause advanced the transport intent,
+  the `Stop` was discarded, and the cleared track stayed loaded (paused) with the queue empty.
+- Clear, then Play on the empty queue: `LocalQueue.Play` returned `ResumePlayback` for an empty queue
+  (on both platforms), whose newer intent discarded the `Stop` — and the resume restarted the track
+  the user had just cleared.
+- Select A with its load pending, then Play: the resume played the *previous* track at once, and A's
+  trailing `Play`, no longer the newest intent, was dropped — A loaded but never started.
+
+#### Decision (round 4)
+
+1. **A `Stop` is ended only by a newer selection.** It still advances both sequences when issued, but
+   it is proved against the admission and its **selection** only. A later Pause or resume cannot
+   discard it; a genuine new selection after Clear supersedes it and plays.
+2. **The transport intent records what it asked for.** Each intent (load-and-play, resume: play;
+   pause, stop: not) stores whether it wants playback. A Pause or resume press still acts only while it
+   is the newest intent. A load's trailing `Play` runs if the **newest intent wants playback** —
+   whichever press issued it — so Select A then Play starts A once loaded, Select A then Pause leaves
+   A loaded but paused, and Pause then Play during the load starts A.
+3. **A resume defers to a load of its own selection that is still in flight** (the runner records
+   which selection's load-and-play has not yet settled), so the previous track never plays while the
+   selected one loads; the load's `Play` carries the press.
+4. **`LocalQueue.Play` on an empty queue does nothing** (both reducers; previously `ResumePlayback`).
+   There is no local track to resume, and a resume would restart a track the user removed. The
+   Now Playing and Ride Mode Play controls follow: a track the player merely still holds after a Clear
+   is not offered under local ownership. While synchronised (display ownership, rendering only) a
+   loaded track keeps Play enabled, because the gate forwards it to the session — unchanged.
+5. Unchanged: the ownership admission and its lifetime, effect-level revalidation before every player
+   step, add/move/non-current removal taking no ticket, and every synchronised path. Nothing is
+   reconstructed from queue state: the runner's sequences, intent and in-flight record are its own
+   bookkeeping, written only when an effect is issued or settles.
+
+Regressions (mirrored `R4-*` in `LocalPlaybackEffectsLifetimeTest[s]`, issued so a later press is queued
+before the earlier effect runs): Clear then Pause; Clear then Play on the empty queue; Select A parked
+then Play, and then Pause-then-Play; Clear then a new selection before and after the `Stop` ran. Three
+real-`MusicCoordinator` cases on the emulator (Clear then Pause, Clear then Play, Play while the
+selection loads). The reducer change is pinned in `LocalQueueTest[s]`, the availability change in
+`TransportAvailabilityTest`. The reviewer's other scenarios stay pinned by round 3's cases (Clear or a
+newer selection during a parked select, Pause during a pending selection, ABA, harmless edits).
+Against unmodified round-3 production, four `R4-*` cases fail on each platform and all three emulator
+cases fail. Removing each new guard alone fails exactly its own cases on both platforms: the `Stop`
+intent requirement restored → R4-1; empty-queue resume restored → R4-2; the load's `Play` requiring
+its own intent → both R4-5; the in-flight deferral removed → both R4-5. No wire, vector or protocol
+change.

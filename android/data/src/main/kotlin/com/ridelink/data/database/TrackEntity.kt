@@ -1,5 +1,6 @@
 package com.ridelink.data.database
 
+import androidx.room.ColumnInfo
 import androidx.room.Entity
 import androidx.room.Fts4
 import androidx.room.Index
@@ -43,6 +44,7 @@ import androidx.room.PrimaryKey
         Index(value = ["locationUri"], unique = true),
         Index(value = ["quickId"]),
         Index(value = ["contentHash"]),
+        Index(value = ["sourceKey"]),
     ],
 )
 data class TrackEntity(
@@ -67,6 +69,16 @@ data class TrackEntity(
     val decodeStatus: String,
     val indexedAtMonoUs: Long,
     val lastSeenAtMonoUs: Long,
+    /**
+     * Provenance (schema version 3, STATUS §4 problem 115): the [com.ridelink.data.library.ImportSource]
+     * whose scan owns this row's reconciliation, stored as its kind's name and its key. The defaults
+     * are the fail-safe kind — an individual file reconciles nothing but itself — and match
+     * [RideLinkDatabase.MIGRATION_2_3]'s `ADD COLUMN` clauses exactly, which Room validates.
+     */
+    @ColumnInfo(defaultValue = "'FILE'")
+    val sourceKind: String = "FILE",
+    @ColumnInfo(defaultValue = "''")
+    val sourceKey: String = "",
 )
 
 /**

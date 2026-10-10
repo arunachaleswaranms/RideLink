@@ -144,6 +144,25 @@ AUTHENTICATED PEER UNAVAILABLE**. **The exact next tasks are:**
    AF-05, AF-06, AF-07, problems 101 and 108, V-09's Android half, and problem 113's intercom half)
    together with the two-device rows.
 
+**9 October 2026: Phase 9A.5 — release UX and large-library reliability — is implemented on branch
+`phase9a-5/release-ux-library`, pending independent review** ([PHASE9A5_RELEASE_UX.md](PHASE9A5_RELEASE_UX.md)).
+Baseline `5575269` (PR #17). Problems 112–116 are fixed in software (STATUS §4), with 117–119 recorded
+alongside; ADR-005 Amendment A2 (library provenance, Room v3) and ADR-022 Amendment A1 (two notification
+surfaces, one service, one `MediaSession`). No wire, vector, trust, FSM or authority change. Nothing ran
+on the OnePlus. **The exact next tasks are now:**
+
+1. Independent review of the Phase 9A.5 PR; merge only after it.
+2. **Post-merge physical check on the OnePlus Nord 5** with the ~3,460-track library, on the merged
+   build only (TEST_PLAN §4.3a): L-06 cold launch / clear search / rapid scroll / sort with no ANR;
+   L-07 folder A, folder B and a single file stay independent across a rescan; L-08 import summary,
+   recordings choice, progress and cancel; Q-01 queue, Play from the queue and Up Next; N-01
+   music-only notification copy; N-02 three consecutive track changes on the lock-screen card and the
+   shade; then the Phase 9A lifecycle smoke (Home, recreations, screen off). Record results in
+   PHASE9A_ANDROID_PHYSICAL.md as a new section, without rewriting its earlier evidence.
+3. **Phase 9B** on the physical iPhone, which also closes the peer-dependent rows: AF-01, AF-02,
+   AF-05, AF-06, AF-07, problems 101 and 108, V-09's Android half, **N-03 / N-04 (problem 113's live
+   intercom half, problem 119)**, problem 118's physical half, and the two-device gates.
+
 ## 7. Manual tests still required (all MANUAL REQUIRED)
 
 | Area | TEST_PLAN | Needs |
@@ -152,7 +171,8 @@ AUTHENTICATED PEER UNAVAILABLE**. **The exact next tasks are:**
 | Voice two-device gate | §5.1 V-01…V-11 | Android + iPhone |
 | Synchronised playback gate | §5.2 S-01…S-12 | Android + iPhone + recorder |
 | Audio hardware chain | §6 A-01…A-15 | + helmet unit + TWS |
-| Foreground service, lock screen, notification actions | V-08, AF-01, AF-05, §4.1 | Android phone |
+| Foreground service, lock screen, notification actions | V-08, AF-01, AF-05, §4.1, §4.3a N-01…N-04 | Android phone (N-03/N-04 need a peer) |
+| Large library, scoped import, queue (Phase 9A.5) | §4.3a L-06…L-08, Q-01 | Android phone, ~3,460 tracks |
 | Problem 101 on a device | — | Android phone: start the intercom, press End, rotate within the release window, and confirm the notification goes |
 | Problem 102 | — | Two Android phones: device-to-device setup, then confirm a fresh `peer_id` and a pairing prompt |
 | Problem 104 | — | Android: a navigation prompt, a call, and a helmet-unit disconnect while music plays |

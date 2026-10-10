@@ -23,116 +23,16 @@ struct MainScreen: View {
     let deviceDescription: String
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: RideDesign.md) {
-                Text("RideLink")
-                    .font(.largeTitle)
-
-                Text("Your ride, together").font(.body).foregroundStyle(.secondary)
-                ConnectionSummary(status: coordinator.state.status, peerCount: coordinator.discoveredPeers.count)
-
-                // One button, four meanings, decided by `SessionFsm`'s own legal transitions rather
-                // than by this screen (`docs/STATUS.md` §4 problem 53). Before this pass it only ever
-                // offered Start/Stop Discovery, and `.startDiscovery` is legal only from `IDLE` — so
-                // once a session had ended or the reconnect budget was spent, pressing it did nothing
-                // at all and the ride could only be restarted by force-quitting the app.
-                if let action = sessionAction(coordinator.state.status) {
-                    Button(action.label) {
-                        switch action {
-                        case .start: coordinator.startDiscovery()
-                        case .stopDiscovery: coordinator.cancelDiscovery()
-                        case .end: coordinator.endSession()
-                        case .retry: coordinator.retryDiscovery()
-                        }
-                    }
-                    .buttonStyle(.borderedProminent).foregroundStyle(RideDesign.onPrimary)
-                }
-
-                // FR-018 (Phase 7, ADR-028): the entry point into the simplified riding surface.
-                // Gated on `SessionFsm`'s own legality (`RideModePresentation.canStartRide` mirrors
-                // `.startRide`'s `CONNECTED`-only rule) and on local music actually existing — the
-                // button is never offered for a transition that would be rejected or a screen that
-                // has nothing to show.
-                if RideModePresentation.canStartRide(coordinator.state.status), case .success = music {
-                    Button("Start Ride") { coordinator.startRide() }
-                        .buttonStyle(.borderedProminent).foregroundStyle(RideDesign.onPrimary)
-                        .controlSize(.large)
-                }
-
-                if let alert = coordinator.securityAlert {
-                    SecurityAlertCard(code: alert) { coordinator.dismissSecurityAlert() }
-                }
-
-                if let prompt = coordinator.pairingPrompt {
-                    PairingCard(prompt: prompt) { coordinator.confirmPairing(accepted: $0) }
-                }
-
-                // PROTOCOL §7.1 in the UI: voice controls exist only once the trust gate has passed.
-                // A disabled button would still be a button; an absent card cannot be pressed.
-                if coordinator.state.status == .connected || coordinator.state.status == .rideActive {
-                    VoiceCard(
-                        voice: coordinator.voiceDiagnostics,
-                        coexistence: coordinator.coexistenceDiagnostics,
-                        policy: coordinator.intercomPolicy,
-                        peerAudioState: coordinator.peerAudioState,
-                        refusal: coordinator.lastIntercomRefusal,
-                        // Routed through the coordinator, which owns the controller's lifetime — the
-                        // view never touches `VoiceController` directly (CLAUDE.md rule 8).
-                        onStartIntercom: { coordinator.startIntercom() },
-                        onStopIntercom: { coordinator.endIntercom() },
-                        // The user's own Mute latch, not the wire's `mic_muted` — under PTT the latter is
-                        // true whenever the button is not held, and toggling from it would be a coin flip.
-                        onToggleMute: { coordinator.setMicrophoneMuted(!coordinator.voiceDiagnostics.userMuted) },
-                        onPushToTalkHeld: { coordinator.setPushToTalkHeld($0) },
-                        onSelectPolicy: { coordinator.selectIntercomPolicy($0) }
-                    )
-                }
-
-                // Same gate as `VoiceCard` above (PROTOCOL §7.1 / brief §22): the shared library
-                // exists only once the trust gate has passed, since `MANIFEST_*`/`TRANSFER_*` are
-                // absent from the pre-authentication frame allowlist for exactly this reason.
-                if coordinator.state.status == .connected || coordinator.state.status == .rideActive,
-                   let sharedLibrary = coordinator.sharedLibrary {
-                    SharedLibraryView(coordinator: sharedLibrary, onPlayLocally: playSharedTrackLocally)
-
-                    // PROTOCOL §5/§9's synchronisation plane, gated the same way: every Phase 5
-                    // frame is absent from the pre-authentication allowlist, so there is nothing
-                    // here to drive before the trust gate has passed (ADR-024 §8).
-                    if let syncPlayback {
-                        SyncPlaybackView(presenter: syncPlayback, sharedLibrary: sharedLibrary)
-                    }
-                }
-
-                // Deliberately independent of `coordinator.state.status` — this phase's brief §28/
-                // §30: local music must be fully usable in airplane mode, with no peer, regardless
-                // of session state.
-                switch music {
-                case .success(let musicCoordinator):
-                    MusicSection(musicCoordinator: musicCoordinator, sharedEntries: coordinator.sharedLibrary?.remoteEntries ?? [])
-                case .failure(let error):
-                    Text("Local music unavailable. Restart RideLink to try again.")
-                    DisclosureGroup("Music diagnostics") { Text(String(describing: error)) }
-                        .font(.footnote)
-                        .foregroundStyle(.red)
-                }
-                DisclosureGroup("Connection diagnostics") {
-                    Text(deviceDescription)
-                    TransportBanner(transportLabel: coordinator.controlDiagnostics.transportLabel)
-                    DiagnosticsCard(
-                        diagnostics: coordinator.controlDiagnostics,
-                        discoveredPeerCount: coordinator.discoveredPeers.count,
-                        discoveryCount: coordinator.discoveryCount,
-                        localIdentityPrefix: coordinator.localIdentityPrefix
-                    )
-
-                    ResyncDiagnosticsCard(diagnostics: coordinator.resyncDiagnostics)
-                    DiagnosticsExportCard(source: coordinator.diagnosticsExport)
-                }.font(.subheadline)
+        NavigationStack {
+            ScrollView {
+                content
+                    .padding(RideDesign.lg)
+                    .frame(maxWidth: .infinity, alignment: .leading)
             }
-            .padding(RideDesign.xl)
-            .frame(maxWidth: .infinity, alignment: .leading)
+            .navigationTitle("RideLink")
+            .navigationBarTitleDisplayMode(.inline)
+            .background(RideDesign.background)
         }
-        .background(RideDesign.background)
         .tint(RideDesign.primary)
         .controlSize(.large)
         .onChange(of: scenePhase) { _, phase in
@@ -165,6 +65,135 @@ struct MainScreen: View {
         }
     }
 
+    private var authenticated: Bool { coordinator.state.status == .connected || coordinator.state.status == .rideActive }
+
+    /// Connection first, then the intercom and music, then links to the long lists — every list
+    /// that grows with a library is its own lazy destination (Phase 9A.5 §5).
+    @ViewBuilder
+    private var content: some View {
+        VStack(alignment: .leading, spacing: RideDesign.xl) {
+            VStack(alignment: .leading, spacing: RideDesign.md) {
+                ConnectionSummary(status: coordinator.state.status, peerCount: coordinator.discoveredPeers.count)
+                HStack(spacing: RideDesign.sm) {
+                    // FR-018 (Phase 7, ADR-028): the entry point into the simplified riding surface,
+                    // gated on `SessionFsm`'s own legality and on local music existing.
+                    if RideModePresentation.canStartRide(coordinator.state.status), case .success = music {
+                        Button("Start ride") { coordinator.startRide() }
+                            .buttonStyle(.borderedProminent).foregroundStyle(RideDesign.onPrimary)
+                    }
+                    // One button, four meanings, decided by `SessionFsm`'s own legal transitions rather
+                    // than by this screen (`docs/STATUS.md` §4 problem 53).
+                    if let action = sessionAction(coordinator.state.status) {
+                        let secondary = coordinator.state.status == .connected || action == .stopDiscovery
+                        if secondary {
+                            Button(action.label) { perform(action) }.buttonStyle(.bordered)
+                        } else {
+                            Button(action.label) { perform(action) }
+                                .buttonStyle(.borderedProminent).foregroundStyle(RideDesign.onPrimary)
+                        }
+                    }
+                }
+            }
+
+            if let alert = coordinator.securityAlert {
+                SecurityAlertCard(code: alert) { coordinator.dismissSecurityAlert() }
+            }
+            if let prompt = coordinator.pairingPrompt {
+                PairingCard(prompt: prompt) { coordinator.confirmPairing(accepted: $0) }
+            }
+
+            // PROTOCOL §7.1 in the UI: voice controls exist only once the trust gate has passed.
+            // A disabled button would still be a button; an absent section cannot be pressed.
+            if authenticated {
+                VStack(alignment: .leading, spacing: RideDesign.md) {
+                    Text("Intercom").font(.title3.weight(.semibold)).foregroundStyle(.secondary)
+                        .accessibilityAddTraits(.isHeader)
+                    VoiceCard(
+                        voice: coordinator.voiceDiagnostics,
+                        coexistence: coordinator.coexistenceDiagnostics,
+                        policy: coordinator.intercomPolicy,
+                        peerAudioState: coordinator.peerAudioState,
+                        refusal: coordinator.lastIntercomRefusal,
+                        // Routed through the coordinator, which owns the controller's lifetime — the
+                        // view never touches `VoiceController` directly (CLAUDE.md rule 8).
+                        onStartIntercom: { coordinator.startIntercom() },
+                        onStopIntercom: { coordinator.endIntercom() },
+                        // The user's own Mute latch, not the wire's `mic_muted` — under PTT the latter is
+                        // true whenever the button is not held, and toggling from it would be a coin flip.
+                        onToggleMute: { coordinator.setMicrophoneMuted(!coordinator.voiceDiagnostics.userMuted) },
+                        onPushToTalkHeld: { coordinator.setPushToTalkHeld($0) },
+                        onSelectPolicy: { coordinator.selectIntercomPolicy($0) }
+                    )
+                }
+            }
+
+            // Deliberately independent of `coordinator.state.status` — local music must be fully
+            // usable in airplane mode, with no peer, regardless of session state.
+            switch music {
+            case .success(let musicCoordinator):
+                MusicSection(
+                    musicCoordinator: musicCoordinator,
+                    sharedEntries: coordinator.sharedLibrary?.remoteEntries ?? [],
+                    // Observable, for rendering only (PR #18 review); MusicCoordinator re-asks the gate.
+                    synchronized: syncPlayback?.localQueueLocked == true
+                )
+            case .failure(let error):
+                Text("Local music unavailable. Restart RideLink to try again.")
+                DisclosureGroup("Music diagnostics") { Text(String(describing: error)) }
+                    .font(.footnote)
+                    .foregroundStyle(.red)
+            }
+
+            // Same gate as the intercom (PROTOCOL §7.1 / brief §22): the shared library and the
+            // synchronisation plane exist only once the trust gate has passed.
+            if authenticated, let sharedLibrary = coordinator.sharedLibrary {
+                VStack(alignment: .leading, spacing: RideDesign.md) {
+                    NavigationLink {
+                        SharedMusicScreen(coordinator: sharedLibrary, syncPlayback: syncPlayback, onPlayLocally: playSharedTrackLocally)
+                    } label: {
+                        HStack {
+                            Label("Other phone's music", systemImage: "music.note.house")
+                            Spacer()
+                            Text(sharedLibrary.remoteEntries.count == 1 ? "1 track" : "\(sharedLibrary.remoteEntries.count.formatted()) tracks")
+                                .foregroundStyle(.secondary)
+                            Image(systemName: "chevron.right").font(.footnote).foregroundStyle(.tertiary)
+                        }
+                        .padding(.horizontal, RideDesign.lg)
+                        .frame(minHeight: RideDesign.touch + RideDesign.sm)
+                        .background(RideDesign.surface, in: RoundedRectangle(cornerRadius: RideDesign.radius))
+                    }
+                    .buttonStyle(.plain)
+                    if let syncPlayback {
+                        SyncPlaybackView(presenter: syncPlayback, sharedLibrary: sharedLibrary)
+                    }
+                }
+            }
+
+            DisclosureGroup("Connection diagnostics") {
+                Text(deviceDescription)
+                TransportBanner(transportLabel: coordinator.controlDiagnostics.transportLabel)
+                DiagnosticsCard(
+                    diagnostics: coordinator.controlDiagnostics,
+                    discoveredPeerCount: coordinator.discoveredPeers.count,
+                    discoveryCount: coordinator.discoveryCount,
+                    localIdentityPrefix: coordinator.localIdentityPrefix
+                )
+
+                ResyncDiagnosticsCard(diagnostics: coordinator.resyncDiagnostics)
+                DiagnosticsExportCard(source: coordinator.diagnosticsExport)
+            }.font(.subheadline)
+        }
+    }
+
+    private func perform(_ action: SessionAction) {
+        switch action {
+        case .start: coordinator.startDiscovery()
+        case .stopDiscovery: coordinator.cancelDiscovery()
+        case .end: coordinator.endSession()
+        case .retry: coordinator.retryDiscovery()
+        }
+    }
+
     @Environment(\.scenePhase) private var scenePhase
     @State private var rideModeVisible = false
 
@@ -179,7 +208,8 @@ struct MainScreen: View {
     ///    player/queue. There is still no second, cache-file-only player.
     private func playSharedTrackLocally(_ entry: ManifestEntry) {
         guard let hash = entry.contentHash, case .success(let musicCoordinator) = music else { return }
-        if let localEntry = musicCoordinator.libraryEntries.first(where: { $0.track.contentHash == hash }) {
+        // Looked up in the repository, not in the library's search-filtered list (Phase 9A.5).
+        if let localEntry = musicCoordinator.localEntry(contentHash: hash) {
             musicCoordinator.playNow(localEntry)
             return
         }
@@ -217,7 +247,7 @@ struct PairingCard: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: RideDesign.md) {
-            Text("Verify your peer")
+            Text("Check the code")
                 .font(.headline)
             Text(prompt.peerDisplayName.isEmpty ? "Nearby phone" : prompt.peerDisplayName)
                 .font(.subheadline)
@@ -226,7 +256,7 @@ struct PairingCard: View {
                 .font(.system(size: 44, weight: .bold, design: .monospaced))
                 .frame(maxWidth: .infinity, alignment: .center)
                 .accessibilityLabel(prompt.sas6.map(String.init).joined(separator: " "))
-            Text("Both phones must show the same six digits. If they differ, do not confirm.")
+            Text("Both phones must show the same six digits. If they differ, tap They differ.")
                 .font(.footnote)
                 .foregroundStyle(.secondary)
             HStack(spacing: RideDesign.md) {
@@ -268,13 +298,13 @@ struct SecurityAlertCard: View {
     private var explanation: String {
         switch code {
         case "pin_mismatch":
-            "This peer's identity key has changed. That happens after a reinstall — but it is also "
-                + "what an impersonation attempt looks like. RideLink will not reconnect until you "
-                + "forget this peer and pair again."
+            "The other phone's identity key has changed. That happens after a reinstall — but it is "
+                + "also what an impersonation attempt looks like. RideLink will not reconnect until you "
+                + "forget this phone and pair again."
         case "certificate_invalid":
-            "The peer's certificate is outside its validity window. Check the date and time on both phones."
+            "The other phone's certificate is outside its validity window. Check the date and time on both phones."
         case "identity_mismatch":
-            "The peer's stated identity did not match its certificate. The connection was refused."
+            "The other phone's stated identity did not match its certificate. The connection was refused."
         default:
             "The connection was refused."
         }
@@ -289,7 +319,7 @@ private struct ResyncDiagnosticsCard: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: RideDesign.sm) {
-            Text("Resync (Phase 7)").font(.headline)
+            Text("Resync").font(.headline)
             diagnosticRow("request pending", "\(diagnostics.requestPending)")
             diagnosticRow("reconnect requests", "\(diagnostics.reconnectRequestCount)")
             diagnosticRow("desync requests", "\(diagnostics.desyncRequestCount)")
@@ -382,10 +412,10 @@ private enum SessionAction {
 
     var label: String {
         switch self {
-        case .start: return "Find peer"
+        case .start: return "Find other phone"
         case .stopDiscovery: return "Stop searching"
-        case .end: return "End Session"
-        case .retry: return "Find peer again"
+        case .end: return "End session"
+        case .retry: return "Search again"
         }
     }
 }
@@ -400,21 +430,6 @@ private func sessionAction(_ status: SessionStatus) -> SessionAction? {
     }
 }
 
-private func connectionLabel(_ status: SessionStatus) -> String {
-    switch status {
-    case .idle: "Idle"
-    case .discovering: "Discovering…"
-    case .pairing: "Pairing…"
-    case .connecting: "Connecting…"
-    case .connected: "Connected"
-    case .rideActive: "Ride Active"
-    case .reconnecting: "Reconnecting…"
-    case .disconnected: "Disconnected"
-    case .ending: "Ending…"
-    case .error: "Error"
-    }
-}
-
 private func controlStateLabel(_ state: ControlState) -> String {
     switch state {
     case .idle: "Idle"
@@ -426,19 +441,54 @@ private func controlStateLabel(_ state: ControlState) -> String {
     }
 }
 
+/// The connection state as a status line, mirroring Android's `ConnectionSummary`: a small spinner
+/// only while work is in progress, a still dot otherwise, the title cross-fading on change, and
+/// "Other phone found" appearing when discovery finds one. Reduce Motion turns the spinner into a dot.
 struct ConnectionSummary: View {
     let status: SessionStatus
     let peerCount: Int
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    private var working: Bool { [.discovering, .connecting, .reconnecting, .ending].contains(status) }
+    private var connected: Bool { status == .connected || status == .rideActive }
+
     var body: some View {
-        VStack(alignment: .leading, spacing: RideDesign.sm) {
-            Label(status == .idle ? "No peer connected" : connectionLabel(status), systemImage: "antenna.radiowaves.left.and.right")
-                .font(.title2.bold())
-            Text(UiPresentation.connectionHint(status)).font(.body)
-            if status == .discovering && peerCount > 0 {
-                Text("Peer found · Connecting automatically").font(.subheadline.weight(.semibold))
+        VStack(alignment: .leading, spacing: RideDesign.xs) {
+            HStack(spacing: RideDesign.md) {
+                if working && !reduceMotion {
+                    ProgressView().controlSize(.small)
+                } else {
+                    Circle()
+                        .fill(connected ? RideDesign.primary : status == .error ? RideDesign.error : Color.secondary.opacity(0.5))
+                        .frame(width: 10, height: 10)
+                }
+                Text(UiPresentation.connectionTitle(status))
+                    .font(.title2.bold())
+                    .contentTransition(.opacity)
+                    .animation(reduceMotion ? nil : .easeInOut(duration: 0.18), value: status)
             }
-        }.rideSurface()
+            .accessibilityElement(children: .combine)
+            Text(UiPresentation.connectionHint(status)).font(.body).foregroundStyle(.secondary)
+            if found {
+                // Phase 9A backlog: "found, connecting" used to stay up forever when the one dial
+                // failed. After 15 s it says so — wording over the FSM's state, never a retry.
+                Text(stalled ? "Couldn't reach the other phone yet. Stop searching, then find it again." : "Other phone found. Connecting…")
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(stalled ? RideDesign.warning : RideDesign.primary)
+                    .transition(.opacity)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .task(id: found) {
+            stalled = false
+            guard found else { return }
+            try? await Task.sleep(for: .seconds(15))
+            if !Task.isCancelled { stalled = true }
+        }
     }
+
+    private var found: Bool { status == .discovering && peerCount > 0 }
+    @State private var stalled = false
 }
 
 /// NFR-08 (ADR-029 Amendment A2): the redacted event log, offered to the system share sheet as a
@@ -450,7 +500,7 @@ private struct DiagnosticsExportCard: View {
     var body: some View {
         VStack(alignment: .leading, spacing: RideDesign.sm) {
             Text("Diagnostics log").font(.headline)
-            Text("Shares this session's redacted event log as a text file, through the share sheet. Nothing is sent unless you choose where it goes.")
+            Text("Shares a redacted log file. Nothing is sent unless you pick where.")
                 .font(.footnote)
                 .foregroundStyle(.secondary)
             ShareLink(

@@ -43,6 +43,18 @@ android {
         compose = true
         buildConfig = true
     }
+
+    // The committed synthetic fixtures, read as test assets (the same pattern :data uses) — the
+    // notification regression plays real files through the real service and player.
+    sourceSets {
+        named("androidTest") {
+            assets.directories.add(
+                rootProject.rootDir.parentFile
+                    .resolve("test-media/synthetic")
+                    .path,
+            )
+        }
+    }
 }
 
 kotlin {
@@ -87,6 +99,8 @@ dependencies {
     androidTestImplementation(libs.junit4)
     androidTestImplementation(libs.kotlin.test)
     androidTestImplementation(libs.kotlinx.coroutines.test)
+    androidTestImplementation(platform(libs.compose.bom))
+    androidTestImplementation(libs.compose.ui.test.junit4)
 }
 
 tasks.withType<Test> {

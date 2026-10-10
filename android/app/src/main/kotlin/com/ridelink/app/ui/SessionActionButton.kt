@@ -1,10 +1,9 @@
 package com.ridelink.app.ui
 
-import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.material3.Button
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.ui.Modifier
 import com.ridelink.app.session.SessionCoordinator
 import com.ridelink.core.sessionfsm.SessionStatus
 
@@ -21,17 +20,22 @@ import com.ridelink.core.sessionfsm.SessionStatus
 fun SessionActionButton(
     status: SessionStatus,
     coordinator: SessionCoordinator,
+    /** Drawn outlined when another action (Start ride) is the one the screen is leading with. */
+    secondary: Boolean = false,
 ) {
     val action = sessionAction(status) ?: return
-    Button(onClick = {
+    val onClick = {
         when (action) {
             SessionAction.START -> coordinator.startDiscovery()
             SessionAction.STOP_DISCOVERY -> coordinator.cancelDiscovery()
             SessionAction.END -> coordinator.endSession()
             SessionAction.RETRY -> coordinator.retryDiscovery()
         }
-    }) {
-        Text(action.label)
+    }
+    if (secondary || action == SessionAction.STOP_DISCOVERY) {
+        OutlinedButton(onClick = onClick) { Text(action.label) }
+    } else {
+        Button(onClick = onClick) { Text(action.label) }
     }
 }
 
@@ -47,9 +51,7 @@ fun StartRideButton(
     onStartRide: () -> Unit,
 ) {
     if (status != SessionStatus.CONNECTED) return
-    Button(onClick = onStartRide, modifier = Modifier.fillMaxWidth()) {
-        Text("Start Ride")
-    }
+    Button(onClick = onStartRide) { Text("Start ride") }
 }
 
 /**
@@ -69,10 +71,10 @@ fun StartRideButton(
 private enum class SessionAction(
     val label: String,
 ) {
-    START("Find peer"),
+    START("Find other phone"),
     STOP_DISCOVERY("Stop searching"),
-    END("End Session"),
-    RETRY("Find peer again"),
+    END("End session"),
+    RETRY("Search again"),
 }
 
 private fun sessionAction(status: SessionStatus): SessionAction? =

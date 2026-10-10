@@ -382,6 +382,155 @@ class LibraryIndexerTest {
             assertEquals(1, repository.observe(LibraryQuery()).first().size)
         }
 
+    // ---- STATUS §4 problem 115: source-scoped reconciliation (Phase 9A.5 cases A-D) -----------
+
+    /** A real directory tree of copies of `normal.m4a`, walked through the production SAF walk. */
+    private fun tree(
+        name: String,
+        vararg files: String,
+    ): File {
+        val root = File(context.filesDir, "$name-${System.nanoTime()}").apply { mkdirs() }
+        files.forEach { path ->
+            val file = File(root, path).apply { parentFile?.mkdirs() }
+            context.assets.open("normal.m4a").use { input -> file.outputStream().use { input.copyTo(it) } }
+        }
+        return root
+    }
+
+    private suspend fun importTree(
+        root: File,
+        key: String,
+        skipRecordings: Boolean = false,
+    ) = indexer.importScan(indexer.scanDocumentTree(DocumentFile.fromFile(root), ImportSource.Tree(key)), skipRecordings)
+
+    private suspend fun statusByFilename(): Map<String, DecodeStatus> =
+        repository.observe(LibraryQuery()).first().associate { it.track.filename to it.decodeStatus }
+
+    @Test
+    fun caseA_rescanningOneTreeMarksOnlyItsOwnVanishedTrackMissing() =
+        runBlocking {
+            val a = tree("treeA", "a1.m4a", "a2.m4a")
+            val b = tree("treeB", "b1.m4a", "b2.m4a")
+            importTree(a, "tree-a")
+            importTree(b, "tree-b")
+
+            assertTrue(File(a, "a2.m4a").delete())
+            importTree(a, "tree-a")
+
+            assertEquals(
+                mapOf(
+                    "a1.m4a" to DecodeStatus.INDEXED,
+                    "a2.m4a" to DecodeStatus.MISSING,
+                    "b1.m4a" to DecodeStatus.INDEXED,
+                    "b2.m4a" to DecodeStatus.INDEXED,
+                ),
+                statusByFilename(),
+            )
+        }
+
+    @Test
+    fun caseB_anIndividuallyImportedFileSurvivesAnUnrelatedTreeRescan() =
+        runBlocking {
+            indexer.importFiles(listOf(fixtureUri("normal.m4a")))
+            val b = tree("treeB", "b1.m4a")
+            importTree(b, "tree-b")
+            assertTrue(File(b, "b1.m4a").delete())
+            importTree(b, "tree-b")
+
+            val statuses = repository.observe(LibraryQuery()).first().map { it.decodeStatus }
+            assertEquals(listOf(DecodeStatus.INDEXED, DecodeStatus.MISSING).sorted(), statuses.sorted())
+            val picked = repository.observe(LibraryQuery()).first().single { it.track.filename != "b1.m4a" }
+            assertEquals(DecodeStatus.INDEXED, picked.decodeStatus, "the explicitly imported file was not part of tree B")
+        }
+
+    @Test
+    fun caseC_byteIdenticalFilesInTwoTreesStayIndependentRows() =
+        runBlocking {
+            val a = tree("treeA", "same.m4a")
+            val b = tree("treeB", "same.m4a")
+            importTree(a, "tree-a")
+            importTree(b, "tree-b")
+
+            val rows = repository.observe(LibraryQuery()).first()
+            assertEquals(2, rows.size)
+            assertEquals(2, rows.map { it.localEntryId }.toSet().size)
+
+            assertTrue(File(a, "same.m4a").delete())
+            importTree(a, "tree-a")
+            val after = repository.observe(LibraryQuery()).first().associate { it.location.uri to it.decodeStatus }
+            assertEquals(DecodeStatus.MISSING, after.entries.single { it.key.contains(a.name) }.value)
+            assertEquals(DecodeStatus.INDEXED, after.entries.single { it.key.contains(b.name) }.value)
+        }
+
+    @Test
+    fun caseD_reimportingTheSameTreeNeverDuplicatesRowsOrChangesIdentity() =
+        runBlocking {
+            val a = tree("treeA", "one.m4a", "sub/two.m4a")
+            importTree(a, "tree-a")
+            val first =
+                repository
+                    .observe(LibraryQuery())
+                    .first()
+                    .map { it.localEntryId }
+                    .toSet()
+            val second = importTree(a, "tree-a")
+            importTree(a, "tree-a")
+
+            assertEquals(
+                first,
+                repository
+                    .observe(LibraryQuery())
+                    .first()
+                    .map { it.localEntryId }
+                    .toSet(),
+            )
+            assertEquals(0, second.added)
+            assertEquals(0, second.missing)
+            assertEquals(2, second.trackCount)
+        }
+
+    @Test
+    fun recordingFoldersAreNamedAndSkippedOnlyWhenTheUserAsks() =
+        runBlocking {
+            val root = tree("music", "Albums/song.m4a", "Recordings/call.m4a")
+            val scan = indexer.scanDocumentTree(DocumentFile.fromFile(root), ImportSource.Tree("tree-m"))
+            assertEquals(listOf(RecordingFolder("Recordings", 1)), scan.recordingFolders)
+
+            indexer.importScan(scan, skipRecordings = false)
+            assertEquals(setOf("song.m4a", "call.m4a"), statusByFilename().keys)
+
+            // Skipping later leaves the earlier import alone: a skipped file is not a missing one.
+            val rescan = indexer.scanDocumentTree(DocumentFile.fromFile(root), ImportSource.Tree("tree-m"))
+            val outcome = indexer.importScan(rescan, skipRecordings = true)
+            assertEquals(0, outcome.missing)
+            assertEquals(DecodeStatus.INDEXED, statusByFilename()["call.m4a"])
+
+            val fresh = tree("fresh", "Albums/song.m4a", "Recordings/call.m4a")
+            repository.deleteAll()
+            indexer.importScan(indexer.scanDocumentTree(DocumentFile.fromFile(fresh), ImportSource.Tree("tree-f")), skipRecordings = true)
+            assertEquals(setOf("song.m4a"), statusByFilename().keys)
+        }
+
+    @Test
+    fun importReportsRealCountsAndNeverAPercentageItDoesNotKnow() =
+        runBlocking {
+            val root = tree("progress", "a.m4a", "b.m4a", "c.m4a")
+            val found = mutableListOf<Int>()
+            val scan = indexer.scanDocumentTree(DocumentFile.fromFile(root), ImportSource.Tree("tree-p")) { found += it.found }
+            assertEquals(listOf(0, 1, 2, 3), found)
+
+            val events = mutableListOf<ImportProgress>()
+            val complete = indexer.importScan(scan, skipRecordings = false) { events += it }
+
+            val checking = events.filterIsInstance<ImportProgress.Indexing>().filter { it.stage == ImportProgress.Stage.CHECKING }
+            val reading = events.filterIsInstance<ImportProgress.Indexing>().filter { it.stage == ImportProgress.Stage.READING }
+            assertEquals(listOf(0, 1, 2), checking.map { it.done })
+            assertTrue(checking.all { it.total == 3 })
+            assertEquals(listOf(0, 1, 2), reading.map { it.done })
+            assertEquals(ImportProgress.Complete(root.name, trackCount = 3, added = 3, missing = 0), complete)
+            assertEquals(complete, events.last())
+        }
+
     private companion object {
         const val BARRIER_TIMEOUT_MS = 2_000L
     }

@@ -24,7 +24,7 @@ import com.ridelink.app.resync.ResyncOutcome
 internal fun ResyncDiagnosticsCard(diagnostics: ResyncDiagnostics) {
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(modifier = Modifier.padding(RideSpace.lg), verticalArrangement = Arrangement.spacedBy(RideSpace.sm)) {
-            Text("Resync (Phase 7)", style = MaterialTheme.typography.titleMedium)
+            Text("Resync", style = MaterialTheme.typography.titleMedium)
             DiagnosticRow("Request outstanding", diagnostics.requestPending.toString())
             DiagnosticRow("Last outcome", resyncOutcomeLabel(diagnostics.lastOutcome))
             DiagnosticRow("Reconnect-triggered requests", diagnostics.reconnectRequestCount.toString())

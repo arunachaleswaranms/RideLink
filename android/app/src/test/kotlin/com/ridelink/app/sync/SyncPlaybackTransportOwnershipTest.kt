@@ -17,6 +17,7 @@ import kotlinx.coroutines.test.runTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
+import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 
 /**
@@ -72,6 +73,7 @@ class SyncPlaybackTransportOwnershipTest {
             assertFalse(gate.interceptNext(), "Next")
             assertFalse(gate.interceptPrevious(), "Previous")
             assertFalse(gate.interceptTrackEnded(), "TrackEnded: MusicCoordinator advances its own queue")
+            assertFalse(gate.localQueueLocked(), "SYNCED debt finishing after End Ride must not lock local Up Next (PR #18)")
             runCurrent()
             // C: the entry points the synchronised-playback card calls directly refuse fresh authority.
             coordinator.pause()
@@ -91,6 +93,7 @@ class SyncPlaybackTransportOwnershipTest {
             runCurrent()
             assertTrue(coordinator.isSynchronizedModeActive(), "Play synced reopened ownership")
             assertTrue(gate.interceptPause(), "Pause is intercepted again")
+            assertTrue(gate.localQueueLocked(), "a legitimate activation locks local Up Next again (PR #18)")
             runCurrent()
             assertTrue(gate.interceptSeek(7_000), "Seek is intercepted again")
             runCurrent()
@@ -106,6 +109,28 @@ class SyncPlaybackTransportOwnershipTest {
         }
 
     // --- Fresh-fix audit -------------------------------------------------------------------------
+
+    /**
+     * ADR-024 Amendment A15, round 2 (PR #18): a local edit admitted before the ride's synchronised
+     * activation stays dead through End Ride and the old debt finishing SYNCED; a fresh edit after
+     * End Ride is admitted, although the role survives and diagnostics say SYNCED.
+     */
+    @Test
+    fun `a pre-ride local admission dies at activation, and a fresh one after End Ride and old debt works`() =
+        runTest(StandardTestDispatcher()) {
+            build(backgroundScope)
+            connect(this, asLeader = false)
+            val gate = SyncPlaybackGateAdapter(backgroundScope, coordinator)
+            val beforeRide = assertNotNull(gate.admitLocalQueueEdit(), "premise: local before the ride")
+
+            followerFinishesAcceptedDebtAfterEndRide()
+
+            assertEquals(SyncState.SYNCED, coordinator.diagnostics.value.syncState, "premise: old debt finished SYNCED")
+            assertEquals(PlaybackRole.FOLLOWER, coordinator.diagnostics.value.role, "premise: the role survives")
+            assertFalse(gate.isLocalQueueEditStillValid(beforeRide), "a pre-boundary local admission survived the ride")
+            val fresh = assertNotNull(gate.admitLocalQueueEdit(), "a fresh local edit after End Ride is refused")
+            assertTrue(gate.isLocalQueueEditStillValid(fresh))
+        }
 
     /**
      * The gate answers on the caller's thread and forwards in a launched coroutine. A press it

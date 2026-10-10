@@ -1,5 +1,6 @@
 package com.ridelink.data.transfer
 
+import com.ridelink.data.database.LocationProvenanceRow
 import com.ridelink.data.database.LocationQuickIdRow
 import com.ridelink.data.database.TrackDao
 import com.ridelink.data.database.TrackEntity
@@ -41,6 +42,9 @@ class FakeTrackDao : TrackDao {
     override suspend fun allLocationsAndQuickIds(): List<LocationQuickIdRow> =
         rows.value.map { LocationQuickIdRow(it.locationUri, it.quickId) }
 
+    override suspend fun allLocationsWithProvenance(): List<LocationProvenanceRow> =
+        rows.value.map { LocationProvenanceRow(it.locationUri, it.quickId, it.sourceKind, it.sourceKey) }
+
     override suspend fun findMissingContentHash(): List<TrackEntity> = rows.value.filter { it.contentHash == null }
 
     override suspend fun findAllSyncEligible(): List<TrackEntity> =
@@ -66,6 +70,8 @@ class FakeTrackDao : TrackDao {
         sizeBytes: Long,
         decodeStatus: String,
         lastSeenAtMonoUs: Long,
+        sourceKind: String,
+        sourceKey: String,
     ) {
         rows.update { list ->
             list.map {
@@ -86,6 +92,8 @@ class FakeTrackDao : TrackDao {
                         sizeBytes = sizeBytes,
                         decodeStatus = decodeStatus,
                         lastSeenAtMonoUs = lastSeenAtMonoUs,
+                        sourceKind = sourceKind,
+                        sourceKey = sourceKey,
                     )
                 }
             }
@@ -102,9 +110,17 @@ class FakeTrackDao : TrackDao {
     override suspend fun touchSeen(
         locationUri: String,
         lastSeenAtMonoUs: Long,
+        sourceKind: String,
+        sourceKey: String,
     ) {
         rows.update { list ->
-            list.map { if (it.locationUri == locationUri) it.copy(decodeStatus = "INDEXED", lastSeenAtMonoUs = lastSeenAtMonoUs) else it }
+            list.map {
+                if (it.locationUri == locationUri) {
+                    it.copy(decodeStatus = "INDEXED", lastSeenAtMonoUs = lastSeenAtMonoUs, sourceKind = sourceKind, sourceKey = sourceKey)
+                } else {
+                    it
+                }
+            }
         }
     }
 
@@ -126,6 +142,11 @@ class FakeTrackDao : TrackDao {
     override fun observeSearch(ftsQuery: String): Flow<List<TrackEntity>> = rows.asStateFlow().map { it }
 
     override suspend fun count(): Int = rows.value.size
+
+    override fun observeCount(): Flow<Int> = rows.asStateFlow().map { it.size }
+
+    override fun observeIndexedContentHashes(): Flow<List<String>> =
+        rows.asStateFlow().map { list -> list.filter { it.decodeStatus == "INDEXED" }.mapNotNull { it.contentHash }.distinct() }
 
     override suspend fun deleteAll() {
         rows.value = emptyList()

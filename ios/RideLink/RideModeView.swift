@@ -17,12 +17,18 @@ struct RideModeView: View {
             artist: music.currentEntry?.track.artist ?? cachedEntry?.artist,
             playing: music.playerState.playing,
             hasTrack: music.playerState.localEntryId != nil,
+            // PR #18 review round 4 (mirrors Android's `transportAvailability`): under local ownership
+            // an empty queue's Play does nothing, so a track merely still held after a Clear is not
+            // offered; while synchronised, Play is the session's.
+            canStart: !music.queueState.items.isEmpty
+                || (syncPlayback?.isSynchronizedModeActive == true && music.playerState.localEntryId != nil),
             syncText: UiPresentation.rideMusicLabel(status: coordinator.state.status,
                 state: syncPlayback?.diagnostics.syncState ?? .inactive,
                 ownsTransport: syncPlayback?.isSynchronizedModeActive == true),
             voiceText: UiPresentation.voiceLabel(voice.status),
-            microphoneText: !voice.localAudioOpen ? "Microphone unavailable"
-                : voice.userMuted ? "Muted" : voice.transmitting ? "Transmitting" : "Microphone ready",
+            microphoneText: UiPresentation.microphoneLabel(
+                localAudioOpen: voice.localAudioOpen, userMuted: voice.userMuted, transmitting: voice.transmitting
+            ),
             micAvailable: voice.localAudioOpen,
             muted: voice.userMuted,
             ptt: coordinator.intercomPolicy.gate == .ptt,
@@ -47,6 +53,8 @@ struct RideModeContent: View {
     let artist: String?
     let playing: Bool
     let hasTrack: Bool
+    /// Phase 9A.5 §11: a queued track can be started even with nothing selected yet.
+    var canStart: Bool = false
     let syncText: String
     let voiceText: String
     let microphoneText: String
@@ -67,20 +75,22 @@ struct RideModeContent: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: RideDesign.xl) {
-                Text("RIDE MODE").font(.subheadline.weight(.semibold)).foregroundStyle(.secondary)
+                Text("Riding").font(.subheadline.weight(.semibold)).foregroundStyle(.secondary)
                 connection
                 VStack(alignment: .leading, spacing: RideDesign.sm) {
                     Text("NOW PLAYING").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
                     Text(title.flatMap { $0.isEmpty ? nil : $0 } ?? (hasTrack ? "Untitled track" : "Nothing playing"))
                         .font(.title.weight(.bold)).fixedSize(horizontal: false, vertical: true)
                     if let artist, !artist.isEmpty { Text(artist).font(.headline).foregroundStyle(.secondary) }
-                    Text(playing ? "Playing" : hasTrack ? "Paused" : "Choose music in setup before your ride.")
+                    Text(playing ? "Playing" : hasTrack ? "Paused" : "Pick music before you ride.")
                     Label(syncText, systemImage: "music.note").font(.subheadline).foregroundStyle(RideDesign.primary)
                 }.rideSurface()
-                HStack(spacing: RideDesign.md) {
+                // Previous · Play/Pause · Next with Play/Pause the filled, larger control (Phase 9A.5 §12).
+                HStack(alignment: .center, spacing: RideDesign.md) {
                     transport("Previous", icon: "backward.end.fill", action: onPrevious)
-                    transport(playing ? "Pause" : "Play", icon: playing ? "pause.fill" : "play.fill", action: onPlayPause)
-                        .disabled(!hasTrack && !playing)
+                    transport(playing ? "Pause" : "Play", icon: playing ? "pause.fill" : "play.fill", prominent: true, action: onPlayPause)
+                        .disabled(!playing && !canStart)
+                        .layoutPriority(1)
                     transport("Next", icon: "forward.end.fill", action: onNext)
                 }
                 VStack(alignment: .leading, spacing: RideDesign.md) {
@@ -100,7 +110,7 @@ struct RideModeContent: View {
                 }
                 Divider()
                 Button(role: .destructive, action: onEndRide) {
-                    Label("End Ride", systemImage: "stop.circle")
+                    Label("End ride", systemImage: "stop.circle")
                         .font(.headline).frame(maxWidth: .infinity, minHeight: RideDesign.rideTouch)
                 }.buttonStyle(.bordered).tint(RideDesign.error)
             }.padding(RideDesign.xl)
@@ -118,21 +128,25 @@ struct RideModeContent: View {
                   systemImage: health == .healthy ? "checkmark.circle.fill" : "antenna.radiowaves.left.and.right.slash")
                 .font(.title2.bold())
                 .foregroundStyle(health == .healthy ? RideDesign.primary : health == .reconnecting ? RideDesign.warning : RideDesign.error)
-            if health == .reconnecting { Text("Trying to reconnect automatically.") }
+            if health == .reconnecting { Text("Trying to reach the other phone. Music keeps playing.") }
             if health == .disconnected {
-                Text("Peer features are unavailable. Check the shared network.")
-                Button("Reconnect", action: onReconnect).buttonStyle(.bordered).controlSize(.large)
+                Text("The other phone is out of reach. Check both are on the same network.")
+                Button("Search again", action: onReconnect).buttonStyle(.bordered).controlSize(.large)
             }
         }
     }
 
-    private func transport(_ label: String, icon: String, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            VStack(spacing: RideDesign.sm) {
-                Image(systemName: icon).font(.title2)
-                Text(label).font(.caption.weight(.semibold))
-            }.frame(maxWidth: .infinity, minHeight: RideDesign.rideTouch)
-        }.buttonStyle(.bordered).accessibilityLabel(label)
+    @ViewBuilder
+    private func transport(_ label: String, icon: String, prominent: Bool = false, action: @escaping () -> Void) -> some View {
+        let content = VStack(spacing: RideDesign.sm) {
+            Image(systemName: icon).font(prominent ? .title : .title2)
+            Text(label).font(.caption.weight(.semibold))
+        }.frame(maxWidth: .infinity, minHeight: prominent ? RideDesign.rideTouch + RideDesign.lg : RideDesign.rideTouch)
+        if prominent {
+            Button(action: action) { content }.buttonStyle(.borderedProminent).foregroundStyle(RideDesign.onPrimary).accessibilityLabel(label)
+        } else {
+            Button(action: action) { content }.buttonStyle(.bordered).accessibilityLabel(label)
+        }
     }
 
 }

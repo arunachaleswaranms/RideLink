@@ -63,13 +63,13 @@ class MainActivity : ComponentActivity() {
      */
     private val pickFolder =
         registerForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
-            uri?.let { musicCoordinator?.importTree(it) }
+            uri?.let { musicCoordinator?.imports?.importTree(it) }
         }
 
     /** `ACTION_OPEN_DOCUMENT` multi-select — brief §10's explicit "multiple files" import path. */
     private val pickFiles =
         registerForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
-            if (uris.isNotEmpty()) musicCoordinator?.importFiles(uris)
+            if (uris.isNotEmpty()) musicCoordinator?.imports?.importFiles(uris)
         }
 
     private var musicCoordinator: MusicCoordinator? = null
@@ -108,6 +108,7 @@ class MainActivity : ComponentActivity() {
                             onStopIntercom = { appContainer.intercomStopOwner.requestStop() },
                             onPlayMusic = { attemptMusicPlay(appContainer.musicCoordinator) },
                             onPlayNow = { entry -> attemptPlayNow(appContainer.musicCoordinator, entry) },
+                            onPlayQueueItem = { id -> attemptPlayQueueItem(appContainer.musicCoordinator, id) },
                             onImportFolder = { pickFolder.launch(null) },
                             onImportFiles = { pickFiles.launch(arrayOf("audio/*")) },
                             onPlaySharedTrackLocally = { entry ->
@@ -233,12 +234,27 @@ class MainActivity : ComponentActivity() {
         musicCoordinator: MusicCoordinator,
         entry: LibraryEntry,
     ) {
-        if (!foregroundVisible) return
-        if (!RideForegroundService.startMusicFromVisibleUi(this)) {
-            musicCoordinator.onForegroundServiceStartFailed()
-            return
-        }
-        musicCoordinator.playNow(entry)
+        // Phase 9A.5, PR #18 review: while synchronised playback owns transport the coordinator
+        // refuses this play-now, so do not start the foreground service for it either. This read
+        // only avoids a needless start; `playNow` is what refuses.
+        visibleMusicStart(musicCoordinator).startThen { musicCoordinator.playNow(entry) }
+    }
+
+    /** See [VisibleMusicStart]: visibility and local ownership, read immediately before the start. */
+    private fun visibleMusicStart(musicCoordinator: MusicCoordinator) =
+        VisibleMusicStart(
+            foregroundVisible = { foregroundVisible },
+            localQueueLocked = { musicCoordinator.isLocalQueueLocked() },
+            startForegroundService = { RideForegroundService.startMusicFromVisibleUi(this) },
+            onStartRefused = { musicCoordinator.onForegroundServiceStartFailed() },
+        )
+
+    /** Up Next's "tap an entry to play it" (Phase 9A.5 §10): the same first-play discipline. */
+    private fun attemptPlayQueueItem(
+        musicCoordinator: MusicCoordinator,
+        queueItemId: String,
+    ) {
+        visibleMusicStart(musicCoordinator).startThen { musicCoordinator.selectQueueItem(queueItemId) }
     }
 
     /**
@@ -253,26 +269,29 @@ class MainActivity : ComponentActivity() {
      *    player/queue, held to the identical foreground-visible discipline as every other first
      *    play of a track (ARCHITECTURE §6.4). There is still no second, cache-file-only player.
      */
-    @Suppress("ReturnCount") // one early-out per case in Finding G's KDoc, in that order
     private fun attemptPlaySharedTrackLocally(
         musicCoordinator: MusicCoordinator,
         sharedLibraryCoordinator: SharedLibraryCoordinator,
         entry: ManifestEntry,
     ) {
         val hash = entry.contentHash ?: return
-        val localEntry = musicCoordinator.libraryEntries.value.find { it.track.contentHash == hash }
-        if (localEntry != null) {
-            attemptPlayNow(musicCoordinator, localEntry)
-            return
-        }
-        if (!foregroundVisible) return
+        val start = visibleMusicStart(musicCoordinator)
+        // PR #18 review: refused by the coordinator while synchronised playback owns transport; not
+        // started (nor its foreground service) here either.
+        if (!start.permitted()) return
         lifecycleScope.launch {
-            val file = sharedLibraryCoordinator.cachedFile(hash) ?: return@launch
-            if (!RideForegroundService.startMusicFromVisibleUi(this@MainActivity)) {
-                musicCoordinator.onForegroundServiceStartFailed()
-                return@launch
-            }
-            musicCoordinator.playExternalVerifiedCachedTrack(hash, file, entry.title, entry.artist)
+            // Looked up in the repository, not in the Library screen's search-filtered, only-while-
+            // collected list (Phase 9A.5): that list could be empty or filtered here, sending a track
+            // this phone holds down the cache path instead. Both lookups suspend, so `start` reads
+            // visibility and ownership again after them, immediately before the foreground-service
+            // start (PR #18 review round 3).
+            start.playSharedTrack(
+                hash = hash,
+                findLocal = musicCoordinator::findLocalByContentHash,
+                cachedFile = sharedLibraryCoordinator::cachedFile,
+                playNow = { localEntry -> musicCoordinator.playNow(localEntry) },
+                playCached = { file -> musicCoordinator.playExternalVerifiedCachedTrack(hash, file, entry.title, entry.artist) },
+            )
         }
     }
 

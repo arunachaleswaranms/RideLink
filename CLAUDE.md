@@ -246,6 +246,14 @@ lock-screen metadata). Both are deferred to Phase 9A.5. Rows that need an authen
 **PENDING — AUTHENTICATED PEER UNAVAILABLE**, because the emulator's mDNS is not routable on this
 network. Evidence: `docs/PHASE9A_ANDROID_PHYSICAL.md`.
 
+**Phase 9A.5** (release UX and large-library reliability, on `5575269`) is implemented on branch
+`phase9a-5/release-ux-library`, pending independent review: problems 112–116 fixed in software,
+ADR-005 Amendment A2 (library rows carry provenance; a scan marks only its own rows missing; Room v3)
+and ADR-022 Amendment A1 (a plain intercom notification beside the one media-session notification;
+the media notification re-posted on track changes). Long lists (library, Up Next, the other phone's
+music) are lazy destinations, never children of a scrolling column. Nothing ran on the OnePlus; the
+post-merge phone checks are TEST_PLAN §4.3a. Record: `docs/PHASE9A5_RELEASE_UX.md`.
+
 **The Phase 8 PR has been independently reviewed once, and both of its findings are closed
 (`docs/STATUS.md` problems 94 and 95).** The first is rule 27 above and the sharpest instance yet of
 this repository's standing lesson: Phase 8 found a genuine resource defect, and its fix asked the

@@ -22,8 +22,7 @@ internal fun DiagnosticsExportCard(onExport: () -> Unit) {
         Column(modifier = Modifier.padding(RideSpace.lg), verticalArrangement = Arrangement.spacedBy(RideSpace.sm)) {
             Text("Diagnostics log", style = MaterialTheme.typography.titleMedium)
             Text(
-                "Shares this session's redacted event log as a text file, through the share sheet. " +
-                    "Nothing is sent unless you choose where it goes.",
+                "Shares a redacted log file. Nothing is sent unless you pick where.",
                 style = MaterialTheme.typography.bodyMedium,
             )
             OutlinedButton(onClick = onExport, modifier = Modifier.fillMaxWidth().heightIn(min = RideSpace.touch)) {

@@ -39,6 +39,8 @@ data class RideModeUiState(
     val intercomModeLabel: String,
     val localAudioDegraded: Boolean,
     val peerAudioDegraded: Boolean,
+    /** Phase 9A.5 §11: a queued track can be started even with nothing selected yet. */
+    val queueCanStart: Boolean = false,
 )
 
 /**
@@ -119,7 +121,7 @@ fun rideSyncLabel(
 ): String =
     when {
         status == SessionStatus.RECONNECTING -> "Synchronizing when connection returns"
-        status != SessionStatus.RIDE_ACTIVE && status != SessionStatus.CONNECTED -> "Waiting for peer"
+        status != SessionStatus.RIDE_ACTIVE && status != SessionStatus.CONNECTED -> "Waiting for the other phone"
         else ->
             when (syncState) {
                 SyncState.INACTIVE -> "Local music"

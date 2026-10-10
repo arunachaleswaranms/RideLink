@@ -20,18 +20,19 @@ import com.ridelink.data.library.LibraryIndexer
 import com.ridelink.data.library.LibraryRepository
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.ExperimentalCoroutinesApi
-import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.mapLatest
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import java.io.File
 import java.util.UUID
-import android.net.Uri as PlatformUri
 
 /**
  * The single owner of local-music state (CLAUDE.md rule 8, applied to the music plane the way
@@ -65,14 +66,56 @@ class MusicCoordinator(
     private val _query = MutableStateFlow(LibraryQuery())
     val query: StateFlow<LibraryQuery> = _query.asStateFlow()
 
+    /**
+     * The library as the Library screen shows it — filtered by [query] and sorted. Only that screen
+     * should collect it: with 3,460 tracks, every collector keeps a full re-read and re-sort alive
+     * on each library change (Phase 9A.5 §5/§6). Screens that need a count, the hashes on this
+     * phone or the current track use [libraryCount], [localContentHashes] and [nowPlayingEntry],
+     * none of which depends on what the user typed into search.
+     */
     @OptIn(ExperimentalCoroutinesApi::class)
     val libraryEntries: StateFlow<List<LibraryEntry>> =
         _query
             .flatMapLatest { repository.observe(it) }
             .stateIn(scope, SharingStarted.WhileSubscribed(), emptyList())
 
+    /** How many tracks the library holds, whatever the search says. */
+    val libraryCount: StateFlow<Int> = repository.observeCount().stateIn(scope, SharingStarted.WhileSubscribed(), 0)
+
+    /** Every content hash a usable local row holds — "on this phone" for the shared-music surfaces. */
+    val localContentHashes: StateFlow<Set<String>> =
+        repository.observeIndexedContentHashes().stateIn(scope, SharingStarted.WhileSubscribed(), emptySet())
+
+    /** The one owner of imports and their progress. */
+    val imports = LibraryImports(indexer, scope)
+
     private val _queueState = MutableStateFlow(LocalQueueState())
     val queueState: StateFlow<LocalQueueState> = _queueState.asStateFlow()
+
+    /**
+     * The library row for the current queue item, looked up by [LocalEntryId] in the repository.
+     * It used to be found by scanning [libraryEntries], which is **search-filtered**: typing in the
+     * search box made Now Playing say "Shared track" for whatever was playing, and every screen that
+     * wanted the title kept the whole library subscribed. Entries in the queue are few; the lookup is
+     * one indexed query per change of current item.
+     */
+    @OptIn(ExperimentalCoroutinesApi::class)
+    val nowPlayingEntry: StateFlow<LibraryEntry?> =
+        _queueState
+            .map { it.currentItem?.localEntryId }
+            .distinctUntilChanged()
+            .mapLatest { id -> id?.let { repository.findByLocalEntryId(it) } }
+            .stateIn(scope, SharingStarted.WhileSubscribed(), null)
+
+    /** Library rows for the given queue entries, for Up Next — looked up, never scanned for. */
+    suspend fun entriesFor(ids: Collection<LocalEntryId>): Map<LocalEntryId, LibraryEntry> =
+        ids.toSet().mapNotNull { id -> repository.findByLocalEntryId(id)?.let { id to it } }.toMap()
+
+    /** A usable local row holding [hash], if any — the shared library's "play it here" lookup. */
+    suspend fun findLocalByContentHash(hash: ContentHash): LibraryEntry? = repository.findByContentHash(hash)
+
+    /** Title and artist for a queue entry that is a verified Phase 4 cache file, not a library row. */
+    fun externalTitleFor(id: LocalEntryId): Pair<String?, String?>? = externalCacheSources[id]?.let { it.title to it.artist }
 
     private val _playerState = MutableStateFlow(PlayerState())
     val playerState: StateFlow<PlayerState> = _playerState.asStateFlow()
@@ -119,11 +162,6 @@ class MusicCoordinator(
     @Volatile
     var syncGate: SyncPlaybackGate? = null
 
-    /** Guards [completeContentHashingInBackground] against launching a second concurrent pass while
-     *  one is already running — not correctness-critical (each pass re-reads the repository and a
-     *  row already hashed is simply skipped), but avoids redundant concurrent DB reads. */
-    private var hashingJob: Job? = null
-
     /** Closure-audit Finding G: verified Phase-4 cache-only tracks playable through the *existing*
      *  queue/player, held in [ExternalCacheSources] rather than inline — see that class for why
      *  Amendment A4 (Finding U) made this a synchronous read rather than a shared flow. */
@@ -167,9 +205,9 @@ class MusicCoordinator(
         }
         // ADR-005's background pass, actually wired to run (this phase's closure-audit hardening
         // pass — previously this method existed but nothing ever called it). Kicked off once at
-        // composition time so rows left unhashed by a previous session's interrupted pass resume,
-        // and again after every import below so newly-added rows do not wait for the next app launch.
-        completeContentHashingInBackground()
+        // composition time so rows left unhashed by a previous session's interrupted pass resume;
+        // [LibraryImports] runs it again after every import so new rows do not wait for a relaunch.
+        imports.completeContentHashingInBackground()
     }
 
     fun setSearchText(text: String) {
@@ -180,19 +218,47 @@ class MusicCoordinator(
         _query.value = _query.value.copy(sort = sort)
     }
 
-    fun addToQueue(entry: LibraryEntry) {
-        dispatch(LocalQueueAction.Add(newItem(entry)))
-    }
+    /**
+     * Phase 9A.5, PR #18 review: every user edit of the local queue — [addToQueue], [playNow],
+     * [playExternalVerifiedCachedTrack], [removeFromQueue], [moveInQueue], [clearQueue],
+     * [selectQueueItem] — is admitted through [LocalQueueEdits], which refuses it while synchronised
+     * transport owns playback ([SyncPlaybackGate.localQueueLocked], ADR-024 Amendment A14). Each
+     * returns whether it was admitted. A refusal changes nothing: no queue mutation, no `Load`, no
+     * `Play`, no `Stop`. Additions are refused too, because the synchronised path replaces the local
+     * queue on every synchronised selection ([syncSelect]) and clears it on stop
+     * ([syncClearSelection]) — an entry "staged" during a synchronised ride would silently vanish.
+     */
+    fun addToQueue(entry: LibraryEntry): Boolean = edit(LocalQueueAction.Add(newItem(entry)))
+
+    /** Whether local queue edits are refused right now — for **rendering** only (which controls to
+     *  offer). Every edit re-asks at the moment it is admitted; this answer authorises nothing. */
+    fun isLocalQueueLocked(): Boolean = syncGate?.localQueueLocked() == true
+
+    /** ADR-024 Amendment A15: every local player effect runs under the admission that caused it. */
+    private val localEffects =
+        LocalPlaybackEffects(
+            scope = scope,
+            player = player,
+            resolve = ::resolveLoad,
+            stillValid = { admission -> LocalQueueEdits.stillValid(syncGate, admission) },
+        )
 
     /** Adds [entry] to the queue and starts playing it immediately — the library screen's "tap a
      *  track" affordance, as one atomic queue operation rather than an add followed by a
      *  UI-observed "select the item I just added" that would race a second rapid tap. */
-    fun playNow(entry: LibraryEntry) {
+    fun playNow(entry: LibraryEntry): Boolean {
+        val item = newItem(entry)
+        val outcome =
+            LocalQueueEdits.reduce(
+                _queueState.value,
+                listOf(LocalQueueAction.Add(item), LocalQueueAction.Select(item.id)),
+                syncGate,
+            )
+        if (outcome == null) return false
         _lastMusicStartRefusal.value = null
         coexistenceEvents?.onPlaybackIntent(playing = true)
-        val item = newItem(entry)
-        dispatch(LocalQueueAction.Add(item))
-        dispatch(LocalQueueAction.Select(item.id))
+        apply(outcome)
+        return true
     }
 
     private fun newItem(entry: LibraryEntry): LocalQueueItem =
@@ -210,24 +276,32 @@ class MusicCoordinator(
         file: File,
         title: String?,
         artist: String?,
-    ) {
+    ): Boolean {
+        val entryId = LocalEntryId(UUID.randomUUID().toString())
+        val item = LocalQueueItem(id = nextQueueItemId(), localEntryId = entryId, insertedAtMonoUs = monotonicNowUs())
+        val outcome =
+            LocalQueueEdits.reduce(
+                _queueState.value,
+                listOf(LocalQueueAction.Add(item), LocalQueueAction.Select(item.id)),
+                syncGate,
+            )
+        if (outcome == null) return false
         _lastMusicStartRefusal.value = null
         coexistenceEvents?.onPlaybackIntent(playing = true)
-        val entryId = LocalEntryId(UUID.randomUUID().toString())
+        // Registered before the effects run: `loadAndPlay` resolves the source when it executes.
         externalCacheSources.register(entryId, ExternalCacheSource(contentHash, LocalTrackLocation(file.toURI().toString()), title, artist))
-        val item = LocalQueueItem(id = nextQueueItemId(), localEntryId = entryId, insertedAtMonoUs = monotonicNowUs())
-        dispatch(LocalQueueAction.Add(item))
-        dispatch(LocalQueueAction.Select(item.id))
+        apply(outcome)
+        return true
     }
 
-    fun removeFromQueue(id: String) = dispatch(LocalQueueAction.Remove(id))
+    fun removeFromQueue(id: String): Boolean = edit(LocalQueueAction.Remove(id))
 
     fun moveInQueue(
         id: String,
         toIndex: Int,
-    ) = dispatch(LocalQueueAction.Move(id, toIndex))
+    ): Boolean = edit(LocalQueueAction.Move(id, toIndex))
 
-    fun clearQueue() = dispatch(LocalQueueAction.Clear)
+    fun clearQueue(): Boolean = edit(LocalQueueAction.Clear)
 
     fun next() {
         if (syncGate?.interceptNext() == true) return
@@ -239,24 +313,31 @@ class MusicCoordinator(
         dispatch(LocalQueueAction.Previous)
     }
 
-    fun selectQueueItem(id: String) = dispatch(LocalQueueAction.Select(id))
+    fun selectQueueItem(id: String): Boolean = edit(LocalQueueAction.Select(id))
 
+    /**
+     * Play, from the app or the lock screen. A synchronised session owns it first (ADR-024 A14, via
+     * [syncGate]); otherwise the local queue decides: with tracks queued and nothing selected it
+     * starts the first one, and otherwise resumes the player (Phase 9A.5 §11, [LocalQueueAction.Play]).
+     */
     fun play() {
         _lastMusicStartRefusal.value = null
         coexistenceEvents?.onPlaybackIntent(playing = true)
         if (syncGate?.interceptPlay() == true) return
-        scope.launch { player.execute(PlaybackCommand.Play) }
+        dispatch(LocalQueueAction.Play)
     }
 
     fun pause() {
         coexistenceEvents?.onPlaybackIntent(playing = false)
         if (syncGate?.interceptPause() == true) return
-        scope.launch { player.execute(PlaybackCommand.Pause) }
+        val admission = LocalQueueEdits.admit(syncGate) ?: return
+        localEffects.pause(admission)
     }
 
     fun seek(positionMs: Long) {
         if (syncGate?.interceptSeek(positionMs) == true) return
-        scope.launch { player.execute(PlaybackCommand.Seek(positionMs)) }
+        val admission = LocalQueueEdits.admit(syncGate) ?: return
+        localEffects.seek(positionMs, admission)
     }
 
     // --- Phase 5's own entry points ---------------------------------------------------------
@@ -359,60 +440,42 @@ class MusicCoordinator(
         trackToken: String,
     ): Boolean = player.resumeAfterVoice(generation, trackToken)
 
-    fun importTree(treeUri: PlatformUri) =
-        scope.launch {
-            indexer.importTree(treeUri)
-            completeContentHashingInBackground()
-        }
-
-    fun importFiles(uris: List<PlatformUri>) =
-        scope.launch {
-            indexer.importFiles(uris)
-            completeContentHashingInBackground()
-        }
-
-    fun rescanMediaStore() =
-        scope.launch {
-            indexer.rescanMediaStore()
-            completeContentHashingInBackground()
-        }
+    /** A user's edit of the local queue, admitted or refused as one step — see [LocalQueueEdits]. */
+    private fun edit(action: LocalQueueAction): Boolean {
+        val outcome = LocalQueueEdits.reduce(_queueState.value, listOf(action), syncGate) ?: return false
+        apply(outcome)
+        return true
+    }
 
     /**
-     * Fills in the authoritative hash for every row still missing one — the ADR-005 background
-     * pass. Safe to call repeatedly and from any thread/coroutine: [LibraryIndexer.completeContentHashing]
-     * re-queries the repository for rows missing a hash on every call, so it never depends on a
-     * possibly-stale [libraryEntries] snapshot and always resumes exactly the rows a previous,
-     * possibly-cancelled pass had not yet reached (this phase's closure-audit hardening pass — the
-     * method existed before this pass but had no production caller anywhere, so `content_hash` never
-     * actually got filled in). [hashingJob] only prevents launching a redundant *concurrent* pass;
-     * it is never required for correctness.
+     * Local transport and track-end actions, after [syncGate]'s intercept said "local". They are fresh
+     * local presses, so they are admitted too, and their player effects carry that admission exactly
+     * as an edit's do (ADR-024 Amendment A15): a press the intercept saw as local, whose effect runs
+     * after synchronised mode took transport, must not reach the player either.
      */
-    fun completeContentHashingInBackground() {
-        if (hashingJob?.isActive == true) return
-        hashingJob = scope.launch { indexer.completeContentHashing() }
-    }
-
     private fun dispatch(action: LocalQueueAction) {
-        val outcome = LocalQueue.reduce(_queueState.value, action)
-        _queueState.value = outcome.state
-        outcome.effects.forEach { effect ->
-            when (effect) {
-                is LocalQueueEffect.LoadAndPlay -> scope.launch { loadAndPlay(effect.localEntryId) }
-                LocalQueueEffect.StopPlayback -> scope.launch { player.execute(PlaybackCommand.Stop) }
-            }
-        }
+        val admission = LocalQueueEdits.admit(syncGate) ?: return
+        apply(AdmittedEdit(LocalQueue.reduce(_queueState.value, action), admission))
     }
 
-    private suspend fun loadAndPlay(localEntryId: LocalEntryId) {
+    /**
+     * Queue state first, synchronously, under a valid admission; player effects after, each re-proving
+     * the same admission. If an effect is later dropped the local queue keeps the admitted state — that
+     * is what the user asked for under local ownership, and the synchronised path replaces the local
+     * queue wholesale at its next selection (`syncSelect`) anyway. No rollback crosses an ownership
+     * boundary (ADR-024 Amendment A15).
+     */
+    private fun apply(edit: AdmittedEdit) {
+        _queueState.value = edit.state
+        localEffects.run(edit.effects, edit.admission)
+    }
+
+    private suspend fun resolveLoad(localEntryId: LocalEntryId): PlaybackCommand.Load? {
         val external = externalCacheSources[localEntryId]
-        if (external != null) {
-            player.execute(PlaybackCommand.Load(localEntryId, external.location, external.title, external.artist))
-            player.execute(PlaybackCommand.Play)
-            return
+        if (external != null) return PlaybackCommand.Load(localEntryId, external.location, external.title, external.artist)
+        return repository.findByLocalEntryId(localEntryId)?.let { entry ->
+            PlaybackCommand.Load(localEntryId, entry.location, entry.track.title, entry.track.artist)
         }
-        val entry = repository.findByLocalEntryId(localEntryId) ?: return
-        player.execute(PlaybackCommand.Load(localEntryId, entry.location, entry.track.title, entry.track.artist))
-        player.execute(PlaybackCommand.Play)
     }
 
     private companion object {

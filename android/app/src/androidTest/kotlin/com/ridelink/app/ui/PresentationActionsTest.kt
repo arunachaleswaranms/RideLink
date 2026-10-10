@@ -82,7 +82,7 @@ class PresentationActionsTest {
                 activity.setContent {
                     RideLinkTheme {
                         Column(Modifier.onGloballyPositioned { layout.countDown() }) {
-                            SharedQueueContent(queue, mapOf(hash.value to "Same track")) { removed.add(it) }
+                            SharedQueueContent(queue, mapOf(hash.value to "Same track"), onRemove = { removed.add(it) })
                         }
                     }
                 }
@@ -93,7 +93,7 @@ class PresentationActionsTest {
             val tree = nodes(instrumentation.uiAutomation.rootInActiveWindow)
             val buttons =
                 tree
-                    .filter { it.text?.toString() == "Remove" }
+                    .filter { it.contentDescription?.toString() == "Remove Same track from the shared queue" }
                     .mapNotNull { node ->
                         generateSequence(node) { it.parent }.firstOrNull { it.isClickable }
                     }.distinct()

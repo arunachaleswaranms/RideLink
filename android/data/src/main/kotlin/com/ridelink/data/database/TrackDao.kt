@@ -51,6 +51,15 @@ interface TrackDao {
     @Query("SELECT locationUri, quickId FROM tracks")
     suspend fun allLocationsAndQuickIds(): List<LocationQuickIdRow>
 
+    /**
+     * Problem 115: what scoped reconciliation needs — every row's location, last `quickId` and owner.
+     * [com.ridelink.data.library.ScopedReconciliation] then restricts it to one scan's scope; the
+     * scope is applied in pure code rather than a `WHERE`, because a location this scan found must
+     * be visible whoever owns it (or it would be inserted twice).
+     */
+    @Query("SELECT locationUri, quickId, sourceKind, sourceKey FROM tracks")
+    suspend fun allLocationsWithProvenance(): List<LocationProvenanceRow>
+
     /** ADR-005's lazy background hashing pass reads this directly, rather than a possibly-stale UI
      *  snapshot — a row is sync/transfer-eligible only once it leaves this list. */
     @Query("SELECT * FROM tracks WHERE contentHash IS NULL")
@@ -83,9 +92,14 @@ interface TrackDao {
         "UPDATE tracks SET quickId = :quickId, contentHash = NULL, title = :title, artist = :artist, " +
             "album = :album, durationMs = :durationMs, filename = :filename, codec = :codec, " +
             "bitrateKbps = :bitrateKbps, artworkRef = :artworkRef, sizeBytes = :sizeBytes, " +
-            "decodeStatus = :decodeStatus, lastSeenAtMonoUs = :lastSeenAtMonoUs " +
+            "decodeStatus = :decodeStatus, lastSeenAtMonoUs = :lastSeenAtMonoUs, " +
+            "sourceKind = :sourceKind, sourceKey = :sourceKey " +
             "WHERE localEntryId = :localEntryId",
     )
+    // One bind parameter per column the re-index rewrites (detekt.yml's LongParameterList note):
+    // schema version 3's two provenance columns take it past the shared threshold, and wrapping a
+    // single table row's columns in a payload type would be less readable, not more.
+    @Suppress("LongParameterList")
     suspend fun updateReindexed(
         localEntryId: String,
         quickId: String,
@@ -100,6 +114,8 @@ interface TrackDao {
         sizeBytes: Long,
         decodeStatus: String,
         lastSeenAtMonoUs: Long,
+        sourceKind: String,
+        sourceKey: String,
     )
 
     @Query("UPDATE tracks SET contentHash = :contentHash WHERE localEntryId = :localEntryId")
@@ -116,12 +132,15 @@ interface TrackDao {
      * read-then-write race. Nothing about identity, metadata or hashes changes.
      */
     @Query(
-        "UPDATE tracks SET decodeStatus = 'INDEXED', lastSeenAtMonoUs = :lastSeenAtMonoUs " +
+        "UPDATE tracks SET decodeStatus = 'INDEXED', lastSeenAtMonoUs = :lastSeenAtMonoUs, " +
+            "sourceKind = :sourceKind, sourceKey = :sourceKey " +
             "WHERE locationUri = :locationUri",
     )
     suspend fun touchSeen(
         locationUri: String,
         lastSeenAtMonoUs: Long,
+        sourceKind: String,
+        sourceKey: String,
     )
 
     @Query(
@@ -154,6 +173,16 @@ interface TrackDao {
     @Query("SELECT COUNT(*) FROM tracks")
     suspend fun count(): Int
 
+    /** The library's size for screens that show a count but not the rows (Phase 9A.5): observing
+     *  [observeAll] just to call `.size` would re-read and re-sort every row on every change. */
+    @Query("SELECT COUNT(*) FROM tracks")
+    fun observeCount(): Flow<Int>
+
+    /** Every content hash a usable local row holds — what the shared-music surfaces need to say
+     *  "on this phone", without observing whole rows and without a search filter in the way. */
+    @Query("SELECT DISTINCT contentHash FROM tracks WHERE contentHash IS NOT NULL AND decodeStatus = 'INDEXED'")
+    fun observeIndexedContentHashes(): Flow<List<String>>
+
     /** Test/reindex support: a clean slate without dropping and recreating the schema. */
     @Query("DELETE FROM tracks")
     suspend fun deleteAll()
@@ -164,4 +193,12 @@ interface TrackDao {
 data class LocationQuickIdRow(
     val locationUri: String,
     val quickId: String,
+)
+
+/** Projection for [TrackDao.allLocationsWithProvenance]. */
+data class LocationProvenanceRow(
+    val locationUri: String,
+    val quickId: String,
+    val sourceKind: String,
+    val sourceKey: String,
 )

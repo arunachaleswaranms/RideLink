@@ -1,25 +1,22 @@
 import RideLinkCore
+import RideLinkPlatform
 import SwiftUI
-import UniformTypeIdentifiers
 
-/// Local music, entirely below the intercom/session UI and untouched by its state — this phase's
-/// brief §30's graceful-degradation rule made visible in the layout, not just in the coordinator
-/// wiring. Mirrors `com.ridelink.app.ui.MusicSection`.
+/// Local music on the main screen: Now Playing and links to the library and Up Next — mirrors
+/// `com.ridelink.app.ui.MusicSection` plus Android's home navigation rows. Untouched by session state
+/// (this phase's brief §30's graceful-degradation rule made visible in the layout).
 ///
-/// Owns the two document-picker presentations itself (`.fileImporter`, SwiftUI's own wrapper over
-/// `UIDocumentPickerViewController`) — there is no separate DI container/Activity-result-contract
-/// system on iOS the way `MainActivity` provides on Android, so the picker lives with the one view
-/// that needs it, and hands `MusicCoordinator` the resulting security-scoped URLs directly.
+/// The library and Up Next are their own destinations, each a lazy `List` (Phase 9A.5 §5). Nothing
+/// here reads the search-filtered library list: the current track is `MusicCoordinator.nowPlayingEntry`.
 struct MusicSection: View {
     let musicCoordinator: MusicCoordinator
     var sharedEntries: [ManifestEntry] = []
-
-    @State private var showingFilePicker = false
-    @State private var showingFolderPicker = false
+    var synchronized: Bool = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: RideDesign.md) {
-            Text("Local Music").font(.title2)
+            Text("Music").font(.title3.weight(.semibold)).foregroundStyle(.secondary)
+                .accessibilityAddTraits(.isHeader)
 
             let cachedEntry = sharedEntries.first { $0.contentHash != nil && $0.contentHash == musicCoordinator.activeExternalCacheHash }
             NowPlayingCard(
@@ -28,6 +25,7 @@ struct MusicSection: View {
                 queueSize: musicCoordinator.queueState.items.count,
                 title: musicCoordinator.currentEntry?.track.title ?? cachedEntry?.title,
                 artist: musicCoordinator.currentEntry?.track.artist ?? cachedEntry?.artist,
+                synchronized: synchronized,
                 onPlay: musicCoordinator.play,
                 onPause: musicCoordinator.pause,
                 onSeek: { musicCoordinator.seek(positionMs: $0) },
@@ -35,30 +33,140 @@ struct MusicSection: View {
                 onPrevious: musicCoordinator.previous
             )
 
-            if !musicCoordinator.queueState.items.isEmpty {
-                DisclosureGroup("Local queue") {
-                    ForEach(Array(musicCoordinator.queueState.items.enumerated()), id: \.element.id) { index, item in
-                        let title = musicCoordinator.libraryEntries.first { $0.localEntryId == item.localEntryId }?.track.title ?? "Shared track"
-                        Text("\(item.id == musicCoordinator.queueState.currentId ? "Current" : String(index + 1)) · \(title)")
-                    }
+            VStack(spacing: 0) {
+                NavigationLink {
+                    LibraryScreen(musicCoordinator: musicCoordinator, synchronized: synchronized)
+                } label: {
+                    navigationRow("Library", systemImage: "music.note.list", detail: trackCount(musicCoordinator.libraryCount))
+                }
+                .buttonStyle(.plain)
+                Divider().padding(.leading, RideDesign.xl + RideDesign.lg)
+                NavigationLink {
+                    UpNextScreen(musicCoordinator: musicCoordinator, synchronized: synchronized)
+                } label: {
+                    let queue = musicCoordinator.queueState
+                    navigationRow("Up Next", systemImage: "list.number", detail: upNextDetail(queue))
+                }
+                .buttonStyle(.plain)
+            }
+            .background(RideDesign.surface, in: RoundedRectangle(cornerRadius: RideDesign.radius))
+        }
+    }
+
+    private func navigationRow(_ title: String, systemImage: String, detail: String) -> some View {
+        HStack(spacing: RideDesign.lg) {
+            Image(systemName: systemImage).foregroundStyle(Color.secondary).frame(width: RideDesign.xl)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title).foregroundStyle(Color.primary)
+                Text(detail).font(.caption).foregroundStyle(Color.secondary)
+            }
+            Spacer()
+            Image(systemName: "chevron.right").font(.footnote).foregroundStyle(.tertiary)
+        }
+        .padding(.horizontal, RideDesign.lg)
+        .frame(minHeight: RideDesign.touch + RideDesign.sm)
+        .contentShape(Rectangle())
+    }
+
+    private func trackCount(_ count: Int) -> String { count == 1 ? "1 track" : "\(count.formatted()) tracks" }
+
+    /// "Track 3 of 10" while something in the queue is current, so the row moves as the queue plays.
+    private func upNextDetail(_ queue: LocalQueueState) -> String {
+        if queue.items.isEmpty { return "Empty" }
+        if let index = queue.currentIndex { return "Track \(index + 1) of \(queue.items.count)" }
+        return trackCount(queue.items.count)
+    }
+}
+
+/// The local queue (Phase 9A.5 §10) — mirrors Android's `UpNextContent`. A `List`, so it is lazy;
+/// select, remove (swipe or Edit), reorder (Edit) and clear, each mapped to the one existing
+/// `LocalQueue` action.
+///
+/// Every action names a **queue entry id**: the same track queued twice is two rows with two ids,
+/// removed one at a time. This is the local queue only — while synchronised playback is on, the
+/// shared queue decides what plays (ADR-024), and the screen says so.
+struct UpNextScreen: View {
+    let musicCoordinator: MusicCoordinator
+    let synchronized: Bool
+    var onOpenLibrary: () -> Void = {}
+
+    @State private var confirmClear = false
+
+    var body: some View {
+        let queue = musicCoordinator.queueState
+        // Read-only while synchronised transport owns playback (PR #18 review): nothing that edits the
+        // local queue is offered — absent, not disabled. `MusicCoordinator` refuses the edit anyway.
+        let affordances = LocalQueueAffordances.forLocked(synchronized)
+        List {
+            if synchronized {
+                Text("Playing on both phones. Change what plays together from the other phone's music. "
+                    + "This phone's Up Next can't be changed until you choose Play on this phone only.")
+                    .font(.footnote)
+                    .foregroundStyle(RideDesign.warning)
+            }
+            if queue.items.isEmpty {
+                VStack(alignment: .leading, spacing: RideDesign.sm) {
+                    Text("Up Next is empty").font(.headline)
+                    Text("Add tracks from your library with the add button on each track.").foregroundStyle(.secondary)
+                    Button("Open library", action: onOpenLibrary).buttonStyle(.bordered)
                 }
             }
-            LibraryView(
-                query: musicCoordinator.query,
-                entries: musicCoordinator.libraryEntries,
-                onSearchTextChange: musicCoordinator.setSearchText,
-                onSortChange: musicCoordinator.setSort,
-                onImportFolder: { showingFolderPicker = true },
-                onImportFiles: { showingFilePicker = true },
-                onAddToQueue: musicCoordinator.addToQueue,
-                onPlayNow: musicCoordinator.playNow
-            )
+            ForEach(Array(queue.items.enumerated()), id: \.element.id) { index, item in
+                row(index: index, item: item, isCurrent: item.id == queue.currentId, playable: affordances.rowsPlay)
+            }
+            .onDelete(perform: affordances.canRemove ? { offsets in
+                offsets.map { queue.items[$0].id }.forEach { musicCoordinator.removeFromQueue(id: $0) }
+            } : nil)
+            .onMove(perform: affordances.canReorder ? { source, destination in
+                guard let from = source.first else { return }
+                let to = destination > from ? destination - 1 : destination
+                musicCoordinator.moveInQueue(id: queue.items[from].id, toIndex: to)
+            } : nil)
         }
-        .fileImporter(isPresented: $showingFilePicker, allowedContentTypes: [.audio], allowsMultipleSelection: true) { result in
-            if case .success(let urls) = result, !urls.isEmpty { musicCoordinator.importFiles(urls) }
+        .listStyle(.plain)
+        .navigationTitle("Up Next")
+        .toolbar {
+            if !queue.items.isEmpty {
+                if affordances.canReorder { EditButton() }
+                if affordances.canClear { Button("Clear") { confirmClear = true } }
+            }
         }
-        .fileImporter(isPresented: $showingFolderPicker, allowedContentTypes: [.folder]) { result in
-            if case .success(let url) = result { musicCoordinator.importFolder(url) }
+        .confirmationDialog("Clear Up Next?", isPresented: $confirmClear, titleVisibility: .visible) {
+            Button("Clear", role: .destructive) { musicCoordinator.clearQueue() }
+        } message: {
+            Text("This removes every track from Up Next and stops playback.")
         }
+    }
+
+    @ViewBuilder
+    private func row(index: Int, item: LocalQueueItem, isCurrent: Bool, playable: Bool) -> some View {
+        let entry = musicCoordinator.entry(for: item.localEntryId)
+        let title = entry?.track.title ?? "Shared track"
+        if playable {
+            Button { musicCoordinator.selectQueueItem(id: item.id) } label: { rowContent(index, entry, title, isCurrent) }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Play \(title)")
+                .accessibilityValue(isCurrent ? "Now playing" : "Position \(index + 1)")
+        } else {
+            // A plain row: no button, so no tap and no VoiceOver activation either.
+            rowContent(index, entry, title, isCurrent)
+                .accessibilityElement(children: .combine)
+                .accessibilityValue(isCurrent ? "Now playing" : "Position \(index + 1)")
+        }
+    }
+
+    private func rowContent(_ index: Int, _ entry: LibraryEntry?, _ title: String, _ isCurrent: Bool) -> some View {
+            HStack(spacing: RideDesign.md) {
+                Text(isCurrent ? "▶" : "\(index + 1)")
+                    .frame(width: 28)
+                    .foregroundStyle(isCurrent ? RideDesign.primary : Color.secondary)
+                ArtworkThumbnail(artworkRef: entry?.track.artworkRef, size: 40)
+                VStack(alignment: .leading, spacing: RideDesign.xs) {
+                    Text(title).lineLimit(1).foregroundStyle(isCurrent ? RideDesign.primary : Color.primary)
+                    Text(isCurrent ? "Now playing" : entry?.track.artist ?? "").font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                }
+                Spacer(minLength: 0)
+            }
+            .contentShape(Rectangle())
     }
 }
