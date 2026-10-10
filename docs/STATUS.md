@@ -1,5 +1,18 @@
 # RideLink — Status
 
+**10 October 2026 — Phase 9A.5 merged; Android physical qualification BLOCKED.**
+PR #18 merged at `4104e81fa5ce9bd197d2d1b6769966e47be590d1`, tree
+`71f5fd0bec0c7c2621be4f69b2a274e6e55cf0f5`. The signed merged APK was installed in place on the
+physical OnePlus Nord 5 (Android 16/API 36), with read-back hash verification and no data clear.
+L-07 passed; L-08 passed the disposable-fixture counts, privacy, progress, cancellation and retry
+checks. Queue, notification and lifecycle subchecks passed as recorded, but remaining manual
+lock-screen and playback-race subcases prevent full qualification. L-06 remains BLOCKED: no
+confirmed ~3,460-track music-only source; recordings were not imported to manufacture that count.
+No new product defect confirmed. Existing post-merge CI and Security attempt 2 are successful;
+no software/security rerun was requested. Peer/iOS/two-device/Bluetooth gates remain deferred.
+See [the Phase 9A.5 physical report](PHASE9A5_ANDROID_PHYSICAL.md) for exact artifact, steps,
+measurements, sanitized evidence and unresolved gates. **No Phase 9 or V1 readiness claim.**
+
 **9 October 2026 — Phase 9A.5, release UX and large-library reliability, on `5575269` (PR #17);
 READY FOR INDEPENDENT REVIEW — PHASE 9A.5 ([PHASE9A5_RELEASE_UX.md](PHASE9A5_RELEASE_UX.md)).**
 Branch `phase9a-5/release-ux-library`. **Nothing ran on the OnePlus**: every install and

@@ -1,0 +1,6518 @@
+[
+  {
+    "utc": "2026-10-10T13:06:50Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "am",
+      "start",
+      "-W",
+      "-n",
+      "com.ridelink.app/.MainActivity"
+    ],
+    "seconds": 0.526,
+    "exit_code": 0,
+    "observed_result": "Status: ok; LaunchState: COLD; TotalTime: 394; WaitTime: 401"
+  },
+  {
+    "utc": "2026-10-10T13:06:53Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "uiautomator",
+      "dump",
+      "/data/local/tmp/ridelink-qualification.xml"
+    ],
+    "seconds": 2.99,
+    "exit_code": 0,
+    "observed_result": "fresh hierarchy captured"
+  },
+  {
+    "utc": "2026-10-10T13:07:03Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "input",
+      "tap",
+      "343",
+      "2073"
+    ],
+    "seconds": 0.195,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:07:05Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "uiautomator",
+      "dump",
+      "/data/local/tmp/ridelink-qualification.xml"
+    ],
+    "seconds": 2.403,
+    "exit_code": 0,
+    "observed_result": "fresh hierarchy captured"
+  },
+  {
+    "utc": "2026-10-10T13:07:06Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "input",
+      "tap",
+      "1174",
+      "239"
+    ],
+    "seconds": 0.063,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:07:08Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "uiautomator",
+      "dump",
+      "/data/local/tmp/ridelink-qualification.xml"
+    ],
+    "seconds": 2.293,
+    "exit_code": 0,
+    "observed_result": "fresh hierarchy captured"
+  },
+  {
+    "utc": "2026-10-10T13:07:08Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "input",
+      "tap",
+      "1031",
+      "435"
+    ],
+    "seconds": 0.118,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:07:12Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "uiautomator",
+      "dump",
+      "/data/local/tmp/ridelink-qualification.xml"
+    ],
+    "seconds": 4.127,
+    "exit_code": 0,
+    "observed_result": "fresh hierarchy captured"
+  },
+  {
+    "utc": "2026-10-10T13:07:22Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "input",
+      "tap",
+      "640",
+      "393"
+    ],
+    "seconds": 0.246,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:07:24Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "uiautomator",
+      "dump",
+      "/data/local/tmp/ridelink-qualification.xml"
+    ],
+    "seconds": 2.522,
+    "exit_code": 0,
+    "observed_result": "fresh hierarchy captured"
+  },
+  {
+    "utc": "2026-10-10T13:07:25Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "input",
+      "tap",
+      "636",
+      "2716"
+    ],
+    "seconds": 0.174,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:07:27Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "uiautomator",
+      "dump",
+      "/data/local/tmp/ridelink-qualification.xml"
+    ],
+    "seconds": 2.318,
+    "exit_code": 0,
+    "observed_result": "fresh hierarchy captured"
+  },
+  {
+    "utc": "2026-10-10T13:07:36Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "input",
+      "tap",
+      "1003",
+      "1689"
+    ],
+    "seconds": 0.225,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:07:38Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "uiautomator",
+      "dump",
+      "/data/local/tmp/ridelink-qualification.xml"
+    ],
+    "seconds": 2.434,
+    "exit_code": 0,
+    "observed_result": "fresh hierarchy captured"
+  },
+  {
+    "utc": "2026-10-10T13:07:43Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "uiautomator",
+      "dump",
+      "/data/local/tmp/ridelink-qualification.xml"
+    ],
+    "seconds": 2.459,
+    "exit_code": 0,
+    "observed_result": "fresh hierarchy captured"
+  },
+  {
+    "utc": "2026-10-10T13:07:55Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "uiautomator",
+      "dump",
+      "/data/local/tmp/ridelink-qualification.xml"
+    ],
+    "seconds": 2.512,
+    "exit_code": 0,
+    "observed_result": "fresh hierarchy captured"
+  },
+  {
+    "utc": "2026-10-10T13:08:15Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "uiautomator",
+      "dump",
+      "/data/local/tmp/ridelink-qualification.xml"
+    ],
+    "seconds": 2.435,
+    "exit_code": 0,
+    "observed_result": "fresh hierarchy captured"
+  },
+  {
+    "utc": "2026-10-10T13:08:15Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "input",
+      "tap",
+      "1040",
+      "897"
+    ],
+    "seconds": 0.183,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:08:17Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "uiautomator",
+      "dump",
+      "/data/local/tmp/ridelink-qualification.xml"
+    ],
+    "seconds": 2.531,
+    "exit_code": 0,
+    "observed_result": "fresh hierarchy captured"
+  },
+  {
+    "utc": "2026-10-10T13:08:36Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "input",
+      "tap",
+      "1059",
+      "897"
+    ],
+    "seconds": 0.237,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:08:38Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "uiautomator",
+      "dump",
+      "/data/local/tmp/ridelink-qualification.xml"
+    ],
+    "seconds": 2.496,
+    "exit_code": 0,
+    "observed_result": "fresh hierarchy captured"
+  },
+  {
+    "utc": "2026-10-10T13:08:39Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "input",
+      "tap",
+      "1174",
+      "239"
+    ],
+    "seconds": 0.165,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:08:41Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "uiautomator",
+      "dump",
+      "/data/local/tmp/ridelink-qualification.xml"
+    ],
+    "seconds": 2.38,
+    "exit_code": 0,
+    "observed_result": "fresh hierarchy captured"
+  },
+  {
+    "utc": "2026-10-10T13:08:41Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "input",
+      "tap",
+      "1031",
+      "435"
+    ],
+    "seconds": 0.14,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:08:44Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "uiautomator",
+      "dump",
+      "/data/local/tmp/ridelink-qualification.xml"
+    ],
+    "seconds": 2.388,
+    "exit_code": 0,
+    "observed_result": "fresh hierarchy captured"
+  },
+  {
+    "utc": "2026-10-10T13:08:44Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "input",
+      "tap",
+      "636",
+      "2716"
+    ],
+    "seconds": 0.066,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:08:46Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "uiautomator",
+      "dump",
+      "/data/local/tmp/ridelink-qualification.xml"
+    ],
+    "seconds": 2.201,
+    "exit_code": 0,
+    "observed_result": "fresh hierarchy captured"
+  },
+  {
+    "utc": "2026-10-10T13:08:46Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "input",
+      "tap",
+      "1003",
+      "1689"
+    ],
+    "seconds": 0.076,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:08:48Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "uiautomator",
+      "dump",
+      "/data/local/tmp/ridelink-qualification.xml"
+    ],
+    "seconds": 2.332,
+    "exit_code": 0,
+    "observed_result": "fresh hierarchy captured"
+  },
+  {
+    "utc": "2026-10-10T13:08:49Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "input",
+      "keyevent",
+      "4"
+    ],
+    "seconds": 0.178,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:08:52Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "uiautomator",
+      "dump",
+      "/data/local/tmp/ridelink-qualification.xml"
+    ],
+    "seconds": 3.252,
+    "exit_code": 0,
+    "observed_result": "fresh hierarchy captured"
+  },
+  {
+    "utc": "2026-10-10T13:09:04Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "input",
+      "tap",
+      "343",
+      "2437"
+    ],
+    "seconds": 0.114,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:09:06Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "uiautomator",
+      "dump",
+      "/data/local/tmp/ridelink-qualification.xml"
+    ],
+    "seconds": 2.362,
+    "exit_code": 0,
+    "observed_result": "fresh hierarchy captured"
+  },
+  {
+    "utc": "2026-10-10T13:09:06Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "input",
+      "tap",
+      "1174",
+      "1317"
+    ],
+    "seconds": 0.121,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:09:07Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "input",
+      "tap",
+      "1174",
+      "1541"
+    ],
+    "seconds": 0.106,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:09:07Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "input",
+      "tap",
+      "1174",
+      "1317"
+    ],
+    "seconds": 0.171,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:09:10Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "uiautomator",
+      "dump",
+      "/data/local/tmp/ridelink-qualification.xml"
+    ],
+    "seconds": 3.077,
+    "exit_code": 0,
+    "observed_result": "fresh hierarchy captured"
+  },
+  {
+    "utc": "2026-10-10T13:09:10Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "input",
+      "tap",
+      "964",
+      "2688"
+    ],
+    "seconds": 0.15,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:09:11Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "dumpsys",
+      "media_session"
+    ],
+    "seconds": 0.103,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:09:11Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "input",
+      "keyevent",
+      "4"
+    ],
+    "seconds": 0.174,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:09:14Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "uiautomator",
+      "dump",
+      "/data/local/tmp/ridelink-qualification.xml"
+    ],
+    "seconds": 2.316,
+    "exit_code": 0,
+    "observed_result": "fresh hierarchy captured"
+  },
+  {
+    "utc": "2026-10-10T13:09:14Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "input",
+      "tap",
+      "356",
+      "2647"
+    ],
+    "seconds": 0.113,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:09:16Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "uiautomator",
+      "dump",
+      "/data/local/tmp/ridelink-qualification.xml"
+    ],
+    "seconds": 2.363,
+    "exit_code": 0,
+    "observed_result": "fresh hierarchy captured"
+  },
+  {
+    "utc": "2026-10-10T13:09:35Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "input",
+      "tap",
+      "782",
+      "673"
+    ],
+    "seconds": 0.143,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:09:37Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "uiautomator",
+      "dump",
+      "/data/local/tmp/ridelink-qualification.xml"
+    ],
+    "seconds": 2.376,
+    "exit_code": 0,
+    "observed_result": "fresh hierarchy captured"
+  },
+  {
+    "utc": "2026-10-10T13:09:37Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "input",
+      "tap",
+      "1174",
+      "897"
+    ],
+    "seconds": 0.206,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:09:40Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "uiautomator",
+      "dump",
+      "/data/local/tmp/ridelink-qualification.xml"
+    ],
+    "seconds": 2.316,
+    "exit_code": 0,
+    "observed_result": "fresh hierarchy captured"
+  },
+  {
+    "utc": "2026-10-10T13:09:40Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "input",
+      "tap",
+      "503",
+      "421"
+    ],
+    "seconds": 0.114,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:09:41Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "dumpsys",
+      "media_session"
+    ],
+    "seconds": 0.092,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:09:45Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "uiautomator",
+      "dump",
+      "/data/local/tmp/ridelink-qualification.xml"
+    ],
+    "seconds": 3.679,
+    "exit_code": 0,
+    "observed_result": "fresh hierarchy captured"
+  },
+  {
+    "utc": "2026-10-10T13:10:01Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "uiautomator",
+      "dump",
+      "/data/local/tmp/ridelink-qualification.xml"
+    ],
+    "seconds": 2.981,
+    "exit_code": 0,
+    "observed_result": "fresh hierarchy captured"
+  },
+  {
+    "utc": "2026-10-10T13:10:01Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "input",
+      "keyevent",
+      "26"
+    ],
+    "seconds": 0.14,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:10:03Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "input",
+      "keyevent",
+      "224"
+    ],
+    "seconds": 0.238,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:10:15Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "uiautomator",
+      "dump",
+      "/data/local/tmp/ridelink-qualification.xml"
+    ],
+    "seconds": 12.467,
+    "exit_code": 0,
+    "observed_result": "INVALID: dump failed; stale XML excluded"
+  },
+  {
+    "utc": "2026-10-10T13:10:15Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "dumpsys",
+      "media_session"
+    ],
+    "seconds": 0.067,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:10:29Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "input",
+      "keyevent",
+      "223"
+    ],
+    "seconds": 0.128,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:10:31Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "input",
+      "keyevent",
+      "224"
+    ],
+    "seconds": 0.105,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:10:44Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "uiautomator",
+      "dump",
+      "/data/local/tmp/ridelink-qualification.xml"
+    ],
+    "seconds": 11.444,
+    "exit_code": 0,
+    "observed_result": "INVALID: dump failed; stale XML excluded"
+  },
+  {
+    "utc": "2026-10-10T13:11:23Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "dumpsys",
+      "media_session"
+    ],
+    "seconds": 0.066,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:11:29Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "dumpsys",
+      "media_session"
+    ],
+    "seconds": 0.085,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:11:35Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "dumpsys",
+      "media_session"
+    ],
+    "seconds": 0.05,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:11:41Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "dumpsys",
+      "media_session"
+    ],
+    "seconds": 0.136,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:11:47Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "dumpsys",
+      "media_session"
+    ],
+    "seconds": 0.165,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:11:54Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "dumpsys",
+      "media_session"
+    ],
+    "seconds": 0.15,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:12:00Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "dumpsys",
+      "media_session"
+    ],
+    "seconds": 0.084,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:12:06Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "dumpsys",
+      "media_session"
+    ],
+    "seconds": 0.078,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:12:12Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "dumpsys",
+      "media_session"
+    ],
+    "seconds": 0.154,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:12:18Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "dumpsys",
+      "media_session"
+    ],
+    "seconds": 0.119,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:12:25Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "dumpsys",
+      "media_session"
+    ],
+    "seconds": 0.153,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:12:31Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "dumpsys",
+      "media_session"
+    ],
+    "seconds": 0.121,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:12:37Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "dumpsys",
+      "media_session"
+    ],
+    "seconds": 0.148,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:16:58Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "uiautomator",
+      "dump",
+      "/data/local/tmp/ridelink-qualification.xml"
+    ],
+    "seconds": 2.742,
+    "exit_code": 0,
+    "observed_result": "fresh hierarchy captured"
+  },
+  {
+    "utc": "2026-10-10T13:17:15Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "input",
+      "tap",
+      "1040",
+      "897"
+    ],
+    "seconds": 0.188,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:17:17Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "uiautomator",
+      "dump",
+      "/data/local/tmp/ridelink-qualification.xml"
+    ],
+    "seconds": 2.511,
+    "exit_code": 0,
+    "observed_result": "fresh hierarchy captured"
+  },
+  {
+    "utc": "2026-10-10T13:17:17Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "input",
+      "tap",
+      "1059",
+      "897"
+    ],
+    "seconds": 0.134,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:17:20Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "uiautomator",
+      "dump",
+      "/data/local/tmp/ridelink-qualification.xml"
+    ],
+    "seconds": 2.383,
+    "exit_code": 0,
+    "observed_result": "fresh hierarchy captured"
+  },
+  {
+    "utc": "2026-10-10T13:17:20Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "input",
+      "tap",
+      "1174",
+      "239"
+    ],
+    "seconds": 0.24,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:17:23Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "uiautomator",
+      "dump",
+      "/data/local/tmp/ridelink-qualification.xml"
+    ],
+    "seconds": 2.591,
+    "exit_code": 0,
+    "observed_result": "fresh hierarchy captured"
+  },
+  {
+    "utc": "2026-10-10T13:20:26Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "am",
+      "start",
+      "-W",
+      "-n",
+      "com.ridelink.app/.MainActivity"
+    ],
+    "seconds": 0.377,
+    "exit_code": 0,
+    "observed_result": "Status: ok; LaunchState: HOT; TotalTime: 121; WaitTime: 126"
+  },
+  {
+    "utc": "2026-10-10T13:20:29Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "uiautomator",
+      "dump",
+      "/data/local/tmp/ridelink-qualification.xml"
+    ],
+    "seconds": 2.423,
+    "exit_code": 0,
+    "observed_result": "fresh hierarchy captured"
+  },
+  {
+    "utc": "2026-10-10T13:20:50Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "input",
+      "tap",
+      "1174",
+      "239"
+    ],
+    "seconds": 0.207,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:20:53Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "uiautomator",
+      "dump",
+      "/data/local/tmp/ridelink-qualification.xml"
+    ],
+    "seconds": 2.487,
+    "exit_code": 0,
+    "observed_result": "fresh hierarchy captured"
+  },
+  {
+    "utc": "2026-10-10T13:21:16Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "input",
+      "tap",
+      "1031",
+      "435"
+    ],
+    "seconds": 0.362,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:21:18Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "uiautomator",
+      "dump",
+      "/data/local/tmp/ridelink-qualification.xml"
+    ],
+    "seconds": 2.442,
+    "exit_code": 0,
+    "observed_result": "fresh hierarchy captured"
+  },
+  {
+    "utc": "2026-10-10T13:21:19Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "input",
+      "tap",
+      "230",
+      "393"
+    ],
+    "seconds": 0.2,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:21:22Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "uiautomator",
+      "dump",
+      "/data/local/tmp/ridelink-qualification.xml"
+    ],
+    "seconds": 2.652,
+    "exit_code": 0,
+    "observed_result": "fresh hierarchy captured"
+  },
+  {
+    "utc": "2026-10-10T13:21:36Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "input",
+      "swipe",
+      "700",
+      "2400",
+      "700",
+      "950",
+      "300"
+    ],
+    "seconds": 0.5,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:21:39Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "uiautomator",
+      "dump",
+      "/data/local/tmp/ridelink-qualification.xml"
+    ],
+    "seconds": 3.015,
+    "exit_code": 0,
+    "observed_result": "fresh hierarchy captured"
+  },
+  {
+    "utc": "2026-10-10T13:21:39Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "input",
+      "swipe",
+      "700",
+      "2400",
+      "700",
+      "950",
+      "300"
+    ],
+    "seconds": 0.479,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:21:42Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "uiautomator",
+      "dump",
+      "/data/local/tmp/ridelink-qualification.xml"
+    ],
+    "seconds": 3.0,
+    "exit_code": 0,
+    "observed_result": "fresh hierarchy captured"
+  },
+  {
+    "utc": "2026-10-10T13:21:43Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "input",
+      "swipe",
+      "700",
+      "2400",
+      "700",
+      "950",
+      "300"
+    ],
+    "seconds": 0.469,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:21:46Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "uiautomator",
+      "dump",
+      "/data/local/tmp/ridelink-qualification.xml"
+    ],
+    "seconds": 2.93,
+    "exit_code": 0,
+    "observed_result": "fresh hierarchy captured"
+  },
+  {
+    "utc": "2026-10-10T13:21:47Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "input",
+      "tap",
+      "642",
+      "970"
+    ],
+    "seconds": 0.123,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:21:49Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "uiautomator",
+      "dump",
+      "/data/local/tmp/ridelink-qualification.xml"
+    ],
+    "seconds": 2.53,
+    "exit_code": 0,
+    "observed_result": "fresh hierarchy captured"
+  },
+  {
+    "utc": "2026-10-10T13:21:50Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "input",
+      "tap",
+      "271",
+      "435"
+    ],
+    "seconds": 0.143,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:21:52Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "uiautomator",
+      "dump",
+      "/data/local/tmp/ridelink-qualification.xml"
+    ],
+    "seconds": 2.539,
+    "exit_code": 0,
+    "observed_result": "fresh hierarchy captured"
+  },
+  {
+    "utc": "2026-10-10T13:21:53Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "input",
+      "tap",
+      "636",
+      "2716"
+    ],
+    "seconds": 0.156,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:21:55Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "uiautomator",
+      "dump",
+      "/data/local/tmp/ridelink-qualification.xml"
+    ],
+    "seconds": 2.408,
+    "exit_code": 0,
+    "observed_result": "fresh hierarchy captured"
+  },
+  {
+    "utc": "2026-10-10T13:21:56Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "input",
+      "tap",
+      "1003",
+      "1689"
+    ],
+    "seconds": 0.147,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:21:59Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "uiautomator",
+      "dump",
+      "/data/local/tmp/ridelink-qualification.xml"
+    ],
+    "seconds": 2.501,
+    "exit_code": 0,
+    "observed_result": "fresh hierarchy captured"
+  },
+  {
+    "utc": "2026-10-10T13:23:14Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "uiautomator",
+      "dump",
+      "/data/local/tmp/ridelink-qualification.xml"
+    ],
+    "seconds": 2.628,
+    "exit_code": 0,
+    "observed_result": "fresh hierarchy captured"
+  },
+  {
+    "utc": "2026-10-10T13:23:15Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "input",
+      "tap",
+      "214",
+      "1177"
+    ],
+    "seconds": 0.179,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:23:17Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "uiautomator",
+      "dump",
+      "/data/local/tmp/ridelink-qualification.xml"
+    ],
+    "seconds": 2.483,
+    "exit_code": 0,
+    "observed_result": "fresh hierarchy captured"
+  },
+  {
+    "utc": "2026-10-10T13:23:18Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "input",
+      "tap",
+      "1174",
+      "239"
+    ],
+    "seconds": 0.132,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:23:20Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "uiautomator",
+      "dump",
+      "/data/local/tmp/ridelink-qualification.xml"
+    ],
+    "seconds": 2.417,
+    "exit_code": 0,
+    "observed_result": "fresh hierarchy captured"
+  },
+  {
+    "utc": "2026-10-10T13:23:21Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "input",
+      "tap",
+      "1031",
+      "435"
+    ],
+    "seconds": 0.192,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:23:23Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "uiautomator",
+      "dump",
+      "/data/local/tmp/ridelink-qualification.xml"
+    ],
+    "seconds": 2.405,
+    "exit_code": 0,
+    "observed_result": "fresh hierarchy captured"
+  },
+  {
+    "utc": "2026-10-10T13:23:23Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "input",
+      "tap",
+      "636",
+      "2716"
+    ],
+    "seconds": 0.075,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:23:26Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "uiautomator",
+      "dump",
+      "/data/local/tmp/ridelink-qualification.xml"
+    ],
+    "seconds": 2.418,
+    "exit_code": 0,
+    "observed_result": "fresh hierarchy captured"
+  },
+  {
+    "utc": "2026-10-10T13:23:26Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "input",
+      "tap",
+      "1003",
+      "1689"
+    ],
+    "seconds": 0.116,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:23:29Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "uiautomator",
+      "dump",
+      "/data/local/tmp/ridelink-qualification.xml"
+    ],
+    "seconds": 2.418,
+    "exit_code": 0,
+    "observed_result": "fresh hierarchy captured"
+  },
+  {
+    "utc": "2026-10-10T13:23:51Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "uiautomator",
+      "dump",
+      "/data/local/tmp/ridelink-qualification.xml"
+    ],
+    "seconds": 2.65,
+    "exit_code": 0,
+    "observed_result": "fresh hierarchy captured"
+  },
+  {
+    "utc": "2026-10-10T13:23:51Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "input",
+      "tap",
+      "214",
+      "1177"
+    ],
+    "seconds": 0.166,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:23:54Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "uiautomator",
+      "dump",
+      "/data/local/tmp/ridelink-qualification.xml"
+    ],
+    "seconds": 2.64,
+    "exit_code": 0,
+    "observed_result": "fresh hierarchy captured"
+  },
+  {
+    "utc": "2026-10-10T13:23:55Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "input",
+      "tap",
+      "1174",
+      "239"
+    ],
+    "seconds": 0.143,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:23:57Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "uiautomator",
+      "dump",
+      "/data/local/tmp/ridelink-qualification.xml"
+    ],
+    "seconds": 2.344,
+    "exit_code": 0,
+    "observed_result": "fresh hierarchy captured"
+  },
+  {
+    "utc": "2026-10-10T13:23:57Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "input",
+      "tap",
+      "1031",
+      "435"
+    ],
+    "seconds": 0.219,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:24:00Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "uiautomator",
+      "dump",
+      "/data/local/tmp/ridelink-qualification.xml"
+    ],
+    "seconds": 2.39,
+    "exit_code": 0,
+    "observed_result": "fresh hierarchy captured"
+  },
+  {
+    "utc": "2026-10-10T13:24:00Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "input",
+      "tap",
+      "636",
+      "2716"
+    ],
+    "seconds": 0.175,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:24:03Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "uiautomator",
+      "dump",
+      "/data/local/tmp/ridelink-qualification.xml"
+    ],
+    "seconds": 2.442,
+    "exit_code": 0,
+    "observed_result": "fresh hierarchy captured"
+  },
+  {
+    "utc": "2026-10-10T13:24:03Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "input",
+      "tap",
+      "1003",
+      "1689"
+    ],
+    "seconds": 0.155,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:24:06Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "uiautomator",
+      "dump",
+      "/data/local/tmp/ridelink-qualification.xml"
+    ],
+    "seconds": 2.545,
+    "exit_code": 0,
+    "observed_result": "fresh hierarchy captured"
+  },
+  {
+    "utc": "2026-10-10T13:24:06Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "input",
+      "tap",
+      "367",
+      "1247"
+    ],
+    "seconds": 0.167,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:24:09Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "uiautomator",
+      "dump",
+      "/data/local/tmp/ridelink-qualification.xml"
+    ],
+    "seconds": 2.686,
+    "exit_code": 0,
+    "observed_result": "fresh hierarchy captured"
+  },
+  {
+    "utc": "2026-10-10T13:24:12Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "uiautomator",
+      "dump",
+      "/data/local/tmp/ridelink-qualification.xml"
+    ],
+    "seconds": 2.705,
+    "exit_code": 0,
+    "observed_result": "fresh hierarchy captured"
+  },
+  {
+    "utc": "2026-10-10T13:24:15Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "uiautomator",
+      "dump",
+      "/data/local/tmp/ridelink-qualification.xml"
+    ],
+    "seconds": 2.597,
+    "exit_code": 0,
+    "observed_result": "fresh hierarchy captured"
+  },
+  {
+    "utc": "2026-10-10T13:24:15Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "input",
+      "tap",
+      "1059",
+      "897"
+    ],
+    "seconds": 0.124,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:24:18Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "uiautomator",
+      "dump",
+      "/data/local/tmp/ridelink-qualification.xml"
+    ],
+    "seconds": 2.471,
+    "exit_code": 0,
+    "observed_result": "fresh hierarchy captured"
+  },
+  {
+    "utc": "2026-10-10T13:24:18Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "input",
+      "tap",
+      "1174",
+      "239"
+    ],
+    "seconds": 0.12,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:24:21Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "uiautomator",
+      "dump",
+      "/data/local/tmp/ridelink-qualification.xml"
+    ],
+    "seconds": 2.305,
+    "exit_code": 0,
+    "observed_result": "fresh hierarchy captured"
+  },
+  {
+    "utc": "2026-10-10T13:24:21Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "input",
+      "tap",
+      "1031",
+      "435"
+    ],
+    "seconds": 0.089,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:24:24Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "uiautomator",
+      "dump",
+      "/data/local/tmp/ridelink-qualification.xml"
+    ],
+    "seconds": 2.641,
+    "exit_code": 0,
+    "observed_result": "fresh hierarchy captured"
+  },
+  {
+    "utc": "2026-10-10T13:24:37Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "input",
+      "tap",
+      "689",
+      "393"
+    ],
+    "seconds": 0.144,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:24:40Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "uiautomator",
+      "dump",
+      "/data/local/tmp/ridelink-qualification.xml"
+    ],
+    "seconds": 2.665,
+    "exit_code": 0,
+    "observed_result": "fresh hierarchy captured"
+  },
+  {
+    "utc": "2026-10-10T13:24:40Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "input",
+      "tap",
+      "269",
+      "1069"
+    ],
+    "seconds": 0.157,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:24:43Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "uiautomator",
+      "dump",
+      "/data/local/tmp/ridelink-qualification.xml"
+    ],
+    "seconds": 2.623,
+    "exit_code": 0,
+    "observed_result": "fresh hierarchy captured"
+  },
+  {
+    "utc": "2026-10-10T13:24:44Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "input",
+      "tap",
+      "636",
+      "2716"
+    ],
+    "seconds": 0.116,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:24:46Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "uiautomator",
+      "dump",
+      "/data/local/tmp/ridelink-qualification.xml"
+    ],
+    "seconds": 2.582,
+    "exit_code": 0,
+    "observed_result": "fresh hierarchy captured"
+  },
+  {
+    "utc": "2026-10-10T13:24:47Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "input",
+      "tap",
+      "1003",
+      "1689"
+    ],
+    "seconds": 0.144,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:24:49Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "uiautomator",
+      "dump",
+      "/data/local/tmp/ridelink-qualification.xml"
+    ],
+    "seconds": 2.455,
+    "exit_code": 0,
+    "observed_result": "fresh hierarchy captured"
+  },
+  {
+    "utc": "2026-10-10T13:24:50Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "input",
+      "tap",
+      "350",
+      "1247"
+    ],
+    "seconds": 0.175,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:24:52Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "uiautomator",
+      "dump",
+      "/data/local/tmp/ridelink-qualification.xml"
+    ],
+    "seconds": 2.639,
+    "exit_code": 0,
+    "observed_result": "fresh hierarchy captured"
+  },
+  {
+    "utc": "2026-10-10T13:24:56Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "uiautomator",
+      "dump",
+      "/data/local/tmp/ridelink-qualification.xml"
+    ],
+    "seconds": 2.617,
+    "exit_code": 0,
+    "observed_result": "fresh hierarchy captured"
+  },
+  {
+    "utc": "2026-10-10T13:24:56Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "input",
+      "tap",
+      "1059",
+      "897"
+    ],
+    "seconds": 0.153,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:24:59Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "uiautomator",
+      "dump",
+      "/data/local/tmp/ridelink-qualification.xml"
+    ],
+    "seconds": 2.544,
+    "exit_code": 0,
+    "observed_result": "fresh hierarchy captured"
+  },
+  {
+    "utc": "2026-10-10T13:24:59Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "input",
+      "tap",
+      "1174",
+      "239"
+    ],
+    "seconds": 0.154,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:25:02Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "uiautomator",
+      "dump",
+      "/data/local/tmp/ridelink-qualification.xml"
+    ],
+    "seconds": 2.375,
+    "exit_code": 0,
+    "observed_result": "fresh hierarchy captured"
+  },
+  {
+    "utc": "2026-10-10T13:25:02Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "input",
+      "tap",
+      "994",
+      "603"
+    ],
+    "seconds": 0.128,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:25:04Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "uiautomator",
+      "dump",
+      "/data/local/tmp/ridelink-qualification.xml"
+    ],
+    "seconds": 2.52,
+    "exit_code": 0,
+    "observed_result": "fresh hierarchy captured"
+  },
+  {
+    "utc": "2026-10-10T13:25:22Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "input",
+      "tap",
+      "692",
+      "393"
+    ],
+    "seconds": 0.115,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:25:25Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "uiautomator",
+      "dump",
+      "/data/local/tmp/ridelink-qualification.xml"
+    ],
+    "seconds": 2.694,
+    "exit_code": 0,
+    "observed_result": "fresh hierarchy captured"
+  },
+  {
+    "utc": "2026-10-10T13:25:25Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "input",
+      "tap",
+      "326",
+      "2005"
+    ],
+    "seconds": 0.156,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:25:28Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "uiautomator",
+      "dump",
+      "/data/local/tmp/ridelink-qualification.xml"
+    ],
+    "seconds": 2.537,
+    "exit_code": 0,
+    "observed_result": "fresh hierarchy captured"
+  },
+  {
+    "utc": "2026-10-10T13:25:29Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "input",
+      "tap",
+      "439",
+      "945"
+    ],
+    "seconds": 0.142,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:25:31Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "uiautomator",
+      "dump",
+      "/data/local/tmp/ridelink-qualification.xml"
+    ],
+    "seconds": 2.478,
+    "exit_code": 0,
+    "observed_result": "fresh hierarchy captured"
+  },
+  {
+    "utc": "2026-10-10T13:25:34Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "uiautomator",
+      "dump",
+      "/data/local/tmp/ridelink-qualification.xml"
+    ],
+    "seconds": 2.514,
+    "exit_code": 0,
+    "observed_result": "fresh hierarchy captured"
+  },
+  {
+    "utc": "2026-10-10T13:25:34Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "input",
+      "tap",
+      "1059",
+      "897"
+    ],
+    "seconds": 0.161,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:25:37Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "uiautomator",
+      "dump",
+      "/data/local/tmp/ridelink-qualification.xml"
+    ],
+    "seconds": 2.559,
+    "exit_code": 0,
+    "observed_result": "fresh hierarchy captured"
+  },
+  {
+    "utc": "2026-10-10T13:25:38Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "input",
+      "tap",
+      "1174",
+      "239"
+    ],
+    "seconds": 0.089,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:25:40Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "uiautomator",
+      "dump",
+      "/data/local/tmp/ridelink-qualification.xml"
+    ],
+    "seconds": 2.429,
+    "exit_code": 0,
+    "observed_result": "fresh hierarchy captured"
+  },
+  {
+    "utc": "2026-10-10T13:25:40Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "input",
+      "tap",
+      "1031",
+      "435"
+    ],
+    "seconds": 0.109,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:25:44Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "uiautomator",
+      "dump",
+      "/data/local/tmp/ridelink-qualification.xml"
+    ],
+    "seconds": 3.582,
+    "exit_code": 0,
+    "observed_result": "fresh hierarchy captured"
+  },
+  {
+    "utc": "2026-10-10T13:25:45Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "input",
+      "tap",
+      "587",
+      "393"
+    ],
+    "seconds": 0.123,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:25:47Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "uiautomator",
+      "dump",
+      "/data/local/tmp/ridelink-qualification.xml"
+    ],
+    "seconds": 2.755,
+    "exit_code": 0,
+    "observed_result": "fresh hierarchy captured"
+  },
+  {
+    "utc": "2026-10-10T13:25:48Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "input",
+      "tap",
+      "271",
+      "813"
+    ],
+    "seconds": 0.145,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:25:50Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "uiautomator",
+      "dump",
+      "/data/local/tmp/ridelink-qualification.xml"
+    ],
+    "seconds": 2.56,
+    "exit_code": 0,
+    "observed_result": "fresh hierarchy captured"
+  },
+  {
+    "utc": "2026-10-10T13:25:51Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "input",
+      "tap",
+      "636",
+      "2716"
+    ],
+    "seconds": 0.155,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:25:53Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "uiautomator",
+      "dump",
+      "/data/local/tmp/ridelink-qualification.xml"
+    ],
+    "seconds": 2.426,
+    "exit_code": 0,
+    "observed_result": "fresh hierarchy captured"
+  },
+  {
+    "utc": "2026-10-10T13:25:54Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "input",
+      "tap",
+      "1003",
+      "1689"
+    ],
+    "seconds": 0.131,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:25:56Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "uiautomator",
+      "dump",
+      "/data/local/tmp/ridelink-qualification.xml"
+    ],
+    "seconds": 2.454,
+    "exit_code": 0,
+    "observed_result": "fresh hierarchy captured"
+  },
+  {
+    "utc": "2026-10-10T13:25:57Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "input",
+      "tap",
+      "350",
+      "1247"
+    ],
+    "seconds": 0.134,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:25:59Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "uiautomator",
+      "dump",
+      "/data/local/tmp/ridelink-qualification.xml"
+    ],
+    "seconds": 2.56,
+    "exit_code": 0,
+    "observed_result": "fresh hierarchy captured"
+  },
+  {
+    "utc": "2026-10-10T13:26:03Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "uiautomator",
+      "dump",
+      "/data/local/tmp/ridelink-qualification.xml"
+    ],
+    "seconds": 2.571,
+    "exit_code": 0,
+    "observed_result": "fresh hierarchy captured"
+  },
+  {
+    "utc": "2026-10-10T13:26:03Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "input",
+      "tap",
+      "1059",
+      "897"
+    ],
+    "seconds": 0.161,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:26:06Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "uiautomator",
+      "dump",
+      "/data/local/tmp/ridelink-qualification.xml"
+    ],
+    "seconds": 2.519,
+    "exit_code": 0,
+    "observed_result": "fresh hierarchy captured"
+  },
+  {
+    "utc": "2026-10-10T13:26:06Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "input",
+      "tap",
+      "590",
+      "435"
+    ],
+    "seconds": 0.146,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:26:07Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "input",
+      "text",
+      "QA-"
+    ],
+    "seconds": 0.291,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:26:07Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "input",
+      "keyevent",
+      "4"
+    ],
+    "seconds": 0.084,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:26:09Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "uiautomator",
+      "dump",
+      "/data/local/tmp/ridelink-qualification.xml"
+    ],
+    "seconds": 2.554,
+    "exit_code": 0,
+    "observed_result": "fresh hierarchy captured"
+  },
+  {
+    "utc": "2026-10-10T13:26:29Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "input",
+      "tap",
+      "393",
+      "939"
+    ],
+    "seconds": 0.191,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:26:29Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "dumpsys",
+      "media_session"
+    ],
+    "seconds": 0.212,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:26:30Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "input",
+      "tap",
+      "393",
+      "1163"
+    ],
+    "seconds": 0.193,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:26:31Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "dumpsys",
+      "media_session"
+    ],
+    "seconds": 0.133,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:26:31Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "input",
+      "tap",
+      "410",
+      "1387"
+    ],
+    "seconds": 0.138,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:26:32Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "dumpsys",
+      "media_session"
+    ],
+    "seconds": 0.245,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:26:34Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "uiautomator",
+      "dump",
+      "/data/local/tmp/ridelink-qualification.xml"
+    ],
+    "seconds": 2.443,
+    "exit_code": 0,
+    "observed_result": "fresh hierarchy captured"
+  },
+  {
+    "utc": "2026-10-10T13:26:35Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "input",
+      "tap",
+      "1132",
+      "435"
+    ],
+    "seconds": 0.246,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:26:37Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "uiautomator",
+      "dump",
+      "/data/local/tmp/ridelink-qualification.xml"
+    ],
+    "seconds": 2.477,
+    "exit_code": 0,
+    "observed_result": "fresh hierarchy captured"
+  },
+  {
+    "utc": "2026-10-10T13:26:40Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "uiautomator",
+      "dump",
+      "/data/local/tmp/ridelink-qualification.xml"
+    ],
+    "seconds": 2.476,
+    "exit_code": 0,
+    "observed_result": "fresh hierarchy captured"
+  },
+  {
+    "utc": "2026-10-10T13:26:41Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "input",
+      "tap",
+      "1174",
+      "239"
+    ],
+    "seconds": 0.217,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:26:43Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "uiautomator",
+      "dump",
+      "/data/local/tmp/ridelink-qualification.xml"
+    ],
+    "seconds": 2.406,
+    "exit_code": 0,
+    "observed_result": "fresh hierarchy captured"
+  },
+  {
+    "utc": "2026-10-10T13:26:44Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "input",
+      "tap",
+      "1031",
+      "435"
+    ],
+    "seconds": 0.215,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:26:46Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "uiautomator",
+      "dump",
+      "/data/local/tmp/ridelink-qualification.xml"
+    ],
+    "seconds": 2.323,
+    "exit_code": 0,
+    "observed_result": "fresh hierarchy captured"
+  },
+  {
+    "utc": "2026-10-10T13:26:47Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "input",
+      "tap",
+      "689",
+      "393"
+    ],
+    "seconds": 0.216,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:26:49Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "uiautomator",
+      "dump",
+      "/data/local/tmp/ridelink-qualification.xml"
+    ],
+    "seconds": 2.509,
+    "exit_code": 0,
+    "observed_result": "fresh hierarchy captured"
+  },
+  {
+    "utc": "2026-10-10T13:26:50Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "input",
+      "tap",
+      "418",
+      "1581"
+    ],
+    "seconds": 0.193,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:26:52Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "uiautomator",
+      "dump",
+      "/data/local/tmp/ridelink-qualification.xml"
+    ],
+    "seconds": 2.414,
+    "exit_code": 0,
+    "observed_result": "fresh hierarchy captured"
+  },
+  {
+    "utc": "2026-10-10T13:26:53Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "input",
+      "tap",
+      "636",
+      "2716"
+    ],
+    "seconds": 0.243,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:26:55Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "uiautomator",
+      "dump",
+      "/data/local/tmp/ridelink-qualification.xml"
+    ],
+    "seconds": 2.361,
+    "exit_code": 0,
+    "observed_result": "fresh hierarchy captured"
+  },
+  {
+    "utc": "2026-10-10T13:26:56Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "input",
+      "tap",
+      "1003",
+      "1689"
+    ],
+    "seconds": 0.212,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:26:58Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "uiautomator",
+      "dump",
+      "/data/local/tmp/ridelink-qualification.xml"
+    ],
+    "seconds": 2.454,
+    "exit_code": 0,
+    "observed_result": "fresh hierarchy captured"
+  },
+  {
+    "utc": "2026-10-10T13:26:59Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "input",
+      "tap",
+      "350",
+      "1583"
+    ],
+    "seconds": 0.218,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:27:01Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "uiautomator",
+      "dump",
+      "/data/local/tmp/ridelink-qualification.xml"
+    ],
+    "seconds": 2.577,
+    "exit_code": 0,
+    "observed_result": "fresh hierarchy captured"
+  },
+  {
+    "utc": "2026-10-10T13:27:05Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "uiautomator",
+      "dump",
+      "/data/local/tmp/ridelink-qualification.xml"
+    ],
+    "seconds": 2.504,
+    "exit_code": 0,
+    "observed_result": "fresh hierarchy captured"
+  },
+  {
+    "utc": "2026-10-10T13:27:05Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "input",
+      "tap",
+      "1059",
+      "897"
+    ],
+    "seconds": 0.222,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:27:08Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "uiautomator",
+      "dump",
+      "/data/local/tmp/ridelink-qualification.xml"
+    ],
+    "seconds": 2.528,
+    "exit_code": 0,
+    "observed_result": "fresh hierarchy captured"
+  },
+  {
+    "utc": "2026-10-10T13:27:09Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "input",
+      "tap",
+      "590",
+      "435"
+    ],
+    "seconds": 0.215,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:27:09Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "input",
+      "text",
+      "QA-"
+    ],
+    "seconds": 0.158,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:27:09Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "input",
+      "keyevent",
+      "4"
+    ],
+    "seconds": 0.144,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:27:11Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "uiautomator",
+      "dump",
+      "/data/local/tmp/ridelink-qualification.xml"
+    ],
+    "seconds": 2.362,
+    "exit_code": 0,
+    "observed_result": "fresh hierarchy captured"
+  },
+  {
+    "utc": "2026-10-10T13:27:34Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "input",
+      "keyevent",
+      "4"
+    ],
+    "seconds": 0.241,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:27:37Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "uiautomator",
+      "dump",
+      "/data/local/tmp/ridelink-qualification.xml"
+    ],
+    "seconds": 2.462,
+    "exit_code": 0,
+    "observed_result": "fresh hierarchy captured"
+  },
+  {
+    "utc": "2026-10-10T13:27:37Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "input",
+      "tap",
+      "356",
+      "2269"
+    ],
+    "seconds": 0.112,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:27:40Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "uiautomator",
+      "dump",
+      "/data/local/tmp/ridelink-qualification.xml"
+    ],
+    "seconds": 2.681,
+    "exit_code": 0,
+    "observed_result": "fresh hierarchy captured"
+  },
+  {
+    "utc": "2026-10-10T13:27:40Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "input",
+      "tap",
+      "1155",
+      "239"
+    ],
+    "seconds": 0.123,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:27:43Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "uiautomator",
+      "dump",
+      "/data/local/tmp/ridelink-qualification.xml"
+    ],
+    "seconds": 2.554,
+    "exit_code": 0,
+    "observed_result": "fresh hierarchy captured"
+  },
+  {
+    "utc": "2026-10-10T13:27:43Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "input",
+      "tap",
+      "759",
+      "1666"
+    ],
+    "seconds": 0.164,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:27:46Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "uiautomator",
+      "dump",
+      "/data/local/tmp/ridelink-qualification.xml"
+    ],
+    "seconds": 2.524,
+    "exit_code": 0,
+    "observed_result": "fresh hierarchy captured"
+  },
+  {
+    "utc": "2026-10-10T13:27:46Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "input",
+      "tap",
+      "1155",
+      "239"
+    ],
+    "seconds": 0.113,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:27:49Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "uiautomator",
+      "dump",
+      "/data/local/tmp/ridelink-qualification.xml"
+    ],
+    "seconds": 2.479,
+    "exit_code": 0,
+    "observed_result": "fresh hierarchy captured"
+  },
+  {
+    "utc": "2026-10-10T13:27:50Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "input",
+      "tap",
+      "1009",
+      "1666"
+    ],
+    "seconds": 0.212,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:27:52Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "uiautomator",
+      "dump",
+      "/data/local/tmp/ridelink-qualification.xml"
+    ],
+    "seconds": 2.365,
+    "exit_code": 0,
+    "observed_result": "fresh hierarchy captured"
+  },
+  {
+    "utc": "2026-10-10T13:27:52Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "dumpsys",
+      "media_session"
+    ],
+    "seconds": 0.137,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:27:53Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "input",
+      "tap",
+      "964",
+      "2688"
+    ],
+    "seconds": 0.193,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:27:53Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "dumpsys",
+      "media_session"
+    ],
+    "seconds": 0.172,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:27:56Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "dumpsys",
+      "media_session"
+    ],
+    "seconds": 0.158,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:27:59Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "uiautomator",
+      "dump",
+      "/data/local/tmp/ridelink-qualification.xml"
+    ],
+    "seconds": 2.394,
+    "exit_code": 0,
+    "observed_result": "fresh hierarchy captured"
+  },
+  {
+    "utc": "2026-10-10T13:28:00Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "input",
+      "tap",
+      "636",
+      "1607"
+    ],
+    "seconds": 0.27,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:28:02Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "uiautomator",
+      "dump",
+      "/data/local/tmp/ridelink-qualification.xml"
+    ],
+    "seconds": 2.288,
+    "exit_code": 0,
+    "observed_result": "fresh hierarchy captured"
+  },
+  {
+    "utc": "2026-10-10T13:28:02Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "input",
+      "tap",
+      "1174",
+      "967"
+    ],
+    "seconds": 0.252,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:28:03Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "input",
+      "tap",
+      "1174",
+      "1191"
+    ],
+    "seconds": 0.205,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:28:03Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "input",
+      "tap",
+      "1174",
+      "967"
+    ],
+    "seconds": 0.201,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:28:06Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "uiautomator",
+      "dump",
+      "/data/local/tmp/ridelink-qualification.xml"
+    ],
+    "seconds": 2.385,
+    "exit_code": 0,
+    "observed_result": "fresh hierarchy captured"
+  },
+  {
+    "utc": "2026-10-10T13:28:06Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "input",
+      "tap",
+      "964",
+      "2688"
+    ],
+    "seconds": 0.157,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:28:07Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "dumpsys",
+      "media_session"
+    ],
+    "seconds": 0.155,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:28:07Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "input",
+      "tap",
+      "1174",
+      "2688"
+    ],
+    "seconds": 0.09,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:28:08Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "dumpsys",
+      "media_session"
+    ],
+    "seconds": 0.228,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:28:08Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "input",
+      "keyevent",
+      "4"
+    ],
+    "seconds": 0.067,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:28:10Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "uiautomator",
+      "dump",
+      "/data/local/tmp/ridelink-qualification.xml"
+    ],
+    "seconds": 2.21,
+    "exit_code": 0,
+    "observed_result": "fresh hierarchy captured"
+  },
+  {
+    "utc": "2026-10-10T13:28:50Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "input",
+      "tap",
+      "343",
+      "2073"
+    ],
+    "seconds": 0.12,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:28:53Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "uiautomator",
+      "dump",
+      "/data/local/tmp/ridelink-qualification.xml"
+    ],
+    "seconds": 2.407,
+    "exit_code": 0,
+    "observed_result": "fresh hierarchy captured"
+  },
+  {
+    "utc": "2026-10-10T13:28:53Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "input",
+      "tap",
+      "1174",
+      "967"
+    ],
+    "seconds": 0.1,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:28:56Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "uiautomator",
+      "dump",
+      "/data/local/tmp/ridelink-qualification.xml"
+    ],
+    "seconds": 2.322,
+    "exit_code": 0,
+    "observed_result": "fresh hierarchy captured"
+  },
+  {
+    "utc": "2026-10-10T13:28:56Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "input",
+      "tap",
+      "1174",
+      "1191"
+    ],
+    "seconds": 0.117,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:28:59Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "uiautomator",
+      "dump",
+      "/data/local/tmp/ridelink-qualification.xml"
+    ],
+    "seconds": 2.401,
+    "exit_code": 0,
+    "observed_result": "fresh hierarchy captured"
+  },
+  {
+    "utc": "2026-10-10T13:28:59Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "input",
+      "tap",
+      "1174",
+      "1415"
+    ],
+    "seconds": 0.129,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:29:01Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "uiautomator",
+      "dump",
+      "/data/local/tmp/ridelink-qualification.xml"
+    ],
+    "seconds": 2.373,
+    "exit_code": 0,
+    "observed_result": "fresh hierarchy captured"
+  },
+  {
+    "utc": "2026-10-10T13:29:02Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "input",
+      "keyevent",
+      "4"
+    ],
+    "seconds": 0.21,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:29:04Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "uiautomator",
+      "dump",
+      "/data/local/tmp/ridelink-qualification.xml"
+    ],
+    "seconds": 2.27,
+    "exit_code": 0,
+    "observed_result": "fresh hierarchy captured"
+  },
+  {
+    "utc": "2026-10-10T13:29:04Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "input",
+      "tap",
+      "356",
+      "2269"
+    ],
+    "seconds": 0.188,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:29:07Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "uiautomator",
+      "dump",
+      "/data/local/tmp/ridelink-qualification.xml"
+    ],
+    "seconds": 2.267,
+    "exit_code": 0,
+    "observed_result": "fresh hierarchy captured"
+  },
+  {
+    "utc": "2026-10-10T13:29:07Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "input",
+      "tap",
+      "463",
+      "421"
+    ],
+    "seconds": 0.232,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:29:08Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "dumpsys",
+      "media_session"
+    ],
+    "seconds": 0.172,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:35:03Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "am",
+      "start",
+      "-W",
+      "-n",
+      "com.ridelink.app/.MainActivity"
+    ],
+    "seconds": 0.284,
+    "exit_code": 0,
+    "observed_result": "Status: ok; LaunchState: HOT; TotalTime: 120; WaitTime: 124"
+  },
+  {
+    "utc": "2026-10-10T13:35:06Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "uiautomator",
+      "dump",
+      "/data/local/tmp/ridelink-qualification.xml"
+    ],
+    "seconds": 2.609,
+    "exit_code": 0,
+    "observed_result": "fresh hierarchy captured"
+  },
+  {
+    "utc": "2026-10-10T13:35:07Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "input",
+      "tap",
+      "463",
+      "421"
+    ],
+    "seconds": 0.162,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:35:07Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "dumpsys",
+      "media_session"
+    ],
+    "seconds": 0.301,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:35:08Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "input",
+      "tap",
+      "1174",
+      "2688"
+    ],
+    "seconds": 0.236,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:35:08Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "dumpsys",
+      "media_session"
+    ],
+    "seconds": 0.172,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:35:09Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "input",
+      "keyevent",
+      "4"
+    ],
+    "seconds": 0.279,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:35:11Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "uiautomator",
+      "dump",
+      "/data/local/tmp/ridelink-qualification.xml"
+    ],
+    "seconds": 2.328,
+    "exit_code": 0,
+    "observed_result": "fresh hierarchy captured"
+  },
+  {
+    "utc": "2026-10-10T13:35:12Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "input",
+      "tap",
+      "328",
+      "1779"
+    ],
+    "seconds": 0.237,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:35:12Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "dumpsys",
+      "media_session"
+    ],
+    "seconds": 0.227,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:35:15Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "uiautomator",
+      "dump",
+      "/data/local/tmp/ridelink-qualification.xml"
+    ],
+    "seconds": 2.448,
+    "exit_code": 0,
+    "observed_result": "fresh hierarchy captured"
+  },
+  {
+    "utc": "2026-10-10T13:35:15Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "input",
+      "tap",
+      "636",
+      "1779"
+    ],
+    "seconds": 0.101,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:35:16Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "dumpsys",
+      "media_session"
+    ],
+    "seconds": 0.305,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:35:18Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "dumpsys",
+      "media_session"
+    ],
+    "seconds": 0.061,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:35:21Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "uiautomator",
+      "dump",
+      "/data/local/tmp/ridelink-qualification.xml"
+    ],
+    "seconds": 2.671,
+    "exit_code": 0,
+    "observed_result": "fresh hierarchy captured"
+  },
+  {
+    "utc": "2026-10-10T13:35:21Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "input",
+      "tap",
+      "636",
+      "1779"
+    ],
+    "seconds": 0.14,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:35:22Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "dumpsys",
+      "media_session"
+    ],
+    "seconds": 0.336,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:35:24Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "uiautomator",
+      "dump",
+      "/data/local/tmp/ridelink-qualification.xml"
+    ],
+    "seconds": 2.172,
+    "exit_code": 0,
+    "observed_result": "fresh hierarchy captured"
+  },
+  {
+    "utc": "2026-10-10T13:36:05Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "input",
+      "tap",
+      "356",
+      "2269"
+    ],
+    "seconds": 0.311,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:36:07Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "uiautomator",
+      "dump",
+      "/data/local/tmp/ridelink-qualification.xml"
+    ],
+    "seconds": 2.442,
+    "exit_code": 0,
+    "observed_result": "fresh hierarchy captured"
+  },
+  {
+    "utc": "2026-10-10T13:36:08Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "input",
+      "tap",
+      "463",
+      "421"
+    ],
+    "seconds": 0.277,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:36:09Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "dumpsys",
+      "media_session"
+    ],
+    "seconds": 0.179,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:36:12Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "uiautomator",
+      "dump",
+      "/data/local/tmp/ridelink-qualification.xml"
+    ],
+    "seconds": 2.921,
+    "exit_code": 0,
+    "observed_result": "fresh hierarchy captured"
+  },
+  {
+    "utc": "2026-10-10T13:36:15Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "uiautomator",
+      "dump",
+      "/data/local/tmp/ridelink-qualification.xml"
+    ],
+    "seconds": 2.43,
+    "exit_code": 0,
+    "observed_result": "fresh hierarchy captured"
+  },
+  {
+    "utc": "2026-10-10T13:36:16Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "input",
+      "tap",
+      "463",
+      "869"
+    ],
+    "seconds": 0.166,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:36:17Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "dumpsys",
+      "media_session"
+    ],
+    "seconds": 0.307,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:36:20Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "uiautomator",
+      "dump",
+      "/data/local/tmp/ridelink-qualification.xml"
+    ],
+    "seconds": 3.259,
+    "exit_code": 0,
+    "observed_result": "fresh hierarchy captured"
+  },
+  {
+    "utc": "2026-10-10T13:36:25Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "uiautomator",
+      "dump",
+      "/data/local/tmp/ridelink-qualification.xml"
+    ],
+    "seconds": 3.884,
+    "exit_code": 0,
+    "observed_result": "fresh hierarchy captured"
+  },
+  {
+    "utc": "2026-10-10T13:36:45Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "am",
+      "start",
+      "-W",
+      "-n",
+      "com.ridelink.app/.MainActivity"
+    ],
+    "seconds": 0.286,
+    "exit_code": 0,
+    "observed_result": "Status: ok; LaunchState: UNKNOWN (0); TotalTime: 0; WaitTime: 62"
+  },
+  {
+    "utc": "2026-10-10T13:36:48Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "uiautomator",
+      "dump",
+      "/data/local/tmp/ridelink-qualification.xml"
+    ],
+    "seconds": 2.964,
+    "exit_code": 0,
+    "observed_result": "fresh hierarchy captured"
+  },
+  {
+    "utc": "2026-10-10T13:37:13Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "input",
+      "keyevent",
+      "4"
+    ],
+    "seconds": 0.388,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:37:16Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "uiautomator",
+      "dump",
+      "/data/local/tmp/ridelink-qualification.xml"
+    ],
+    "seconds": 2.383,
+    "exit_code": 0,
+    "observed_result": "fresh hierarchy captured"
+  },
+  {
+    "utc": "2026-10-10T13:37:17Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "input",
+      "tap",
+      "480",
+      "1093"
+    ],
+    "seconds": 0.348,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:37:17Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "dumpsys",
+      "media_session"
+    ],
+    "seconds": 0.306,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:37:29Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "uiautomator",
+      "dump",
+      "/data/local/tmp/ridelink-qualification.xml"
+    ],
+    "seconds": 10.822,
+    "exit_code": 0,
+    "observed_result": "fresh hierarchy captured"
+  },
+  {
+    "utc": "2026-10-10T13:37:29Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "input",
+      "keyevent",
+      "4"
+    ],
+    "seconds": 0.092,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:37:32Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "uiautomator",
+      "dump",
+      "/data/local/tmp/ridelink-qualification.xml"
+    ],
+    "seconds": 2.591,
+    "exit_code": 0,
+    "observed_result": "fresh hierarchy captured"
+  },
+  {
+    "utc": "2026-10-10T13:37:32Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "input",
+      "tap",
+      "463",
+      "421"
+    ],
+    "seconds": 0.145,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:37:33Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "input",
+      "tap",
+      "463",
+      "869"
+    ],
+    "seconds": 0.203,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:37:33Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "input",
+      "tap",
+      "480",
+      "1093"
+    ],
+    "seconds": 0.095,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:37:34Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "dumpsys",
+      "media_session"
+    ],
+    "seconds": 0.282,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:37:36Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "uiautomator",
+      "dump",
+      "/data/local/tmp/ridelink-qualification.xml"
+    ],
+    "seconds": 2.324,
+    "exit_code": 0,
+    "observed_result": "fresh hierarchy captured"
+  },
+  {
+    "utc": "2026-10-10T13:38:34Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "uiautomator",
+      "dump",
+      "/data/local/tmp/ridelink-qualification.xml"
+    ],
+    "seconds": 3.16,
+    "exit_code": 0,
+    "observed_result": "fresh hierarchy captured"
+  },
+  {
+    "utc": "2026-10-10T13:38:35Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "input",
+      "keyevent",
+      "4"
+    ],
+    "seconds": 0.237,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:38:37Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "uiautomator",
+      "dump",
+      "/data/local/tmp/ridelink-qualification.xml"
+    ],
+    "seconds": 2.324,
+    "exit_code": 0,
+    "observed_result": "fresh hierarchy captured"
+  },
+  {
+    "utc": "2026-10-10T13:38:38Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "input",
+      "keyevent",
+      "3"
+    ],
+    "seconds": 0.156,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:38:38Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "dumpsys",
+      "media_session"
+    ],
+    "seconds": 0.27,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:38:39Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "am",
+      "start",
+      "-W",
+      "-n",
+      "com.ridelink.app/.MainActivity"
+    ],
+    "seconds": 0.256,
+    "exit_code": 0,
+    "observed_result": "Status: ok; LaunchState: HOT; TotalTime: 59; WaitTime: 64"
+  },
+  {
+    "utc": "2026-10-10T13:38:41Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "uiautomator",
+      "dump",
+      "/data/local/tmp/ridelink-qualification.xml"
+    ],
+    "seconds": 2.403,
+    "exit_code": 0,
+    "observed_result": "fresh hierarchy captured"
+  },
+  {
+    "utc": "2026-10-10T13:38:41Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "dumpsys",
+      "media_session"
+    ],
+    "seconds": 0.213,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:38:42Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "input",
+      "keyevent",
+      "3"
+    ],
+    "seconds": 0.248,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:38:42Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "dumpsys",
+      "media_session"
+    ],
+    "seconds": 0.192,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:38:42Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "am",
+      "start",
+      "-W",
+      "-n",
+      "com.ridelink.app/.MainActivity"
+    ],
+    "seconds": 0.152,
+    "exit_code": 0,
+    "observed_result": "Status: ok; LaunchState: HOT; TotalTime: 52; WaitTime: 55"
+  },
+  {
+    "utc": "2026-10-10T13:38:45Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "uiautomator",
+      "dump",
+      "/data/local/tmp/ridelink-qualification.xml"
+    ],
+    "seconds": 2.414,
+    "exit_code": 0,
+    "observed_result": "fresh hierarchy captured"
+  },
+  {
+    "utc": "2026-10-10T13:38:45Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "dumpsys",
+      "media_session"
+    ],
+    "seconds": 0.219,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:38:45Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "am",
+      "start",
+      "-a",
+      "android.settings.SETTINGS"
+    ],
+    "seconds": 0.2,
+    "exit_code": 0,
+    "observed_result": ""
+  },
+  {
+    "utc": "2026-10-10T13:38:46Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "dumpsys",
+      "media_session"
+    ],
+    "seconds": 0.41,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:38:47Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "am",
+      "start",
+      "-W",
+      "-n",
+      "com.ridelink.app/.MainActivity"
+    ],
+    "seconds": 0.207,
+    "exit_code": 0,
+    "observed_result": "Status: ok; LaunchState: HOT; TotalTime: 68; WaitTime: 74"
+  },
+  {
+    "utc": "2026-10-10T13:38:49Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "uiautomator",
+      "dump",
+      "/data/local/tmp/ridelink-qualification.xml"
+    ],
+    "seconds": 2.451,
+    "exit_code": 0,
+    "observed_result": "fresh hierarchy captured"
+  },
+  {
+    "utc": "2026-10-10T13:38:49Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "dumpsys",
+      "media_session"
+    ],
+    "seconds": 0.267,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:39:30Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "settings",
+      "get",
+      "system",
+      "accelerometer_rotation"
+    ],
+    "seconds": 0.22,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:39:31Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "settings",
+      "get",
+      "system",
+      "user_rotation"
+    ],
+    "seconds": 0.275,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:39:31Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "settings",
+      "put",
+      "system",
+      "accelerometer_rotation",
+      "0"
+    ],
+    "seconds": 0.128,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:39:31Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "settings",
+      "put",
+      "system",
+      "user_rotation",
+      "1"
+    ],
+    "seconds": 0.261,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:39:32Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "dumpsys",
+      "media_session"
+    ],
+    "seconds": 0.046,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:39:32Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "settings",
+      "put",
+      "system",
+      "user_rotation",
+      "0"
+    ],
+    "seconds": 0.105,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:39:33Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "dumpsys",
+      "media_session"
+    ],
+    "seconds": 0.194,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:39:33Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "settings",
+      "put",
+      "system",
+      "user_rotation",
+      "1"
+    ],
+    "seconds": 0.26,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:39:34Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "dumpsys",
+      "media_session"
+    ],
+    "seconds": 0.049,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:39:35Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "settings",
+      "put",
+      "system",
+      "user_rotation",
+      "0"
+    ],
+    "seconds": 0.124,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:39:36Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "dumpsys",
+      "media_session"
+    ],
+    "seconds": 0.428,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:39:36Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "settings",
+      "put",
+      "system",
+      "user_rotation",
+      "1"
+    ],
+    "seconds": 0.32,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:39:37Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "dumpsys",
+      "media_session"
+    ],
+    "seconds": 0.221,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:39:38Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "settings",
+      "put",
+      "system",
+      "accelerometer_rotation",
+      "0"
+    ],
+    "seconds": 0.177,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:39:38Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "settings",
+      "put",
+      "system",
+      "user_rotation",
+      "0"
+    ],
+    "seconds": 0.24,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:39:39Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "dumpsys",
+      "media_session"
+    ],
+    "seconds": 0.041,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:39:41Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "uiautomator",
+      "dump",
+      "/data/local/tmp/ridelink-qualification.xml"
+    ],
+    "seconds": 2.43,
+    "exit_code": 0,
+    "observed_result": "fresh hierarchy captured"
+  },
+  {
+    "utc": "2026-10-10T13:39:42Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "input",
+      "tap",
+      "1155",
+      "239"
+    ],
+    "seconds": 0.153,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:39:44Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "uiautomator",
+      "dump",
+      "/data/local/tmp/ridelink-qualification.xml"
+    ],
+    "seconds": 2.55,
+    "exit_code": 0,
+    "observed_result": "fresh hierarchy captured"
+  },
+  {
+    "utc": "2026-10-10T13:39:45Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "input",
+      "tap",
+      "1009",
+      "1666"
+    ],
+    "seconds": 0.131,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:39:45Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "input",
+      "tap",
+      "964",
+      "2688"
+    ],
+    "seconds": 0.134,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:39:46Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "dumpsys",
+      "media_session"
+    ],
+    "seconds": 0.233,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:39:49Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "dumpsys",
+      "media_session"
+    ],
+    "seconds": 0.099,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:39:52Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "uiautomator",
+      "dump",
+      "/data/local/tmp/ridelink-qualification.xml"
+    ],
+    "seconds": 2.531,
+    "exit_code": 0,
+    "observed_result": "fresh hierarchy captured"
+  },
+  {
+    "utc": "2026-10-10T13:39:52Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "input",
+      "keyevent",
+      "4"
+    ],
+    "seconds": 0.296,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:39:55Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "uiautomator",
+      "dump",
+      "/data/local/tmp/ridelink-qualification.xml"
+    ],
+    "seconds": 2.468,
+    "exit_code": 0,
+    "observed_result": "fresh hierarchy captured"
+  },
+  {
+    "utc": "2026-10-10T13:39:55Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "input",
+      "keyevent",
+      "4"
+    ],
+    "seconds": 0.199,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:39:56Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "dumpsys",
+      "media_session"
+    ],
+    "seconds": 0.099,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:40:51Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "am",
+      "start",
+      "-W",
+      "-n",
+      "com.ridelink.app/.MainActivity"
+    ],
+    "seconds": 0.309,
+    "exit_code": 0,
+    "observed_result": "Status: ok; LaunchState: WARM; TotalTime: 141; WaitTime: 145"
+  },
+  {
+    "utc": "2026-10-10T13:40:54Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "uiautomator",
+      "dump",
+      "/data/local/tmp/ridelink-qualification.xml"
+    ],
+    "seconds": 2.673,
+    "exit_code": 0,
+    "observed_result": "fresh hierarchy captured"
+  },
+  {
+    "utc": "2026-10-10T13:40:55Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "input",
+      "tap",
+      "343",
+      "2073"
+    ],
+    "seconds": 0.2,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:40:57Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "uiautomator",
+      "dump",
+      "/data/local/tmp/ridelink-qualification.xml"
+    ],
+    "seconds": 2.535,
+    "exit_code": 0,
+    "observed_result": "fresh hierarchy captured"
+  },
+  {
+    "utc": "2026-10-10T13:40:58Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "input",
+      "tap",
+      "393",
+      "939"
+    ],
+    "seconds": 0.171,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:40:59Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "dumpsys",
+      "media_session"
+    ],
+    "seconds": 0.306,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:40:59Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "settings",
+      "get",
+      "system",
+      "accelerometer_rotation"
+    ],
+    "seconds": 0.094,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:40:59Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "settings",
+      "get",
+      "system",
+      "user_rotation"
+    ],
+    "seconds": 0.225,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:40:59Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "settings",
+      "put",
+      "system",
+      "accelerometer_rotation",
+      "0"
+    ],
+    "seconds": 0.078,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:40:59Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "settings",
+      "put",
+      "system",
+      "user_rotation",
+      "1"
+    ],
+    "seconds": 0.199,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:41:00Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "dumpsys",
+      "media_session"
+    ],
+    "seconds": 0.091,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:41:00Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "settings",
+      "put",
+      "system",
+      "user_rotation",
+      "0"
+    ],
+    "seconds": 0.134,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:41:01Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "dumpsys",
+      "media_session"
+    ],
+    "seconds": 0.221,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:41:01Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "settings",
+      "put",
+      "system",
+      "user_rotation",
+      "1"
+    ],
+    "seconds": 0.162,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:41:02Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "dumpsys",
+      "media_session"
+    ],
+    "seconds": 0.07,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:41:02Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "settings",
+      "put",
+      "system",
+      "user_rotation",
+      "0"
+    ],
+    "seconds": 0.189,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:41:03Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "dumpsys",
+      "media_session"
+    ],
+    "seconds": 0.294,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:41:04Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "settings",
+      "put",
+      "system",
+      "user_rotation",
+      "1"
+    ],
+    "seconds": 0.558,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:41:05Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "dumpsys",
+      "media_session"
+    ],
+    "seconds": 0.096,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:41:05Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "settings",
+      "put",
+      "system",
+      "accelerometer_rotation",
+      "0"
+    ],
+    "seconds": 0.256,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:41:05Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "settings",
+      "put",
+      "system",
+      "user_rotation",
+      "0"
+    ],
+    "seconds": 0.293,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:41:06Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "dumpsys",
+      "media_session"
+    ],
+    "seconds": 0.095,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:41:08Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "uiautomator",
+      "dump",
+      "/data/local/tmp/ridelink-qualification.xml"
+    ],
+    "seconds": 2.386,
+    "exit_code": 0,
+    "observed_result": "fresh hierarchy captured"
+  },
+  {
+    "utc": "2026-10-10T13:41:09Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "input",
+      "keyevent",
+      "4"
+    ],
+    "seconds": 0.234,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:41:11Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "uiautomator",
+      "dump",
+      "/data/local/tmp/ridelink-qualification.xml"
+    ],
+    "seconds": 2.128,
+    "exit_code": 0,
+    "observed_result": "fresh hierarchy captured"
+  },
+  {
+    "utc": "2026-10-10T13:41:12Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "input",
+      "tap",
+      "356",
+      "2269"
+    ],
+    "seconds": 0.236,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:41:14Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "uiautomator",
+      "dump",
+      "/data/local/tmp/ridelink-qualification.xml"
+    ],
+    "seconds": 2.203,
+    "exit_code": 0,
+    "observed_result": "fresh hierarchy captured"
+  },
+  {
+    "utc": "2026-10-10T13:41:14Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "input",
+      "tap",
+      "1155",
+      "239"
+    ],
+    "seconds": 0.274,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:41:26Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "uiautomator",
+      "dump",
+      "/data/local/tmp/ridelink-qualification.xml"
+    ],
+    "seconds": 11.471,
+    "exit_code": 0,
+    "observed_result": "INVALID: dump failed; stale XML excluded"
+  },
+  {
+    "utc": "2026-10-10T13:42:00Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "uiautomator",
+      "dump",
+      "/data/local/tmp/ridelink-qualification.xml"
+    ],
+    "seconds": 2.597,
+    "exit_code": 0,
+    "observed_result": "fresh hierarchy captured"
+  },
+  {
+    "utc": "2026-10-10T13:42:27Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "input",
+      "tap",
+      "463",
+      "421"
+    ],
+    "seconds": 0.186,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:42:30Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "uiautomator",
+      "dump",
+      "/data/local/tmp/ridelink-qualification.xml"
+    ],
+    "seconds": 2.679,
+    "exit_code": 0,
+    "observed_result": "fresh hierarchy captured"
+  },
+  {
+    "utc": "2026-10-10T13:42:30Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "input",
+      "tap",
+      "1155",
+      "239"
+    ],
+    "seconds": 0.191,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:42:33Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "uiautomator",
+      "dump",
+      "/data/local/tmp/ridelink-qualification.xml"
+    ],
+    "seconds": 2.581,
+    "exit_code": 0,
+    "observed_result": "fresh hierarchy captured"
+  },
+  {
+    "utc": "2026-10-10T13:42:33Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "dumpsys",
+      "media_session"
+    ],
+    "seconds": 0.266,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:42:34Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "input",
+      "tap",
+      "1009",
+      "1666"
+    ],
+    "seconds": 0.272,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:42:34Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "input",
+      "tap",
+      "964",
+      "2688"
+    ],
+    "seconds": 0.24,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:42:35Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "dumpsys",
+      "media_session"
+    ],
+    "seconds": 0.198,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:42:38Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "dumpsys",
+      "media_session"
+    ],
+    "seconds": 0.243,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:42:41Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "uiautomator",
+      "dump",
+      "/data/local/tmp/ridelink-qualification.xml"
+    ],
+    "seconds": 2.45,
+    "exit_code": 0,
+    "observed_result": "fresh hierarchy captured"
+  },
+  {
+    "utc": "2026-10-10T13:42:41Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "input",
+      "keyevent",
+      "4"
+    ],
+    "seconds": 0.27,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:42:44Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "uiautomator",
+      "dump",
+      "/data/local/tmp/ridelink-qualification.xml"
+    ],
+    "seconds": 2.346,
+    "exit_code": 0,
+    "observed_result": "fresh hierarchy captured"
+  },
+  {
+    "utc": "2026-10-10T13:42:44Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "input",
+      "keyevent",
+      "4"
+    ],
+    "seconds": 0.137,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:42:44Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "dumpsys",
+      "media_session"
+    ],
+    "seconds": 0.066,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:43:22Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "am",
+      "start",
+      "-W",
+      "-n",
+      "com.ridelink.app/.MainActivity"
+    ],
+    "seconds": 0.272,
+    "exit_code": 0,
+    "observed_result": "Status: ok; LaunchState: WARM; TotalTime: 105; WaitTime: 109"
+  },
+  {
+    "utc": "2026-10-10T13:43:24Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "uiautomator",
+      "dump",
+      "/data/local/tmp/ridelink-qualification.xml"
+    ],
+    "seconds": 2.417,
+    "exit_code": 0,
+    "observed_result": "fresh hierarchy captured"
+  },
+  {
+    "utc": "2026-10-10T13:43:25Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "input",
+      "tap",
+      "343",
+      "2073"
+    ],
+    "seconds": 0.118,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:43:27Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "uiautomator",
+      "dump",
+      "/data/local/tmp/ridelink-qualification.xml"
+    ],
+    "seconds": 2.389,
+    "exit_code": 0,
+    "observed_result": "fresh hierarchy captured"
+  },
+  {
+    "utc": "2026-10-10T13:43:30Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "uiautomator",
+      "dump",
+      "/data/local/tmp/ridelink-qualification.xml"
+    ],
+    "seconds": 2.539,
+    "exit_code": 0,
+    "observed_result": "fresh hierarchy captured"
+  },
+  {
+    "utc": "2026-10-10T13:43:30Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "input",
+      "tap",
+      "1174",
+      "239"
+    ],
+    "seconds": 0.235,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:43:33Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "uiautomator",
+      "dump",
+      "/data/local/tmp/ridelink-qualification.xml"
+    ],
+    "seconds": 2.492,
+    "exit_code": 0,
+    "observed_result": "fresh hierarchy captured"
+  },
+  {
+    "utc": "2026-10-10T13:43:33Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "input",
+      "tap",
+      "1031",
+      "435"
+    ],
+    "seconds": 0.126,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:43:36Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "uiautomator",
+      "dump",
+      "/data/local/tmp/ridelink-qualification.xml"
+    ],
+    "seconds": 2.897,
+    "exit_code": 0,
+    "observed_result": "fresh hierarchy captured"
+  },
+  {
+    "utc": "2026-10-10T13:43:37Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "input",
+      "tap",
+      "423",
+      "393"
+    ],
+    "seconds": 0.099,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:43:40Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "uiautomator",
+      "dump",
+      "/data/local/tmp/ridelink-qualification.xml"
+    ],
+    "seconds": 2.686,
+    "exit_code": 0,
+    "observed_result": "fresh hierarchy captured"
+  },
+  {
+    "utc": "2026-10-10T13:43:40Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "input",
+      "tap",
+      "419",
+      "1325"
+    ],
+    "seconds": 0.167,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:43:43Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "uiautomator",
+      "dump",
+      "/data/local/tmp/ridelink-qualification.xml"
+    ],
+    "seconds": 2.806,
+    "exit_code": 0,
+    "observed_result": "fresh hierarchy captured"
+  },
+  {
+    "utc": "2026-10-10T13:43:44Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "input",
+      "tap",
+      "636",
+      "2716"
+    ],
+    "seconds": 0.124,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:43:46Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "uiautomator",
+      "dump",
+      "/data/local/tmp/ridelink-qualification.xml"
+    ],
+    "seconds": 2.495,
+    "exit_code": 0,
+    "observed_result": "fresh hierarchy captured"
+  },
+  {
+    "utc": "2026-10-10T13:43:47Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "input",
+      "tap",
+      "1003",
+      "1689"
+    ],
+    "seconds": 0.269,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:43:50Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "uiautomator",
+      "dump",
+      "/data/local/tmp/ridelink-qualification.xml"
+    ],
+    "seconds": 2.539,
+    "exit_code": 0,
+    "observed_result": "fresh hierarchy captured"
+  },
+  {
+    "utc": "2026-10-10T13:43:50Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "input",
+      "tap",
+      "382",
+      "1247"
+    ],
+    "seconds": 0.218,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:43:51Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "input",
+      "tap",
+      "1040",
+      "897"
+    ],
+    "seconds": 0.12,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:43:54Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "uiautomator",
+      "dump",
+      "/data/local/tmp/ridelink-qualification.xml"
+    ],
+    "seconds": 2.553,
+    "exit_code": 0,
+    "observed_result": "fresh hierarchy captured"
+  },
+  {
+    "utc": "2026-10-10T13:45:13Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "uiautomator",
+      "dump",
+      "/data/local/tmp/ridelink-qualification.xml"
+    ],
+    "seconds": 2.682,
+    "exit_code": 0,
+    "observed_result": "fresh hierarchy captured"
+  },
+  {
+    "utc": "2026-10-10T13:45:14Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "input",
+      "tap",
+      "1059",
+      "897"
+    ],
+    "seconds": 0.242,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:45:16Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "uiautomator",
+      "dump",
+      "/data/local/tmp/ridelink-qualification.xml"
+    ],
+    "seconds": 2.613,
+    "exit_code": 0,
+    "observed_result": "fresh hierarchy captured"
+  },
+  {
+    "utc": "2026-10-10T13:45:17Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "input",
+      "tap",
+      "1174",
+      "239"
+    ],
+    "seconds": 0.309,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:45:20Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "uiautomator",
+      "dump",
+      "/data/local/tmp/ridelink-qualification.xml"
+    ],
+    "seconds": 2.395,
+    "exit_code": 0,
+    "observed_result": "fresh hierarchy captured"
+  },
+  {
+    "utc": "2026-10-10T13:45:20Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "input",
+      "tap",
+      "1031",
+      "435"
+    ],
+    "seconds": 0.297,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:45:23Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "uiautomator",
+      "dump",
+      "/data/local/tmp/ridelink-qualification.xml"
+    ],
+    "seconds": 2.429,
+    "exit_code": 0,
+    "observed_result": "fresh hierarchy captured"
+  },
+  {
+    "utc": "2026-10-10T13:45:24Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "input",
+      "tap",
+      "636",
+      "2716"
+    ],
+    "seconds": 0.248,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:45:26Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "uiautomator",
+      "dump",
+      "/data/local/tmp/ridelink-qualification.xml"
+    ],
+    "seconds": 2.374,
+    "exit_code": 0,
+    "observed_result": "fresh hierarchy captured"
+  },
+  {
+    "utc": "2026-10-10T13:45:27Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "input",
+      "tap",
+      "1003",
+      "1689"
+    ],
+    "seconds": 0.254,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:45:29Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "uiautomator",
+      "dump",
+      "/data/local/tmp/ridelink-qualification.xml"
+    ],
+    "seconds": 2.46,
+    "exit_code": 0,
+    "observed_result": "fresh hierarchy captured"
+  },
+  {
+    "utc": "2026-10-10T13:45:30Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "input",
+      "tap",
+      "382",
+      "1247"
+    ],
+    "seconds": 0.267,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:45:32Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "uiautomator",
+      "dump",
+      "/data/local/tmp/ridelink-qualification.xml"
+    ],
+    "seconds": 2.53,
+    "exit_code": 0,
+    "observed_result": "fresh hierarchy captured"
+  },
+  {
+    "utc": "2026-10-10T13:45:36Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "uiautomator",
+      "dump",
+      "/data/local/tmp/ridelink-qualification.xml"
+    ],
+    "seconds": 2.531,
+    "exit_code": 0,
+    "observed_result": "fresh hierarchy captured"
+  },
+  {
+    "utc": "2026-10-10T13:46:50Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "uiautomator",
+      "dump",
+      "/data/local/tmp/ridelink-qualification.xml"
+    ],
+    "seconds": 2.93,
+    "exit_code": 0,
+    "observed_result": "fresh hierarchy captured"
+  },
+  {
+    "utc": "2026-10-10T13:46:50Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "input",
+      "tap",
+      "1059",
+      "897"
+    ],
+    "seconds": 0.233,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:46:51Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "input",
+      "keyevent",
+      "4"
+    ],
+    "seconds": 0.308,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:46:53Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "uiautomator",
+      "dump",
+      "/data/local/tmp/ridelink-qualification.xml"
+    ],
+    "seconds": 2.403,
+    "exit_code": 0,
+    "observed_result": "fresh hierarchy captured"
+  },
+  {
+    "utc": "2026-10-10T13:46:53Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "input",
+      "keyevent",
+      "4"
+    ],
+    "seconds": 0.186,
+    "exit_code": 0,
+    "observed_result": "completed"
+  },
+  {
+    "utc": "2026-10-10T13:46:54Z",
+    "command": [
+      "adb",
+      "-s",
+      "$RIDELINK_SERIAL",
+      "shell",
+      "dumpsys",
+      "media_session"
+    ],
+    "seconds": 0.093,
+    "exit_code": 0,
+    "observed_result": "completed"
+  }
+]

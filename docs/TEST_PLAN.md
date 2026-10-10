@@ -1567,6 +1567,13 @@ New physical rows (Android, OnePlus Nord 5, the reviewed and merged build only):
 | N-03 | Live intercom (authenticated peer): shade and lock screen | A separate "Intercom on" notification with Mute/Unmute and End intercom, both working; with music too, the media card is still present | Phone + peer — **PENDING — AUTHENTICATED PEER UNAVAILABLE** |
 | N-04 | `POST_NOTIFICATIONS` denied, then start the intercom (peer) | Intercom runs; no intercom notification is shown (ADR-022 A1 consequence); the system still lists the foreground service | Phone + peer |
 
+**10 October 2026 physical result on merged `4104e81`, OnePlus Nord 5:** L-07 PASS;
+L-08 PASS for the disposable-fixture acceptance checks (cancellation observed during Checking,
+not after partial indexing writes). L-06 BLOCKED; Q-01, N-01, N-02 and lifecycle remain
+MANUAL REQUIRED with passing subchecks and explicit gaps. See
+[PHASE9A5_ANDROID_PHYSICAL.md](PHASE9A5_ANDROID_PHYSICAL.md). The earlier software regressions
+above and historical Phase 9A results do not close those gaps.
+
 ### 4.4 Phase 5 scheduled playback and drift — what the laptop now proves, and what it cannot
 
 Added by the thirty-fifth session (`docs/STATUS.md` §2al.3, closing §4 problem 41). STATUS previously

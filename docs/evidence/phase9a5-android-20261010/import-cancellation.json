@@ -1,0 +1,13 @@
+{
+  "source": "Visual inspection of private indexing-before-cancel.png; raw screenshot not published",
+  "observed_phase": "Checking",
+  "done": 3,
+  "total": 20,
+  "cancel_control_visible": true,
+  "after_cancel_message": "Import cancelled",
+  "library_count_before": 58,
+  "library_count_after_cancel": 58,
+  "retry_completion": "20 tracks \u00b7 20 new",
+  "library_count_after_retry": 78,
+  "partial_indexing_write_retention_observed": false
+}
