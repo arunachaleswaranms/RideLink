@@ -31,6 +31,18 @@ investigated further.
 phones and the explicit replacement on each, then Phase 9B-A from I-01 (TEST_PLAN, Phase 9B-A
 additions).
 
+**18 October 2026 — Phase 9B-A Android ↔ Android physical integration BLOCKED AT CHECKPOINT 1
+(problem 122).** Two physical phones: OnePlus Nord 5 (Android 16/API 36) and Motorola moto g57
+power (Android 17/API 37), same access point, phone-to-phone TCP verified. Both run the signed
+`4104e81` artifact (code-identical to main `8f47a72`; read-back SHA-256 `7cdcfc29…fb75`, signer
+`51d88fc7…3ee2`); Device B was a user-approved first install. **I-01 discovery PASS** (0.6 s, both
+directions). **I-02 secure pairing FAIL**: Android Keystore refuses Conscrypt's TLS 1.3
+`CertificateVerify` signature (`NONEwithECDSA`) with `INCOMPATIBLE_DIGEST`, because the identity key
+authorises only `DIGEST_SHA256`. No SAS was ever shown; nothing unauthenticated was admitted. Every
+later two-phone row is BLOCKED. No application code changed in the evidence run; the fix is a
+separate draft PR. See [the Phase 9B-A report](PHASE9BA_ANDROID_ANDROID_PHYSICAL.md). **No
+Android-to-iOS, Phase 9 or V1 readiness claim.**
+
 **10 October 2026 — Phase 9A.5 Android evidence READY FOR INDEPENDENT REVIEW WITH EXPLICIT LIMITATIONS.**
 N-01 and N-02 now have user-confirmed real lock-screen/audio observations on three actual music
 tracks. Background/unlock state consistency and lock-screen Pause/Resume were user-confirmed;
