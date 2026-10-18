@@ -7,6 +7,8 @@ import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
 import androidx.lifecycle.lifecycleScope
 import com.ridelink.app.diagnostics.DiagnosticsShare
 import com.ridelink.app.library.SharedLibraryCoordinator
@@ -14,6 +16,7 @@ import com.ridelink.app.music.MusicCoordinator
 import com.ridelink.app.service.IntercomStopOwner
 import com.ridelink.app.service.RideForegroundService
 import com.ridelink.app.session.SessionCoordinator
+import com.ridelink.app.ui.IdentityReplacementScreen
 import com.ridelink.app.ui.RideLinkRoot
 import com.ridelink.app.ui.RideLinkTheme
 import com.ridelink.app.ui.SecureTransportUnavailableScreen
@@ -85,13 +88,15 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        val container = (application as RideLinkApplication).container
+        val app = application as RideLinkApplication
         val deviceDescription = "${Build.MANUFACTURER} ${Build.MODEL}"
 
         setContent {
             RideLinkTheme {
-                container.fold(
-                    onSuccess = { appContainer ->
+                val startup by app.startup.collectAsState()
+                when (val current = startup) {
+                    is AppStartup.Ready -> {
+                        val appContainer = current.container
                         coordinator = appContainer.sessionCoordinator
                         musicCoordinator = appContainer.musicCoordinator
                         intercomStopOwner = appContainer.intercomStopOwner
@@ -120,11 +125,20 @@ class MainActivity : ComponentActivity() {
                             },
                             onExportDiagnostics = { exportDiagnostics(appContainer.diagnosticsExport) },
                         )
-                    },
-                    // The only way to land here is a device-identity failure. There is deliberately
-                    // no plaintext path to offer instead (ADR-007 Amendment A1).
-                    onFailure = { SecureTransportUnavailableScreen(reason = it.message.orEmpty()) },
-                )
+                    }
+                    // ADR-017 Amendment A1: an identity whose key cannot sign a TLS handshake is
+                    // replaced only on the user's explicit, confirmed decision.
+                    is AppStartup.IdentityReplacementRequired ->
+                        IdentityReplacementScreen(
+                            incompatibleIdentity = current.incompatibleIdentity,
+                            replacing = current.replacing,
+                            onReplace = app::replaceIncompatibleIdentity,
+                        )
+                    // A device-identity failure. There is deliberately no plaintext path to offer
+                    // instead (ADR-007 Amendment A1).
+                    is AppStartup.Failed -> SecureTransportUnavailableScreen(reason = current.error.message.orEmpty())
+                    null -> Unit
+                }
             }
         }
     }

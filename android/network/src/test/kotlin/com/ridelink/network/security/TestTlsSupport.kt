@@ -129,7 +129,7 @@ object TestTlsSupport {
                 load(null)
                 setKeyEntry(ALIAS, privateKey, KEY_PASSWORD, arrayOf(certificate))
             }
-        return DeviceIdentity(certificate, keyStore, KEY_PASSWORD)
+        return DeviceIdentity(certificate, keyStore, KEY_PASSWORD, ALIAS)
     }
 
     /** 27 August 2026, 12:00 UTC — a fixed instant, so no test depends on when it is run. */

@@ -1,13 +1,41 @@
 package com.ridelink.network.security
 
 import android.security.keystore.KeyGenParameterSpec
+import android.security.keystore.KeyInfo
 import android.security.keystore.KeyProperties
+import com.ridelink.core.model.SpkiHash
+import com.ridelink.core.security.IdentityCertificate
 import com.ridelink.core.security.UtcTime
+import java.security.KeyFactory
 import java.security.KeyPairGenerator
 import java.security.KeyStore
+import java.security.PrivateKey
 import java.security.Signature
 import java.security.cert.X509Certificate
 import java.security.spec.ECGenParameterSpec
+
+/**
+ * What [AndroidKeystoreIdentityStore.resolve] found (ADR-017 Amendment A1).
+ */
+sealed interface IdentityResolution {
+    /** A usable identity: its key can issue RideLink's certificate and sign a TLS 1.3 handshake. */
+    class Ready(
+        val identity: DeviceIdentity,
+    ) : IdentityResolution
+
+    /**
+     * An identity exists, but its key was generated without `DIGEST_NONE` and so can never sign a
+     * TLS handshake (STATUS §4 problem 122). Keystore cannot add an authorization to an existing
+     * key, so the only remedy is a **new** key — a new SPKI, which ADR-012 says is a new identity.
+     * That is the user's decision, never the store's: it is offered through
+     * [AndroidKeystoreIdentityStore.replaceIncompatibleIdentity] and nothing calls it implicitly.
+     *
+     * [incompatibleSpki] is the identity being replaced, for display (redacted, 6 hex).
+     */
+    class ReplacementRequired(
+        val incompatibleSpki: SpkiHash,
+    ) : IdentityResolution
+}
 
 /**
  * The device identity, held in **Android Keystore** (ADR-017 §1).
@@ -16,6 +44,14 @@ import java.security.spec.ECGenParameterSpec
  * returns its bytes, so there is no code path — accidental or otherwise — that writes it to a
  * file, a log or the network. What this class hands out is an opaque `PrivateKey` handle that only
  * JSSE ever dereferences.
+ *
+ * **Two aliases (ADR-017 Amendment A1).** Keys this build generates live under [alias] and are
+ * authorised for `SHA-256` *and* `NONE` ([IdentityKeyAuthorization]). Every key generated before
+ * the amendment lives under [legacyAlias] and is authorised for `SHA-256` only, which Conscrypt's
+ * TLS signing cannot use. An incompatible legacy entry is read, inspected and reported, and
+ * **never modified or deleted** — not by [resolve], and not by [replaceIncompatibleIdentity], which
+ * writes only [alias]. (Re-issue writes back to whichever alias holds a *capable* key; no build has
+ * ever put one under the legacy alias.) Which one TLS presents is pinned by [DeviceIdentity]'s alias.
  *
  * **Lifetime, by platform, stated because it differs and users notice:**
  *
@@ -28,40 +64,100 @@ import java.security.spec.ECGenParameterSpec
  *
  * A reinstall therefore produces a new identity key, a new SPKI, and a deliberate `pin_mismatch`
  * on the peer — which is correct, not a bug: a different key *is* a different identity (ADR-012).
- * Recovery is the documented one, forget-and-re-pair with a fresh SAS on both screens.
+ * Recovery is the documented one, forget-and-re-pair with a fresh SAS on both screens. An explicit
+ * [replaceIncompatibleIdentity] has exactly the same consequence and the same recovery.
  *
- * The only part of Phase 1b that cannot be exercised without a device. Everything it composes —
- * the certificate encoding, the signing call, the point extraction, the TLS handshake — is
- * covered by JVM tests through [IdentityIssuer] and [TlsControlChannel].
+ * The part of Phase 1b that cannot be exercised without Android Keystore. The certificate
+ * encoding, the signing call and the point extraction are covered by JVM tests through
+ * [IdentityIssuer]; the Keystore authorizations and a real Keystore-backed TLS 1.3 handshake are
+ * covered by `KeystoreTlsIdentityTest`, an instrumented test.
  */
 class AndroidKeystoreIdentityStore(
     private val alias: String = DEFAULT_ALIAS,
+    private val legacyAlias: String = LEGACY_ALIAS,
 ) {
+    init {
+        require(alias != legacyAlias) { "the current and legacy identity aliases must differ" }
+    }
+
     /**
-     * Returns the existing identity, or creates one on first run.
+     * Returns the existing identity, creates one on first run, or reports that the existing one
+     * cannot be used for TLS.
      *
      * If the stored certificate is outside its validity window, a fresh one is issued **around the
      * same key**: the SPKI is unchanged, so peers stay trusted and no SAS is shown (ADR-012,
      * PROTOCOL §4.5.3). This is exactly the operation Android's auto-issued certificate cannot
-     * perform, and the reason RideLink encodes its own (ADR-017 §3).
+     * perform, and the reason RideLink encodes its own (ADR-017 §3). An incompatible identity is
+     * **not** re-issued: a new certificate would not make its key usable.
+     *
+     * A new key is generated only when no identity exists at all. In particular, an incompatible
+     * identity is never silently replaced here — that would change this phone's SPKI without the
+     * user knowing, which ADR-012 forbids.
      */
-    @Suppress("ReturnCount") // three distinct outcomes: existing-and-valid, existing-but-reissued, fresh
-    fun loadOrCreate(now: UtcTime): DeviceIdentity {
-        val keyStore = KeyStore.getInstance(ANDROID_KEYSTORE).apply { load(null) }
-        val existing = keyStore.getEntry(alias, null) as? KeyStore.PrivateKeyEntry
-        if (existing != null) {
-            val certificate = existing.certificate as X509Certificate
-            if (isWithinValidity(certificate, now)) {
-                return DeviceIdentity(certificate, keyStore, null)
-            }
-            return DeviceIdentity(reissue(keyStore, existing, now), keyStore, null)
+    @Suppress("ReturnCount") // three distinct outcomes: fresh, incompatible, existing (re-issued or not)
+    fun resolve(now: UtcTime): IdentityResolution {
+        val keyStore = openKeyStore()
+        val existing =
+            existingIdentity(keyStore)
+                ?: return IdentityResolution.Ready(DeviceIdentity(generate(keyStore, now), keyStore, null, alias))
+        if (!existing.tlsCapable) {
+            return IdentityResolution.ReplacementRequired(spkiOf(existing.certificate))
         }
-        return DeviceIdentity(generate(keyStore, now), keyStore, null)
+        val certificate =
+            if (isWithinValidity(existing.certificate, now)) {
+                existing.certificate
+            } else {
+                reissue(keyStore, existing, now)
+            }
+        return IdentityResolution.Ready(DeviceIdentity(certificate, keyStore, null, existing.alias))
     }
 
     /**
-     * Generates a fresh P-256 key in the Keystore and replaces the placeholder certificate the
-     * Keystore mints at generation time with RideLink's own.
+     * The explicit, user-confirmed replacement of a TLS-incompatible identity (ADR-017 Amendment
+     * A1). Generates a new key under [alias] — a **new SPKI** — and leaves the incompatible entry
+     * exactly as it was.
+     *
+     * This is deliberately not a general "rotate my key": it refuses unless [resolve] would return
+     * [IdentityResolution.ReplacementRequired], so it can never replace a working identity, and it
+     * is not certificate re-issuance (which keeps the SPKI). Peers that pinned the old SPKI will see
+     * `pin_mismatch`; recovery is forget-and-re-pair with a fresh SAS on both phones. Trusted-peer
+     * records are not touched: they pin the *peers'* keys, which have not changed.
+     */
+    fun replaceIncompatibleIdentity(now: UtcTime): DeviceIdentity {
+        val keyStore = openKeyStore()
+        val existing = existingIdentity(keyStore)
+        check(existing != null && !existing.tlsCapable) {
+            "refusing to replace an identity that is absent or already TLS-capable"
+        }
+        // The current alias is only ever written by generate(), which always authorises NONE, so
+        // an incompatible key there is not one this app made. Refuse rather than delete it.
+        check(existing.alias != alias) { "refusing to overwrite the current identity alias" }
+        return DeviceIdentity(generate(keyStore, now), keyStore, null, alias)
+    }
+
+    private class ExistingIdentity(
+        val alias: String,
+        val privateKey: PrivateKey,
+        val certificate: X509Certificate,
+        val tlsCapable: Boolean,
+    )
+
+    /** The current alias wins over the legacy one: after a replacement both exist. */
+    private fun existingIdentity(keyStore: KeyStore): ExistingIdentity? =
+        listOf(alias, legacyAlias).firstNotNullOfOrNull { candidate ->
+            (keyStore.getEntry(candidate, null) as? KeyStore.PrivateKeyEntry)?.let { entry ->
+                ExistingIdentity(
+                    alias = candidate,
+                    privateKey = entry.privateKey,
+                    certificate = entry.certificate as X509Certificate,
+                    tlsCapable = IdentityKeyAuthorization.isTlsCapable(authorizedDigests(entry.privateKey)),
+                )
+            }
+        }
+
+    /**
+     * Generates a fresh P-256 key in the Keystore under [alias] and replaces the placeholder
+     * certificate the Keystore mints at generation time with RideLink's own.
      *
      * `setCertificateSubject`/`setCertificateSerialNumber` are deliberately *not* used to shape
      * that placeholder: its encoding is outside our control, cannot be pinned by a shared vector,
@@ -76,13 +172,24 @@ class AndroidKeystoreIdentityStore(
             KeyGenParameterSpec
                 .Builder(alias, KeyProperties.PURPOSE_SIGN or KeyProperties.PURPOSE_VERIFY)
                 .setAlgorithmParameterSpec(ECGenParameterSpec(DeviceIdentity.CURVE))
-                .setDigests(KeyProperties.DIGEST_SHA256)
+                // SHA-256 for RideLink's own certificate signature (ADR-017 §3); NONE because
+                // Conscrypt signs the TLS 1.3 CertificateVerify as NONEwithECDSA over a digest it
+                // computed itself. Without NONE no handshake completes (ADR-017 Amendment A1).
+                .setDigests(KeyProperties.DIGEST_SHA256, KeyProperties.DIGEST_NONE)
                 // No setUserAuthenticationRequired: the identity has to be usable while the screen
                 // is locked, which is the normal state of a phone in a tank bag mid-ride
                 // (ARCHITECTURE §6.4).
                 .build(),
         )
         val keyPair = generator.generateKeyPair()
+        // The platform enforces what it recorded, not what was asked for. A key that cannot sign a
+        // handshake must never be handed out as Ready, nor left under the current alias where it
+        // would read as an incompatible key this app did not make. It is the entry this call just
+        // created, so removing it touches nothing that existed before.
+        if (!IdentityKeyAuthorization.isTlsCapable(authorizedDigests(keyPair.private))) {
+            keyStore.deleteEntry(alias)
+            error("Keystore did not record the digest authorizations TLS needs")
+        }
         val signer = Signature.getInstance(DeviceIdentity.SIGNATURE_ALGORITHM).apply { initSign(keyPair.private) }
         val certificate = IdentityIssuer.issue(keyPair.public, signer, now)
         keyStore.setKeyEntry(alias, keyPair.private, null, arrayOf(certificate))
@@ -91,14 +198,24 @@ class AndroidKeystoreIdentityStore(
 
     private fun reissue(
         keyStore: KeyStore,
-        entry: KeyStore.PrivateKeyEntry,
+        existing: ExistingIdentity,
         now: UtcTime,
     ): X509Certificate {
-        val signer = Signature.getInstance(DeviceIdentity.SIGNATURE_ALGORITHM).apply { initSign(entry.privateKey) }
-        val certificate = IdentityIssuer.issue(entry.certificate.publicKey, signer, now)
-        keyStore.setKeyEntry(alias, entry.privateKey, null, arrayOf(certificate))
+        val signer = Signature.getInstance(DeviceIdentity.SIGNATURE_ALGORITHM).apply { initSign(existing.privateKey) }
+        val certificate = IdentityIssuer.issue(existing.certificate.publicKey, signer, now)
+        keyStore.setKeyEntry(existing.alias, existing.privateKey, null, arrayOf(certificate))
         return certificate
     }
+
+    /** The digests Keystore has recorded for [key], read through the supported `KeyInfo` API. */
+    private fun authorizedDigests(key: PrivateKey): Set<String> =
+        KeyFactory
+            .getInstance(key.algorithm, ANDROID_KEYSTORE)
+            .getKeySpec(key, KeyInfo::class.java)
+            .digests
+            .toSet()
+
+    private fun spkiOf(certificate: X509Certificate): SpkiHash = IdentityCertificate.spkiHashOfEncoded(certificate.publicKey.encoded)
 
     private fun isWithinValidity(
         certificate: X509Certificate,
@@ -109,8 +226,14 @@ class AndroidKeystoreIdentityStore(
             UtcTime(certificate.notAfter.time / MILLIS_PER_SECOND),
         )
 
+    private fun openKeyStore(): KeyStore = KeyStore.getInstance(ANDROID_KEYSTORE).apply { load(null) }
+
     companion object {
-        const val DEFAULT_ALIAS: String = "ridelink.identity.v1"
+        /** Where keys authorised for TLS live (ADR-017 Amendment A1). */
+        const val DEFAULT_ALIAS: String = "ridelink.identity.v2"
+
+        /** Where every key generated before ADR-017 Amendment A1 lives. Never deleted by RideLink. */
+        const val LEGACY_ALIAS: String = "ridelink.identity.v1"
         private const val ANDROID_KEYSTORE = "AndroidKeyStore"
         private const val MILLIS_PER_SECOND = 1000L
     }

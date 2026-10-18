@@ -137,3 +137,82 @@ unbound and the pin check on that side meaningless.
 | Ed25519 | Clean and attractive, but TLS 1.3 support for `ed25519` certificates is less uniformly guaranteed across Android's Conscrypt and Apple's stack than `ecdsa_secp256r1_sha256`, and the spike would have had to prove a second thing. P-256 is the conservative interoperable option the brief asked for |
 | Put a `subjectAltName` / device name in the certificate | A durable identifier handed to anyone who can open the port. The mDNS TXT record was cleaned of exactly this in ADR-002 A1; re-introducing it one layer down would undo that |
 | Whole-certificate pinning | Already rejected by ADR-012, and §3 above is the concrete reason it would have hurt |
+
+## Amendment A1 — 18 October 2026 — the Android identity key must also authorise `DIGEST_NONE`, and an identity created without it is replaced only by the user
+
+**Evidence:** [`docs/PHASE9BA_ANDROID_ANDROID_PHYSICAL.md`](../PHASE9BA_ANDROID_ANDROID_PHYSICAL.md) (two physical phones, Android 16/API 36 and Android 17/API 37), STATUS §4 problem 122.
+
+### What was wrong
+
+§1 specified the Android key as `KeyGenParameterSpec` with `PURPOSE_SIGN` and **`DIGEST_SHA256`** —
+correct for the one signature RideLink makes itself (`SHA256withECDSA` over its own TBSCertificate,
+§3), and insufficient for the one Android's TLS stack makes with the same key. For an Android
+Keystore EC key, Conscrypt computes the TLS 1.3 `CertificateVerify` digest itself and calls back into
+Java to sign **that digest** with `NONEwithECDSA` (`CryptoUpcalls.ecSignDigestWithPrivateKey`).
+Keystore enforces a key's digest authorizations, so it refused the operation with
+`INCOMPATIBLE_DIGEST`. No Android build could complete a RideLink handshake, as client or as server.
+Two physical phones were the first place a handshake was ever attempted with a Keystore key: the JVM
+suite uses software keys, which carry no digest authorization at all, and Phase 9A never authenticated
+a peer. §5's "Keystore `PrivateKeyEntry` presented through a `KeyManager`" was right; the key behind it
+could not do the job.
+
+### Decision
+
+1. **New keys are authorised for `DIGEST_SHA256` *and* `DIGEST_NONE`.** Nothing else in §1 changes:
+   still P-256, still `PURPOSE_SIGN | PURPOSE_VERIFY`, still non-exportable, still no user
+   authentication (the identity must work with the screen locked). The certificate is still
+   `ecdsa-with-SHA256`; the wire, the SPKI encoding and every vector are unchanged.
+   `NONEwithECDSA` over SHA-256(m) is the same signature as `SHA256withECDSA` over m. The only new
+   capability is signing a digest the platform's TLS stack computed, inside the app's own uid,
+   which no other app can reach.
+2. **`IdentityKeyAuthorization` is the rule**, pure and JVM-tested: a key is usable only when
+   `KeyInfo.getDigests()` contains both. A key generated in a way Keystore does not record as
+   capable is deleted at once (it is the entry that call just created) and never handed out.
+3. **Keystore cannot add an authorization to an existing key.** Every identity created through
+   `8f47a72` is therefore permanently unable to sign a handshake, and the only remedy is a **new key —
+   a new SPKI**, which ADR-012 says is a new identity. That is never done silently:
+   - Keys generated from now on live under a **new alias**, `ridelink.identity.v2`. The old
+     alias, `ridelink.identity.v1`, is read, inspected through `KeyInfo` and reported, and is
+     **never modified or deleted**.
+   - `AndroidKeystoreIdentityStore.resolve` returns `Ready` or `ReplacementRequired`. It generates a
+     key only when no identity exists at all, and never re-issues an incompatible one.
+   - On `ReplacementRequired` the app builds **nothing** around the unusable key: no `AppContainer`,
+     no listener, no discovery, no pairing. It shows a dedicated screen that explains the
+     consequence, and replaces only after an explicit confirmation dialog
+     (`replaceIncompatibleIdentity`). That call refuses unless the current identity is actually
+     incompatible, so it can never rotate a working identity. It is not certificate re-issuance,
+     which keeps the SPKI.
+   - The container is then built in-process around the new identity. Trusted-peer records are not
+     touched, because they pin the *peers'* keys, which have not changed. A peer that had pinned the
+     old SPKI sees `pin_mismatch`, and recovery is the existing forget-and-re-pair with a fresh SAS.
+     No physical Android pair has ever completed a handshake, so in practice there is no such pin.
+4. **TLS presents exactly the resolved identity.** A keystore can now hold two EC identities, and a
+   `KeyManagerFactory` over the whole store may choose either. `DeviceIdentity.keyManagers()` wraps
+   the platform key manager in `SingleAliasKeyManager`, which offers and dereferences only the
+   resolved alias. It still returns the same opaque Keystore handle, and no key material is touched.
+
+### Rejected alternatives
+
+| Option | Rejected because |
+|---|---|
+| Replace an incompatible key automatically on upgrade | Changes the phone's SPKI without the user knowing, which ADR-012 forbids however benign the cause |
+| Delete the old alias and regenerate under the same name | Destroys the old identity irrecoverably, and a crash between delete and generate leaves no identity at all. Keeping both and pinning the alias is non-destructive |
+| A software key, or a key exported to a `PKCS12` keystore, so JSSE can sign with it | Exports the identity key — ADR-017 §3 exists to keep it inside Keystore |
+| A custom TLS provider or `KeyManager` that signs with `SHA256withECDSA` itself | Conscrypt hands the callback an already-hashed transcript; re-hashing it would produce a signature over the wrong bytes. Authorising `NONE` is the platform's documented mechanism |
+| Keep the identity loadable and only warn in the UI | The app would still advertise and accept connections that cannot authenticate, and the user would see the same unexplained stall that Phase 9B-A did |
+
+### iOS
+
+Not affected by this mechanism: `SecKeyCreateSignature` has no per-key digest authorization. The
+iPhone handshake has still never run on hardware, so this is an argument, not a measurement.
+
+### Verification
+
+`KeystoreTlsIdentityTest` (instrumented, `network`, real Keystore keys, disposable aliases in the
+test package's own Keystore namespace) passed 8/8 on the `RideLink_API36` emulator, the OnePlus
+Nord 5 (Android 16/API 36) and the moto g57 power (Android 17/API 37). With the fix reverted (the key
+SHA-256-only again), 4 of the 8 fail on the emulator, for the reason the phones showed. The
+emulator also ran the real upgrade: main's build created a legacy key, the fix build updated it in
+place, the replacement screen appeared, and confirming it produced a new identity that survived a
+restart. Replacing an identity **on the two test phones** is not done here; it waits for the user's
+authorisation after independent review.

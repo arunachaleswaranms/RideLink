@@ -1,0 +1,4 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- The Keystore-backed TLS test runs a real handshake over loopback; nothing leaves the device. -->
+    <uses-permission android:name="android.permission.INTERNET" />
+</manifest>

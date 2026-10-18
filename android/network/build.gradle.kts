@@ -8,6 +8,7 @@ android {
 
     defaultConfig {
         minSdk = 31
+        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
     compileOptions {
@@ -43,6 +44,15 @@ dependencies {
     // docs/test-results/phase1b-security-spike-20260827.md for what the substitution does and does
     // not prove.
     testImplementation(libs.conscrypt.openjdk.uber)
+
+    // ADR-017 Amendment A1: the identity's Keystore authorizations and a Keystore-backed TLS 1.3
+    // handshake can only be exercised on a device. This module's test APK is its own package, so
+    // its Keystore namespace cannot contain the app's identity aliases at all.
+    androidTestImplementation(libs.androidx.test.runner)
+    androidTestImplementation(libs.androidx.test.junit)
+    androidTestImplementation(libs.junit4)
+    androidTestImplementation(libs.kotlin.test)
+    androidTestImplementation(libs.kotlinx.coroutines.core)
 }
 
 tasks.withType<Test> {

@@ -42,7 +42,6 @@ import com.ridelink.core.model.ManifestId
 import com.ridelink.core.model.TransferId
 import com.ridelink.core.model.Ulid
 import com.ridelink.core.security.TrustedPeerStore
-import com.ridelink.core.security.UtcTime
 import com.ridelink.data.database.RideLinkDatabase
 import com.ridelink.data.library.ArtworkCache
 import com.ridelink.data.library.LibraryIndexer
@@ -57,7 +56,6 @@ import com.ridelink.network.control.ConnTiebreakGenerator
 import com.ridelink.network.control.ControlSessionManager
 import com.ridelink.network.control.LocalHandshakeIdentity
 import com.ridelink.network.discovery.NsdDiscoveryController
-import com.ridelink.network.security.AndroidKeystoreIdentityStore
 import com.ridelink.network.security.DeviceIdentity
 import com.ridelink.network.security.TlsControlChannel
 import com.ridelink.network.transfer.BulkTransportManager
@@ -83,7 +81,8 @@ private const val MILLIS_PER_SECOND = 1_000L
  *
  * **Security wiring (Phase 1b).** Three things are assembled here and nowhere else:
  *
- * 1. the device's identity keypair and certificate, from Android Keystore ([AndroidKeystoreIdentityStore], ADR-017);
+ * 1. the device's identity keypair and certificate, from Android Keystore (ADR-017; resolved by
+ *    [com.ridelink.app.RideLinkApplication] through `AndroidKeystoreIdentityStore`, Amendment A1);
  * 2. the one production [com.ridelink.network.control.ControlChannel], which is TLS 1.3 ([TlsControlChannel], ADR-007);
  * 3. the trusted-peer store the SPKI pin is checked against ([FileTrustedPeerStore], ADR-012).
  *
@@ -94,6 +93,12 @@ private const val MILLIS_PER_SECOND = 1_000L
  */
 class AppContainer(
     private val context: Context,
+    /**
+     * Resolved by [com.ridelink.app.RideLinkApplication] before this container exists, and only
+     * when it is usable for TLS (ADR-017 Amendment A1): a container is never built around an
+     * identity whose key cannot sign a handshake.
+     */
+    private val deviceIdentity: DeviceIdentity,
 ) {
     // A SupervisorJob is required here, not merely tidy: network.control's accept loop, read
     // loop, keepalive and clock-sync bursts are all children of this scope, and one of them
@@ -101,14 +106,6 @@ class AppContainer(
     private val appScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
 
     private val monotonicNowUs: () -> Long = { SystemClock.elapsedRealtimeNanos() / NANOS_PER_MICRO }
-
-    /**
-     * The one wall-clock read in the app, and only X.509 uses it. Certificate validity is defined
-     * in wall-clock terms by RFC 5280 and has no monotonic alternative — see
-     * [com.ridelink.core.security.UtcTime] for why this is the single permitted exception to
-     * CLAUDE.md's monotonic-clocks rule.
-     */
-    private val wallClockNow: () -> UtcTime = { UtcTime(System.currentTimeMillis() / MILLIS_PER_SECOND) }
 
     // The process's one redacted log (ARCHITECTURE §11 item 3), bounded by ADR-029 §2. It is never
     // persisted; the only way out of the process is the user-initiated export below.
@@ -128,9 +125,6 @@ class AppContainer(
         )
 
     private val securityDirectory: File = File(context.filesDir, "security").apply { mkdirs() }
-
-    private val deviceIdentity: DeviceIdentity =
-        AndroidKeystoreIdentityStore().loadOrCreate(wallClockNow())
 
     val trustedPeers: TrustedPeerStore = FileTrustedPeerStore(File(securityDirectory, "trusted_peers.json"))
 

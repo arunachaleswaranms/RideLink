@@ -1,5 +1,38 @@
 # RideLink — Test Plan
 
+## Phase 9B-A Keystore TLS identity additions (18 October 2026)
+
+[ADR-017 Amendment A1](DECISIONS/ADR-017-identity-key-and-certificate.md#amendment-a1--18-october-2026--the-android-identity-key-must-also-authorise-digest_none-and-an-identity-created-without-it-is-replaced-only-by-the-user),
+STATUS §4 problem 122. The first two-phone run ([PHASE9BA_ANDROID_ANDROID_PHYSICAL.md](PHASE9BA_ANDROID_ANDROID_PHYSICAL.md))
+failed I-02 because Android Keystore refused Conscrypt's TLS signature. Every JVM TLS test had
+passed throughout, because their software keys carry no digest authorization. **Run these on a
+real Android Keystore before claiming anything about Android TLS:**
+
+- `KeystoreTlsIdentityTest` (`network` instrumented, real Keystore keys, disposable aliases in the test
+  package's own Keystore namespace; it cannot reach `com.ridelink.app`'s keys):
+  - a SHA-256-only key is refused `NONEwithECDSA`, and a handshake with it fails as server and as client;
+  - the amended key signs both the certificate and the TLS digest;
+  - two Keystore identities complete a mutual TLS 1.3 handshake, see each other's SPKI and derive
+    equal SAS digits (asserted, never printed);
+  - re-issue keeps the SPKI;
+  - an incompatible identity is reported, not replaced, and the explicit replacement makes a new
+    SPKI, keeps the legacy entry byte-for-byte, presents only the new key, and refuses to run twice;
+  - aliases are deleted afterwards.
+
+  Run it with `:network:assembleDebugAndroidTest`, then `adb -s <serial> install --user 0 -t` and
+  `am instrument --user 0`, and uninstall `com.ridelink.network.test` afterwards. Use `--user 0` on a
+  phone with a work profile.
+- **Never** run `:app:connectedAndroidTest` against a phone carrying the sideloaded release build. The
+  debug app has the same application ID and a different signer.
+- `IdentityReplacementScreenTest` (`app` instrumented, emulator only): the first tap only asks, Cancel
+  replaces nothing, confirmation replaces exactly once, and nothing is offered while a replacement runs.
+- JVM: `IdentityKeyAuthorizationTest` (the digest rule) and `SingleAliasKeyManagerTest` (TLS presents
+  the resolved alias whatever else the keystore holds, in a real handshake).
+- **Physical retest after the user authorises identity replacement**: install the reviewed build on
+  both phones as an in-place update (`tools/sideload/android.sh install`, no `--clean`). Each phone
+  shows the replacement screen; confirm on each. Then re-run I-01, I-02 (compare the six digits), I-03
+  and the rest of §5 in order.
+
 ## Phase 8.5 UI polish additions
 
 See [UI audit and evidence](PHASE8_5_UI_POLISH.md) and [native fixture instructions](../tools/ui-qa/README.md).
@@ -1347,7 +1380,7 @@ Two substitutions make that possible on a laptop, and neither is hidden:
 
 | Production | In the suite | Still real |
 |---|---|---|
-| Android Keystore holds a non-exportable P-256 key | An in-memory `KeyStore` holds a JCE P-256 key | the certificate encoding, the signing call, the `KeyManager` wiring, the SPKI derivation |
+| Android Keystore holds a non-exportable P-256 key | An in-memory `KeyStore` holds a JCE P-256 key | the certificate encoding, the signing call, the `KeyManager` wiring, the SPKI derivation. **Not** the key's digest authorizations — a software key has none, which is exactly what hid STATUS §4 problem 122; `KeystoreTlsIdentityTest` (§4) closes that half on a real Keystore |
 | `android.net.ssl.SSLSockets.exportKeyingMaterial` | `Conscrypt.exportKeyingMaterial` — the method the platform class delegates to | the TLS 1.3 handshake, mutual auth, the exporter computation |
 | iOS Keychain holds the identity key | `SecKeyCreateRandomKey` with `kSecAttrIsPermanent: false` | everything else: Apple's shipping `Network.framework` and `Security.framework` |
 
@@ -1368,6 +1401,7 @@ and is closed by I-02/I-03/I-04/I-19/I-20/I-21 on the two real phones, not by an
 | Player | load/play/pause/seek/stop/end-of-track — **done, both platforms, §4.3** (`ExoPlayerMusicPlayerTest`/`AVAudioEnginePlayerTests`). Scheduled start at a future deadline and rate change are Phase 5 sample-accurate-scheduling concerns, not built or tested this phase | both |
 | Transfer | loopback to self: 1 KiB / 5 MiB / 50 MiB; corrupt a chunk ⇒ rejected; truncate ⇒ rejected; cancel mid-transfer ⇒ `.part` removed; **no `.part` ever promoted** | both |
 | Manifest sync | loopback sync of a 5 000-entry manifest; kill the sender after page 20 ⇒ receiver keeps the previous manifest and reports not-synchronised; retry succeeds | both |
+| **Keystore TLS identity** | `KeystoreTlsIdentityTest`: real Keystore keys sign the certificate *and* the TLS 1.3 `CertificateVerify`; a real mutual handshake between two Keystore identities; re-issue keeps the SPKI; an incompatible identity is reported and replaced only explicitly. **Done — 8/8 on the API 36 emulator, the OnePlus Nord 5 (API 36) and the moto g57 power (API 37)**, 18 October 2026 | Android |
 | Discovery | advertise + browse on loopback/emulator network; service resolves | both |
 | **Discovery privacy** | advertised TXT key set is a **subset of `{v, dh, plat}`**; **no TXT value equals, contains or prefixes `peer_id`, `identity_spki_sha256` or any 6-hex prefix of either**; `dh` differs between two advertising sessions of the same install; `dh` is not persisted across app restarts; no TXT value contains a device or user name | both |
 | Build baseline | `minSdk`/`compileSdk`/`targetSdk` equal 31/36/36; iOS deployment target equals the ADR-011 value — asserted from build configuration so drift fails a check | both |
