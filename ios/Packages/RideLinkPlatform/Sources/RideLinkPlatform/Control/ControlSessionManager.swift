@@ -66,8 +66,8 @@ public enum ControlEvent: Sendable {
     case connected(remotePeerId: PeerId, sessionId: SessionId, isLocalLeader: Bool, authGeneration: Int64)
     /// The peer's presented SPKI matched the stored pin, so the trust gate passed with no user
     /// action at all (PROTOCOL §4.1 "silent connect"). Raised only on the **surviving** connection
-    /// and always immediately before `.connected` — it is what carries `PAIRING -> CONNECTING` for
-    /// a known peer, now that `.connected` no longer doubles as implicit pairing success.
+    /// and always immediately before `.connected` — it is what carries the session into `CONNECTING`
+    /// (from `PAIRING`, or `DISCOVERING` — ADR-019 Amendment A2) for a known peer, now that `.connected` no longer doubles as implicit pairing success.
     case peerTrusted(remotePeerId: PeerId)
     /// The surviving control connection ended.
     ///
@@ -863,8 +863,8 @@ public actor ControlSessionManager {
     }
 
     /// Both users confirmed and `PairingExchange` has written the pin exactly once. Only now does
-    /// the surviving connection become authenticated — `.pairingSucceeded` first (which carries
-    /// `PAIRING -> CONNECTING`), then `.connected` (`CONNECTING -> CONNECTED`), over the same socket.
+    /// the surviving connection become authenticated — `.pairingSucceeded` first (which carries the
+    /// session into `CONNECTING`), then `.connected` (`CONNECTING -> CONNECTED`), over the same socket.
     private func succeedPairing(_ peer: TrustedPeer) {
         pairing = nil
         updatePairingPrompt(nil) // the six digits stop meaning anything the moment this settles

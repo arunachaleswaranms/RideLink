@@ -92,8 +92,8 @@ sealed class ControlEvent {
     /**
      * The peer's presented SPKI matched the stored pin, so the trust gate passed with no user
      * action at all (PROTOCOL §4.1 "silent connect"). Raised only on the **surviving** connection
-     * and always immediately before [Connected] — it is what carries `PAIRING -> CONNECTING` for a
-     * known peer, now that [Connected] no longer doubles as implicit pairing success.
+     * and always immediately before [Connected] — it is what carries the session into `CONNECTING`
+     * (from `PAIRING`, or `DISCOVERING` — ADR-019 Amendment A2) for a known peer, now that [Connected] no longer doubles as implicit pairing success.
      */
     data class PeerTrusted(
         val remotePeerId: PeerId,
@@ -853,8 +853,8 @@ class ControlSessionManager(
 
     /**
      * Both users confirmed and [PairingExchange] has written the pin exactly once. Only now does
-     * the surviving connection become authenticated — `PairingSucceeded` first (which carries
-     * `PAIRING -> CONNECTING`), then `Connected` (`CONNECTING -> CONNECTED`), over the same socket.
+     * the surviving connection become authenticated — `PairingSucceeded` first (which carries the
+     * session into `CONNECTING`), then `Connected` (`CONNECTING -> CONNECTED`), over the same socket.
      */
     private fun succeedPairing(peer: TrustedPeer) {
         pairing = null
