@@ -114,8 +114,12 @@ public enum SessionFsm {
         case .pairingRejectedOrTimeout:
             return s == .pairing ? FsmState(status: .discovering) : nil
 
+        // The trust gate (ADR-019) is the *event*, not the state it is applied in. From
+        // `.discovering` too (ADR-019 Amendment A2, STATUS §4 problem 124): this device's own
+        // `.pairing` can end — a link loss — while the peer's dial is accepted and pairs underneath
+        // it. Both users confirming, or the stored pin matching, is the same claim either way.
         case .pairingSucceeded:
-            return s == .pairing ? FsmState(status: .connecting) : nil
+            return s == .pairing || s == .discovering ? FsmState(status: .connecting) : nil
 
         case .connectionEstablished:
             return s == .connecting ? FsmState(status: .connected) : nil

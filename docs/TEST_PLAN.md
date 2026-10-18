@@ -1,5 +1,49 @@
 # RideLink — Test Plan
 
+## Phase 9B-A post-fix retest additions (18 October 2026, evening)
+
+STATUS §4 problems 123 and 124, both found on two physical Android phones after problem 122's fix
+([evidence](PHASE9BA_ANDROID_ANDROID_PHYSICAL.md#continuation--post-fix-physical-retest-18-october-2026-evening)).
+
+**Problem 123 — `PongWriteFailureTest` (`:network`, JVM, real loopback TLS 1.3)**
+
+- It authenticates a real connection, then fails only the live socket's writes, as a reset
+  connection would.
+- A `PING` dispatched on that still-live connection must not throw out of the read path.
+- The test asserts that the `PONG` write was really attempted: the frame was neither refused nor
+  retired first. Without that check, closing the socket would make the test pass vacuously.
+- It fails against the unguarded `handlePing` with `IOException: Connection reset`, the phones'
+  exception.
+- iOS has no mirror test, because its `PONG` write is `try?`.
+
+**Problem 124 — ADR-019 Amendment A2**
+
+- `session-gate` vectors: two rows moved (`peer-trusted-in-discovering`,
+  `pairing-succeeded-in-discovering`). `session-fsm` gains
+  `discovering-pairing-succeeded-to-connecting`. Both platforms run both files.
+- `SessionGateTest` / `SessionGateTests`: the gate opens from `PAIRING` and `DISCOVERING` only.
+- `SessionCoordinatorDiscoveringTrustGateTest` (`:app`, real `SessionCoordinator`): the phones'
+  sequence (`PeerSelected`, code shown, `LinkLost(NETWORK)` back to `DISCOVERING`), then:
+  - the peer's dial pairs, giving `CONNECTING` and then `CONNECTED`;
+  - the same with a trusted peer through `PeerTrusted`;
+  - `Connected` alone, which must still open nothing.
+- `InboundTrustWhileDiscoveringTest` (`:network`, real managers, real loopback TLS 1.3): a session
+  that has only done `StartDiscovery` accepts a dial.
+  - An unknown peer that both users confirm reaches `CONNECTED` without visiting `PAIRING`.
+  - A trusted peer connects silently.
+  - A one-user confirmation stays out of `CONNECTING`.
+- Each positive case fails against the unamended table with the session stuck at `DISCOVERING`.
+  Each guard passes either way.
+
+**Physical, after review:** install the reviewed build in place on both phones. They already hold
+each other's pins, so start at I-03, which is exactly the trusted path the amendment changes. Then
+deliberately repeat the failing shape:
+1. Start a pairing.
+2. Let one phone's screen time out (or switch it to another app) before confirming.
+3. Confirm that the other phone keeps running, and that both reach `CONNECTED` once paired again.
+
+A first-time I-02 needs the user's authorisation to *Forget* the pairing on both phones.
+
 ## Phase 9B-A Keystore TLS identity additions (18 October 2026)
 
 [ADR-017 Amendment A1](DECISIONS/ADR-017-identity-key-and-certificate.md#amendment-a1--18-october-2026--the-android-identity-key-must-also-authorise-digest_none-and-an-identity-created-without-it-is-replaced-only-by-the-user),

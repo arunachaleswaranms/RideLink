@@ -24,8 +24,9 @@ import RideLinkCore
 ///
 /// > `.connected` never produces `.pairingSucceeded`.
 ///
-/// `PAIRING -> CONNECTING` is reachable **only** from `.peerTrusted` (the stored pin matched) or
-/// `.pairingSucceeded` (both users confirmed and the pin was written).
+/// `CONNECTING` is reachable **only** from `.peerTrusted` (the stored pin matched) or
+/// `.pairingSucceeded` (both users confirmed and the pin was written) — from `PAIRING`, or from
+/// `DISCOVERING` when the pairing ran on a connection the peer dialled (ADR-019 Amendment A2).
 public enum SessionGate {
     /// - Returns: the FSM event this control event implies from `status`, or nil when it implies no
     ///   transition at all. Nil is a legitimate answer, not a failure: `.pairingRequired`
@@ -39,9 +40,12 @@ public enum SessionGate {
         case .connected:
             return connectionAuthenticated(status)
 
-        // The two — and only two — ways out of `.pairing` and into `.connecting`.
+        // The two — and only two — ways into `.connecting`, from `.pairing` or `.discovering`.
+        // ADR-019 Amendment A2 (STATUS §4 problem 124): a peer that dials while this device is back
+        // in `.discovering` is accepted and pairs on that connection; dropping the gate's verdict
+        // there left an authenticated control session the session layer did not know about.
         case .peerTrusted, .pairingSucceeded:
-            return status == .pairing ? .pairingSucceeded : nil
+            return status == .pairing || status == .discovering ? .pairingSucceeded : nil
 
         // A six-digit code is on screen. The session stays in `.pairing` until two humans answer.
         case .pairingRequired:

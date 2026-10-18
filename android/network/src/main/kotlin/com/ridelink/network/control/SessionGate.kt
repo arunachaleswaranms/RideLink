@@ -28,8 +28,9 @@ import com.ridelink.core.sessionfsm.LinkLossReason as FsmLinkLossReason
  *
  * > [ControlEvent.Connected] never produces [SessionEvent.PairingSucceeded].
  *
- * `PAIRING -> CONNECTING` is reachable **only** from [ControlEvent.PeerTrusted] (the stored pin
- * matched) or [ControlEvent.PairingSucceeded] (both users confirmed and the pin was written).
+ * `CONNECTING` is reachable **only** from [ControlEvent.PeerTrusted] (the stored pin matched) or
+ * [ControlEvent.PairingSucceeded] (both users confirmed and the pin was written) — from `PAIRING`, or
+ * from `DISCOVERING` when the pairing ran on a connection the peer dialled (ADR-019 Amendment A2).
  */
 object SessionGate {
     /**
@@ -48,7 +49,7 @@ object SessionGate {
             // TLS socket to an unknown peer indistinguishable from a confirmed pairing.
             is ControlEvent.Connected -> connectionAuthenticated(status)
 
-            // The two — and only two — ways out of PAIRING and into CONNECTING.
+            // The two — and only two — ways into CONNECTING, from PAIRING or DISCOVERING.
             is ControlEvent.PeerTrusted -> pairingPassed(status)
             is ControlEvent.PairingSucceeded -> pairingPassed(status)
 
@@ -107,8 +108,15 @@ object SessionGate {
         }
     }
 
+    /**
+     * ADR-019 Amendment A2 (STATUS §4 problem 124): DISCOVERING as well as PAIRING. A peer that
+     * dials while this device is back in DISCOVERING — its own PAIRING ended by a link loss, or a
+     * losing duplicate dial — is accepted, and its pairing or pin check runs on that connection.
+     * Dropping the gate's verdict there left an authenticated control session the session layer did
+     * not know about. What opens the gate is unchanged: the pin matched, or both users confirmed.
+     */
     private fun pairingPassed(status: SessionStatus): SessionEvent? =
-        if (status == SessionStatus.PAIRING) SessionEvent.PairingSucceeded else null
+        if (status == SessionStatus.PAIRING || status == SessionStatus.DISCOVERING) SessionEvent.PairingSucceeded else null
 
     private fun pairingEnded(status: SessionStatus): SessionEvent? =
         if (status == SessionStatus.PAIRING) SessionEvent.PairingRejectedOrTimeout else null
