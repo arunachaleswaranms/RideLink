@@ -28,7 +28,11 @@ import androidx.compose.ui.text.font.FontFamily
  *
  * Replacing the identity changes this phone's SPKI — to a peer, a different phone (ADR-012) — so it
  * is offered, explained and confirmed, never done on the user's behalf. Until then RideLink builds
- * nothing around the unusable key: no discovery, no listener, no pairing.
+ * nothing around the unusable key: no discovery, no listener, no pairing — and, deliberately, no
+ * local music either, because the music player lives in the same composition root
+ * ([com.ridelink.app.di.AppContainer]) as the session it can be synchronised with. Splitting that
+ * root to keep music running would create a second construction path for one-time-only state; the
+ * screen says so instead, and the user's library and settings are untouched.
  */
 @Composable
 fun IdentityReplacementScreen(
@@ -57,7 +61,12 @@ fun IdentityReplacementScreen(
             Text(
                 "Replacing it gives this phone a new identity. If the other phone already trusts this one, " +
                     "it will show a security warning: forget the pairing on both phones, then pair again " +
-                    "and compare a new six-digit code. Your music and settings are not changed.",
+                    "and compare a new six-digit code.",
+                style = MaterialTheme.typography.bodyMedium,
+            )
+            Text(
+                "Music on this phone is also unavailable until you decide. Your music library and " +
+                    "settings are kept, and music is available again as soon as the identity is replaced.",
                 style = MaterialTheme.typography.bodyMedium,
             )
             DiagnosticDisclosure("identity details") {

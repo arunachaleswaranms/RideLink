@@ -102,6 +102,30 @@ object IdentityIssuer {
         return serial
     }
 
+    /**
+     * True only for a certificate this encoder issued around its own key: self-signed by that key,
+     * and with a TBSCertificate **byte-identical** to the one [IdentityCertificate] produces from the
+     * certificate's own key, serial and validity (ADR-017 §2–§3).
+     *
+     * This is how [AndroidKeystoreIdentityStore] tells a finished identity from a half-made one
+     * (ADR-017 Amendment A1). Android Keystore writes its own placeholder certificate the moment a
+     * key is generated, and RideLink overwrites it only afterwards, so an entry can exist whose key
+     * is fine and whose certificate was never RideLink's. Comparing the exact encoding, rather than
+     * a field or two, means no certificate RideLink did not write can pass.
+     */
+    fun isRideLinkIdentityCertificate(certificate: X509Certificate): Boolean =
+        runCatching {
+            val expected =
+                IdentityCertificate.tbsCertificate(
+                    uncompressedPoint(certificate.publicKey),
+                    certificate.serialNumber.toByteArray(),
+                    UtcTime(certificate.notBefore.time / MILLIS_PER_SECOND),
+                    UtcTime(certificate.notAfter.time / MILLIS_PER_SECOND),
+                )
+            certificate.verify(certificate.publicKey)
+            expected.contentEquals(certificate.tbsCertificate)
+        }.getOrDefault(false)
+
     /** Round-trips our own DER through the platform's X.509 parser, so a malformed encoding fails here. */
     fun parseCertificate(der: ByteArray): X509Certificate =
         CertificateFactory
@@ -131,6 +155,8 @@ object IdentityIssuer {
 
     /** Masks off the top bit, so the 16-byte serial always encodes as a positive DER INTEGER. */
     private const val CLEAR_SIGN_BIT = 0x7F
+
+    private const val MILLIS_PER_SECOND = 1000L
 
     private const val UNCOMPRESSED_TAG: Byte = 0x04
     private const val COORDINATE_BYTES = 32

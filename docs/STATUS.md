@@ -1,35 +1,46 @@
 # RideLink — Status
 
 **18 October 2026 — Problem 122 (Android Keystore TLS signing) FIXED IN SOFTWARE on branch
-`fix/android-keystore-tls-digest`, pending independent review. No identity replaced on either test
-phone.** New Android identity keys are authorised for `DIGEST_SHA256` *and* `DIGEST_NONE`
+`fix/android-keystore-tls-digest` (PR #21), revised after the first independent review; pending
+final review. No identity replaced on either test phone, and the fix is not installed on either.**
+
+New Android identity keys are authorised for `DIGEST_SHA256` *and* `DIGEST_NONE`
 ([ADR-017 Amendment A1](DECISIONS/ADR-017-identity-key-and-certificate.md#amendment-a1--18-october-2026--the-android-identity-key-must-also-authorise-digest_none-and-an-identity-created-without-it-is-replaced-only-by-the-user)).
-Keys created earlier can never gain it. They are now detected through `KeyInfo`, the app builds
-nothing around them, and they are replaced (a new SPKI, under the new alias `ridelink.identity.v2`)
-only after an explicit confirmation. The legacy alias is never modified or deleted, and TLS presents
-only the resolved alias. No wire, vector, trust-store or FSM change; iOS untouched.
+- **Keys created earlier** can never gain it. They are detected through `KeyInfo`, the app builds
+  nothing around them, and they are replaced (a new SPKI, under the new alias `ridelink.identity.v2`)
+  only after an explicit confirmation.
+- **Legacy alias:** never modified or deleted.
+- **TLS** presents only the resolved alias.
+- **Unchanged:** wire, vectors, trust store and FSM; iOS untouched.
+
+**Review round 1 (PR #20 merged first as `1da9b3e`):**
+- **Partial creation closed.** Generation is all-or-nothing (empty alias only; any failure after the
+  key exists removes that one entry). An entry whose certificate is not RideLink's exact encoding,
+  left by a process death, is discarded, never accepted as `Ready`. A failed replacement leaves the
+  legacy identity unchanged and still reported, and no working or pre-existing identity can be
+  removed.
+- **Documented:** local music is intentionally unavailable while replacement is unconfirmed.
 
 **Verified, not written:**
-- `KeystoreTlsIdentityTest` (real Keystore keys, disposable aliases) passed 8/8 on the API 36
-  emulator, the OnePlus Nord 5 (Android 16/API 36) and the moto g57 power (Android 17/API 37). With
-  the fix reverted, 4/8 fail on the emulator, for the reason the phones showed. On the phones, only
-  the separate `com.ridelink.network.test` package was installed and then removed; RideLink's install
-  state was unchanged.
-- Emulator upgrade path: main's debug build created a legacy key, and the fix build, updated in place,
-  showed the replacement screen. Confirming it produced a new identity that persisted across a
-  restart. `IdentityReplacementScreenTest` 3/3 and `ActivityOwnershipTest` 1/1 (emulator).
-- Android unit: 1,196 passed, 0 failed (core 471, network 297, audio 33, data 47, app 348). ktlint,
-  detekt and lint (0 errors; warnings pre-existing) pass.
+- `KeystoreTlsIdentityTest` 13/13 on the API 36 emulator. With only the partial-creation protections
+  removed, 4 of the 5 new cases fail, one of them because a placeholder certificate was accepted as
+  `Ready`.
+- The 8-case first version had passed 8/8 on the OnePlus Nord 5 (Android 16/API 36) and the moto g57
+  power (Android 17/API 37). The 13-case version was **not** run on the phones, because installing the
+  fix there is not authorised.
+- Emulator upgrade path re-run: legacy key → replacement screen (with the music notice) → confirmed →
+  new identity, which persisted across a restart. `IdentityReplacementScreenTest` 3/3 and
+  `ActivityOwnershipTest` 1/1.
+- Android unit: 1,199 passed, 0 failed (core 471, network 300, audio 33, data 47, app 348). ktlint,
+  detekt and lint (0 errors; warnings pre-existing) pass. CI and Security for the pushed head are in PR #21.
 
-**Observed, not fixed:** one full-suite run failed `VoiceControllerIntercomTest` "switching from full
-duplex to PTT stops transmitting" (the fake engine's `muted` was read before it was set). It passed
-5/5 in isolation on this branch *and* on unmodified main, and passed in the next full run; the file is
-untouched here. It looks like a pre-existing, load-sensitive test-side race; recorded, not
-investigated further.
+**Observed, not fixed:** one first-round full-suite run failed `VoiceControllerIntercomTest`
+"switching from full duplex to PTT stops transmitting". It passed 5/5 in isolation on this branch and
+on unmodified main; the file is untouched. It looks like a pre-existing, load-sensitive test-side
+race.
 
-**Next:** independent review. Then, only with the user's authorisation, an in-place update of both
-phones and the explicit replacement on each, then Phase 9B-A from I-01 (TEST_PLAN, Phase 9B-A
-additions).
+**Next:** final independent review. Then, only with the user's authorisation, an in-place update of
+both phones and the explicit replacement on each, then Phase 9B-A from I-01.
 
 **18 October 2026 — Phase 9B-A Android ↔ Android physical integration BLOCKED AT CHECKPOINT 1
 (problem 122).** Two physical phones: OnePlus Nord 5 (Android 16/API 36) and Motorola moto g57
@@ -8604,7 +8615,7 @@ as of this write-up — see §7.
 | 119 | **RECORDED 9 October 2026 — consequence of ADR-022 Amendment A1 (Android).** The intercom notification is now a plain notification, which needs `POST_NOTIFICATIONS`; the old single notification carried a media-session token and was exempt. With notifications denied, the intercom runs (the foreground service is still listed by the system) but its Mute / End intercom controls are not shown | Low (the app asks for the permission before an intercom start; `RideStartPolicy` treats a denial as a warning) | By design; documented in ADR-022 A1, ARCHITECTURE §6.4 and TEST_PLAN AF-06 / N-04 |
 | 120 | **FIXED 9 October 2026 (found by independent review of PR #18; Phase 9A.5's own; both platforms).** The new local Up Next — and the library's play-now and add, and "Play here" — edited `LocalQueue` without `SyncPlaybackGate`. While synchronised transport owned playback, selecting a row loaded and played on this phone only, Clear or removing the current entry stopped or advanced this phone only, and Move/Add edited a queue the synchronised path replaces on every synchronised selection — a second path around the leader-ordered one | High (bypasses ADR-024 A14's single transport authority) | ADR-024 Amendment A15: `SyncPlaybackGate.localQueueLocked()` from the same ownership; `LocalQueueEdits` refuses every local edit at `MusicCoordinator`'s boundary with no effect; Up Next and the library read-only (controls absent) while synchronised. Mutants (gate ignored) fail on both platforms. **Round 2 (second review, same day):** the round-1 Boolean admission did not reach the effects it authorised — they ran after suspensions (lookup, `Load`, iOS audio-session activation), and synchronised activation inside one let stale local work load, play or stop; a re-check of "local now" would also have revived local A's work under a later local C. Fixed by ADR-024 A15 round 2: a `LocalQueueEditAdmission` bound to the owner's local-ownership lifetime (advanced on every LOCAL↔SYNC flip), carried by `LocalPlaybackEffects` and re-proved before every activation/`Load`/`Play`/`Stop`/`Pause`/`Seek`; local transport presses carry one too. Mutants that drop any proof or freeze the lifetime fail on both platforms. **Round 3 (third review):** the admission orders lifetimes, not operations — inside one local lifetime a parked Select A could load after Clear, replace a newer Select B, or play over a newer Pause. Fixed by ADR-024 A15 round 3: `LocalPlaybackEffects` issues every local effect a ticket (selection: load-and-play, stop; transport intent: load-and-play, stop, resume, pause) and proves it beside the admission before every player step; add/move/non-current remove take none. Disabling the sequence checks fails the Clear, Select B and both Pause cases on both platforms and the two real-coordinator cases on the emulator. **Round 4 (fourth review, 10 October):** round 3's `Stop` needed its transport ticket and a load's `Play` its own, so Pause after Clear discarded the `Stop`, empty-queue Play (`ResumePlayback` in both reducers) discarded it and restarted the cleared track, and Play during a pending selection played the previous track and was lost. Fixed by A15 round 4: `Stop` ended only by a newer selection; a load's `Play` follows the newest intent's wish to play; a resume defers to its own selection's in-flight load; empty-queue Play does nothing. Each guard removed alone fails exactly its own `R4-*` cases on both platforms |
 | 121 | **FIXED 9 October 2026 (found by the third independent review of PR #18; Android; pre-existing since closure-audit Finding G).** `MainActivity.attemptPlaySharedTrackLocally` checked `foregroundVisible` (and, since problem 120, the local-queue lock) once, then suspended in `findLocalByContentHash` and `SharedLibraryCoordinator.cachedFile`, and on the cache path called `RideForegroundService.startMusicFromVisibleUi` with no second check — so an Activity that stopped while either lookup was in flight could still start the music foreground service and play, which ARCHITECTURE §6.4's foreground-visible rule forbids | Medium (a foreground-service start from a non-visible Activity; Android normally refuses it, which `onForegroundServiceStartFailed` would then record as a failure the user did not cause) | `VisibleMusicStart` holds the first-play rule for every visible-UI play (`attemptPlayNow`, Up Next select, shared-music Play): visibility and the owner's local-queue lock are read immediately before the start, with no suspension between that read, the start and the coordinator call; `MusicCoordinator` remains the final admission authority. `VisibleMusicStartTest` (JVM): the Activity stopping during either lookup, or synchronised mode taking transport during one, yields no start and no play; the normal and refused-start paths are unchanged. Removing the re-check fails 4 of its 7 cases. iOS: not affected (its lookup is synchronous; no foreground service) |
-| 122 | **FIXED IN SOFTWARE 18 October 2026 (branch `fix/android-keystore-tls-digest`, pending independent review); PHYSICAL RETEST PENDING — identity replacement on the test phones not yet authorised.** Found by Phase 9B-A on two physical Android phones ([evidence](PHASE9BA_ANDROID_ANDROID_PHYSICAL.md)); pre-existing since Phase 1b. No Android build could complete a RideLink TLS handshake. Conscrypt signs the TLS 1.3 `CertificateVerify` for an Android Keystore EC key by calling back with `NONEwithECDSA` over a digest it computed itself, and the identity key was generated with `setDigests(DIGEST_SHA256)` only (ADR-017 §1), so `keystore2` refused with `INCOMPATIBLE_DIGEST` — on Android 16/API 36 and Android 17/API 37, as client and as server. It went unseen because the JVM suite uses software keys, which have no digest authorization, and no test had ever run a handshake with a Keystore key | **Critical** (Android release-blocking: pairing and every two-device feature) | ADR-017 Amendment A1: new keys authorise `SHA-256` and `NONE` under `ridelink.identity.v2`; `IdentityKeyAuthorization` is the rule (`KeyInfo.getDigests()`). A legacy (`v1`) key is reported as `ReplacementRequired`, never re-issued and never replaced automatically; the app builds nothing around it and offers an explicit, confirmed replacement (new SPKI; the legacy entry kept untouched; refuses for a working identity). `SingleAliasKeyManager` makes TLS present only the resolved alias. `KeystoreTlsIdentityTest` 8/8 on the emulator, API 36 and API 37 phones (4/8 fail with the fix reverted); JVM `IdentityKeyAuthorizationTest`, `SingleAliasKeyManagerTest`; `IdentityReplacementScreenTest`. iOS not affected by this mechanism (no per-key digest authorization) but untested on hardware |
+| 122 | **FIXED IN SOFTWARE 18 October 2026 (branch `fix/android-keystore-tls-digest`, pending independent review); PHYSICAL RETEST PENDING — identity replacement on the test phones not yet authorised.** Found by Phase 9B-A on two physical Android phones ([evidence](PHASE9BA_ANDROID_ANDROID_PHYSICAL.md)); pre-existing since Phase 1b. No Android build could complete a RideLink TLS handshake. Conscrypt signs the TLS 1.3 `CertificateVerify` for an Android Keystore EC key by calling back with `NONEwithECDSA` over a digest it computed itself, and the identity key was generated with `setDigests(DIGEST_SHA256)` only (ADR-017 §1), so `keystore2` refused with `INCOMPATIBLE_DIGEST` — on Android 16/API 36 and Android 17/API 37, as client and as server. It went unseen because the JVM suite uses software keys, which have no digest authorization, and no test had ever run a handshake with a Keystore key | **Critical** (Android release-blocking: pairing and every two-device feature) | ADR-017 Amendment A1: new keys authorise `SHA-256` and `NONE` under `ridelink.identity.v2`; `IdentityKeyAuthorization` is the rule (`KeyInfo.getDigests()`). A legacy (`v1`) key is reported as `ReplacementRequired`, never re-issued and never replaced automatically; the app builds nothing around it and offers an explicit, confirmed replacement (new SPKI; the legacy entry kept untouched; refuses for a working identity). `SingleAliasKeyManager` makes TLS present only the resolved alias. `KeystoreTlsIdentityTest` 8/8 on the emulator, API 36 and API 37 phones (4/8 fail with the fix reverted); review round 1 added all-or-nothing generation and discards an entry without a RideLink certificate, so a half-made identity is never `Ready` (13/13 on the emulator; 4 fail without it); JVM `IdentityKeyAuthorizationTest`, `SingleAliasKeyManagerTest`; `IdentityReplacementScreenTest`. iOS not affected by this mechanism (no per-key digest authorization) but untested on hardware |
 
 Resolved 26 Aug 2026 session: `CLAUDE.md` in `.gitignore` (was problem 1); `.DS_Store` tracking
 (was problem 7 — the claim was incorrect; the files are untracked and now ignored); the ADR-015/

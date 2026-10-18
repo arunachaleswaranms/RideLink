@@ -94,6 +94,42 @@ class KeystoreTlsIdentityTest {
         keyStore().setKeyEntry(alias, keyPair.private, null, arrayOf(IdentityIssuer.issue(keyPair.public, signer, now)))
     }
 
+    /**
+     * The production key spec, stopped where an interrupted generation stops: the key exists, with
+     * Keystore's own placeholder certificate, and RideLink's certificate was never written.
+     */
+    private fun generateUnfinishedCurrentKey(alias: String) {
+        val generator = KeyPairGenerator.getInstance(KeyProperties.KEY_ALGORITHM_EC, ANDROID_KEYSTORE)
+        generator.initialize(
+            KeyGenParameterSpec
+                .Builder(alias, KeyProperties.PURPOSE_SIGN or KeyProperties.PURPOSE_VERIFY)
+                .setAlgorithmParameterSpec(ECGenParameterSpec(DeviceIdentity.CURVE))
+                .setDigests(KeyProperties.DIGEST_SHA256, KeyProperties.DIGEST_NONE)
+                .build(),
+        )
+        generator.generateKeyPair()
+    }
+
+    /** A store whose certificate issuance or Keystore commit fails after the key has been generated. */
+    private fun failingStore(
+        current: String,
+        legacy: String,
+        failIssue: Boolean,
+    ) = AndroidKeystoreIdentityStore(
+        current,
+        legacy,
+        issueCertificate = {
+            key,
+            signer,
+            at,
+            ->
+            if (failIssue) error("injected issuance failure") else IdentityIssuer.issue(key, signer, at)
+        },
+        commitEntry = { _, _, _, _ -> error("injected setKeyEntry failure") },
+    )
+
+    private fun spkiOfEntry(alias: String) = DeviceIdentity(certificate(alias), keyStore(), null, alias).identitySpkiSha256
+
     private fun ready(store: AndroidKeystoreIdentityStore): DeviceIdentity = assertIs<IdentityResolution.Ready>(store.resolve(now)).identity
 
     @After
@@ -265,6 +301,87 @@ class KeystoreTlsIdentityTest {
 
         val identity = ready(store)
         assertFailsWith<IllegalStateException> { store.replaceIncompatibleIdentity(now) }
+        assertEquals(identity.identitySpkiSha256, ready(store).identitySpkiSha256)
+    }
+
+    // Partial creation — a failure after the key exists leaves nothing behind, on a fresh store.
+    @Test
+    fun aFailedCertificateIssueOrCommitLeavesNoIdentityBehind() {
+        for (failIssue in listOf(true, false)) {
+            val current = alias("v2.$failIssue")
+            val legacy = alias("v1.$failIssue")
+
+            assertFailsWith<IllegalStateException> { failingStore(current, legacy, failIssue).resolve(now) }
+            assertFalse(keyStore().containsAlias(current), "a half-made key must not survive the failed call")
+
+            // The next, healthy attempt starts from nothing and yields a complete RideLink identity.
+            val identity = ready(AndroidKeystoreIdentityStore(current, legacy))
+            assertTrue(IdentityIssuer.isRideLinkIdentityCertificate(identity.certificate))
+        }
+    }
+
+    // Partial creation during an explicit replacement — the legacy identity is untouched and still reported.
+    @Test
+    fun aFailedReplacementLeavesTheLegacyIdentityExactlyAsItWas() {
+        for (failIssue in listOf(true, false)) {
+            val current = alias("v2.$failIssue")
+            val legacy = alias("v1.$failIssue")
+            generateLegacyIdentity(legacy)
+            val legacyCertificate = certificate(legacy).encoded
+            val legacySpki = spkiOfEntry(legacy)
+
+            assertFailsWith<IllegalStateException> { failingStore(current, legacy, failIssue).replaceIncompatibleIdentity(now) }
+
+            assertFalse(keyStore().containsAlias(current))
+            assertContentEquals(legacyCertificate, certificate(legacy).encoded, "the legacy identity must be untouched")
+            // Still unconfirmed as far as the store knows: the user is asked again, nothing is half-done.
+            val reported = assertIs<IdentityResolution.ReplacementRequired>(AndroidKeystoreIdentityStore(current, legacy).resolve(now))
+            assertEquals(legacySpki, reported.incompatibleSpki)
+        }
+    }
+
+    // Partial creation that no in-process cleanup could catch (process death between the two steps).
+    @Test
+    fun aGenerationInterruptedBeforeItsCertificateIsNeverReady() {
+        val current = alias("v2")
+        generateUnfinishedCurrentKey(current)
+        val placeholder = certificate(current)
+        assertFalse(IdentityIssuer.isRideLinkIdentityCertificate(placeholder), "Keystore's placeholder is not a RideLink certificate")
+        val unfinishedSpki = spkiOfEntry(current)
+
+        val identity = ready(AndroidKeystoreIdentityStore(current, alias("v1")))
+
+        assertTrue(IdentityIssuer.isRideLinkIdentityCertificate(identity.certificate))
+        assertNotEquals(unfinishedSpki, identity.identitySpkiSha256, "the unfinished key is discarded, never adopted")
+    }
+
+    @Test
+    fun anInterruptedReplacementFallsBackToTheUntouchedLegacyIdentity() {
+        val current = alias("v2")
+        val legacy = alias("v1")
+        generateLegacyIdentity(legacy)
+        val legacyCertificate = certificate(legacy).encoded
+        generateUnfinishedCurrentKey(current)
+
+        val reported = assertIs<IdentityResolution.ReplacementRequired>(AndroidKeystoreIdentityStore(current, legacy).resolve(now))
+
+        assertEquals(spkiOfEntry(legacy), reported.incompatibleSpki)
+        assertFalse(keyStore().containsAlias(current))
+        assertContentEquals(legacyCertificate, certificate(legacy).encoded)
+    }
+
+    // Cleanup never reaches a working identity.
+    @Test
+    fun aWorkingIdentityIsNeverDiscardedOrReplaced() {
+        val current = alias("v2")
+        val store = AndroidKeystoreIdentityStore(current, alias("v1"))
+        val identity = ready(store)
+        val certificateBytes = certificate(current).encoded
+
+        repeat(3) { assertEquals(identity.identitySpkiSha256, ready(store).identitySpkiSha256) }
+        assertFailsWith<IllegalStateException> { store.replaceIncompatibleIdentity(now) }
+        assertFailsWith<IllegalStateException> { failingStore(current, alias("v1b"), failIssue = true).replaceIncompatibleIdentity(now) }
+        assertContentEquals(certificateBytes, certificate(current).encoded)
         assertEquals(identity.identitySpkiSha256, ready(store).identitySpkiSha256)
     }
 

@@ -186,7 +186,34 @@ could not do the job.
      touched, because they pin the *peers'* keys, which have not changed. A peer that had pinned the
      old SPKI sees `pin_mismatch`, and recovery is the existing forget-and-re-pair with a fresh SAS.
      No physical Android pair has ever completed a handshake, so in practice there is no such pin.
-4. **TLS presents exactly the resolved identity.** A keystore can now hold two EC identities, and a
+4. **No half-made identity is ever `Ready`** (independent review of PR #21). Keystore writes the key,
+   with its own placeholder certificate, the moment it is generated. RideLink's certificate replaces it
+   only afterwards, so a failure between the two steps leaves a TLS-capable key whose certificate is
+   not RideLink's. Before this was closed, the next `resolve` would have accepted that entry as
+   `Ready`. Now:
+   - **Generation is all-or-nothing.** It runs only on an empty current alias, so its cleanup can
+     only ever remove the entry that call created. Any failure after the key exists (certificate
+     issuance, `setKeyEntry`, the authorization check) deletes that entry before rethrowing.
+   - **Process death between the two steps.** A process death escapes that cleanup, so `resolve` and
+     `replaceIncompatibleIdentity` first discard an entry under the current alias whose certificate
+     is not RideLink's.
+   - **RideLink's certificate is recognised by exact encoding.** `IdentityIssuer.isRideLinkIdentityCertificate`
+     checks the self-signature and that the TBSCertificate is byte-identical to the one the shared
+     encoder produces from the certificate's own key, serial and validity.
+   - **Why discarding is safe.** Such an entry was never returned by the store, so it was never
+     presented in a handshake and no peer can have pinned it: it is not an identity, and discarding
+     it restores the state from before the attempt. A working identity always carries a RideLink
+     certificate, so it can never match, and the legacy alias is never examined or deleted.
+   - **A failed replacement leaves the legacy identity byte-for-byte unchanged** and still reported,
+     so the user is asked again. Nothing is left half-done.
+5. **Local music is unavailable until the user decides, intentionally.** While replacement is
+   unconfirmed there is no `AppContainer`. The music player lives in that same composition root as
+   the session it synchronises with, so there is no player either. Keeping music alive would mean a
+   second construction path for state that is built exactly once. The replacement screen says so in
+   plain words. The library and settings on disk are untouched, and music returns the moment the
+   identity is replaced. The state is reachable only by updating a pre-amendment build in place; a
+   fresh install never sees it.
+6. **TLS presents exactly the resolved identity.** A keystore can now hold two EC identities, and a
    `KeyManagerFactory` over the whole store may choose either. `DeviceIdentity.keyManagers()` wraps
    the platform key manager in `SingleAliasKeyManager`, which offers and dereferences only the
    resolved alias. It still returns the same opaque Keystore handle, and no key material is touched.
@@ -211,7 +238,12 @@ iPhone handshake has still never run on hardware, so this is an argument, not a 
 `KeystoreTlsIdentityTest` (instrumented, `network`, real Keystore keys, disposable aliases in the
 test package's own Keystore namespace) passed 8/8 on the `RideLink_API36` emulator, the OnePlus
 Nord 5 (Android 16/API 36) and the moto g57 power (Android 17/API 37). With the fix reverted (the key
-SHA-256-only again), 4 of the 8 fail on the emulator, for the reason the phones showed. The
+SHA-256-only again), 4 of the 8 fail on the emulator, for the reason the phones showed. Decision 4
+added five partial-creation cases, making 13: all 13 pass on the emulator. With only decision 4's
+protections removed, 4 of them fail, including the one where a placeholder certificate is accepted
+as `Ready`. The fifth asserts the opposite direction, that a working identity is never discarded,
+and passes either way. The 13-case version was **not** run on the phones: the user has not
+authorised installing the fix there. The
 emulator also ran the real upgrade: main's build created a legacy key, the fix build updated it in
 place, the replacement screen appeared, and confirming it produced a new identity that survived a
 restart. Replacing an identity **on the two test phones** is not done here; it waits for the user's

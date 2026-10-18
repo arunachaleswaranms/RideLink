@@ -26,7 +26,9 @@ sealed interface AppStartup {
     /**
      * The identity key cannot sign a TLS handshake and must be replaced before RideLink can
      * connect (STATUS §4 problem 122). Replacing it is a new SPKI, so it waits for an explicit
-     * user decision; nothing is built around the unusable key in the meantime.
+     * user decision; nothing is built around the unusable key in the meantime. That intentionally
+     * includes local music: there is no [AppContainer], so there is no player, until the user
+     * decides. The library and settings on disk are untouched.
      *
      * [incompatibleIdentity] is already redacted (`spki:` + 6 hex), for display only.
      */

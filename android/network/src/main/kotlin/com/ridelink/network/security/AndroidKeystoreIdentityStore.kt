@@ -10,6 +10,7 @@ import java.security.KeyFactory
 import java.security.KeyPairGenerator
 import java.security.KeyStore
 import java.security.PrivateKey
+import java.security.PublicKey
 import java.security.Signature
 import java.security.cert.X509Certificate
 import java.security.spec.ECGenParameterSpec
@@ -53,6 +54,17 @@ sealed interface IdentityResolution {
  * writes only [alias]. (Re-issue writes back to whichever alias holds a *capable* key; no build has
  * ever put one under the legacy alias.) Which one TLS presents is pinned by [DeviceIdentity]'s alias.
  *
+ * **No half-made identity is ever Ready.** Keystore writes a key, with its own placeholder
+ * certificate, the moment the key is generated; RideLink's certificate replaces it only afterwards.
+ * [generate] is therefore all-or-nothing: it runs only on an empty [alias], and any failure after the
+ * key exists removes that entry before rethrowing. A process death between the two steps cannot run
+ * that cleanup, so [resolve] and [replaceIncompatibleIdentity] first discard an entry under [alias]
+ * that does not carry a RideLink certificate ([IdentityIssuer.isRideLinkIdentityCertificate]).
+ * Such an entry was never returned by this store, so it was never presented in a handshake and no
+ * peer can have pinned it: it is not an identity, and removing it restores the state from before
+ * that generation began. A working identity always carries a RideLink certificate, so it can never
+ * match; [legacyAlias] is never examined for this and never deleted, whatever it holds.
+ *
  * **Lifetime, by platform, stated because it differs and users notice:**
  *
  * | Event | Key survives? |
@@ -72,10 +84,24 @@ sealed interface IdentityResolution {
  * [IdentityIssuer]; the Keystore authorizations and a real Keystore-backed TLS 1.3 handshake are
  * covered by `KeystoreTlsIdentityTest`, an instrumented test.
  */
-class AndroidKeystoreIdentityStore(
-    private val alias: String = DEFAULT_ALIAS,
-    private val legacyAlias: String = LEGACY_ALIAS,
+class AndroidKeystoreIdentityStore internal constructor(
+    private val alias: String,
+    private val legacyAlias: String,
+    // The two steps after key generation that can fail, injectable so a test can make them fail on a
+    // real Keystore. Production always uses the defaults below.
+    private val issueCertificate: (PublicKey, Signature, UtcTime) -> X509Certificate,
+    private val commitEntry: (KeyStore, String, PrivateKey, X509Certificate) -> Unit,
 ) {
+    constructor(
+        alias: String = DEFAULT_ALIAS,
+        legacyAlias: String = LEGACY_ALIAS,
+    ) : this(
+        alias,
+        legacyAlias,
+        issueCertificate = { key, signer, now -> IdentityIssuer.issue(key, signer, now) },
+        commitEntry = { keyStore, entryAlias, key, certificate -> keyStore.setKeyEntry(entryAlias, key, null, arrayOf(certificate)) },
+    )
+
     init {
         require(alias != legacyAlias) { "the current and legacy identity aliases must differ" }
     }
@@ -97,6 +123,7 @@ class AndroidKeystoreIdentityStore(
     @Suppress("ReturnCount") // three distinct outcomes: fresh, incompatible, existing (re-issued or not)
     fun resolve(now: UtcTime): IdentityResolution {
         val keyStore = openKeyStore()
+        discardUnfinishedGeneration(keyStore)
         val existing =
             existingIdentity(keyStore)
                 ?: return IdentityResolution.Ready(DeviceIdentity(generate(keyStore, now), keyStore, null, alias))
@@ -125,6 +152,7 @@ class AndroidKeystoreIdentityStore(
      */
     fun replaceIncompatibleIdentity(now: UtcTime): DeviceIdentity {
         val keyStore = openKeyStore()
+        discardUnfinishedGeneration(keyStore)
         val existing = existingIdentity(keyStore)
         check(existing != null && !existing.tlsCapable) {
             "refusing to replace an identity that is absent or already TLS-capable"
@@ -141,6 +169,18 @@ class AndroidKeystoreIdentityStore(
         val certificate: X509Certificate,
         val tlsCapable: Boolean,
     )
+
+    /**
+     * Removes the residue of a [generate] that did not finish — an entry under [alias] whose
+     * certificate is not RideLink's — and nothing else. See the class comment for why that entry is
+     * not an identity. Only [alias] is looked at; [legacyAlias] is never deleted here or anywhere.
+     */
+    private fun discardUnfinishedGeneration(keyStore: KeyStore) {
+        val entry = keyStore.getEntry(alias, null) as? KeyStore.PrivateKeyEntry ?: return
+        if (!IdentityIssuer.isRideLinkIdentityCertificate(entry.certificate as X509Certificate)) {
+            keyStore.deleteEntry(alias)
+        }
+    }
 
     /** The current alias wins over the legacy one: after a replacement both exist. */
     private fun existingIdentity(keyStore: KeyStore): ExistingIdentity? =
@@ -162,11 +202,15 @@ class AndroidKeystoreIdentityStore(
      * `setCertificateSubject`/`setCertificateSerialNumber` are deliberately *not* used to shape
      * that placeholder: its encoding is outside our control, cannot be pinned by a shared vector,
      * and cannot be re-issued later — see ADR-017 §3.
+     *
+     * All or nothing. It refuses unless [alias] is empty, so the only entry its cleanup can ever
+     * remove is the one this call created: never an identity that existed before, never a working one.
      */
     private fun generate(
         keyStore: KeyStore,
         now: UtcTime,
     ): X509Certificate {
+        check(!keyStore.containsAlias(alias)) { "refusing to generate over an existing entry" }
         val generator = KeyPairGenerator.getInstance(KeyProperties.KEY_ALGORITHM_EC, ANDROID_KEYSTORE)
         generator.initialize(
             KeyGenParameterSpec
@@ -182,18 +226,25 @@ class AndroidKeystoreIdentityStore(
                 .build(),
         )
         val keyPair = generator.generateKeyPair()
-        // The platform enforces what it recorded, not what was asked for. A key that cannot sign a
-        // handshake must never be handed out as Ready, nor left under the current alias where it
-        // would read as an incompatible key this app did not make. It is the entry this call just
-        // created, so removing it touches nothing that existed before.
-        if (!IdentityKeyAuthorization.isTlsCapable(authorizedDigests(keyPair.private))) {
-            keyStore.deleteEntry(alias)
-            error("Keystore did not record the digest authorizations TLS needs")
+        try {
+            // The platform enforces what it recorded, not what was asked for: a key that cannot sign
+            // a handshake must never be handed out as Ready.
+            check(IdentityKeyAuthorization.isTlsCapable(authorizedDigests(keyPair.private))) {
+                "Keystore did not record the digest authorizations TLS needs"
+            }
+            val signer = Signature.getInstance(DeviceIdentity.SIGNATURE_ALGORITHM).apply { initSign(keyPair.private) }
+            val certificate = issueCertificate(keyPair.public, signer, now)
+            commitEntry(keyStore, alias, keyPair.private, certificate)
+            return certificate
+        } catch (
+            // Deliberately broad: whatever failed, the half-made entry must not survive this call,
+            // and the failure itself must still reach the caller unchanged.
+            @Suppress("TooGenericExceptionCaught") failure: Throwable,
+        ) {
+            // If this delete fails too, discardUnfinishedGeneration removes the entry next time.
+            runCatching { keyStore.deleteEntry(alias) }
+            throw failure
         }
-        val signer = Signature.getInstance(DeviceIdentity.SIGNATURE_ALGORITHM).apply { initSign(keyPair.private) }
-        val certificate = IdentityIssuer.issue(keyPair.public, signer, now)
-        keyStore.setKeyEntry(alias, keyPair.private, null, arrayOf(certificate))
-        return certificate
     }
 
     private fun reissue(

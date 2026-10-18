@@ -17,6 +17,11 @@ real Android Keystore before claiming anything about Android TLS:**
   - re-issue keeps the SPKI;
   - an incompatible identity is reported, not replaced, and the explicit replacement makes a new
     SPKI, keeps the legacy entry byte-for-byte, presents only the new key, and refuses to run twice;
+  - a failure after key generation (certificate issuance or `setKeyEntry`) leaves no entry behind, on
+    a fresh store and during a replacement;
+  - a failed replacement leaves the legacy identity byte-for-byte unchanged and still reported;
+  - an interrupted generation (Keystore's placeholder certificate, RideLink's never written) is
+    discarded rather than accepted as `Ready`, and a working identity is never discarded;
   - aliases are deleted afterwards.
 
   Run it with `:network:assembleDebugAndroidTest`, then `adb -s <serial> install --user 0 -t` and
@@ -26,8 +31,14 @@ real Android Keystore before claiming anything about Android TLS:**
   debug app has the same application ID and a different signer.
 - `IdentityReplacementScreenTest` (`app` instrumented, emulator only): the first tap only asks, Cancel
   replaces nothing, confirmation replaces exactly once, and nothing is offered while a replacement runs.
-- JVM: `IdentityKeyAuthorizationTest` (the digest rule) and `SingleAliasKeyManagerTest` (TLS presents
-  the resolved alias whatever else the keystore holds, in a real handshake).
+- JVM:
+  - `IdentityKeyAuthorizationTest`: the digest rule.
+  - `SingleAliasKeyManagerTest`: TLS presents the resolved alias whatever else the keystore holds, in a
+    real handshake.
+  - `RideLinkCertificateRecognitionTest`: only RideLink's exact encoding counts as a finished identity.
+- **Intentional:** while a replacement is unconfirmed, local music is unavailable too, because nothing
+  is built. Check that the replacement screen says so, and that music works again straight after
+  replacing.
 - **Physical retest after the user authorises identity replacement**: install the reviewed build on
   both phones as an in-place update (`tools/sideload/android.sh install`, no `--clean`). Each phone
   shows the replacement screen; confirm on each. Then re-run I-01, I-02 (compare the six digits), I-03
