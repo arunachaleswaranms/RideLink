@@ -7,14 +7,32 @@ STATUS §4 problems 123 and 124, both found on two physical Android phones after
 
 **Problem 123 — `PongWriteFailureTest` (`:network`, JVM, real loopback TLS 1.3)**
 
-- It authenticates a real connection, then fails only the live socket's writes, as a reset
-  connection would.
-- A `PING` dispatched on that still-live connection must not throw out of the read path.
-- The test asserts that the `PONG` write was really attempted: the frame was neither refused nor
-  retired first. Without that check, closing the socket would make the test pass vacuously.
-- It fails against the unguarded `handlePing` with `IOException: Connection reset`, the phones'
-  exception.
-- iOS has no mirror test, because its `PONG` write is `try?`.
+The test authenticates a trusted pair, then fails only the live socket's writes, as a reset
+connection would. Closing the socket instead would make it pass vacuously, because ADR-025 would
+refuse the `PING` before any write. It has two cases.
+
+1. **Retire and recover.** A `PING` is dispatched on the still-live connection.
+   - No exception escapes, and the `PONG` write was really attempted (counted).
+   - That connection is retired, with exactly one `LinkLost(NETWORK)` naming its generation, and
+     the session goes to `RECONNECTING`.
+   - The read loop's later `ConnectionClosed` adds no second teardown.
+   - The peer's ordinary trusted redial restores `CONNECTED` on a newer generation.
+2. **The successor is never affected.** A `PONG` write is parked on connection 1. Connection 1
+   drops (no `BYE`) and the peer's redial authenticates connection 2. The parked write is then
+   released as a failure. Connection 2 stays live and `CONNECTED`, and only connection 1's one
+   loss is reported.
+
+Mutants, each confirmed:
+
+| Mutant | Effect |
+|---|---|
+| No guard | Both cases fail, with `IOException: Connection reset` |
+| Catch but don't retire | The retirement case fails |
+| Retire whatever socket is live | The successor case fails |
+
+iOS mirrors the fix with the same guards, but has no deterministic test. Every way to fail an
+`NWConnection` send also ends its receive, so the read loop would always retire the connection
+first.
 
 **Problem 124 — ADR-019 Amendment A2**
 

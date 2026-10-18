@@ -67,7 +67,8 @@ public enum ControlEvent: Sendable {
     /// The peer's presented SPKI matched the stored pin, so the trust gate passed with no user
     /// action at all (PROTOCOL §4.1 "silent connect"). Raised only on the **surviving** connection
     /// and always immediately before `.connected` — it is what carries the session into `CONNECTING`
-    /// (from `PAIRING`, or `DISCOVERING` — ADR-019 Amendment A2) for a known peer, now that `.connected` no longer doubles as implicit pairing success.
+    /// (from `PAIRING`, or `DISCOVERING` — ADR-019 Amendment A2) for a known peer, now that
+    /// `.connected` no longer doubles as implicit pairing success.
     case peerTrusted(remotePeerId: PeerId)
     /// The surviving control connection ended.
     ///
@@ -1035,7 +1036,16 @@ public actor ControlSessionManager {
             guard let t1 = payload["t1_mono_us"]?.int64Value else { return }
             let t2 = monotonicNowUs()
             let t3 = monotonicNowUs()
-            try? await socket.writeFrame(ControlMessages.pong(localPeerId: localPeerId, sessionId: sessionId, seq: seqCounter.nextSeq(), sentAtMonoUs: monotonicNowUs(), t1MonoUs: t1, t2MonoUs: t2, t3MonoUs: t3))
+            // A `PONG` that cannot be written retires its connection (STATUS §4 problem 123), the
+            // Android rule mirrored. Swallowing the error left the failure to the next read, which a
+            // write failure does not guarantee. `endConnection` acts only on the still-active socket,
+            // so a stale failure cannot end a successor and a repeat is a no-op; `endedDeliberately`
+            // is the read loop's own guard, set by `shutdown` before it closes anything.
+            do {
+                try await socket.writeFrame(ControlMessages.pong(localPeerId: localPeerId, sessionId: sessionId, seq: seqCounter.nextSeq(), sentAtMonoUs: monotonicNowUs(), t1MonoUs: t1, t2MonoUs: t2, t3MonoUs: t3))
+            } catch {
+                if !endedDeliberately { await endConnection(socket, reason: .network) }
+            }
         case "PONG":
             guard
                 let t1 = payload["t1_mono_us"]?.int64Value,
