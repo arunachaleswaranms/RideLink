@@ -167,3 +167,228 @@ user has **not** authorised on these phones pending independent review.
    incompatible identity through the reviewed flow. No trusted pin exists between these two
    phones yet, so no existing pairing is invalidated.
 3. Re-run Checkpoint 1 from I-01, then continue through Checkpoints 2–6 in order.
+
+---
+
+# Continuation — post-fix physical retest, 18 October 2026 (evening)
+
+The section above is the original run and is left as it was. **Its I-02 FAIL stands.** This
+section records a separate retest after problem 122's fix merged (PR #21).
+
+**Verdict: problem 122's fix is verified on both phones; I-02 FAILS again, for two new reasons.**
+
+What worked:
+
+- Both phones replaced their identity only after the user confirmed it in the app.
+- The two phones then completed a mutually authenticated TLS 1.3 handshake with Android Keystore
+  keys, with no `INCOMPATIBLE_DIGEST`.
+- Both showed the six-digit code. The user confirmed the codes matched, and each phone pinned the
+  other's correct new SPKI.
+
+Why I-02 still fails: Device A's session never reached `CONNECTED`. Two new defects caused it:
+
+- **Problem 123:** an unhandled socket-write exception crashed Device B's app.
+- **Problem 124:** Device A's session state machine was left in `DISCOVERING`, on top of a live,
+  authenticated control session.
+
+Every later row is **BLOCKED**. No application code changed in this run; the fixes are a separate
+draft PR. No Android-to-iOS, Phase 9 or V1 readiness is claimed.
+
+## Baseline
+
+| Field | Verified value |
+|---|---|
+| origin/main | `2ec06efcd447bc38e6e52543e8ba6bb2d38bd85c` (PR #21 merge). Its tree `dc1709df…` is identical to PR #21's reviewed head `c8fe109` |
+| Build | `tools/sideload/android.sh build`, run from a clean isolated worktree at that commit, with the existing sideload key (no new key). Build-tools 36.0.0, JDK 21.0.12.1, built 2026-10-18T15:07:54Z |
+| APK | `ridelink-android-2ec06efcd447.apk`; release, not debuggable; APK Signature Scheme v3; one signer; `zipalign -c -P 16 4` OK; minSdk 31, targetSdk 36 |
+| APK SHA-256 | `ff0cfdf080cafbfae9c408cd7eaeb8386105ac642b859d162549bd6aa94871cc` (new; not the old `7cdcfc29…`) |
+| Signer certificate SHA-256 | `51d88fc76947c7027fa8fad18a77961c4d1e5c14e950c70d6888ada9240b3ee2` (the same key, so an in-place update is possible) |
+| Revision stamp | The commit string is compiled into the dex. Both phones' in-app diagnostics exports report `source_revision: 2ec06efcd447bc38e6e52543e8ba6bb2d38bd85c` |
+
+### CI on the merged revision
+
+| Check | Result |
+|---|---|
+| CI | Success |
+| Security: CodeQL java-kotlin, gitleaks, gradle-wrapper-validation, local-only-policy | Success |
+| Security: dependency-review | Skipped (it runs only on pull requests) |
+| Security: CodeQL swift | **Not passed.** It exceeded the job's 45-minute `timeout-minutes` on the original run, and again on a rerun (attempt 2). GitHub reports both as *cancelled*, and they are not counted as passes. The PR #21 run of the same job finished in 42 minutes, so the limit is marginal on the macOS runners. Raising it is a workflow change and is not made here |
+
+## Devices and installation
+
+`adb devices -l` listed three transports: one per phone, plus an emulator, which was never used.
+Every command used an explicit `-s` selector, and every RideLink operation was for user 0. Serials,
+addresses and SSIDs are not recorded.
+
+| | Device A | Device B |
+|---|---|---|
+| Model / Android / API | OnePlus Nord 5 (CPH2707) / 16 / 36 | Motorola moto g57 power / 17 / 37 |
+| Physical | Yes (`ro.boot.qemu` empty) | Yes |
+| Before | `4104e81` build. The installed `base.apk` read back as `7cdcfc29…fb75`, signer `51d88fc7…3ee2` | The same |
+| Install (user-approved, in-place update; no uninstall, no `--clean`, no data clear) | `tools/sideload/android.sh install -s <A> …`, 2026-10-18T15:12:55Z | `adb install -r --user 0 …`, 2026-10-18T15:15:50Z. The user chose `--user 0` so that the managed work profile could not be included. The script's read-back check was then repeated by hand |
+| Installed-APK read-back | SHA-256 `ff0cfdf0…71cc`, identical to the build; signer `51d88fc7…3ee2` | The same |
+| App data kept | Data-directory inodes unchanged across the update (CE and DE) | The same |
+| Other users | Dual-app user: RideLink still not installed | Work profile: RideLink still not installed; the profile was not accessed |
+| Runtime permissions | Unchanged across the update (diffed) | Unchanged (diffed) |
+
+### Network
+
+- Both phones were associated with the same SSID. It was compared by hash and not recorded.
+- Both were on one private /24.
+- ICMP worked in both directions: 3/3 each way. RTT was 100–700 ms, consistent with Wi-Fi power
+  saving.
+
+## Checkpoint D — explicit identity replacement
+
+| Check | Device A | Device B |
+|---|---|---|
+| On launch, the app showed *"This phone's secure identity needs replacing"* | Yes | Yes |
+| The screen says music is unavailable until the user decides | Yes | Yes |
+| While waiting: RideLink-owned TCP sockets (read from `/proc/net/tcp{,6}` by app uid; the tables were readable) | 0. No listener, no discovery | 0 |
+| Legacy identity (shown under *Show identity details*) | `spki:e6a9d2…` | `spki:8ac575…` |
+| The user approved the replacement in the session, then confirmed it **by hand** in the app's dialog. Nothing was automated | Done | Done |
+| After the replacement: normal main screen, no crash, no ANR, no Keystore error from RideLink | Yes | Yes |
+| New identity (*This device*, diagnostics card) | `spki:8eb849…`, which differs from the legacy one | `spki:5e38e3…`, which differs from the legacy one |
+| Library after the replacement | 78 tracks. This equals the last recorded count (Phase 9A.5 evidence: `library_count_after_retry: 78`) | 0 tracks. Expected: first installed on 18 October and nothing has been imported |
+
+What could and could not be observed on the phones:
+
+- **Directly observed:** the new key's TLS capability. It is shown by the successful Keystore-backed
+  handshake below, with no `INCOMPATIBLE_DIGEST` logged on either phone.
+- **Not observable on a release build:** the presence of the preserved `ridelink.identity.v1` entry,
+  and the key's exact digest list and non-exportability. The build is not debuggable, so there is no
+  `run-as` and no Keystore listing. These rest on the reviewed code path:
+  `replaceIncompatibleIdentity` writes only `v2` and never deletes the legacy alias.
+  `KeystoreTlsIdentityTest` (8/8 on both of these phones, TEST_PLAN §4) checks them on real
+  Keystore keys.
+- **Trust store:** nothing was written to it at replacement time. The only trust records written in
+  this run are the pairing pins below.
+
+## Results
+
+| ID | Status | Observed |
+|---|---|---|
+| I-01 Discovery | **PASS** | B: *Find other phone*; about 6 s later, A: *Find other phone*. At the first poll after A's tap (≤ 3.0 s; the poll interval was about 2.7 s), both phones were already on *Check the code*. *Discovered peers (current)* = 1 on each, so no duplicate entry. B's dial reached A's listener. No backend was involved |
+| I-02 Secure pairing | **FAIL** | The TLS 1.3 handshake succeeded with Keystore keys, the code was shown on both phones, the user confirmed the codes matched, and each phone pinned the other's new SPKI. **But A's session never reached `CONNECTED`** (problem 124), after B's app crashed (problem 123). Details below |
+| Problem 122 fix (Keystore TLS signing) | **PASS (physical)** | Mutual TLS 1.3 handshake, `TLS_AES_128_GCM_SHA256` on both; no `INCOMPATIBLE_DIGEST`. Cross-consistent identities: A sees peer `5e38e3…`, which is B's own; B sees `8eb849…`, which is A's own. Leader agreement: B `true`, A `false`. B's `peer_id` prefix is the smaller of the two, as ADR-010 requires. Clock sync was symmetric (offsets +2306109.957 s and −2306109.954 s; the two phones' monotonic uptimes differ). Exactly one TCP connection existed between the phones, B→A, plus one listener on each |
+| I-03, I-26 | **BLOCKED** | Needs I-02 |
+| V-01, V-02, V-04, V-05, V-06; intercom modes, including PTT | **BLOCKED** | Needs an authenticated session on both phones. VOX is PENDING REAL AUDIO INPUT regardless |
+| S-01, S-02, S-06, S-08, Q-02, S-11 | **BLOCKED** | |
+| Shared catalogue and file transfer | **BLOCKED** | |
+| N-03, N-04; AF-series two-phone checks | **BLOCKED** | |
+| I-05, I-06, V-07, S-12, repeated I-26 | **BLOCKED** | Problem 123 would make these crash-prone even once I-02 passes |
+| S-03 and other measured alignment gates | **NOT RUN** | No alignment figure exists |
+
+The user's only observation was that the codes on the two screens matched. No digits were read,
+logged or recorded: the harness redacted any all-digit value of six digits or more in the pipe
+before writing anything.
+
+## What happened (times UTC, cross-checked against each phone's event log)
+
+| Time | Device A | Device B |
+|---|---|---|
+| 15:25:21 | | *Find other phone* (`IDLE → DISCOVERING → PAIRING`, first process) |
+| 15:25:27 | *Find other phone*: `IDLE → DISCOVERING → PAIRING (PeerSelected)`; *pairing required with peer:40be2f…* | |
+| ≤ 15:25:30 | Code shown; peer labelled *Nearby phone* | Code shown; peer labelled with A's model |
+| — | The code prompt waited unanswered. The user was not yet at the phones | |
+| 15:35:27 | **Screen off**, exactly 600 s after the last interaction (the phone's screen timeout). The activity stops, and RideLink has no foreground service before a ride | |
+| 15:35:31 | | **App crashes:** `FATAL EXCEPTION: main … sun.net.ConnectionResetException: Connection reset … ControlSocket$writeFrame (Framing.kt:84)`, in a `StandaloneCoroutine` on `Dispatchers.Main`; `am_crash`, then `am_proc_died` |
+| 15:35:32 | `InetDiagMessage: Destroyed live tcp sockets for uids={RideLink}`, issued by the system. This is about 1 s after B's crash timestamp, within the inter-phone clock skew: the reset B received is this destruction. Then `PAIRING → DISCOVERING (PairingRejectedOrTimeout)` | |
+| 15:35:57 | OEM freezer freezes RideLink (screen off) | |
+| 16:04:13 | User unlocks A; RideLink is unfrozen. It shows *Searching…* | |
+| 16:04:36 | | The user relaunches the app (new process): `IDLE → DISCOVERING → PAIRING`; dials A |
+| 16:04:4x | *pairing required with peer:40be2f…* on B's **inbound** connection, while A's state machine is in `DISCOVERING` | *pairing required with peer:59f1b6…* |
+| 16:04:49 | User confirms a match on both. A logs *paired with peer:40be2f… (spki:5e38e3…)* and *voice subsystem attached (offerer=false)*, and **no state transition** | *paired with peer:59f1b6… (spki:8eb849…)*; `PAIRING → CONNECTING (PairingSucceeded)`; `CONNECTING → CONNECTED` |
+| 16:05–16:09 | Stays at *Searching… / Couldn't reach the other phone yet*. The diagnostics card says *Control state: Connected* | Connected; *Start ride* and intercom controls shown |
+
+The 10-minute wait before the first confirmation was a test-conduct artefact. It is why A's screen
+timed out. But the protocol deliberately has **no pairing timeout** (PROTOCOL §4.5), and a phone
+going to sleep or losing its network mid-pairing is an ordinary event. So both failures below are
+application defects, not environmental ones.
+
+## Problem 123 — a control-socket write exception crashes the app (Critical)
+
+### Code path
+
+- `ControlSessionManager.readLoop` → `handleFrame` → `"PING"` → `handlePing` writes the `PONG` with
+  `socket.writeFrame(…)` and catches nothing (`ControlSessionManager.kt:1044`).
+- The read loop runs in a `launch` on the application scope,
+  `CoroutineScope(SupervisorJob() + Dispatchers.Main)` (`AppContainer.kt:106`), which has no
+  exception handler.
+- So an `IOException` from that one write escapes to the main thread's uncaught-exception handler
+  and kills the process.
+
+### Why this write is the one
+
+- Every other control write site is wrapped in `runCatching`, and `readFrame` maps `IOException` to
+  `ConnectionClosed`.
+- `PING` is answered before authentication as well as after.
+
+### Who can trigger it
+
+- Any loss of the peer's connection between reading a `PING` and writing its `PONG` can crash the
+  app. That includes a peer's screen-off socket destruction, Wi-Fi loss and aeroplane mode, so
+  I-05/V-07/S-12 would be crash-prone.
+- As a class, any device on the same network that can reach the pre-pairing `PING` exchange can
+  crash RideLink remotely (denial of service).
+- **No exploit procedure is recorded.**
+
+## Problem 124 — a pairing that completes on a surviving connection is dropped in `DISCOVERING` (High)
+
+### How it happened
+
+1. A's `PAIRING` attempt ended with the link loss above.
+2. The FSM returned to `DISCOVERING`.
+3. A then kept advertising, accepted B's later dial, and ran the pairing on that **inbound**
+   connection.
+
+### What the gate did
+
+- `SessionCoordinator` passes control events through `SessionGate.sessionEventFor(event, status)`.
+- In `DISCOVERING`, `PairingSucceeded`, `PeerTrusted` and `Connected` all map to `null`, so the FSM
+  never moves. Nothing is logged for them either.
+- Their side effects still ran: the trust pin was written, voice was attached and the clock sync
+  started.
+- The result: an authenticated control session the session layer does not know about, with no way
+  forward in the UI.
+
+### What the vectors say
+
+`protocol/vectors/session-gate/` pins those three rows to `null`. So the shared vectors currently
+treat this drop as correct, and the fix is a state-machine change under rule 15 / ADR-019.
+
+A's own dial also latches `connectAttempted`, so A never dials again by itself. Other routes into
+the same state exist (a losing duplicate dial, or a refused redundant handshake, while another
+connection is pairing). None is covered by a test that runs the real FSM with an inbound pairing.
+
+### Security
+
+The trust gate held: no peer reached `CONNECTED` without both users' confirmation and a written pin.
+The defect is liveness and consistency, not authentication.
+
+## Test conduct notes
+
+- Every scripted tap first checked that RideLink was the focused window. No tap touched a security
+  confirmation: the replacement dialog and *They match* were the user's own presses.
+- Taps were used only for navigation: *Find other phone*, disclosures and scrolling.
+- The diagnostics exports were made from the phones' own share sheets into Downloads and pulled
+  over ADB. Their event lines are redacted by construction.
+- Raw `logcat` buffers and the exports are kept off-repository.
+- Phones left as found:
+  - A: RideLink open at *Searching…*, with its new identity and a pin for B.
+  - B: *Connected*, with its new identity and a pin for A.
+  - Nothing was uninstalled, cleared or deleted, and no legacy key was touched.
+
+## Exact next step
+
+1. A separate fix PR, for independent review:
+   - **123:** a failed `PONG` write must end the connection, never crash the process.
+   - **124:** a pairing (or trusted connect) that completes while the FSM is in `DISCOVERING` must
+     reach `CONNECTED` through the trust gate. This needs an ADR-019 amendment and session-gate
+     vector changes.
+   - Both need regression tests on the real coordinator.
+2. Install the reviewed build as an in-place update.
+3. Because both phones now hold pins for each other, the next run starts at I-03 (trusted
+   reconnect, which also proves A's pin). A first-time I-02 needs the user's authorisation to
+   *Forget* the pairing on both phones.
+4. Then continue through Checkpoints F–K in order.
