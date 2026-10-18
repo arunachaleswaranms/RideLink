@@ -1032,6 +1032,12 @@ class ControlSessionManager(
      * Extracted from [handleFrame] rather than inlined, because adding the `AUDIO_STATE` branch took
      * that function to detekt's cyclomatic-complexity ceiling and the answer to that is to extract,
      * not to raise the ceiling (`docs/STATUS.md` §4 problem 18's lesson, applied one function down).
+     *
+     * The `PONG` write is guarded like every other control write (STATUS §4 problem 123). This runs
+     * on the read loop, which is launched on the application scope with no exception handler, so a
+     * peer reset between reading the `PING` and writing its answer used to kill the process. A failed
+     * write needs no handling of its own: the socket is dead, and the read loop's next `readFrame`
+     * returns `ConnectionClosed`, which ends the connection the one usual way.
      */
     private suspend fun handlePing(
         socket: ControlSocket,
@@ -1041,7 +1047,7 @@ class ControlSessionManager(
         val t1 = requiredLongField(payload, "t1_mono_us") ?: return
         val t2 = monotonicNowUs()
         val t3 = monotonicNowUs()
-        socket.writeFrame(ControlMessages.pong(localPeerId, sessionId, seqCounter.nextSeq(), monotonicNowUs(), t1, t2, t3))
+        runCatching { socket.writeFrame(ControlMessages.pong(localPeerId, sessionId, seqCounter.nextSeq(), monotonicNowUs(), t1, t2, t3)) }
     }
 
     /**
