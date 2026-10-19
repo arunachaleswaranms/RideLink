@@ -184,11 +184,16 @@ class ControlSessionManager(
     random: Random = Random,
     /** How long a candidate may take to complete `HELLO`/`HELLO_ACK`; see [handleCandidate]. */
     private val helloExchangeTimeoutMs: Long = HELLO_EXCHANGE_TIMEOUT_MS,
+    /**
+     * How [ReconnectController]'s ladder waits between attempts. Production passes nothing and gets
+     * real [delay]; a test that must watch a whole 120 s budget play out supplies a faster clock.
+     */
+    reconnectDelayMs: suspend (Long) -> Unit = { ms -> delay(ms) },
 ) {
     private val seqCounter = SeqCounter()
     private val arbiter = DuplicateConnectionArbiter(localPeerId, ConnTiebreakGenerator.generate())
     private val reconnectController =
-        ReconnectController(scope, random) { ms -> delay(ms) }
+        ReconnectController(scope, random, reconnectDelayMs)
 
     /**
      * Where the fire-and-forget socket writes below run (a courtesy `BYE`/`ERROR` before closing).
