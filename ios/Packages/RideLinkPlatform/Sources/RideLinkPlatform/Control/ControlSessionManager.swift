@@ -467,7 +467,10 @@ public actor ControlSessionManager {
         nowEpochSeconds: @escaping @Sendable () -> Int64 = { Int64(Date().timeIntervalSince1970) },
         randomFraction: @escaping @Sendable () -> Double = { Double.random(in: -1...1) },
         /// How long a candidate may take to complete `HELLO`/`HELLO_ACK`; see `handleCandidate`.
-        helloExchangeTimeoutMs: Int64 = ControlSessionManager.helloExchangeTimeoutMs
+        helloExchangeTimeoutMs: Int64 = ControlSessionManager.helloExchangeTimeoutMs,
+        /// How `ReconnectController`'s ladder waits between attempts. Production passes nothing and
+        /// gets a real sleep; a test that must watch a whole 120 s budget play out supplies a faster one.
+        reconnectDelayMs: (@Sendable (Int64) async -> Void)? = nil
     ) {
         self.helloExchangeTimeoutNs = UInt64(max(0, helloExchangeTimeoutMs)) * 1_000_000
         self.localPeerId = localPeerId
@@ -476,9 +479,12 @@ public actor ControlSessionManager {
         self.nowEpochSeconds = nowEpochSeconds
         self.monotonicNowUs = monotonicNowUs
         self.arbiter = DuplicateConnectionArbiter(localPeerId: localPeerId, initialConnTiebreak: ConnTiebreakGenerator.generate())
-        self.reconnectController = ReconnectController(randomFraction: randomFraction) { ms in
-            try? await Task.sleep(nanoseconds: UInt64(max(0, ms)) * 1_000_000)
-        }
+        self.reconnectController = ReconnectController(
+            randomFraction: randomFraction,
+            delayMs: reconnectDelayMs ?? { ms in
+                try? await Task.sleep(nanoseconds: UInt64(max(0, ms)) * 1_000_000)
+            }
+        )
     }
 
     public func setOnEvent(_ handler: @escaping @Sendable (ControlEvent) -> Void) { onEvent = handler }
@@ -693,7 +699,12 @@ public actor ControlSessionManager {
         clockTracker.reset()
         authenticatedConnection = nil
         lastPongAtMonoUs = monotonicNowUs()
-        await reconnectController.reset()
+        // Ends any ladder in progress, not merely its budget (STATUS §4 problem 125). This promotion
+        // may be the peer's inbound dial, which reconnects the session without this side's ladder
+        // ever succeeding; a bare reset() left that ladder dialling inside the live session with a
+        // fresh 120 s, after which it reported `.disconnected` into a connected session and left the
+        // next link loss with no budget at all.
+        await reconnectController.connectionPromoted()
 
         let isLeader = leaderPeerId.value == localPeerId.value
         pendingActivation = PendingActivation(
@@ -1304,6 +1315,9 @@ public actor ControlSessionManager {
         await reconnectController.start(
             onAttempt: { [weak self] in
                 guard let self else { return true }
+                // Published per attempt: publishing once, at ladder start, left the card one ladder
+                // behind (STATUS §4 problem 125).
+                await self.publishReconnectCount()
                 return await self.attemptConnection(host: host, port: port, local: local)
             },
             onExhausted: { [weak self] in
@@ -1312,6 +1326,10 @@ public actor ControlSessionManager {
                 await self.emit(.reconnectBudgetExhausted)
             }
         )
+        await publishReconnectCount()
+    }
+
+    private func publishReconnectCount() async {
         let count = await reconnectController.reconnectCount
         updateDiagnostics { $0.reconnectCount = count }
     }
@@ -1361,7 +1379,7 @@ public actor ControlSessionManager {
         endedDeliberately = true
         await reconnectController.cancel()
         // …and reset, not merely cancel: `cancel()` leaves the attempt count and the spent budget where
-        // the previous session left them. `promote` resets them too, so this is not reachable today, but
+        // the previous session left them. `promote` ends the run and resets them too, but
         // an exhausted 120 s budget handed to the next session is exactly the class of defect this pass
         // exists to close — session-lifetime state surviving into a successor.
         await reconnectController.reset()

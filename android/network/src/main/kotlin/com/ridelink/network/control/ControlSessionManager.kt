@@ -670,7 +670,12 @@ class ControlSessionManager(
         clock.reset()
         authenticatedConnection = null
         lastPongAtMonoUs = monotonicNowUs()
-        reconnectController.reset()
+        // Ends any ladder in progress, not merely its budget (STATUS §4 problem 125). This promotion
+        // may be the peer's inbound dial, which reconnects the session without this side's ladder
+        // ever succeeding; a bare reset() left that ladder dialling inside the live session with a
+        // fresh 120 s, after which it reported DISCONNECTED into a connected session and left the
+        // next link loss with no budget at all.
+        reconnectController.connectionPromoted()
 
         val isLeader = candidate.outcome.leaderPeerId == localPeerId
         pendingActivation =
@@ -1271,7 +1276,12 @@ class ControlSessionManager(
     ) {
         _diagnostics.update { it.copy(controlState = ControlState.RECONNECTING) }
         reconnectController.start(
-            onAttempt = { attemptConnection(host, port, local) },
+            onAttempt = {
+                // Published per attempt: publishing once, at ladder start, left the card one ladder
+                // behind (STATUS §4 problem 125).
+                _diagnostics.update { it.copy(reconnectCount = reconnectController.reconnectCount) }
+                attemptConnection(host, port, local)
+            },
             onExhausted = {
                 _diagnostics.update { it.copy(controlState = ControlState.DISCONNECTED) }
                 _events.tryEmit(ControlEvent.ReconnectBudgetExhausted)
@@ -1311,7 +1321,7 @@ class ControlSessionManager(
         endedDeliberately = true
         reconnectController.cancel()
         // …and reset, not merely cancel: `cancel()` leaves `attempt`/`elapsedMs` where the previous
-        // session spent them. `promote` resets them too, so this is not reachable today, but an
+        // session spent them. `promote` ends the run and resets them too, but an
         // exhausted 120 s budget handed to the next session is exactly the class of defect this
         // pass exists to close — session-lifetime state surviving into a successor.
         reconnectController.reset()

@@ -165,7 +165,8 @@ class ReconnectLadderOrphanTest {
         }
 
     private companion object {
-        val MONOTONIC: () -> Long = run { val clock = AtomicLong(1_000_000L); { clock.addAndGet(1_000) } }
+        val CLOCK = AtomicLong(1_000_000L)
+        val MONOTONIC: () -> Long = { CLOCK.addAndGet(1_000) }
         const val POLL_MS = 10L
         const val STEP_MS = 10L
         const val REAL_TIME = 1L

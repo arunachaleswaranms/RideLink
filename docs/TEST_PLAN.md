@@ -1,5 +1,43 @@
 # RideLink — Test Plan
 
+## Phase 9B-A problem 125 additions (19 October 2026)
+
+STATUS §4 problem 125: after a reconnect that the **peer** completed by dialling in, this phone's own
+reconnect ladder kept running inside the live session, exhausted about 120 s later, and left the next
+link loss with no budget.
+
+**`ReconnectLadderOrphanTest` (`:network`) / `ReconnectLadderOrphanTests` (`RideLinkPlatform`)**:
+real managers over real loopback TLS 1.3. The dialler drops the link, this side's ladder runs
+against a refused (stale) address, and the dialler's redial is what reconnects. Only the ladder's
+own waits are accelerated, through the manager's `reconnectDelayMs` seam, and only after the
+promotion, so an orphaned ladder would spend its whole 120 s in well under a second.
+1. **The ladder ends at the promotion.** No `ReconnectBudgetExhausted`, diagnostics still
+   `CONNECTED`, and no ladder attempt after the promotion.
+2. **The next loss gets a full budget.** A second network loss and `beginReconnect` make at least
+   10 attempts (a 120 s budget holds at least 16) before exactly one exhaustion, and the
+   diagnostics card shows every attempt.
+
+Both cases fail against unmodified `promote` on both platforms. `ReconnectPolicyTest(s)` adds three
+controller cases: a promotion while the ladder is parked (then a full fresh budget), a promotion
+during an attempt (the attempt is not cancelled, the run makes no further attempt, and there is no
+exhaustion), and a promotion performed by the ladder's own attempt (not cancelled under itself).
+
+| Mutant | Effect |
+|---|---|
+| `promote` resets only (the unfixed shape) | Both orphan cases fail |
+| `connectionPromoted` cancels an in-flight attempt too | Both in-flight controller cases fail |
+| Exhaustion without the run-ownership check | The in-flight controller case fails |
+
+**Physical, after review (both phones, in-place install):** run I-05 so that the reconnect is
+completed by the **other** phone's dial (aeroplane-mode the phone under test, restore, and let the
+peer's ladder reach it). Then:
+1. Leave the session connected for at least 150 s. The log must contain no
+   `rejected ReconnectBudgetExhausted from CONNECTED`, and the control state must stay *Connected*.
+2. Aeroplane-mode the same phone again for 10 s and restore. It must stay in `RECONNECTING` with
+   attempts counting up (not reach `DISCONNECTED` within a second), and return to the state it left.
+3. Record the reconnect count shown on the diagnostics card after each step. Whether I-05's
+   `reconnect_count = 1` means attempts or completed reconnects is open (STATUS §4 problem 125).
+
 ## Phase 9B-A post-fix retest additions (18 October 2026, evening)
 
 STATUS §4 problems 123 and 124, both found on two physical Android phones after problem 122's fix
@@ -1787,7 +1825,7 @@ Wi-Fi only, no Bluetooth audio yet. This is where most cross-platform defects wi
 | I-02 | Tap peer → compare the 6-digit codes on both screens | codes **identical** and **exactly six digits**; both confirm; session reaches `CONNECTED` | 1 |
 | I-03 | Kill and reopen both apps | reconnects silently, **no code prompt** | 1 |
 | I-04 | Edit one device's stored pin to a wrong SPKI value, reconnect | refused with `pin_mismatch`, surfaced as a security warning, **no auto re-pair** | 1 |
-| I-05 | Aeroplane-mode one phone 10 s, restore | `RECONNECTING` → returns to the state it left; `reconnect_count` = 1 | 1 |
+| I-05 | Aeroplane-mode one phone 10 s, restore | `RECONNECTING` → returns to the state it left; `reconnect_count` = 1. **Repeat once in the same process** after a reconnect the peer completed: the second loss must get a full ladder, not an immediate `DISCONNECTED` (problem 125; procedure at the top of this file) | 1 |
 | I-06 | Aeroplane-mode 3 min | `DISCONNECTED`; recovers on the **Retry** button, which re-enters `DISCOVERING` and finds the peer again. **Runnable for the first time as of ADR-026** — before it, `RetryRequested` had no emitter and the only recovery was a force-quit. Still pending: it is a two-device row | 1 |
 | I-26 | End a ride deliberately (**End Session** on one phone), then start a second ride from the same app process, on both phones, without relaunching | `ENDING -> IDLE` completes on its own; a second discovery session advertises and browses again on real `NsdManager`/`NWBrowser`; a second TLS session reaches `CONNECTED`; the shared catalogue and synchronised playback both still work in it (the §4 problem 54 half); the peer adopts the new `revision_epoch` at `revision` 1. **The real-device gate for ADR-026** | 1 |
 | I-07 | Repeat I-01…I-03 on an Android hotspot, then an iPhone hotspot | all three topologies work, or the failure is documented with a reason | 1 |

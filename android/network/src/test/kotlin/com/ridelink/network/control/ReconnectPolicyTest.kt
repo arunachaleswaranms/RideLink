@@ -1,13 +1,17 @@
 package com.ridelink.network.control
 
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import kotlin.random.Random
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 /**
@@ -93,4 +97,118 @@ class ReconnectPolicyTest {
                 scope.cancel()
             }
         }
+
+    // MARK: - STATUS §4 problem 125: a promotion ends the run, whichever connection it promoted
+
+    @Test
+    fun `a promotion while the ladder is parked ends the run, and the next run has a full budget`() =
+        runBlocking {
+            val scope = CoroutineScope(Job())
+            try {
+                val parked = Channel<Unit>(Channel.UNLIMITED)
+                val release = Channel<Unit>(Channel.UNLIMITED)
+                var free = false
+                val controller =
+                    ReconnectController(scope, Random(11)) {
+                        if (!free) {
+                            parked.send(Unit)
+                            release.receive()
+                        }
+                    }
+                var attempts = 0
+                val firstExhausted = CompletableDeferred<Unit>()
+                controller.start(onAttempt = {
+                    attempts += 1
+                    false
+                }, onExhausted = { firstExhausted.complete(Unit) })
+                withTimeout(5_000) { parked.receive() }
+
+                controller.connectionPromoted() // e.g. the peer dialled in
+                free = true
+                release.send(Unit)
+                delay(SETTLE_MS)
+                assertEquals(0, attempts, "the ended run made no attempt")
+                assertFalse(firstExhausted.isCompleted, "and reported no exhaustion")
+
+                var secondAttempts = 0
+                val secondExhausted = CompletableDeferred<Unit>()
+                controller.start(onAttempt = {
+                    secondAttempts += 1
+                    false
+                }, onExhausted = { secondExhausted.complete(Unit) })
+                withTimeout(5_000) { secondExhausted.await() }
+                assertTrue(secondAttempts >= MIN_FULL_BUDGET_ATTEMPTS, "the next link loss gets a full budget: $secondAttempts")
+                assertFalse(firstExhausted.isCompleted)
+            } finally {
+                scope.cancel()
+            }
+        }
+
+    @Test
+    fun `a promotion during an attempt retires the run without cancelling the attempt`() =
+        runBlocking {
+            val scope = CoroutineScope(Job())
+            try {
+                val controller = ReconnectController(scope, Random(12)) { }
+                val entered = CompletableDeferred<Unit>()
+                val release = CompletableDeferred<Unit>()
+                var attempts = 0
+                var attemptRanToCompletion = false
+                val exhausted = CompletableDeferred<Unit>()
+                controller.start(
+                    onAttempt = {
+                        attempts += 1
+                        entered.complete(Unit)
+                        release.await()
+                        attemptRanToCompletion = true
+                        false // e.g. this dial lost to the peer's, which was promoted meanwhile
+                    },
+                    onExhausted = { exhausted.complete(Unit) },
+                )
+                withTimeout(5_000) { entered.await() }
+                controller.connectionPromoted()
+                release.complete(Unit)
+                delay(SETTLE_MS)
+
+                assertTrue(attemptRanToCompletion, "an in-flight attempt owns its socket and is never cancelled")
+                assertEquals(1, attempts, "no attempt after the promotion")
+                assertFalse(exhausted.isCompleted, "a retired run never reports exhaustion")
+            } finally {
+                scope.cancel()
+            }
+        }
+
+    @Test
+    fun `a promotion performed by the ladder's own attempt does not cancel that attempt`() =
+        runBlocking {
+            val scope = CoroutineScope(Job())
+            try {
+                lateinit var controller: ReconnectController
+                controller = ReconnectController(scope, Random(13)) { }
+                val done = CompletableDeferred<Boolean>()
+                var attempts = 0
+                controller.start(
+                    onAttempt = {
+                        attempts += 1
+                        controller.connectionPromoted() // promote() runs on this very coroutine
+                        delay(1) // a suspension point: it would throw here if the run had cancelled itself
+                        done.complete(true)
+                        true
+                    },
+                    onExhausted = { done.complete(false) },
+                )
+                assertTrue(withTimeout(5_000) { done.await() }, "the promoting attempt completes")
+                delay(SETTLE_MS)
+                assertEquals(1, attempts)
+            } finally {
+                scope.cancel()
+            }
+        }
+
+    private companion object {
+        const val SETTLE_MS = 200L
+
+        /** 7.5 s on the first four rungs, then at most 9.6 s each: a 120 s budget holds at least 16. */
+        const val MIN_FULL_BUDGET_ATTEMPTS = 16
+    }
 }
