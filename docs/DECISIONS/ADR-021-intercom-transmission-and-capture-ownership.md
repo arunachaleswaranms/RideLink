@@ -1157,3 +1157,76 @@ Both entry points now call one `IntercomStopOwner` built on `AppContainer`'s `ap
 this ADR's rules unchanged: release first, and a timed-out release never releases the service. No
 wire, vector or state-machine change. Regression: `IntercomStopOwnerTest`; see `docs/STATUS.md` §4
 problem 101.
+
+## Amendment A9 — 19 October 2026 — a slow in-app End is not a timed-out one
+
+**Status of the ADR: still Accepted.** STATUS §4 problem 129, found on two physical Android phones
+([evidence](../PHASE9BA_ANDROID_ANDROID_FULL_QUALIFICATION.md#13-defects-found-in-this-run)). No wire,
+vector, pure-reducer or state-machine change.
+
+### The finding
+
+Amendment A5 fixed a stale `TimedOut` for the session-teardown path and said, of the other call
+site, that a caller of `stopAndAwaitRelease()` on its own — `SessionCoordinator.endIntercomAndAwaitRelease`,
+the in-app and notification **End intercom** — "still sees a genuine `TimedOut` exactly as before,
+because nothing there subsequently proves the release complete." That was the defect. A4 had already
+shown that the 5 s caller window starts before `engine.release()` and is therefore always at or before
+`AndroidVoiceAudioSession.close()`'s own 5 s route-settlement window. So any End whose route-change
+confirmation is late or absent returns `TimedOut`, and `IntercomStopOwner` (A8) skipped the service
+release and never asked again. Capture then finished releasing on its own. The phone was left with a
+`microphone`-typed foreground service and an *"Intercom on — Starting the microphone…"* notification.
+That text appears only when the service still thinks the intercom is active **and** the controller
+reports capture closed, which is this sequence exactly. The notification's own End later found
+nothing to release (`AlreadyReleased`) and cleared it, which is what the user saw.
+
+### The decision
+
+**For an End, the caller window is a report, not a verdict.** `VoiceController.stopAndAwaitReleaseCompletion`
+tells its caller once that the window elapsed, then keeps waiting on the **same** in-flight
+`StopRequested`, never a second one. It returns only `Released` or `AlreadyReleased`.
+`SessionCoordinator.endIntercomAndAwaitRelease` uses it, so `IntercomStopOwner` drops the
+`microphone` type as soon as capture is really released. The rules this ADR already had stand:
+
+- The service is never released before capture is (A1/A2).
+- A release that never finishes keeps the service, because the microphone is then genuinely held.
+- A start after the End still keeps the new intercom's service (A8's epoch).
+- End intercom is not End session.
+
+Waiting without a caller-side bound is safe for A4's reason: the only suspension inside a
+`StopRequested` application is the release itself, whose route wait is already bounded. The waiter is
+removed on every exit, cancellation included (Issue 10). `stopAndAwaitRelease()` itself, its
+`TimedOut`, and A5's teardown promotion are unchanged.
+
+Rejected:
+- Raising the caller window. It does not remove the race, it only moves it.
+- Re-offering `StopRequested` after a timeout. A second stop would end an intercom the user had
+  restarted in the meantime.
+- Releasing on a diagnostics projection of `localAudioOpen`. A published snapshot is not proof of
+  release.
+
+### Diagnosability
+
+Problem 129 could not be diagnosed from the phone because intercom actions were not in the export.
+`SessionCoordinator` now logs intercom start (with the local control-generation counter), end, the
+release outcome and duration, a slow release, mute, voice re-authentication and link loss. It also
+logs `IntercomStopOwner`'s decision as a closed enum (`IntercomServiceDecision`). It stays the only
+production logger, as `SessionCoordinatorDiagnosticsExportTest` requires. The messages carry no peer,
+device, voice-session or secret value.
+
+### iOS
+
+Not applicable. iOS has no foreground service and no bounded stop-await: `endIntercom()` offers
+`stopRequested` into the controller's mailbox inside `launchInSession`, and the audio-session owner
+moves on the release itself, not on a caller window. Inspected; no code changed.
+
+### Verification
+
+- `IntercomEndForegroundServiceTest` (`:app`) drives a real `SessionCoordinator`, `VoiceController`
+  and `IntercomStopOwner`, wired as `AppContainer` wires them. Its capture release outlasts the caller
+  window and then completes. Against the unmodified code, the headline case and the logging case
+  fail: capture is released, but the service release never follows. A mutant that restores only the
+  old bounded wait fails the same two. The guards pass either way: a fast End, a Start between a slow
+  End and its release, and a release that never completes.
+- `VoiceControllerStopAwaitTest` (`:network`): the elapsed window is reported once, the same release
+  is awaited with no second `close()`, and a cancelled waiter does not leak.
+- Physical retest: TEST_PLAN, problem 129. **Pending.**

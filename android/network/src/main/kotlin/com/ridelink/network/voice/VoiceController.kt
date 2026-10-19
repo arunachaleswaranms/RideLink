@@ -380,6 +380,46 @@ class VoiceController(
     }
 
     /**
+     * Like [stopAndAwaitRelease], but the caller window is a **report, not a verdict** (STATUS §4
+     * problem 129): when [stopAwaitTimeoutMs] elapses first, [onCallerWindowElapsed] is told once and
+     * this keeps waiting on the **same** in-flight `StopRequested` — never a second one — until it has
+     * been fully applied. It therefore returns only [StopReleaseResult.Released] or
+     * [StopReleaseResult.AlreadyReleased].
+     *
+     * Why this exists: the caller window starts before `engine.release()`, while
+     * `AndroidVoiceAudioSession.close()` then waits up to its own route-settlement window for
+     * the platform to confirm the route change, so the outer window is structurally at or before the
+     * inner one (STATUS §2r/§2s). An in-app End whose confirmation was late or absent therefore
+     * returned `TimedOut`, its caller treated that as final, and the `microphone` foreground service
+     * outlived the capture it existed for. [shutdown] already waits this way for the teardown path
+     * (problem 39); this is the same rule for the user's End, which does not shut the controller down.
+     *
+     * Waiting without a caller-side bound is safe for the same reason it is in [shutdown]: the only
+     * suspension inside a `StopRequested` application is the release itself, and the route wait inside
+     * that is already bounded. A release that genuinely never finishes keeps this waiting — and keeps
+     * the foreground service — which is correct, because the microphone is then genuinely still held.
+     * The waiter is removed on every exit, including cancellation, so it cannot leak (Issue 10).
+     */
+    suspend fun stopAndAwaitReleaseCompletion(onCallerWindowElapsed: () -> Unit = {}): StopReleaseResult {
+        if (!audioSession.isOpen) {
+            offer(VoiceInput.StopRequested)
+            return StopReleaseResult.AlreadyReleased
+        }
+        val completion = CompletableDeferred<Unit>()
+        synchronized(mailboxLock) { pendingStopCompletions.add(completion) }
+        offer(VoiceInput.StopRequested)
+        try {
+            if (withTimeoutOrNull(stopAwaitTimeoutMs) { completion.await() } == null) {
+                onCallerWindowElapsed()
+                completion.await()
+            }
+        } finally {
+            synchronized(mailboxLock) { pendingStopCompletions.remove(completion) }
+        }
+        return StopReleaseResult.Released
+    }
+
+    /**
      * The user's own Mute toggle. It goes through the intercom gate rather than straight to the
      * negotiation table, because mute is one of five inputs that decide whether audio leaves — the
      * others being the policy, the PTT button, the capture path and any platform interruption — and
