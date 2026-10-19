@@ -62,6 +62,12 @@ deliberately repeat the failing shape:
 
 A first-time I-02 needs the user's authorisation to *Forget* the pairing on both phones.
 
+**Recorded 19 October 2026.**
+- **I-03 and the trusted half of this procedure:** PASS on both phones.
+- **The first-time half cannot run.** Neither app has a *Forget peer* control (STATUS §4 problem
+  126), so I-02, I-16, I-20 and the pairing-interruption case are BLOCKED until one exists.
+- See [PHASE9BA_ANDROID_ANDROID_FULL_QUALIFICATION.md](PHASE9BA_ANDROID_ANDROID_FULL_QUALIFICATION.md).
+
 ## Phase 9B-A Keystore TLS identity additions (18 October 2026)
 
 [ADR-017 Amendment A1](DECISIONS/ADR-017-identity-key-and-certificate.md#amendment-a1--18-october-2026--the-android-identity-key-must-also-authorise-digest_none-and-an-identity-created-without-it-is-replaced-only-by-the-user),
