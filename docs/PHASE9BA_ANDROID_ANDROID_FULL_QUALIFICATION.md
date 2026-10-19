@@ -297,11 +297,27 @@ UI and diagnostics observations, not filed as problems:
 - The fix for problem 125 was developed in parallel by a separate agent with no phone access, on a
   separate branch (draft PR #24). This evidence branch contains no production code.
 
-**Phones left as found:**
+**Phones left as found (cleanup, 07:12–07:18Z):**
+
+Steps:
+
+1. The user agreed to end the intercom and the session.
+2. On A: *End intercom*, then *End session*. A released everything.
+3. B was locked and stranded in problem 125's `DISCONNECTED` state.
+   - Its control connection had closed after A's BYE.
+   - It **kept the `microphone`-typed foreground service and an *"Intercom on — Microphone on"*
+     notification** with no recorder running.
+   - The `DISCONNECTED` screen offers no End intercom or End session.
+4. After the user unlocked B: *Search again*, whose teardown released the audio and the service,
+   then *Stop searching*. This is a further consequence of problem 125: a stranded phone keeps its
+   microphone service until the user retries.
+
+Final state:
 
 | | Device A | Device B |
 |---|---|---|
-| RideLink | Connected, intercom on | Connected, intercom on |
+| RideLink | *Not connected* | *Not connected* |
+| Foreground service, recorder, player, RideLink notification, sockets | None | None |
 | Identity | Unchanged (`8eb849…`) | Unchanged (`5e38e3…`) |
 | Pin for the other phone | Kept | Kept |
 | Library | Unchanged (78 tracks) | Unchanged (0 tracks) |
