@@ -16,7 +16,7 @@ Consequences · Alternatives considered.
 | [009](ADR-009-ios-music-library-scope.md) | iOS library is app-container only | Accepted |
 | [010](ADR-010-internal-leader-election.md) | Internal leader election by peer_id | Accepted · **amended A1** (26 Aug 2026 — leadership ≠ connection ownership) |
 | [011](ADR-011-platform-baselines.md) | Platform baselines: Android API 31/36/36, iOS 26.0 | Accepted |
-| [012](ADR-012-spki-peer-identity.md) | Peer identity is the SPKI SHA-256, not the certificate | Accepted |
+| [012](ADR-012-spki-peer-identity.md) | Peer identity is the SPKI SHA-256, not the certificate | Accepted · **amended A1** (19 Oct 2026 — a user-visible, confirmed *Forget peer*, only in `IDLE`; the trust gate re-checks the pin, serialised with the forget) |
 | [013](ADR-013-paginated-manifest-sync.md) | Paginated manifest synchronisation | Accepted |
 | [014](ADR-014-initial-module-structure-and-di.md) | Pragmatic initial module structure, and manual DI | Accepted |
 | [015](ADR-015-duplicate-connection-resolution.md) | Deterministic duplicate-connection resolution | Accepted |

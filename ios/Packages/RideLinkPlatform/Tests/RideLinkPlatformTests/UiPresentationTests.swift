@@ -46,4 +46,23 @@ final class UiPresentationTests: XCTestCase {
             XCTAssertFalse(UiPresentation.policyLabel(policy).localizedCaseInsensitiveContains("peer"))
         }
     }
+
+    /// STATUS §4 problem 126: the button and the coordinator read one policy, and the copy says what
+    /// forgetting costs. Mirrors Android's `UiLabelsTest`.
+    func testForgetIsOfferedOnlyInIdleAndItsConfirmationNamesTheSixDigitCode() {
+        let statuses: [SessionStatus] = [.idle, .discovering, .pairing, .connecting, .connected, .rideActive,
+                                         .reconnecting, .disconnected, .ending, .error]
+        for status in statuses {
+            let hint = UiPresentation.forgetPeerUnavailableHint(status)
+            XCTAssertEqual(hint == nil, status == .idle, "\(status)")
+            XCTAssertFalse(hint?.localizedCaseInsensitiveContains("peer") ?? false)
+        }
+        let confirmation = UiPresentation.forgetPeerConfirmation("Rider")
+        XCTAssertTrue(confirmation.contains("six-digit code"))
+        XCTAssertTrue(confirmation.contains("identity"), "it says the identity is kept")
+        XCTAssertFalse(confirmation.localizedCaseInsensitiveContains("peer"))
+        XCTAssertNil(UiPresentation.forgetPeerResultLabel(.forgotten))
+        XCTAssertTrue(UiPresentation.forgetPeerResultLabel(.failed)?.contains("still trusted") ?? false)
+        XCTAssertTrue(UiPresentation.pinMismatchExplanation.contains("Paired phones"))
+    }
 }

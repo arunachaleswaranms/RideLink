@@ -15,6 +15,7 @@ import com.ridelink.core.model.DiscoveredPeer
 import com.ridelink.core.protocol.AudioStateEpoch
 import com.ridelink.core.protocol.AudioStateMessage
 import com.ridelink.core.protocol.AudioStatePublisher
+import com.ridelink.core.security.ForgetPeerPolicy
 import com.ridelink.core.security.TrustedPeer
 import com.ridelink.core.security.TrustedPeerStore
 import com.ridelink.core.sessionfsm.Effect
@@ -46,6 +47,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import java.io.IOException
 import com.ridelink.network.control.LinkLossReason as ControlLinkLossReason
 
 /**
@@ -120,6 +122,22 @@ interface RideSegmentOwner {
      */
     fun endRideSegment(rideEpoch: Long): RideBoundaryOutcome
 }
+
+/** What [SessionCoordinator.forgetPeer] did (STATUS §4 problem 126). Mirrors iOS's `ForgetPeerResult`. */
+enum class ForgetPeerResult {
+    /** The pin is gone; the next connection to that phone pairs afresh with a six-digit code. */
+    FORGOTTEN,
+
+    /** A session is not `IDLE`. Nothing changed; the user ends the session first. */
+    REFUSED_SESSION_ACTIVE,
+
+    /** The store could not make the removal durable. Nothing changed; the phone is still trusted. */
+    FAILED,
+}
+
+/** Most recently seen first, so the phone the user rides with is at the top of the list. */
+private fun TrustedPeerStore.sortedForDisplay(): List<TrustedPeer> =
+    all().sortedWith(compareByDescending<TrustedPeer> { it.lastSeenAtEpochSeconds }.thenBy { it.peerId.value })
 
 /**
  * What an End Ride boundary did when it reached the one owner of ride-segment playback authority
@@ -230,9 +248,47 @@ class SessionCoordinator(
         controlSessionManager.confirmPairing(accepted)
     }
 
-    fun forgetPeer(peer: TrustedPeer) {
-        trustedPeers.forget(peer.peerId)
-        _securityAlert.value = null
+    private val _trustedPeerList = MutableStateFlow(trustedPeers.sortedForDisplay())
+
+    /**
+     * The phones this one trusts, for the *Paired phones* list (STATUS §4 problem 126). A projection
+     * of [TrustedPeerStore], refreshed whenever this coordinator changes the store, and never a second
+     * source of trust: the pin check reads the store, not this list.
+     */
+    val trustedPeerList: StateFlow<List<TrustedPeer>> = _trustedPeerList.asStateFlow()
+
+    /**
+     * The user's confirmed *Forget peer* (ADR-012 Amendment A1, STATUS §4 problem 126): the only
+     * recovery ADR-012, ARCHITECTURE §4.3 and PROTOCOL §4.5.3 allow from a genuine key change or a
+     * `pin_mismatch`.
+     *
+     * Removes **only** [peer]'s pin. The identity key, the local `peer_id`, the music library,
+     * settings and every other peer's record are untouched — this class has no path to any of them
+     * through here. The next connection to that phone is a first meeting: PROTOCOL §4.5's six digits,
+     * compared and confirmed on both screens, before anything is trusted again.
+     *
+     * Refused outside `IDLE` ([ForgetPeerPolicy]): a live session is ended with [endSession], whose
+     * single teardown owner is the one way a session ends (ADR-026), never by a forget.
+     */
+    fun forgetPeer(peer: TrustedPeer): ForgetPeerResult {
+        val status = _state.value.status
+        if (!ForgetPeerPolicy.permits(status)) {
+            logger.warn("SessionCoordinator", "forget ${peer.peerId} refused in $status: end the session first")
+            return ForgetPeerResult.REFUSED_SESSION_ACTIVE
+        }
+        val result =
+            try {
+                controlSessionManager.trustGate.forget(peer.peerId)
+                logger.info("SessionCoordinator", "forgot ${peer.peerId} (${peer.identitySpkiSha256}); next connection pairs afresh")
+                // The alert was about this pin; with the pin gone it describes nothing.
+                _securityAlert.value = null
+                ForgetPeerResult.FORGOTTEN
+            } catch (failure: IOException) {
+                logger.warn("SessionCoordinator", "forget ${peer.peerId} failed to persist: ${failure.javaClass.simpleName}")
+                ForgetPeerResult.FAILED
+            }
+        _trustedPeerList.value = trustedPeers.sortedForDisplay()
+        return result
     }
 
     fun dismissSecurityAlert() {
@@ -791,6 +847,7 @@ class SessionCoordinator(
                 // confirmed; this refreshes `last_seen_at` on that same record (TrustedPeerStore
                 // refuses to replace a pin, so it can never become a second, different one).
                 trustedPeers.remember(event.peer.copy(lastSeenAtEpochSeconds = environment.nowEpochSeconds()))
+                _trustedPeerList.value = trustedPeers.sortedForDisplay()
                 logger.info("SessionCoordinator", "paired with ${event.peer.peerId} (${event.peer.identitySpkiSha256})")
             }
             is ControlEvent.PairingFailed -> _securityAlert.value = event.code

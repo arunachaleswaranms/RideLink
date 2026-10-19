@@ -324,6 +324,19 @@ Recovering from a real key change requires the user to explicitly forget the pee
 with a fresh SAS confirmation. There is no key-rotation protocol in V1
 ([PROTOCOL §4.5.3](PROTOCOL.md#453-certificate-re-issuance-versus-key-rotation)).
 
+**Forget peer** ([ADR-012 Amendment A1](DECISIONS/ADR-012-spki-peer-identity.md#amendment-a1--19-october-2026--forget-peer-is-a-user-visible-control-and-it-cannot-be-bypassed))
+is a confirmed control in the *Paired phones* list on both platforms. It works like this:
+- It removes that one trusted-peer record. The identity key, the local `peer_id`, the library,
+  settings and other records are never touched.
+- It is offered only in `IDLE` (`ForgetPeerPolicy`). In any other state the user ends the session
+  first, so a forget never becomes a second way to end a session (§3, ADR-026).
+- `ControlSessionManager` re-checks the stored pin whenever a handshake's `Trusted` verdict is about
+  to pass the trust gate. The check is serialised with the forget: under one monitor on Android, on
+  the manager's actor on iOS. So a handshake that read the pin before the forget is offered the
+  six-digit code, not a silent connect.
+- Forgetting is local. The procedure forgets on both phones. A phone that forgot never authenticates
+  on the other phone's leftover trust.
+
 ### 4.4 Fallback when mDNS is blocked
 
 Deferred to Phase 1b. Some hotspots and enterprise APs block multicast, so a manual path offers

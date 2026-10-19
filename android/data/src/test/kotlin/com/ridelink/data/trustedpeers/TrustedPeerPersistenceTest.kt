@@ -78,6 +78,34 @@ class TrustedPeerPersistenceTest {
         assertEquals(otherSpki, assertNotNull(store.byPeerId(alice)).identitySpkiSha256)
     }
 
+    /**
+     * STATUS §4 problem 126: *Forget peer* removes the selected record and nothing else — not the
+     * other phone's record, and not the durable `peer_id` that sits in the same directory (the
+     * identity key itself lives in Android Keystore, which this store cannot reach at all).
+     */
+    @Test
+    fun `forgetting one peer removes only that record and leaves the rest of the directory alone`() {
+        val peerIdFile = File(directory, "peer_id")
+        val localPeerId = LocalPeerIdStore(peerIdFile).loadOrCreate()
+        val peerIdBytes = peerIdFile.readBytes()
+        val store = store()
+        store.remember(peer())
+        store.remember(peer(peerId = bob, spki = otherSpki))
+
+        store.forget(alice)
+
+        val reloaded = store()
+        assertNull(reloaded.byPeerId(alice), "the forgotten pin must not come back after a restart")
+        assertEquals(otherSpki, assertNotNull(reloaded.byPeerId(bob)).identitySpkiSha256, "the other phone stays trusted")
+        assertEquals(1, reloaded.all().size)
+        assertTrue(peerIdBytes.contentEquals(peerIdFile.readBytes()), "this phone's peer_id is not touched")
+        assertEquals(localPeerId, LocalPeerIdStore(peerIdFile).loadOrCreate())
+        assertEquals(setOf("peer_id", "trusted_peers.json"), directory.listFiles()!!.map { it.name }.toSet())
+
+        store.forget(PeerId("cccccccccccccccc")) // unknown: a no-op, never an error
+        assertEquals(1, store().all().size)
+    }
+
     @Test
     fun `a corrupt store reads as empty rather than crashing at launch`() {
         val file = File(directory, "trusted_peers.json")

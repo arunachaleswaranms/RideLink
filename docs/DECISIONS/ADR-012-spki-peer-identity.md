@@ -87,3 +87,96 @@ that expiry never masquerades as rotation.
 | Pin the raw public key bytes instead of the SPKI DER | SPKI includes the algorithm identifier, so the same raw bytes cannot be reinterpreted under a different algorithm. Cheap, standard, and one less thing to reason about |
 | Keep the name `cert_fingerprint` and document that it means SPKI | A security field whose name contradicts its content. Rejected outright |
 | Use a certificate subject / CN as identity | Attacker-chosen, unauthenticated, meaningless in a self-signed world |
+
+## Amendment A1 — 19 October 2026 — *Forget peer* is a user-visible control, and it cannot be bypassed
+
+**Found on two physical Android phones** (Phase 9B-A full qualification; STATUS §4 problem 126;
+[evidence](../PHASE9BA_ANDROID_ANDROID_FULL_QUALIFICATION.md#13-defects-found-in-this-run)). The
+decision above makes "forget the peer, pair again, fresh SAS on both screens" the **only** recovery
+from a genuine key change or `pin_mismatch`, and this ADR's own consequences lean on "a 'forget peer'
+button". Neither app had one. `SessionCoordinator.forgetPeer` existed on both platforms, and nothing in
+production called it. The only recourse was clearing app data, which also destroys this phone's own
+identity, and fresh-pairing qualification (TEST_PLAN I-02, I-16, I-20) could not run. Nothing in the
+decision above changes. This amendment says how the forget is offered and what it must guarantee.
+
+### Decision
+
+1. **A deliberate, confirmed control on both platforms.** A *Paired phones* section lists every
+   trusted record by display name and the pin redacted to 6 hex (ARCHITECTURE §11). *Forget* opens a
+   confirmation that says the next connection will show a six-digit code to compare and confirm
+   again, that the other phone should forget this one too, and that this phone's identity, music and
+   settings are not changed.
+2. **It removes one record and nothing else.** `TrustedPeerStore.forget(peer_id)` removes that
+   `peer_id`'s pin. It never touches another peer's record, the Keystore/Keychain identity, the local
+   `peer_id`, the library or settings; the store has no path to any of them. A removal that cannot be
+   made durable **throws** and leaves the record trusted, in memory and on disk. iOS's `forget` used to
+   be `try?`, so a failed write was silently reported as a forget; it now throws, like Android's.
+3. **Only in `IDLE`** (`ForgetPeerPolicy`, mirrored on both platforms). The coordinator refuses the
+   forget in every other status (`REFUSED_SESSION_ACTIVE`), and the UI disables the button and says
+   why, using the same policy. Of the two designs the brief allowed, this one is chosen over "forgetting the
+   connected peer ends the session" because:
+   - a session has exactly **one** end path, ADR-026's `SessionCoordinator.retireSession` (CLAUDE.md
+     rule 21). A forget that ended the session would be a second way in, and from `DISCOVERING`,
+     `PAIRING` and `CONNECTING` there is no `UserEnded` edge to reuse, so the forget would have to
+     invent one. The user already has *End session* and *Stop searching*;
+   - `IDLE` is the only status in which no control plane belongs to the current session: nothing is
+     listening, dialling, reconnecting, pairing or authenticated. `ENDING -> IDLE` is reached only
+     after the teardown owner has awaited `ControlSessionManager.shutdown()`;
+   - it also resets `connectAttempted`, so the next *Find other phone* re-dials and meets the code.
+     A forget from `DISCOVERING` would leave that latch set, and nothing would re-dial;
+   - forgetting a live session's peer is not a recovery scenario. `pin_mismatch` never
+     authenticates, so a live session is by definition one whose pin matched.
+4. **The trust gate re-asks the pin, serialised with the forget.** `PeerTrust.decide` runs inside
+   the `HELLO` exchange, and the connection is promoted only after duplicate resolution's 300 ms grace
+   period. A forget landing in between was silently overruled: the stale `Trusted` verdict passed
+   the gate. Now `promote` re-reads the stored pin for a `Trusted` verdict (`PeerTrust.recheck`):
+   - absent means `PairingRequired`, so PROTOCOL §4.5's code is shown, never a silent connect;
+   - equal means `Trusted`;
+   - different means `pin_mismatch`, refused exactly as the handshake would have refused it.
+
+   The re-check and the trusted path up to `activateAuthenticatedSession` run without suspending.
+   On Android they run under the monitor that `TrustRevocationGate.forget` takes. On iOS they run on
+   the `ControlSessionManager` actor that `forgetTrustedPeer` is isolated to. So a forget lands either
+   before the re-check, which sends the peer to the code, or after an activation. Point 3 makes the
+   second case impossible in a live session. The tail of a retiring session (`CancelDiscovery` reaches
+   `IDLE` before its teardown finishes) is closed by `shutdown()` before any successor starts, as
+   rule 21 already requires.
+5. **No other trust cache exists to go stale.** The pin is read from the store at both points. The
+   UI's list is a projection refreshed after every coordinator write, and nothing reads trust from
+   it. `SessionGate` decides from events, and `PeerTrusted` is emitted only after the re-check. Each
+   step of the reconnect ladder is a fresh dial with a fresh handshake read.
+
+### What it does not do
+
+- **Forgetting is local.** If only this phone forgets, the other phone still holds a valid pin for
+  this phone's unchanged key. It therefore passes its *own* trust gate silently, while this phone
+  shows the six digits and, since nobody on the other side is ever asked to confirm, never
+  authenticates. This fails closed, and no wire change is made to "tell" the other phone, which would
+  need an authenticated message from a peer that is no longer trusted. The confirmation and the
+  TEST_PLAN procedure say to forget on both phones.
+- **It does not end an authenticated connection.** It cannot meet one, by point 3.
+- **No wire change, and no vector moved.** `recheck` is the pin half of `decide`, already pinned by
+  `vectors/identity/`. It is exhausted by unit tests on both platforms, including against `decide`
+  itself.
+
+### Verification
+
+- `ForgetPeerTrustGateTest` (Android, `:network`) and `ForgetPeerTrustGateTests` (iOS,
+  `RideLinkPlatform`) use real managers over real loopback TLS 1.3, with a store that runs the
+  forget the instant the handshake's own lookup has returned the pin. In those tests:
+  - the raced connection shows the code and pairs afresh only after both users confirm;
+  - one-sided trust never authenticates the phone that forgot;
+  - a pin replaced in the window is `pin_mismatch`.
+
+  On both platforms, three of the four cases fail against the unamended `promote`. The fourth (both phones
+  forgot before dialling) is the normal path and passes either way.
+- `SessionCoordinatorForgetPeerTest` (Android, `:app`, real coordinator) proves four things:
+  - only the selected record goes and the identity prefix is unchanged;
+  - the forget is refused in `DISCOVERING`, `PAIRING`, `CONNECTED`, `RIDE_ACTIVE` and
+    `RECONNECTING`, with nothing changed and nothing torn down;
+  - *End session* then reaches `IDLE` through `TeardownComplete`, after which the forget succeeds;
+  - a persistence failure reports `FAILED` and keeps the phone listed.
+
+  The iOS app target has no test bundle, so its coordinator is covered through the shared
+  `ForgetPeerPolicy` and `UiPresentation` tests only.
+- **Physical:** pending. See TEST_PLAN's problem 126 section for the I-02/I-16 procedure.

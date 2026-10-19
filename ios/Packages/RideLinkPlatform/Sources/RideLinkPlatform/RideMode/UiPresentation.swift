@@ -95,4 +95,40 @@ public enum UiPresentation {
         case .custom: "Custom intercom mode"
         }
     }
+
+    // MARK: - Paired phones (STATUS §4 problem 126, ADR-012 Amendment A1)
+
+    /// Why *Forget* is disabled in `status`, or nil when it is offered. Reads the same `ForgetPeerPolicy`
+    /// the coordinator enforces, so the button and the refusal cannot disagree. Mirrors Android's
+    /// `forgetPeerUnavailableHint`.
+    public static func forgetPeerUnavailableHint(_ status: SessionStatus) -> String? {
+        if ForgetPeerPolicy.permits(status) { return nil }
+        switch status {
+        case .discovering: return "Tap Stop searching first, then forget the phone."
+        case .pairing, .connecting: return "Finish or cancel the code check first, then end the session to forget the phone."
+        case .ending: return "Closing the connection…"
+        default: return "End the session first, then forget the phone."
+        }
+    }
+
+    /// The confirmation dialog's body: what forgetting does, and what it deliberately leaves alone.
+    public static func forgetPeerConfirmation(_ name: String) -> String {
+        "This phone will stop trusting \(name). The next time the two phones connect, both screens will "
+            + "show a six-digit code that you must compare and confirm again. Forget this phone on the "
+            + "other phone too. This phone's own identity, your music and your settings are not changed."
+    }
+
+    public static func forgetPeerResultLabel(_ result: ForgetPeerResult) -> String? {
+        switch result {
+        case .forgotten: return nil
+        case .refusedSessionActive: return "End the session first, then forget the phone."
+        case .failed: return "Could not forget the phone. It is still trusted. Try again."
+        }
+    }
+
+    /// The `pin_mismatch` security card's explanation, here so it names the control that resolves it.
+    public static let pinMismatchExplanation =
+        "The other phone's identity key has changed. That happens after a reinstall — but it is "
+            + "also what an impersonation attempt looks like. RideLink will not reconnect until you "
+            + "forget this phone under Paired phones, on both phones, and pair again with a new code."
 }

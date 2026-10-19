@@ -103,7 +103,7 @@ internal fun securityAlertExplanation(code: String): String =
         "pin_mismatch" ->
             "The other phone's identity key has changed. That happens after a reinstall — but it is " +
                 "also what an impersonation attempt looks like. RideLink will not reconnect until you " +
-                "forget this phone and pair again."
+                "forget this phone under Paired phones, on both phones, and pair again with a new code."
         "certificate_invalid" ->
             "The other phone's certificate is outside its validity window. Check the date and time on both phones."
         "identity_mismatch" ->

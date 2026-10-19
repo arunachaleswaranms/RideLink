@@ -233,6 +233,14 @@ class ControlSessionManager(
      */
     @Volatile
     private var isShutDown = false
+
+    /**
+     * The *Forget peer* action's one write path (ADR-012 Amendment A1, STATUS §4 problem 126):
+     * [TrustRevocationGate.forget] removes one pin, serialised with the trusted half of [promote].
+     * A property rather than a method here for the reason `config/detekt/detekt.yml` gives this
+     * class: extract rather than raise a threshold.
+     */
+    val trustGate: TrustRevocationGate = TrustRevocationGate(trustedPeers)
     private val stateLock = Mutex()
     private val pendingPings = ConcurrentHashMap<Long, CompletableDeferred<ClockSync.Sample>>()
 
@@ -684,30 +692,41 @@ class ControlSessionManager(
             )
         }
 
-        // PROTOCOL §4.5: pairing runs only on the surviving connection, so this is decided here —
-        // after duplicate resolution — and never in the handshake itself. That is what guarantees
-        // exactly one six-digit code is ever displayed, even on a simultaneous first meeting.
-        //
-        // The exchange is armed *before* the read loop starts, so a PAIR_REQUEST that arrives
-        // immediately cannot be dropped for want of an exchange to hand it to.
-        val pairingRequired = candidate.outcome.pinDecision is PinDecision.PairingRequired
-        if (pairingRequired) {
-            beginPairing(candidate)
-            // beginPairing fails closed when the exporter is unavailable, and that closes the
-            // socket. There is nothing left to run loops over.
-            if (activeSocket !== candidate.socket) return
-        }
+        // ADR-012 Amendment A1 (STATUS §4 problem 126): the handshake's `Trusted` verdict is re-asked
+        // against the store as it is *now*, serialised with [TrustRevocationGate.forget], and the trusted path
+        // runs to [activateAuthenticatedSession] on that same lock without suspending — so a forget
+        // that landed after the HELLO exchange read the pin sends this peer to the six-digit code.
+        val decision =
+            trustGate.admit(candidate.outcome) {
+                // The read loop and keepalive belong to the **transport**: PROTOCOL §4.5's pairing
+                // frames arrive on this same connection, and a link that dies mid-pairing still has to
+                // be noticed. Everything that presumes an authenticated peer — the ARCHITECTURE §7.1
+                // clock burst — waits for the trust gate instead.
+                readLoopJob = scope.launch { readLoop(candidate.socket, candidate.outcome.sessionId) }
+                keepaliveJob = scope.launch { keepaliveLoop(candidate.socket) }
+                _events.tryEmit(ControlEvent.PeerTrusted(candidate.outcome.remotePeerId))
+                activateAuthenticatedSession()
+            }
 
-        // The read loop and keepalive belong to the **transport**: PROTOCOL §4.5's pairing frames
-        // arrive on this same connection, and a link that dies mid-pairing still has to be
-        // noticed. Everything that presumes an authenticated peer — the ARCHITECTURE §7.1 clock
-        // burst — waits for the trust gate instead.
-        readLoopJob = scope.launch { readLoop(candidate.socket, candidate.outcome.sessionId) }
-        keepaliveJob = scope.launch { keepaliveLoop(candidate.socket) }
-
-        if (!pairingRequired) {
-            _events.tryEmit(ControlEvent.PeerTrusted(candidate.outcome.remotePeerId))
-            activateAuthenticatedSession()
+        when (decision) {
+            PinDecision.Trusted -> Unit
+            // PROTOCOL §4.5: pairing runs only on the surviving connection, so this is decided here —
+            // after duplicate resolution — and never in the handshake itself. That is what guarantees
+            // exactly one six-digit code is ever displayed, even on a simultaneous first meeting.
+            //
+            // The exchange is armed *before* the read loop starts, so a PAIR_REQUEST that arrives
+            // immediately cannot be dropped for want of an exchange to hand it to.
+            PinDecision.PairingRequired -> {
+                beginPairing(candidate)
+                // beginPairing fails closed when the exporter is unavailable, and that closes the
+                // socket. There is nothing left to run loops over.
+                if (activeSocket !== candidate.socket) return
+                readLoopJob = scope.launch { readLoop(candidate.socket, candidate.outcome.sessionId) }
+                keepaliveJob = scope.launch { keepaliveLoop(candidate.socket) }
+            }
+            // Only the re-check can produce this: the pin was replaced between the handshake and now.
+            // Refused exactly as the handshake would have refused it — never re-paired (ADR-012).
+            is PinDecision.Refused -> failPairing(candidate.socket, decision.code)
         }
     }
 

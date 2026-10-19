@@ -1,5 +1,46 @@
 # RideLink — Test Plan
 
+## *Forget peer* additions (19 October 2026) — STATUS §4 problem 126, ADR-012 Amendment A1
+
+Software regressions. No wire change, and no vector moved: `PeerTrust.recheck` is the pin half of
+the already-pinned `decide`.
+
+| Test | Platform / layer | What it proves |
+|---|---|---|
+| `ForgetPeerTest` / `ForgetPeerTests` | `:core` / `RideLinkCore` | `ForgetPeerPolicy` permits only `IDLE`, over every status. `recheck` maps absent to `PairingRequired`, equal to `Trusted` and different to `pin_mismatch`, and agrees with `decide`. `forget` removes only the selected record |
+| `TrustedPeerPersistenceTest` (new case) / `FileTrustedPeerStoreForgetTests` | `:data` / `RideLinkPlatform` | The file store forgets one record durably, keeps the other, and leaves the `peer_id` file byte-identical with nothing else created. On iOS, a forget whose write fails **throws** and leaves the peer trusted in memory and on disk |
+| `ForgetPeerTrustGateTest` / `ForgetPeerTrustGateTests` | `:network` / `RideLinkPlatform`, real managers, real loopback TLS 1.3 | (a) after both phones forget, the next dial shows equal six digits, nothing authenticates until both confirm, and both pins are rewritten. (b) A forget that lands **after the handshake read the pin** (forced deterministically by a store that runs the forget on that lookup) shows the code, never `PeerTrusted`/`Connected`, and then pairs afresh. (c) One-sided: the phone that forgot never authenticates, even though the other phone connects on its own pin. (d) A pin *replaced* in that window is refused as `pin_mismatch`, with no prompt |
+| `SessionCoordinatorForgetPeerTest` | `:app`, real `SessionCoordinator` | In `IDLE`, only the selected pin goes; the list refreshes, the identity prefix is unchanged and the `pin_mismatch` alert clears. The forget is refused in `DISCOVERING`, `PAIRING`, `CONNECTED`, `RIDE_ACTIVE` and `RECONNECTING`, with nothing changed and nothing torn down. *End session* then reaches `IDLE` through `TeardownComplete`, after which the forget succeeds. A persistence failure returns `FAILED` and keeps the phone listed. A new pairing appears in the list |
+| `UiLabelsTest` / `UiPresentationTests` (new cases) | `:app` / `RideLinkPlatform` | The button's hint is null only in `IDLE`. The confirmation names the six-digit code and says the identity is kept, and no copy says "peer" |
+
+**Reverted-fix check, both platforms:** with `promote`'s re-check disabled, three of the four
+`ForgetPeerTrustGateTest` (Android) and `ForgetPeerTrustGateTests` (iOS) cases fail. Case (a) is the ordinary path and passes either way.
+
+**Not covered:** the iOS app target has no unit-test bundle, so iOS `SessionCoordinator.forgetPeer`
+(the `.idle` refusal and the list refresh) and the SwiftUI view are covered only through the shared
+policy and presentation tests. There is no Compose UI test.
+
+**Physical procedure for I-02 and I-16 using Forget (Android ↔ Android first, then Android ↔ iOS).**
+Read no SAS digits aloud into any record, and let the users press every security confirmation.
+1. On **both** phones: if a session is running, tap *End session* (or *Stop searching*) and wait for
+   *Not connected* (`IDLE`). Check that *Forget* is disabled, with a reason, before this, and enabled
+   after it.
+2. On **both** phones, under *Paired phones*, tap *Forget* on the other phone, read the dialog, and
+   confirm. The row disappears. Expect a log line `forgot peer:xxxxxx… (spki:xxxxxx…)`, with no full
+   identifier. This phone's own identity prefix in *Connection diagnostics* does not change. Music
+   library and settings are unchanged.
+3. **I-02:** on one phone tap *Find other phone*, then on the other. Both screens show *Check the
+   code* with six digits. The users confirm that the digits are identical and that there are exactly
+   six. Both tap *They match*, and both reach *Connected*. *Paired phones* lists the other phone
+   again, under the same identity prefix as before.
+4. **I-16:** repeat steps 1 and 2. Then both users tap *Find other phone* at the same moment.
+   Expect exactly one code per phone, pairing completing once, and one *Paired phones* row per side.
+5. **Negative, one-sided:** forget on phone A only, then search on both. A shows the code. B
+   connects on its own side and shows no code, and A never reaches *Connected*. Tap *They differ*
+   on A, *Stop searching*, forget on B too, and redo step 3. This is the expected, fail-closed
+   behaviour recorded in ADR-012 A1, not a defect.
+6. Record each result in `docs/test-results/` and the Phase 9B-A report.
+
 ## Phase 9B-A post-fix retest additions (18 October 2026, evening)
 
 STATUS §4 problems 123 and 124, both found on two physical Android phones after problem 122's fix

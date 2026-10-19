@@ -53,11 +53,14 @@ public final class FileTrustedPeerStore: TrustedPeerStore, @unchecked Sendable {
         try persist(peers)
     }
 
-    public func forget(_ peerId: PeerId) {
+    public func forget(_ peerId: PeerId) throws {
         lock.lock(); defer { lock.unlock() }
         var peers = load()
         guard peers.removeValue(forKey: peerId.value) != nil else { return }
-        try? persist(peers)
+        // Not `try?`: a forget that did not reach the disk must not be reported as one. `persist`
+        // updates the cache only after the write succeeded, so a failure leaves the peer trusted in
+        // memory and on disk alike, and the caller says so (STATUS §4 problem 126).
+        try persist(peers)
     }
 
     private func load() -> [String: TrustedPeer] {

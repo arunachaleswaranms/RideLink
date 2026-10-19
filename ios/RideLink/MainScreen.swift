@@ -169,6 +169,16 @@ struct MainScreen: View {
                 }
             }
 
+            if !coordinator.trustedPeerList.isEmpty {
+                VStack(alignment: .leading, spacing: RideDesign.md) {
+                    Text("Paired phones").font(.title3.weight(.semibold)).foregroundStyle(.secondary)
+                        .accessibilityAddTraits(.isHeader)
+                    PairedPhonesSection(peers: coordinator.trustedPeerList, status: coordinator.state.status) { peer in
+                        await coordinator.forgetPeer(peer)
+                    }
+                }
+            }
+
             DisclosureGroup("Connection diagnostics") {
                 Text(deviceDescription)
                 TransportBanner(transportLabel: coordinator.controlDiagnostics.transportLabel)
@@ -273,6 +283,66 @@ struct PairingCard: View {
     }
 }
 
+/// The *Paired phones* list and its *Forget* control (STATUS §4 problem 126, ADR-012 Amendment A1).
+/// The mirror of Android's `PairedPhonesSection`.
+///
+/// Forgetting is the only recovery ADR-012 allows from a changed identity key, so it is a deliberate,
+/// confirmed action: the dialog says that the next connection asks for the six-digit code again, and
+/// that nothing else on this phone changes. The button is disabled — with the reason shown — outside
+/// `.idle`, from the same `ForgetPeerPolicy` the coordinator enforces; the coordinator would refuse it
+/// anyway. Each row shows the pinned identity redacted to 6 hex (ARCHITECTURE §11).
+struct PairedPhonesSection: View {
+    let peers: [TrustedPeer]
+    let status: SessionStatus
+    let onForget: (TrustedPeer) async -> ForgetPeerResult
+
+    @State private var confirming: TrustedPeer?
+    @State private var failure: String?
+
+    var body: some View {
+        let unavailable = UiPresentation.forgetPeerUnavailableHint(status)
+        VStack(alignment: .leading, spacing: RideDesign.sm) {
+            VStack(spacing: 0) {
+                ForEach(peers, id: \.peerId.value) { peer in
+                    HStack(spacing: RideDesign.lg) {
+                        VStack(alignment: .leading) {
+                            Text(peer.displayName)
+                            Text(peer.identitySpkiSha256.description)
+                                .font(.caption.monospaced())
+                                .foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        Button("Forget") {
+                            failure = nil
+                            confirming = peer
+                        }
+                        .disabled(unavailable != nil)
+                    }
+                    .padding(.horizontal, RideDesign.lg)
+                    .frame(minHeight: RideDesign.touch + RideDesign.sm)
+                }
+            }
+            .background(RideDesign.surface, in: RoundedRectangle(cornerRadius: RideDesign.radius))
+            if let message = failure ?? unavailable {
+                Text(message).font(.footnote).foregroundStyle(.secondary)
+            }
+        }
+        .alert(
+            confirming.map { "Forget \($0.displayName)?" } ?? "",
+            isPresented: Binding(get: { confirming != nil }, set: { if !$0 { confirming = nil } }),
+            presenting: confirming
+        ) { peer in
+            Button("Forget phone", role: .destructive) {
+                confirming = nil
+                Task { failure = UiPresentation.forgetPeerResultLabel(await onForget(peer)) }
+            }
+            Button("Cancel", role: .cancel) { confirming = nil }
+        } message: { peer in
+            Text(UiPresentation.forgetPeerConfirmation(peer.displayName))
+        }
+    }
+}
+
 /// A refused handshake the user has to see. `pin_mismatch` is the one that matters: ADR-012
 /// requires it to surface as a warning and never to be resolved by silently re-pairing.
 struct SecurityAlertCard: View {
@@ -298,9 +368,7 @@ struct SecurityAlertCard: View {
     private var explanation: String {
         switch code {
         case "pin_mismatch":
-            "The other phone's identity key has changed. That happens after a reinstall — but it is "
-                + "also what an impersonation attempt looks like. RideLink will not reconnect until you "
-                + "forget this phone and pair again."
+            UiPresentation.pinMismatchExplanation
         case "certificate_invalid":
             "The other phone's certificate is outside its validity window. Check the date and time on both phones."
         case "identity_mismatch":

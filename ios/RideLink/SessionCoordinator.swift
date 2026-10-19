@@ -237,6 +237,7 @@ public final class SessionCoordinator {
             connTiebreak: ConnTiebreakGenerator.generate(),
             identitySpkiSha256: identity.identitySpkiSha256
         )
+        refreshTrustedPeerList()
     }
 
     private static func securityDirectory() -> URL {
@@ -354,9 +355,51 @@ public final class SessionCoordinator {
         launchInSession { _ in await manager.confirmPairing(accepted: accepted) }
     }
 
-    public func forgetPeer(_ peer: TrustedPeer) {
-        trustedPeers.forget(peer.peerId)
-        securityAlert = nil
+    /// The user's confirmed *Forget peer* (ADR-012 Amendment A1, STATUS §4 problem 126): the only
+    /// recovery ADR-012, ARCHITECTURE §4.3 and PROTOCOL §4.5.3 allow from a genuine key change or a
+    /// `pin_mismatch`. The mirror of Android's `SessionCoordinator.forgetPeer`.
+    ///
+    /// Removes **only** `peer`'s pin. The Keychain identity, the local `peer_id`, the music library,
+    /// settings and every other peer's record are untouched — nothing here reaches them. The next
+    /// connection to that phone is a first meeting: PROTOCOL §4.5's six digits, compared and confirmed
+    /// on both screens, before anything is trusted again.
+    ///
+    /// Refused outside `.idle` (`ForgetPeerPolicy`): a live session is ended with `endSession()`, whose
+    /// single teardown owner is the one way a session ends (ADR-026), never by a forget. The policy is
+    /// read before the actor hop; a session that starts during the hop is still safe, because the
+    /// manager re-checks the pin on its own actor before any trusted connection passes the gate.
+    @discardableResult
+    public func forgetPeer(_ peer: TrustedPeer) async -> ForgetPeerResult {
+        let status = state.status
+        guard ForgetPeerPolicy.permits(status) else {
+            logger.warn("SessionCoordinator", "forget \(peer.peerId) refused in \(status): end the session first")
+            return .refusedSessionActive
+        }
+        let result: ForgetPeerResult
+        do {
+            try await controlSessionManager.forgetTrustedPeer(peer.peerId)
+            logger.info("SessionCoordinator", "forgot \(peer.peerId) (\(peer.identitySpkiSha256)); next connection pairs afresh")
+            // The alert was about this pin; with the pin gone it describes nothing.
+            securityAlert = nil
+            result = .forgotten
+        } catch {
+            logger.warn("SessionCoordinator", "forget \(peer.peerId) failed to persist")
+            result = .failed
+        }
+        refreshTrustedPeerList()
+        return result
+    }
+
+    /// The phones this one trusts, for the *Paired phones* list (STATUS §4 problem 126). A projection
+    /// of the trusted-peer store, refreshed whenever this coordinator changes it, and never a second
+    /// source of trust: the pin check reads the store, not this list.
+    public private(set) var trustedPeerList: [TrustedPeer] = []
+
+    private func refreshTrustedPeerList() {
+        // Most recently seen first, so the phone the user rides with is at the top of the list.
+        trustedPeerList = trustedPeers.all().sorted {
+            ($0.lastSeenAtEpochSeconds, $1.peerId.value) > ($1.lastSeenAtEpochSeconds, $0.peerId.value)
+        }
     }
 
     public func dismissSecurityAlert() {
@@ -992,6 +1035,7 @@ public final class SessionCoordinator {
             // `PairingExchange` already wrote the pin, exactly once and only after both users
             // confirmed.
             logger.info("SessionCoordinator", "paired with \(peer.peerId) (\(peer.identitySpkiSha256))")
+            refreshTrustedPeerList()
         case .pairingFailed(let code):
             securityAlert = code
         case .handshakeRefused(let code):

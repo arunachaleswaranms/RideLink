@@ -32,7 +32,16 @@ public protocol TrustedPeerStore: Sendable {
     func remember(_ peer: TrustedPeer) throws
 
     /// The explicit user action that makes a re-pair — and a fresh SAS on both screens — possible.
-    func forget(_ peerId: PeerId)
+    ///
+    /// Removes **only** `peerId`'s record: never another peer's, and never anything that is not a
+    /// trusted-peer record (the identity key, the local `peer_id`, the library and settings live
+    /// elsewhere and are not reachable from here). A no-op for an unknown `peerId`.
+    ///
+    /// Throws when the removal could not be made durable, and leaves the record trusted in memory too:
+    /// a forget that silently failed would report success to a user who then trusts a code that was
+    /// never asked for (STATUS §4 problem 126). Production code reaches this only through
+    /// `ControlSessionManager.forgetTrustedPeer`, which serialises it with the trust gate.
+    func forget(_ peerId: PeerId) throws
 }
 
 /// Thrown when `remember` would change a stored pin without an explicit `forget`.
@@ -83,7 +92,7 @@ public final class InMemoryTrustedPeerStore: TrustedPeerStore, @unchecked Sendab
         peers[peer.peerId.value] = peer
     }
 
-    public func forget(_ peerId: PeerId) {
+    public func forget(_ peerId: PeerId) throws {
         lock.lock(); defer { lock.unlock() }
         peers.removeValue(forKey: peerId.value)
     }
