@@ -392,3 +392,19 @@ The defect is liveness and consistency, not authentication.
    reconnect, which also proves A's pin). A first-time I-02 needs the user's authorisation to
    *Forget* the pairing on both phones.
 4. Then continue through Checkpoints F–K in order.
+
+---
+
+# Continuation — full qualification run 1, 19 October 2026
+
+The merged PR #23 build (`47d7cde`, `afafa4c1…2b65`, same signer) was installed in place on both
+phones. The full run is recorded separately in
+[PHASE9BA_ANDROID_ANDROID_FULL_QUALIFICATION.md](PHASE9BA_ANDROID_ANDROID_FULL_QUALIFICATION.md).
+
+- **I-03 PASS.**
+- **Problems 123 and 124 physically resolved** on every path exercised.
+- **Two-way voice audible**, confirmed by the user.
+- **Verdict: BLOCKED.** Problem 125 is a new High defect; its fix is draft PR #24. A fresh I-02 is
+  impossible without a *Forget peer* control (problem 126). Problems 127–130 are new.
+
+The two sections above are unchanged. **The original I-02 FAIL stands.**
