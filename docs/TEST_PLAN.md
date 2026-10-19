@@ -22,11 +22,21 @@ controller cases: a promotion while the ladder is parked (then a full fresh budg
 during an attempt (the attempt is not cancelled, the run makes no further attempt, and there is no
 exhaustion), and a promotion performed by the ladder's own attempt (not cancelled under itself).
 
+**Review round 2:** `an exhaustion decided before an inbound promotion does not touch the promoted
+session` (both platforms). The ladder exhausts against the refused port and is held by
+`ReconnectSeams.exhaustionHook` (Android; it blocks the thread, so cancellation cannot stand in for
+the guard) / `reconnectExhaustionHook` (iOS) between its decision and its effects. The peer's redial
+is promoted, then the hook is released: no `ReconnectBudgetExhausted`, diagnostics still `CONNECTED`,
+FSM `CONNECTED`; and the next loss gets a full ladder ending in exactly one exhaustion and
+`DISCONNECTED`. It fails with the commit guard removed and passes with it. A controller case pins
+`commitExhaustion`: once only, and never after a promotion ended the run.
+
 | Mutant | Effect |
 |---|---|
 | `promote` resets only (the unfixed shape) | Both orphan cases fail |
 | `connectionPromoted` cancels an in-flight attempt too | Both in-flight controller cases fail |
 | Exhaustion without the run-ownership check | The in-flight controller case fails |
+| Exhaustion effects without the ownership commit (round 2) | The round-2 case fails on both platforms |
 
 **Physical, after review (both phones, in-place install):** run I-05 so that the reconnect is
 completed by the **other** phone's dial (aeroplane-mode the phone under test, restore, and let the

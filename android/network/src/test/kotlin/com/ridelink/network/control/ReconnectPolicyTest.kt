@@ -205,6 +205,30 @@ class ReconnectPolicyTest {
             }
         }
 
+    @Test
+    fun `an exhaustion commits once, and never after a promotion ended its run`() =
+        runBlocking {
+            val scope = CoroutineScope(Job())
+            try {
+                val controller = ReconnectController(scope, Random(14)) { }
+
+                val first = CompletableDeferred<ReconnectRun>()
+                controller.start(onAttempt = { false }, onExhausted = { run -> first.complete(run) })
+                val decided = withTimeout(5_000) { first.await() }
+                assertTrue(controller.commitExhaustion(decided), "the deciding run still owns the budget")
+                assertFalse(controller.commitExhaustion(decided), "and commits exactly once")
+
+                controller.connectionPromoted() // refreshes the budget for the next run
+                val second = CompletableDeferred<ReconnectRun>()
+                controller.start(onAttempt = { false }, onExhausted = { run -> second.complete(run) })
+                val stale = withTimeout(5_000) { second.await() }
+                controller.connectionPromoted() // a promotion lands between the decision and its commit
+                assertFalse(controller.commitExhaustion(stale), "a promotion that ended the run first wins")
+            } finally {
+                scope.cancel()
+            }
+        }
+
     private companion object {
         const val SETTLE_MS = 200L
 

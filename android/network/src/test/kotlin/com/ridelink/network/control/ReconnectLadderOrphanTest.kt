@@ -9,6 +9,9 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -31,7 +34,7 @@ import kotlin.test.assertTrue
  * Real managers over real loopback TLS 1.3, the phones' sequence: the dialler drops the link, this
  * side's ladder runs against a dead (stale) address, and the dialler's redial is what reconnects.
  * Time is real; only the ladder's own waits are accelerated, through the manager's
- * `reconnectDelayMs` seam, and only once the promotion has happened — so an orphaned ladder would
+ * `ReconnectSeams`, and only once the promotion has happened — so an orphaned ladder would
  * burn its 120 s within a fraction of a second, and nothing else about the session is sped up.
  */
 class ReconnectLadderOrphanTest {
@@ -76,6 +79,54 @@ class ReconnectLadderOrphanTest {
             )
             assertEquals(1, pair.session.countOf { it == ControlEvent.ReconnectBudgetExhausted }, "exactly one exhaustion: this ladder's")
             assertEquals(attempts, pair.manager.diagnostics.value.reconnectCount - countBefore, "the card shows every attempt")
+            assertEquals(ControlState.DISCONNECTED, pair.manager.diagnostics.value.controlState, "a genuine exhaustion still says so")
+        }
+
+    /**
+     * Round 2 of the review: **a ladder that has already decided its budget is spent must not act
+     * on that decision once a connection has been promoted.** The decision and its effects
+     * (`DISCONNECTED` into the diagnostics, `ReconnectBudgetExhausted`) are two steps, and on a
+     * multi-threaded dispatcher an inbound promotion can land between them. The hook holds the
+     * ladder's thread exactly there — blocking, not suspending, so cancellation cannot rescue it,
+     * as nothing would on a thread that is between two plain statements.
+     *
+     * Against an exhaustion that writes unconditionally this fails: the stale callback writes
+     * `DISCONNECTED` over the promoted session and emits a `ReconnectBudgetExhausted`.
+     */
+    @Test
+    fun `an exhaustion decided before an inbound promotion does not touch the promoted session`() =
+        withConnectedPair { pair ->
+            pair.dropDiallerConnection()
+            pair.session.awaitStatus(SessionStatus.RECONNECTING)
+            pair.ladderSpeed.set(FAST)
+            pair.exhaustionGate.arm()
+            pair.manager.beginReconnect(pair.localPeer.local, "127.0.0.1", pair.deadPort)
+            pair.exhaustionGate.awaitReached()
+
+            // The peer dials back in while the spent ladder is parked between decision and effect.
+            pair.connectAndAwait(expectedConnections = 2)
+            pair.session.awaitStatus(SessionStatus.CONNECTED)
+            pair.exhaustionGate.release()
+            delay(FsmSession.SETTLE_MS)
+
+            assertEquals(0, pair.session.countOf { it == ControlEvent.ReconnectBudgetExhausted }, "no stale exhaustion is emitted")
+            assertEquals(
+                ControlState.CONNECTED,
+                pair.manager.diagnostics.value.controlState,
+                "the promoted session's diagnostics are untouched",
+            )
+            assertEquals(SessionStatus.CONNECTED, pair.session.status)
+
+            // And the next genuine loss is an ordinary one: a full ladder, then exactly one exhaustion.
+            pair.dropDiallerConnection()
+            pair.session.awaitStatus(SessionStatus.RECONNECTING)
+            val countBefore = pair.manager.reconnectCount
+            pair.manager.beginReconnect(pair.localPeer.local, "127.0.0.1", pair.deadPort)
+            pair.session.awaitStatus(SessionStatus.DISCONNECTED)
+            val attempts = pair.manager.reconnectCount - countBefore
+            assertTrue(attempts >= MIN_ATTEMPTS_IN_A_FULL_BUDGET, "a fresh budget, not $attempts attempts")
+            assertEquals(1, pair.session.countOf { it == ControlEvent.ReconnectBudgetExhausted }, "exactly one exhaustion: this ladder's")
+            assertEquals(ControlState.DISCONNECTED, pair.manager.diagnostics.value.controlState)
         }
 
     private class Pair(
@@ -87,6 +138,7 @@ class ReconnectLadderOrphanTest {
         val localPeer: TestPeer,
         val ladderSpeed: AtomicLong,
         val deadPort: Int,
+        val exhaustionGate: ExhaustionGate,
     ) {
         suspend fun connectAndAwait(expectedConnections: Int) {
             withTimeout(FsmSession.TIMEOUT_MS) { while (dialler.currentReadBinding() != null) delay(POLL_MS) }
@@ -108,10 +160,28 @@ class ReconnectLadderOrphanTest {
      * `RECONNECTING -> CONNECTED`.
      */
     private fun withInboundReconnect(body: suspend (Pair) -> Unit) =
+        withConnectedPair { pair ->
+            // The link drops; as `SessionCoordinator` does, this side starts its ladder — here
+            // against an address nothing answers, like a remembered port from an earlier session.
+            pair.dropDiallerConnection()
+            pair.session.awaitStatus(SessionStatus.RECONNECTING)
+            pair.manager.beginReconnect(pair.localPeer.local, "127.0.0.1", pair.deadPort)
+            withTimeout(FsmSession.TIMEOUT_MS) { while (pair.manager.reconnectCount < 1) delay(POLL_MS) }
+
+            // The peer dials back in: an inbound promotion completes the reconnect.
+            pair.connectAndAwait(expectedConnections = 2)
+            pair.session.awaitStatus(SessionStatus.CONNECTED)
+
+            body(pair)
+        }
+
+    /** A trusted pair, connected once by the dialler's dial. */
+    private fun withConnectedPair(body: suspend (Pair) -> Unit) =
         runBlocking {
             val (a, b) = TestSessions.pairedPeers("cccccccccccccccc", "dddddddddddddddd")
             val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
             val ladderSpeed = AtomicLong(REAL_TIME)
+            val exhaustionGate = ExhaustionGate()
             val manager =
                 ControlSessionManager(
                     scope = scope,
@@ -120,7 +190,11 @@ class ReconnectLadderOrphanTest {
                     channel = a.channel(),
                     trustedPeers = a.trustedPeers,
                     nowEpochSeconds = { com.ridelink.network.security.TestTlsSupport.NOW_EPOCH_SECONDS },
-                    reconnectDelayMs = { ms -> scaledDelay(ms, ladderSpeed) },
+                    reconnectSeams =
+                        ReconnectSeams(
+                            delayMs = { ms -> scaledDelay(ms, ladderSpeed) },
+                            exhaustionHook = { exhaustionGate.pass() },
+                        ),
                 )
             val dialler = b.manager(scope, MONOTONIC)
             try {
@@ -129,29 +203,42 @@ class ReconnectLadderOrphanTest {
                 val port = manager.startListening(a.local)
                 dialler.startListening(b.local)
                 assertTrue(session.apply(SessionEvent.StartDiscovery) && session.apply(SessionEvent.PeerSelected))
-                val pair = Pair(manager, session, port, dialler, b, a, ladderSpeed, deadPort())
+                val pair = Pair(manager, session, port, dialler, b, a, ladderSpeed, deadPort(), exhaustionGate)
 
                 pair.connectAndAwait(expectedConnections = 1)
                 pair.session.awaitStatus(SessionStatus.CONNECTED)
 
-                // The link drops; as `SessionCoordinator` does, this side starts its ladder — here
-                // against an address nothing answers, like a remembered port from an earlier session.
-                pair.dropDiallerConnection()
-                pair.session.awaitStatus(SessionStatus.RECONNECTING)
-                manager.beginReconnect(a.local, "127.0.0.1", pair.deadPort)
-                withTimeout(FsmSession.TIMEOUT_MS) { while (manager.reconnectCount < 1) delay(POLL_MS) }
-
-                // The peer dials back in: an inbound promotion completes the reconnect.
-                pair.connectAndAwait(expectedConnections = 2)
-                pair.session.awaitStatus(SessionStatus.CONNECTED)
-
                 body(pair)
             } finally {
+                exhaustionGate.release()
                 dialler.shutdown()
                 manager.shutdown()
                 scope.cancel()
             }
         }
+
+    /**
+     * Holds the first exhaustion after [arm] between the ladder's decision and its effects. It
+     * **blocks** the ladder's thread rather than suspending it, so a cancellation cannot stand in
+     * for the ownership check under test.
+     */
+    private class ExhaustionGate {
+        private val armed = AtomicBoolean(false)
+        private val reached = CountDownLatch(1)
+        private val released = CountDownLatch(1)
+
+        fun arm() = armed.set(true)
+
+        fun pass() {
+            if (!armed.compareAndSet(true, false)) return
+            reached.countDown()
+            released.await(FsmSession.TIMEOUT_MS, TimeUnit.MILLISECONDS)
+        }
+
+        suspend fun awaitReached() = withTimeout(FsmSession.TIMEOUT_MS) { while (reached.count > 0) delay(POLL_MS) }
+
+        fun release() = released.countDown()
+    }
 
     /**
      * A port that is bound and immediately released, so a connect to it is refused at once. The

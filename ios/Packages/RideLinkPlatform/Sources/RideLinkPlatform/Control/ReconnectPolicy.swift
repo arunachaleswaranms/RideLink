@@ -30,6 +30,14 @@ public enum LinkLossReason: Sendable {
     case userEnded
 }
 
+/// One run of the reconnect ladder: the ownership token a run's writes are checked against, and the
+/// one an exhaustion hands to its caller so the caller can commit it
+/// (`ReconnectController.commitExhaustion`). Compared by identity; it carries nothing, because
+/// "whose?" is the only question it answers.
+public final class ReconnectRun: Sendable {
+    init() {}
+}
+
 /// Drives `ReconnectPolicy`'s ladder against real time via an injectable delay function, so unit
 /// tests can replace `delayNs` with a no-op recorder instead of sleeping (CLAUDE.md rule 12).
 /// `BYE`, `duplicate_connection` and a deliberate user end never reach this controller at all —
@@ -43,19 +51,32 @@ public enum LinkLossReason: Sendable {
 /// to be a bare `reset()`, which left the ladder dialling inside the live session with a freshly
 /// zeroed budget, exhausting 120 s later into a connected session and leaving the *next* link loss
 /// with no budget at all. Every write the loop makes — the budget, the attempt counter,
-/// `reconnectCount`, `onExhausted` — is made only while its run is still the current one, so a run
-/// that has ended can touch nothing, whether or not it was cancelled.
-public actor ReconnectController {
+/// `reconnectCount` — is made only while its run is still the current one, so a run that has ended
+/// can touch nothing, whether or not it was cancelled.
+///
+/// **Exhaustion is a decision here and a commit at the caller.** Deciding the budget is spent and
+/// acting on it are two steps, and a promotion can land between them. So `onExhausted` receives the
+/// deciding `ReconnectRun` and must commit it with `commitExhaustion(_:)` inside the caller's own
+/// connection-ownership critical section — the same synchronous stretch of `ControlSessionManager`'s
+/// actor in which `promote` calls `connectionPromoted()`. Exactly one of the two then ends the run.
+///
+/// **A lock, not an actor** (review round 2). Those two calls must be *synchronous* from the
+/// manager's actor: an `await` into a separate actor between the ownership change and the run's end
+/// is a re-entrancy point, which is exactly where the stale exhaustion got in. It is the same shape
+/// as the Android controller.
+public final class ReconnectController: @unchecked Sendable {
+    /// Guards every mutable field below.
+    private let lock = NSLock()
     private var attempt = 0
     private var elapsedMs: Int64 = 0
     private var task: Task<Void, Never>?
-    private var lastRun: UInt64 = 0
     /// The run that owns the budget, or nil. A run that is not this one may write nothing.
-    private var currentRun: UInt64?
+    private var currentRun: ReconnectRun?
     /// The run whose `onAttempt` is executing right now, or nil; see `connectionPromoted()`.
-    private var attemptInFlightRun: UInt64?
+    private var attemptInFlightRun: ReconnectRun?
+    private var count = 0
 
-    public private(set) var reconnectCount = 0
+    public var reconnectCount: Int { lock.withLock { count } }
 
     private let randomFraction: @Sendable () -> Double
     private let delayMs: @Sendable (Int64) async -> Void
@@ -66,8 +87,9 @@ public actor ReconnectController {
     }
 
     /// Starts (or restarts) the retry loop. `onAttempt` returns `true` on success (stops the loop
-    /// and resets it for next time) or `false` to keep retrying. `onExhausted` fires once the
-    /// 120s budget is spent with no success — and never for a run that has ended.
+    /// and resets it for next time) or `false` to keep retrying. `onExhausted` is called once the
+    /// 120s budget is spent with no success, never for a run that has already ended, and must
+    /// `commitExhaustion(_:)` before acting (see the type's comment).
     ///
     /// A restart continues the budget it finds; only a promoted connection (`connectionPromoted()`)
     /// or `reset()` refreshes it. Every production `start` follows a promotion (`RECONNECTING` is
@@ -79,56 +101,78 @@ public actor ReconnectController {
     /// `Task.sleep` throws when `cancel()` cancels this task. Without an explicit check, a
     /// cancelled loop would keep running to completion in the background, invisible to
     /// `cancel()`'s caller and still calling `onAttempt` on a schedule no one asked for.
-    public func start(onAttempt: @escaping @Sendable () async -> Bool, onExhausted: @escaping @Sendable () async -> Void) {
+    public func start(
+        onAttempt: @escaping @Sendable () async -> Bool,
+        onExhausted: @escaping @Sendable (ReconnectRun) async -> Void
+    ) {
         cancel()
-        lastRun &+= 1
-        let run = lastRun
-        currentRun = run
-        task = Task { await self.runLadder(run, onAttempt: onAttempt, onExhausted: onExhausted) }
+        let run = ReconnectRun()
+        lock.withLock {
+            currentRun = run
+            task = Task { await self.runLadder(run, onAttempt: onAttempt, onExhausted: onExhausted) }
+        }
     }
 
     private func runLadder(
-        _ run: UInt64,
+        _ run: ReconnectRun,
         onAttempt: @Sendable () async -> Bool,
-        onExhausted: @Sendable () async -> Void
+        onExhausted: @Sendable (ReconnectRun) async -> Void
     ) async {
-        while owns(run) && remainingBudget() {
+        while let delay = nextDelayIfOwned(run) {
             if Task.isCancelled { return }
-            let (currentAttempt, delay) = nextDelay(fraction: randomFraction())
             await delayMs(delay)
-            if Task.isCancelled || !owns(run) { return }
-            recordElapsed(delay, attempt: currentAttempt)
-            attemptInFlightRun = run
+            if Task.isCancelled || !beginAttemptIfOwned(run, delay: delay) { return }
             let succeeded = await onAttempt()
-            if attemptInFlightRun == run { attemptInFlightRun = nil }
-            if succeeded {
-                if owns(run) { endRun() }
-                return
+            let ended: Bool = lock.withLock {
+                if attemptInFlightRun === run { attemptInFlightRun = nil }
+                if succeeded && currentRun === run { endRunLocked() }
+                return succeeded
             }
+            if ended { return }
         }
+        // Only a decision: the run stays current until the caller commits it.
         guard !Task.isCancelled, owns(run) else { return }
-        currentRun = nil
-        await onExhausted()
+        await onExhausted(run)
     }
 
-    private func owns(_ run: UInt64) -> Bool { currentRun == run }
+    private func owns(_ run: ReconnectRun) -> Bool { lock.withLock { currentRun === run } }
 
-    private func remainingBudget() -> Bool { elapsedMs < ReconnectPolicy.maxTotalBudgetMs }
-
-    private func nextDelay(fraction: Double) -> (Int, Int64) {
-        let current = attempt
-        return (current, ReconnectPolicy.jitteredDelayMs(current, randomFraction: fraction))
+    /// Nil when the budget is spent or `run` has ended.
+    private func nextDelayIfOwned(_ run: ReconnectRun) -> Int64? {
+        let fraction = randomFraction()
+        return lock.withLock {
+            guard currentRun === run, elapsedMs < ReconnectPolicy.maxTotalBudgetMs else { return nil }
+            return ReconnectPolicy.jitteredDelayMs(attempt, randomFraction: fraction)
+        }
     }
 
-    private func recordElapsed(_ delay: Int64, attempt currentAttempt: Int) {
-        elapsedMs += delay
-        attempt = currentAttempt + 1
-        reconnectCount += 1
+    private func beginAttemptIfOwned(_ run: ReconnectRun, delay: Int64) -> Bool {
+        lock.withLock {
+            guard currentRun === run else { return false }
+            elapsedMs += delay
+            attempt += 1
+            count += 1
+            attemptInFlightRun = run
+            return true
+        }
+    }
+
+    /// Ends `run` as exhausted if, and only if, it is still the run that owns the budget, and says
+    /// whether it did. False means a promotion, a restart or a cancel ended it first, and the
+    /// exhaustion must have no effect. The spent budget is left spent: only a promotion refreshes it.
+    public func commitExhaustion(_ run: ReconnectRun) -> Bool {
+        lock.withLock {
+            guard currentRun === run else { return false }
+            currentRun = nil
+            task = nil
+            return true
+        }
     }
 
     /// A connection was promoted — by this ladder's own attempt, by the peer dialling in, or by a
     /// first dial — so whatever run is in progress is over, and the next link loss starts from a
-    /// full budget.
+    /// full budget. The caller calls this in the same synchronous stretch in which it takes
+    /// ownership of the connection, so a pending exhaustion either committed before it or cannot.
     ///
     /// A run parked in its delay holds nothing and is cancelled. A run whose attempt is in flight is
     /// **not** cancelled: that attempt may be the very task performing this promotion (its own dial
@@ -136,26 +180,34 @@ public actor ReconnectController {
     /// handshake whose connection only it closes. It is retired instead — its run is no longer
     /// current — and it ends at its next ownership check without writing anything.
     public func connectionPromoted() {
-        if let run = currentRun, attemptInFlightRun != run {
-            task?.cancel()
+        let parked: Task<Void, Never>? = lock.withLock {
+            let running = (currentRun != nil && attemptInFlightRun !== currentRun) ? task : nil
+            endRunLocked()
+            return running
         }
-        endRun()
+        parked?.cancel()
     }
 
     public func cancel() {
-        task?.cancel()
-        task = nil
-        currentRun = nil
+        let ending: Task<Void, Never>? = lock.withLock {
+            let running = task
+            task = nil
+            currentRun = nil
+            return running
+        }
+        ending?.cancel()
     }
 
     /// Refreshes the budget. Call only with no run in progress (after `cancel()`); see
     /// `connectionPromoted()`.
     public func reset() {
-        attempt = 0
-        elapsedMs = 0
+        lock.withLock {
+            attempt = 0
+            elapsedMs = 0
+        }
     }
 
-    private func endRun() {
+    private func endRunLocked() {
         task = nil
         currentRun = nil
         attempt = 0

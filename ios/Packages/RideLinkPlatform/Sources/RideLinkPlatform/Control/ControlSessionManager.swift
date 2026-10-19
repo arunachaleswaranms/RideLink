@@ -151,6 +151,7 @@ public actor ControlSessionManager {
     private let seqCounter = SeqCounter()
     private let arbiter: DuplicateConnectionArbiter
     private let reconnectController: ReconnectController
+    private let reconnectExhaustionHook: @Sendable () async -> Void
 
     private var listener: ControlListener?
     private var acceptTask: Task<Void, Never>?
@@ -441,9 +442,7 @@ public actor ControlSessionManager {
     public var onEvent: (@Sendable (ControlEvent) -> Void)?
     public var onDiagnosticsChanged: (@Sendable (ControlDiagnostics) -> Void)?
 
-    public var reconnectCount: Int {
-        get async { await reconnectController.reconnectCount }
-    }
+    public var reconnectCount: Int { reconnectController.reconnectCount }
 
     /// Diagnostic-only: how many PING requests are currently awaiting their PONG. Exists so a
     /// test (or a future on-device diagnostics screen) can tell "stuck waiting on the network"
@@ -470,8 +469,12 @@ public actor ControlSessionManager {
         helloExchangeTimeoutMs: Int64 = ControlSessionManager.helloExchangeTimeoutMs,
         /// How `ReconnectController`'s ladder waits between attempts. Production passes nothing and
         /// gets a real sleep; a test that must watch a whole 120 s budget play out supplies a faster one.
-        reconnectDelayMs: (@Sendable (Int64) async -> Void)? = nil
+        reconnectDelayMs: (@Sendable (Int64) async -> Void)? = nil,
+        /// Runs after a ladder has decided its budget is spent and before that decision may take
+        /// effect. Production passes nothing. A test holds it to place a promotion between the two.
+        reconnectExhaustionHook: (@Sendable () async -> Void)? = nil
     ) {
+        self.reconnectExhaustionHook = reconnectExhaustionHook ?? {}
         self.helloExchangeTimeoutNs = UInt64(max(0, helloExchangeTimeoutMs)) * 1_000_000
         self.localPeerId = localPeerId
         self.channel = channel
@@ -694,17 +697,19 @@ public actor ControlSessionManager {
             return
         }
         activeSocket = candidate.socket
+        // Ends any ladder in progress, not merely its budget (STATUS §4 problem 125). This promotion
+        // may be the peer's inbound dial, which reconnects the session without this side's ladder
+        // ever succeeding; a bare reset() left that ladder dialling inside the live session with a
+        // fresh 120 s, after which it reported `.disconnected` into a connected session and left the
+        // next link loss with no budget at all. Synchronous and adjacent to the ownership change —
+        // no `await` between them — so a pending exhaustion is ordered against it
+        // (`commitReconnectExhaustion`).
+        reconnectController.connectionPromoted()
         activeSessionId = sessionId
         endedDeliberately = false
         clockTracker.reset()
         authenticatedConnection = nil
         lastPongAtMonoUs = monotonicNowUs()
-        // Ends any ladder in progress, not merely its budget (STATUS §4 problem 125). This promotion
-        // may be the peer's inbound dial, which reconnects the session without this side's ladder
-        // ever succeeding; a bare reset() left that ladder dialling inside the live session with a
-        // fresh 120 s, after which it reported `.disconnected` into a connected session and left the
-        // next link loss with no budget at all.
-        await reconnectController.connectionPromoted()
 
         let isLeader = leaderPeerId.value == localPeerId.value
         pendingActivation = PendingActivation(
@@ -1312,7 +1317,7 @@ public actor ControlSessionManager {
     /// second one (this session's brief §3).
     public func beginReconnect(local: LocalHandshakeIdentity, host: String, port: UInt16) async {
         updateDiagnostics { $0.controlState = .reconnecting }
-        await reconnectController.start(
+        reconnectController.start(
             onAttempt: { [weak self] in
                 guard let self else { return true }
                 // Published per attempt: publishing once, at ladder start, left the card one ladder
@@ -1320,17 +1325,34 @@ public actor ControlSessionManager {
                 await self.publishReconnectCount()
                 return await self.attemptConnection(host: host, port: port, local: local)
             },
-            onExhausted: { [weak self] in
-                guard let self else { return }
-                await self.updateDiagnostics { $0.controlState = .disconnected }
-                await self.emit(.reconnectBudgetExhausted)
+            onExhausted: { [weak self] run in
+                await self?.commitReconnectExhaustion(run)
             }
         )
-        await publishReconnectCount()
+        publishReconnectCount()
     }
 
-    private func publishReconnectCount() async {
-        let count = await reconnectController.reconnectCount
+    /// Acts on a ladder's decision that its budget is spent — only if that decision still describes
+    /// this manager (STATUS §4 problem 125, review round 2).
+    ///
+    /// The ladder decides on its own task and this runs after an actor hop; that hop is a
+    /// re-entrancy point at which an inbound `promote` can run, and a stale `.disconnected` plus
+    /// `.reconnectBudgetExhausted` would then fall on the promoted session. So the effects commit
+    /// only in one synchronous stretch of this actor — no `await` between the check and the writes —
+    /// and only while no connection is active, the manager is not shut down, and `run` is still the
+    /// run that owns the budget (`ReconnectController.commitExhaustion`, checked and ended at once).
+    /// `promote` ends the run synchronously beside its own ownership change, so the two are totally
+    /// ordered: either the exhaustion commits first, and a later promotion is an ordinary fresh
+    /// connection, or the promotion ended the run first, and this does nothing.
+    private func commitReconnectExhaustion(_ run: ReconnectRun) async {
+        await reconnectExhaustionHook()
+        guard !isShutDown, activeSocket == nil, reconnectController.commitExhaustion(run) else { return }
+        updateDiagnostics { $0.controlState = .disconnected }
+        emit(.reconnectBudgetExhausted)
+    }
+
+    private func publishReconnectCount() {
+        let count = reconnectController.reconnectCount
         updateDiagnostics { $0.reconnectCount = count }
     }
 
@@ -1377,12 +1399,12 @@ public actor ControlSessionManager {
         pendingActivation = nil
         updatePairingPrompt(nil)
         endedDeliberately = true
-        await reconnectController.cancel()
+        reconnectController.cancel()
         // …and reset, not merely cancel: `cancel()` leaves the attempt count and the spent budget where
         // the previous session left them. `promote` ends the run and resets them too, but
         // an exhausted 120 s budget handed to the next session is exactly the class of defect this pass
         // exists to close — session-lifetime state surviving into a successor.
-        await reconnectController.reset()
+        reconnectController.reset()
         acceptTask?.cancel()
         keepaliveTask?.cancel()
         clockSyncTask?.cancel()

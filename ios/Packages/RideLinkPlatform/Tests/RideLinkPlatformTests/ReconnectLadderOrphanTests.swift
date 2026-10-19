@@ -50,6 +50,49 @@ final class ReconnectLadderOrphanTests: XCTestCase {
             XCTAssertEqual(sut.session.count(where: Self.isExhaustion), 1, "exactly one exhaustion: this ladder's")
             let published = await sut.manager.diagnostics.reconnectCount
             XCTAssertEqual(published - countBefore, attempts, "the card shows every attempt")
+            let final = await sut.manager.diagnostics.controlState
+            XCTAssertEqual(final, .disconnected, "a genuine exhaustion still says so")
+        }
+    }
+
+    /// Review round 2: a ladder that has already decided its budget is spent must not act on that
+    /// decision once a connection has been promoted. The decision is the controller's and the
+    /// effects are this manager's, and the `await` that crosses between them is an actor
+    /// re-entrancy point at which an inbound promotion can run. The hook holds exactly that point.
+    ///
+    /// Against an exhaustion that writes unconditionally this fails: the stale callback writes
+    /// `.disconnected` over the promoted session and emits `.reconnectBudgetExhausted`.
+    func testAnExhaustionDecidedBeforeAnInboundPromotionDoesNotTouchThePromotedSession() async throws {
+        try await withConnectedPair { sut in
+            try await sut.dropDiallerConnection()
+            try await sut.session.awaitStatus(.reconnecting)
+            sut.speed.set(Self.fast)
+            sut.exhaustionGate.arm()
+            await sut.manager.beginReconnect(local: sut.localPeer.local, host: "127.0.0.1", port: sut.deadPort)
+            try await sut.poll { sut.exhaustionGate.hasReached }
+
+            // The peer dials back in while the spent ladder is parked between decision and effect.
+            try await sut.connectAndAwait(expectedConnections: 2)
+            try await sut.session.awaitStatus(.connected)
+            sut.exhaustionGate.release()
+            try await Task.sleep(nanoseconds: FsmSession.settleNs)
+
+            XCTAssertEqual(sut.session.count(where: Self.isExhaustion), 0, "no stale exhaustion is emitted")
+            let state = await sut.manager.diagnostics.controlState
+            XCTAssertEqual(state, .connected, "the promoted session's diagnostics are untouched")
+            XCTAssertEqual(sut.session.status, .connected)
+
+            // And the next genuine loss is an ordinary one: a full ladder, then exactly one exhaustion.
+            try await sut.dropDiallerConnection()
+            try await sut.session.awaitStatus(.reconnecting)
+            let countBefore = await sut.manager.reconnectCount
+            await sut.manager.beginReconnect(local: sut.localPeer.local, host: "127.0.0.1", port: sut.deadPort)
+            try await sut.session.awaitStatus(.disconnected)
+            let attempts = await sut.manager.reconnectCount - countBefore
+            XCTAssertGreaterThanOrEqual(attempts, Self.minAttemptsInAFullBudget, "a fresh budget, not \(attempts) attempts")
+            XCTAssertEqual(sut.session.count(where: Self.isExhaustion), 1, "exactly one exhaustion: this ladder's")
+            let final = await sut.manager.diagnostics.controlState
+            XCTAssertEqual(final, .disconnected)
         }
     }
 
@@ -69,11 +112,14 @@ final class ReconnectLadderOrphanTests: XCTestCase {
         let localPeer: TestPeer
         let speed: LockedSpeed
         let deadPort: UInt16
+        let exhaustionGate: ExhaustionGate
 
         init(
             manager: ControlSessionManager, session: FsmSession, port: UInt16, dialler: ControlSessionManager,
-            diallerPeer: TestPeer, localPeer: TestPeer, speed: LockedSpeed, deadPort: UInt16
+            diallerPeer: TestPeer, localPeer: TestPeer, speed: LockedSpeed, deadPort: UInt16,
+            exhaustionGate: ExhaustionGate
         ) {
+            self.exhaustionGate = exhaustionGate
             self.manager = manager
             self.session = session
             self.port = port
@@ -112,9 +158,28 @@ final class ReconnectLadderOrphanTests: XCTestCase {
     /// Leaves the pair connected by an **inbound** promotion that happened while this side's own
     /// ladder was running against a stale address.
     private func withInboundReconnect(_ body: (Sut) async throws -> Void) async throws {
+        try await withConnectedPair { sut in
+            // The link drops; as `SessionCoordinator` does, this side starts its ladder — here
+            // against an address nothing answers, like a remembered port from an earlier session.
+            try await sut.dropDiallerConnection()
+            try await sut.session.awaitStatus(.reconnecting)
+            await sut.manager.beginReconnect(local: sut.localPeer.local, host: "127.0.0.1", port: sut.deadPort)
+            try await sut.poll { await sut.manager.reconnectCount >= 1 }
+
+            // The peer dials back in: an inbound promotion completes the reconnect.
+            try await sut.connectAndAwait(expectedConnections: 2)
+            try await sut.session.awaitStatus(.connected)
+
+            try await body(sut)
+        }
+    }
+
+    /// A trusted pair, connected once by the dialler's dial.
+    private func withConnectedPair(_ body: (Sut) async throws -> Void) async throws {
         let (a, b) = try TestSessions.pairedPeers("cccccccccccccccc", "dddddddddddddddd")
         let clock = MonotonicCounter()
         let speed = LockedSpeed()
+        let gate = ExhaustionGate()
         let manager = ControlSessionManager(
             localPeerId: a.peerId,
             // A dial to a refused port sits in `.waiting` until this bound (see
@@ -124,7 +189,8 @@ final class ReconnectLadderOrphanTests: XCTestCase {
             trustedPeers: a.trustedPeers,
             monotonicNowUs: { clock.next() },
             nowEpochSeconds: { TestTlsSupport.nowEpochSeconds },
-            reconnectDelayMs: { ms in await Self.scaledDelay(ms, speed: speed) }
+            reconnectDelayMs: { ms in await Self.scaledDelay(ms, speed: speed) },
+            reconnectExhaustionHook: { await gate.pass() }
         )
         let dialler = b.manager(monotonicNowUs: { clock.next() })
         let session = FsmSession(peer: a, manager: manager)
@@ -135,29 +201,21 @@ final class ReconnectLadderOrphanTests: XCTestCase {
             XCTAssertTrue(session.apply(.startDiscovery) && session.apply(.peerSelected))
             let sut = Sut(
                 manager: manager, session: session, port: port, dialler: dialler,
-                diallerPeer: b, localPeer: a, speed: speed, deadPort: try await TestSessions.deadPort()
+                diallerPeer: b, localPeer: a, speed: speed, deadPort: try await TestSessions.deadPort(),
+                exhaustionGate: gate
             )
 
             try await sut.connectAndAwait(expectedConnections: 1)
             try await session.awaitStatus(.connected)
 
-            // The link drops; as `SessionCoordinator` does, this side starts its ladder — here
-            // against an address nothing answers, like a remembered port from an earlier session.
-            try await sut.dropDiallerConnection()
-            try await session.awaitStatus(.reconnecting)
-            await manager.beginReconnect(local: a.local, host: "127.0.0.1", port: sut.deadPort)
-            try await sut.poll { await manager.reconnectCount >= 1 }
-
-            // The peer dials back in: an inbound promotion completes the reconnect.
-            try await sut.connectAndAwait(expectedConnections: 2)
-            try await session.awaitStatus(.connected)
-
             try await body(sut)
         } catch {
+            gate.release()
             await dialler.shutdown()
             await manager.shutdown()
             throw error
         }
+        gate.release()
         await dialler.shutdown()
         await manager.shutdown()
     }
@@ -197,4 +255,44 @@ private final class MonotonicCounter: @unchecked Sendable {
     private var value: Int64 = 1_000_000
 
     func next() -> Int64 { lock.withLock { value += 1000; return value } }
+}
+
+/// Holds the first exhaustion after `arm()` between the ladder's decision and its effects.
+private final class ExhaustionGate: @unchecked Sendable {
+    private let lock = NSLock()
+    private var armed = false
+    private var reached = false
+    private var released = false
+    private var waiter: CheckedContinuation<Void, Never>?
+
+    var hasReached: Bool { lock.withLock { reached } }
+
+    func arm() { lock.withLock { armed = true } }
+
+    func pass() async {
+        let hold: Bool = lock.withLock {
+            guard armed else { return false }
+            armed = false
+            reached = true
+            return !released
+        }
+        guard hold else { return }
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            let resumeNow: Bool = lock.withLock {
+                if released { return true }
+                waiter = continuation
+                return false
+            }
+            if resumeNow { continuation.resume() }
+        }
+    }
+
+    func release() {
+        let pending: CheckedContinuation<Void, Never>? = lock.withLock {
+            released = true
+            defer { waiter = nil }
+            return waiter
+        }
+        pending?.resume()
+    }
 }
