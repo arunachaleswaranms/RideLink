@@ -48,9 +48,11 @@ def session_event(control_event, status):
             return {"kind": "ReconnectSucceeded"}
         return None
 
-    # The only two ways out of PAIRING: the stored pin matched, or both users confirmed.
+    # The only two ways into CONNECTING: the stored pin matched, or both users confirmed. From
+    # PAIRING, or from DISCOVERING when the peer's dial was accepted and paired after this device's
+    # own PAIRING had ended (ADR-019 Amendment A2, STATUS problem 124).
     if kind in ("PeerTrusted", "PairingSucceeded"):
-        return {"kind": "PairingSucceeded"} if status == "PAIRING" else None
+        return {"kind": "PairingSucceeded"} if status in ("PAIRING", "DISCOVERING") else None
 
     # A code on screen is not a transition.
     if kind == "PairingRequired":

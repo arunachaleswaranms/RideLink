@@ -92,8 +92,9 @@ sealed class ControlEvent {
     /**
      * The peer's presented SPKI matched the stored pin, so the trust gate passed with no user
      * action at all (PROTOCOL §4.1 "silent connect"). Raised only on the **surviving** connection
-     * and always immediately before [Connected] — it is what carries `PAIRING -> CONNECTING` for a
-     * known peer, now that [Connected] no longer doubles as implicit pairing success.
+     * and always immediately before [Connected] — it is what carries the session into `CONNECTING`
+     * (from `PAIRING`, or `DISCOVERING` — ADR-019 Amendment A2) for a known peer, now that
+     * [Connected] no longer doubles as implicit pairing success.
      */
     data class PeerTrusted(
         val remotePeerId: PeerId,
@@ -853,8 +854,8 @@ class ControlSessionManager(
 
     /**
      * Both users confirmed and [PairingExchange] has written the pin exactly once. Only now does
-     * the surviving connection become authenticated — `PairingSucceeded` first (which carries
-     * `PAIRING -> CONNECTING`), then `Connected` (`CONNECTING -> CONNECTED`), over the same socket.
+     * the surviving connection become authenticated — `PairingSucceeded` first (which carries the
+     * session into `CONNECTING`), then `Connected` (`CONNECTING -> CONNECTED`), over the same socket.
      */
     private fun succeedPairing(peer: TrustedPeer) {
         pairing = null
@@ -1032,6 +1033,19 @@ class ControlSessionManager(
      * Extracted from [handleFrame] rather than inlined, because adding the `AUDIO_STATE` branch took
      * that function to detekt's cyclomatic-complexity ceiling and the answer to that is to extract,
      * not to raise the ceiling (`docs/STATUS.md` §4 problem 18's lesson, applied one function down).
+     *
+     * A `PONG` that cannot be written retires its connection (STATUS §4 problem 123). This runs on
+     * the read loop, which is launched on the application scope with no exception handler, so a peer
+     * reset between reading the `PING` and writing its answer used to kill the process. Nor is the
+     * failure left for the next `readFrame` to notice: a write can fail while reads stall, so the
+     * connection whose write failed is ended here, through the one existing path.
+     *
+     * [endConnection] retires only the socket it is handed, and only while it is still the active
+     * one — so a stale write failure can never end a successor, and a second retirement of the same
+     * socket (the read loop's own, once the socket is closed) is a no-op that emits nothing. The
+     * `endedDeliberately` guard is the read loop's own: a shutdown or a `BYE` that has already ended
+     * the session must not be reported as a network loss. Only `IOException` is caught, so
+     * cancellation still propagates.
      */
     private suspend fun handlePing(
         socket: ControlSocket,
@@ -1041,7 +1055,14 @@ class ControlSessionManager(
         val t1 = requiredLongField(payload, "t1_mono_us") ?: return
         val t2 = monotonicNowUs()
         val t3 = monotonicNowUs()
-        socket.writeFrame(ControlMessages.pong(localPeerId, sessionId, seqCounter.nextSeq(), monotonicNowUs(), t1, t2, t3))
+        try {
+            socket.writeFrame(ControlMessages.pong(localPeerId, sessionId, seqCounter.nextSeq(), monotonicNowUs(), t1, t2, t3))
+        } catch (
+            // Acted on, not swallowed: the connection whose write failed is retired.
+            @Suppress("SwallowedException") failed: IOException,
+        ) {
+            if (!endedDeliberately) endConnection(socket, LinkLossReason.NETWORK)
+        }
     }
 
     /**

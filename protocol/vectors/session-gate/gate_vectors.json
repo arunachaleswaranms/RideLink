@@ -100,7 +100,9 @@
         "kind": "PeerTrusted"
       },
       "status": "DISCOVERING",
-      "session_event": null
+      "session_event": {
+        "kind": "PairingSucceeded"
+      }
     },
     {
       "name": "peer-trusted-in-pairing",
@@ -262,7 +264,9 @@
         "kind": "PairingSucceeded"
       },
       "status": "DISCOVERING",
-      "session_event": null
+      "session_event": {
+        "kind": "PairingSucceeded"
+      }
     },
     {
       "name": "pairing-succeeded-in-pairing",

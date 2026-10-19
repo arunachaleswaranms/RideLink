@@ -70,10 +70,19 @@ class SessionGateTest {
         }
     }
 
+    /**
+     * ADR-019 Amendment A2 (STATUS §4 problem 124): `DISCOVERING` as well as `PAIRING`, because a
+     * peer's dial is accepted and paired there after this device's own `PAIRING` has ended. Every
+     * other status still drops the verdict.
+     */
     @Test
-    fun `the trust gate only opens from PAIRING`() {
+    fun `the trust gate opens from PAIRING and DISCOVERING only`() {
+        val opensFrom = setOf(SessionStatus.PAIRING, SessionStatus.DISCOVERING)
         for (event in listOf(peerTrusted, pairingSucceeded)) {
-            for (status in allStatuses - SessionStatus.PAIRING) {
+            for (status in opensFrom) {
+                assertEquals(SessionEvent.PairingSucceeded, SessionGate.sessionEventFor(event, status), "$event from $status")
+            }
+            for (status in allStatuses - opensFrom) {
                 assertNull(SessionGate.sessionEventFor(event, status), "$event from $status")
             }
         }

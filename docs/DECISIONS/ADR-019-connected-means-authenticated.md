@@ -161,3 +161,77 @@ user's "yes" has to have come from the connection those six digits belong to.
 
 **No wire change, no gate-table change, no `SessionGate` change** — `protocol/vectors/session-gate/`
 regenerates byte-identically.
+
+## Amendment A2 — 18 October 2026 — the gate's verdict opens `CONNECTING` from `DISCOVERING` too
+
+**Found on two physical Android phones** (Phase 9B-A post-fix retest; STATUS §4 problem 124;
+[evidence](../PHASE9BA_ANDROID_ANDROID_PHYSICAL.md#problem-124--a-pairing-that-completes-on-a-surviving-connection-is-dropped-in-discovering-high)).
+§3's "the FSM is unchanged" no longer holds after this amendment: `SessionFsm` gains exactly one
+edge. §1, §2, §4, §6 and Amendment A1 stand as written.
+
+### What happened
+
+1. Device A dialled the peer, showed the six digits, and the link was lost before anyone answered.
+2. §4's documented exit took A from `PAIRING` back to `DISCOVERING`, and `connect_attempted` stayed
+   latched. That is deliberate and unchanged: A did not re-dial.
+3. A went on advertising. When the peer dialled again, A accepted that connection, and PROTOCOL
+   §4.5 pairing ran on it. The control plane has always done this in `DISCOVERING`: the six digits
+   were on screen.
+4. Both users confirmed and the pin was written. But the table mapped `PairingSucceeded` (and
+   `PeerTrusted`) to `null` in every status except `PAIRING`, and `session-gate` vectors pinned
+   that as correct.
+5. The side effects ran anyway: the trust record, the voice attach and the clock sync. The FSM did
+   not move.
+6. The result was an authenticated control session that the session layer did not know about. The
+   diagnostics card said *Connected*; the screen said *Searching…*. Nothing could move the app
+   forward.
+
+The same state is reachable without a link loss, through a losing duplicate dial or a refused
+redundant handshake while the surviving connection pairs. A **trusted** peer dialling in then lands
+there through `PeerTrusted`. That is the ordinary reconnect shape, and the next physical run
+starts with it.
+
+### Decision
+
+The trust gate is the *event*, not the state it is applied in.
+
+- **`SessionFsm`:** `PairingSucceeded` is legal from `DISCOVERING` as well as `PAIRING`, and in both
+  cases leads to `CONNECTING`. No other transition changes, and no new state or event is added.
+- **`SessionGate`:** `PeerTrusted` and `PairingSucceeded` map to `PairingSucceeded` in
+  `DISCOVERING` as well as `PAIRING`. Every other status still maps them to `null`.
+
+The security property of this ADR is untouched. `CONNECTING` still opens only on a matched pin, or
+on both users' confirmation with the record written, and `Connected` still never produces
+`PairingSucceeded` from any status. Both control events are emitted only for the surviving
+connection, after its own pin check or its own §4.5 exchange (Amendment A1 binds the exchange to
+that connection). So what is newly admitted is the verdict for the connection that actually passed
+the gate. The previous rule threw that verdict away.
+
+§4's rule against re-offering a refused pairing is also untouched. Nothing new dials. A peer that
+dials again was always shown the code in `DISCOVERING`; what changes is that two confirmations are
+no longer discarded.
+
+### Deliberately not changed
+
+- **`PairingRequired` in `DISCOVERING` stays `null`.** The status label reads *Searching…* while an
+  accepted connection's code is on screen. That is cosmetic. Mapping the prompt to `PeerSelected`
+  would have added a gate-driven `PeerSelected` that bypasses `connect_attempted`, for no
+  correctness gain.
+- **The `DISCOVERING` → `CONNECTING` walk skips the two-second "paired" check animation.** That
+  animation keys on leaving `PAIRING`. Also cosmetic.
+- **`DISCONNECTED`, `RECONNECTING` and the other statuses keep dropping the verdict.**
+  `RECONNECTING` completes through `Connected → ReconnectSucceeded`, as before.
+
+### Verification
+
+- **Vectors:** `session-gate` changes exactly two of its 120 rows (`peer-trusted-in-discovering`
+  and `pairing-succeeded-in-discovering`). `session-fsm` gains
+  `discovering-pairing-succeeded-to-connecting`. Both platforms run both files.
+- **Real coordinator:** `SessionCoordinatorDiscoveringTrustGateTest` (`:app`) replays the phones'
+  sequence through the real `SessionCoordinator`, for both the SAS and the trusted path, and checks
+  that `Connected` alone still opens nothing.
+- **End to end:** `InboundTrustWhileDiscoveringTest` (`:network`) does the same over real loopback
+  TLS 1.3 with real managers, including a one-confirmation case that must stay out of `CONNECTING`.
+- **Both new suites fail against the unamended table.**
+
+No wire change.

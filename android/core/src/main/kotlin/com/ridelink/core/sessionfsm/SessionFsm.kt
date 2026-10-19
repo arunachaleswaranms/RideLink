@@ -175,8 +175,12 @@ object SessionFsm {
             is SessionEvent.PairingRejectedOrTimeout ->
                 if (s == SessionStatus.PAIRING) FsmState(SessionStatus.DISCOVERING) else null
 
+            // The trust gate (ADR-019) is the *event*, not the state it is applied in. From
+            // DISCOVERING too (ADR-019 Amendment A2, STATUS §4 problem 124): this device's own
+            // PAIRING can end — a link loss — while the peer's dial is accepted and pairs underneath
+            // it. Both users confirming, or the stored pin matching, is the same claim either way.
             is SessionEvent.PairingSucceeded ->
-                if (s == SessionStatus.PAIRING) FsmState(SessionStatus.CONNECTING) else null
+                if (s == SessionStatus.PAIRING || s == SessionStatus.DISCOVERING) FsmState(SessionStatus.CONNECTING) else null
 
             is SessionEvent.ConnectionEstablished ->
                 if (s == SessionStatus.CONNECTING) FsmState(SessionStatus.CONNECTED) else null

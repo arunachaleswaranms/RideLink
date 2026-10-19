@@ -63,9 +63,16 @@ final class SessionGateTests: XCTestCase {
         }
     }
 
-    func testTheTrustGateOnlyOpensFromPairing() {
+    /// ADR-019 Amendment A2 (STATUS §4 problem 124): `.discovering` as well as `.pairing`, because a
+    /// peer's dial is accepted and paired there after this device's own `.pairing` has ended. Every
+    /// other status still drops the verdict.
+    func testTheTrustGateOpensFromPairingAndDiscoveringOnly() {
+        let opensFrom: [SessionStatus] = [.pairing, .discovering]
         for event in [peerTrusted, pairingSucceeded] {
-            for status in allStatuses where status != .pairing {
+            for status in opensFrom {
+                XCTAssertEqual(SessionGate.sessionEvent(for: event, status: status), .pairingSucceeded, "\(event) from \(status)")
+            }
+            for status in allStatuses where !opensFrom.contains(status) {
                 XCTAssertNil(SessionGate.sessionEvent(for: event, status: status), "\(event) from \(status)")
             }
         }

@@ -8,6 +8,7 @@
     { "name": "discovering-to-pairing",         "from": { "status": "DISCOVERING" },                             "event": { "kind": "PeerSelected" },                "to": { "status": "PAIRING" } },
     { "name": "pairing-reject-to-discovering",  "from": { "status": "PAIRING" },                                 "event": { "kind": "PairingRejectedOrTimeout" },    "to": { "status": "DISCOVERING" } },
     { "name": "pairing-succeeded-to-connecting","from": { "status": "PAIRING" },                                 "event": { "kind": "PairingSucceeded" },            "to": { "status": "CONNECTING" } },
+    { "name": "discovering-pairing-succeeded-to-connecting", "from": { "status": "DISCOVERING" },                "event": { "kind": "PairingSucceeded" },            "to": { "status": "CONNECTING" } },
     { "name": "connecting-established-to-connected", "from": { "status": "CONNECTING" },                        "event": { "kind": "ConnectionEstablished" },       "to": { "status": "CONNECTED" } },
     { "name": "connecting-failed-to-reconnecting",    "from": { "status": "CONNECTING" },                        "event": { "kind": "ConnectionFailed" },            "to": { "status": "RECONNECTING", "returnTo": "CONNECTED" } },
     { "name": "reconnecting-success-returns-to-connected",   "from": { "status": "RECONNECTING", "returnTo": "CONNECTED" },   "event": { "kind": "ReconnectSucceeded" }, "to": { "status": "CONNECTED" } },

@@ -1,5 +1,67 @@
 # RideLink — Test Plan
 
+## Phase 9B-A post-fix retest additions (18 October 2026, evening)
+
+STATUS §4 problems 123 and 124, both found on two physical Android phones after problem 122's fix
+([evidence](PHASE9BA_ANDROID_ANDROID_PHYSICAL.md#continuation--post-fix-physical-retest-18-october-2026-evening)).
+
+**Problem 123 — `PongWriteFailureTest` (`:network`, JVM, real loopback TLS 1.3)**
+
+The test authenticates a trusted pair, then fails only the live socket's writes, as a reset
+connection would. Closing the socket instead would make it pass vacuously, because ADR-025 would
+refuse the `PING` before any write. It has two cases.
+
+1. **Retire and recover.** A `PING` is dispatched on the still-live connection.
+   - No exception escapes, and the `PONG` write was really attempted (counted).
+   - That connection is retired, with exactly one `LinkLost(NETWORK)` naming its generation, and
+     the session goes to `RECONNECTING`.
+   - The read loop's later `ConnectionClosed` adds no second teardown.
+   - The peer's ordinary trusted redial restores `CONNECTED` on a newer generation.
+2. **The successor is never affected.** A `PONG` write is parked on connection 1. Connection 1
+   drops (no `BYE`) and the peer's redial authenticates connection 2. The parked write is then
+   released as a failure. Connection 2 stays live and `CONNECTED`, and only connection 1's one
+   loss is reported.
+
+Mutants, each confirmed:
+
+| Mutant | Effect |
+|---|---|
+| No guard | Both cases fail, with `IOException: Connection reset` |
+| Catch but don't retire | The retirement case fails |
+| Retire whatever socket is live | The successor case fails |
+
+iOS mirrors the fix with the same guards, but has no deterministic test. Every way to fail an
+`NWConnection` send also ends its receive, so the read loop would always retire the connection
+first.
+
+**Problem 124 — ADR-019 Amendment A2**
+
+- `session-gate` vectors: two rows moved (`peer-trusted-in-discovering`,
+  `pairing-succeeded-in-discovering`). `session-fsm` gains
+  `discovering-pairing-succeeded-to-connecting`. Both platforms run both files.
+- `SessionGateTest` / `SessionGateTests`: the gate opens from `PAIRING` and `DISCOVERING` only.
+- `SessionCoordinatorDiscoveringTrustGateTest` (`:app`, real `SessionCoordinator`): the phones'
+  sequence (`PeerSelected`, code shown, `LinkLost(NETWORK)` back to `DISCOVERING`), then:
+  - the peer's dial pairs, giving `CONNECTING` and then `CONNECTED`;
+  - the same with a trusted peer through `PeerTrusted`;
+  - `Connected` alone, which must still open nothing.
+- `InboundTrustWhileDiscoveringTest` (`:network`, real managers, real loopback TLS 1.3): a session
+  that has only done `StartDiscovery` accepts a dial.
+  - An unknown peer that both users confirm reaches `CONNECTED` without visiting `PAIRING`.
+  - A trusted peer connects silently.
+  - A one-user confirmation stays out of `CONNECTING`.
+- Each positive case fails against the unamended table with the session stuck at `DISCOVERING`.
+  Each guard passes either way.
+
+**Physical, after review:** install the reviewed build in place on both phones. They already hold
+each other's pins, so start at I-03, which is exactly the trusted path the amendment changes. Then
+deliberately repeat the failing shape:
+1. Start a pairing.
+2. Let one phone's screen time out (or switch it to another app) before confirming.
+3. Confirm that the other phone keeps running, and that both reach `CONNECTED` once paired again.
+
+A first-time I-02 needs the user's authorisation to *Forget* the pairing on both phones.
+
 ## Phase 9B-A Keystore TLS identity additions (18 October 2026)
 
 [ADR-017 Amendment A1](DECISIONS/ADR-017-identity-key-and-certificate.md#amendment-a1--18-october-2026--the-android-identity-key-must-also-authorise-digest_none-and-an-identity-created-without-it-is-replaced-only-by-the-user),
@@ -186,7 +248,7 @@ can be exhaustive
 | **DER encoding** (ADR-017) | definite length in minimal form at the 127/128, 255/256, 65 535/65 536 boundaries; non-negative INTEGER minimal two's-complement (redundant leading zero stripped, necessary one kept); the 91-byte P-256 SubjectPublicKeyInfo; a fixed TBSCertificate byte-for-byte from fixed inputs; **a compressed or wrong-length public-key point is rejected before it can be hashed into an identity** |
 | **Certificate validity** | inclusive window boundaries; one second either side; UTCTime round-trip across the epoch, a pre-1970 instant (floor vs truncating division), leap days, and the RFC 5280 2049/1950 pivot; `plusYears` clamps 29 Feb rather than rolling into 1 March |
 | **Pairing state machine** (PROTOCOL §4.5) | no pin is written until **both** sides confirm, in either arrival order; either side rejecting writes nothing; a `PAIR_REQUEST`/`PAIR_RESULT` whose advertised identity contradicts the certificate ⇒ `identity_mismatch`; a replayed `PAIR_RESULT` cannot pair twice; **a missing exporter fails the exchange rather than displaying an unbound code**; an existing pin for the same `peer_id` is never overwritten |
-| **Trust gate** (ADR-019) | the complete `(ControlEvent, status) -> SessionEvent` cross-product from `session-gate/`, on both platforms; **no `Connected` row, from any status, produces `PairingSucceeded`**; `PairingRequired` produces no transition from any status; `PAIRING -> CONNECTING` is reachable only from `PeerTrusted` or `PairingSucceeded`; a link lost in `PAIRING` (either reason) exits to `DISCOVERING` rather than wedging |
+| **Trust gate** (ADR-019) | the complete `(ControlEvent, status) -> SessionEvent` cross-product from `session-gate/`, on both platforms; **no `Connected` row, from any status, produces `PairingSucceeded`**; `PairingRequired` produces no transition from any status; `CONNECTING` is reachable only from `PeerTrusted` or `PairingSucceeded` (from `PAIRING`, or `DISCOVERING` per ADR-019 Amendment A2); a link lost in `PAIRING` (either reason) exits to `DISCOVERING` rather than wedging |
 | **Session integration** (ADR-019, real TLS, both platforms) | unknown peer ⇒ the FSM stays in `PAIRING` and **no `Connected` is emitted** before pairing succeeds; exactly one SAS prompt per device even on a simultaneous first meeting, and both show the same six digits; one user confirming alone writes no pin and reaches nothing; both confirming ⇒ one pin per side, code cleared, `PairingRequired` → `PairingSucceeded` → `Connected`, statuses `PAIRING` → `CONNECTING` → `CONNECTED` with neither skipped, and **one dial per side** (pairing must not open a second TLS connection); either side rejecting ⇒ no pin, no `CONNECTED`, `reconnect_count` unchanged; a matching pin ⇒ `PeerTrusted` → `Connected` with no prompt; a re-issued certificate around the same key ⇒ still silent; `forget` ⇒ the next connection asks again; the same `peer_id` with a different key ⇒ `pin_mismatch`, no prompt, stored pin untouched; `StartRide` rejected while `PAIRING` |
 | **Trusted-peer persistence** | survives a new store instance; `last_seen_at` refresh allowed, pin replacement refused; `forget` then re-pair allowed; a corrupt store reads as empty rather than crashing at launch; a record with a malformed identifier is dropped, not adopted; writes are atomic; the local `peer_id` is generated once and then stable |
 | Clock estimator | offset recovery from synthetic samples with known truth; outlier injection (one 500 ms spike in 11); all-samples-bad ⇒ no estimate rather than a wrong one; EWMA convergence; 30 ms step rejected until confirmed twice |
