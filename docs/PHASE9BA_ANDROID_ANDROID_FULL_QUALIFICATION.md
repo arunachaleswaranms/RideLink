@@ -616,7 +616,11 @@ change. Device B is no longer available, so every unfinished **A** row needs a s
 | Services, recorder, notifications | None | None (app removed) |
 | Work profile | — | Never accessed |
 
-Any future two-phone run with a reinstalled B will present a **new** identity to A, which A will refuse
+**Afterwards, at the user's request, the same `47d7cde` APK (`afafa4c1…2b65`, signer `51d88fc7…3ee2`)
+was installed fresh on B for the owner user only (read-back hash identical; not yet launched; no
+runtime permissions granted).** On first launch it will create a new identity with no pins.
+
+Any future two-phone run with this reinstalled B will present a **new** identity to A, which A will refuse
 as a pin mismatch until A forgets B. That needs the Forget peer control (PR #27); it is also the first
 genuine opportunity for I-02.
 
