@@ -21,6 +21,10 @@ struct MusicCoordinatorPlayerPort: SyncPlayerPort {
 
     func playerState() async -> PlayerState { await MainActor.run { music.playerState } }
 
+    func samplePosition(monotonicNowUs: @escaping @Sendable () -> Int64) async -> PlayerPositionSample {
+        await music.syncSamplePosition(monotonicNowUs: monotonicNowUs)
+    }
+
     func select(content: SyncPlayableContent) async {
         await MainActor.run {
             music.syncSelect(

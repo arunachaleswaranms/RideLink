@@ -97,12 +97,26 @@ final class SyncPlaybackDriftTests: XCTestCase {
     /// 7 % of the time on a loaded machine. It was found by stress-running this suite, reproduced on
     /// the first attempt, and fixed here in the harness rather than by re-running: the production
     /// behaviour was correct throughout, and the counter it now publishes is a real FR-023 figure.
-    private func tick(driftMs: Int64, playing: Bool = true) async {
+    ///
+    /// ADR-004 Amendment A1: the leader has reported itself exactly on the timeline one second
+    /// earlier — the settled reference a follower's ladder needs before it acts at all — so `driftMs`
+    /// is the inter-phone error too. `withReference: false` withholds it.
+    private func tick(driftMs: Int64, playing: Bool = true, withReference: Bool = true, referenceDriftMs: Int64 = 0) async {
         // The cadence loop re-arms its next sleep *after* a tick completes, so a second tick driven
         // straight after the first can arrive before the deadline exists. Waited for, not assumed —
         // this is the loop's own observable state, not a yield count.
         await awaitTickArmed()
         guard let nextTickUs = clock.pendingDeadlines().max() else { return XCTFail("no tick is armed") }
+        if withReference {
+            let before = await coordinator.diagnostics.inboundProcessedCount
+            await session.deliverLeaderReport(
+                trackHash: SyncTestValues.hash(1), anchorSessionUs: anchorUs, atSessionUs: nextTickUs - 1_000_000,
+                driftMs: referenceDriftMs
+            )
+            await expect("the leader's report was considered") { [coordinator] in
+                await coordinator!.diagnostics.inboundProcessedCount > before
+            }
+        }
         let before = await coordinator.diagnostics.correctionTickCount
         let elapsedMs = (nextTickUs - anchorUs) / 1_000
         await player.setState(PlayerState(positionMs: elapsedMs + driftMs, durationMs: 600_000, playing: playing))
@@ -188,7 +202,7 @@ final class SyncPlaybackDriftTests: XCTestCase {
         XCTAssertEqual(diagnostics.lastCorrection, .restoreRate)
     }
 
-    func testDriftPastTheNudgeBandHardSeeksToTheExpectedPositionAndCountsIt() async {
+    func testDriftPastTheNudgeBandHardSeeksToTheReferencePositionAndCountsIt() async {
         await startPlaying()
         await tick(driftMs: 400)
         let seeks = await player.calls.compactMap { call -> Int64? in
@@ -196,9 +210,59 @@ final class SyncPlaybackDriftTests: XCTestCase {
             return nil
         }
         XCTAssertEqual(seeks.count, 1)
-        XCTAssertEqual(seeks.first, (clock.now() - anchorUs) / 1_000, "the seek target is the authoritative timeline's position")
+        XCTAssertEqual(
+            seeks.first, (clock.now() - anchorUs) / 1_000,
+            "the seek target is the reference's position on the authoritative timeline, plus nothing learned yet"
+        )
         let diagnostics = await coordinator.diagnostics
         XCTAssertEqual(diagnostics.hardSeekCount, 1)
+    }
+
+    /// STATUS problem 131 (b), at this layer: the published state is up to 250 ms stale, and the tick
+    /// must measure the engine's live position at the instant it read it. Here the published value
+    /// says 200 ms behind — a hard seek, had it been used — and the engine says exactly on time.
+    func testATickMeasuresTheLivePositionNeverThePublishedOne() async {
+        await startPlaying()
+        await awaitTickArmed()
+        guard let nextTickUs = clock.pendingDeadlines().max() else { return XCTFail("no tick is armed") }
+        await player.setLivePosition((nextTickUs - anchorUs) / 1_000)
+        await tick(driftMs: -200)
+        let diagnostics = await coordinator.diagnostics
+        XCTAssertEqual(diagnostics.localDriftMs, 0, "the drift is the live read's")
+        XCTAssertEqual(diagnostics.hardSeekCount, 0, "and nothing was corrected for the stale one")
+        let reported = await session.playbackMessages().compactMap { message -> Int64? in
+            guard case .positionReport(_, let positionMs, _, _, _) = message else { return nil }
+            return positionMs
+        }
+        XCTAssertEqual(reported.last, (nextTickUs - anchorUs) / 1_000, "the report carries the live read too")
+    }
+
+    /// ADR-004 Amendment A1 decision 3: no settled leader report, no decision — at any drift.
+    func testAFollowerWithNoReferenceFromTheLeaderCorrectsNothing() async {
+        await startPlaying()
+        await tick(driftMs: 400, withReference: false)
+        let calls = await player.calls
+        XCTAssertFalse(calls.contains { if case .seek = $0 { return true }; if case .setRate = $0 { return true }; return false })
+        let diagnostics = await coordinator.diagnostics
+        XCTAssertEqual(diagnostics.localDriftMs, 400, "its own drift is still measured and shown")
+        XCTAssertNil(diagnostics.syncErrorMs, "but there is no inter-phone error to act on")
+    }
+
+    /// ADR-004 Amendment A1 decision 2, the case STATUS problem 131 found on two phones: both outputs
+    /// ~375 ms behind the timeline and aligned with each other. The follower reads its drift honestly
+    /// and corrects nothing, because the error between the phones is inside the dead band.
+    func testALagTheLeaderSharesIsMeasuredAndNeverChased() async {
+        await startPlaying()
+        for _ in 0 ..< 3 {
+            await tick(driftMs: -380, referenceDriftMs: -375)
+        }
+        let diagnostics = await coordinator.diagnostics
+        XCTAssertEqual(diagnostics.localDriftMs, -380)
+        XCTAssertEqual(diagnostics.peerDriftMs, -375)
+        XCTAssertEqual(diagnostics.syncErrorMs, -5, "the error the ladder acts on is the difference")
+        XCTAssertEqual(diagnostics.hardSeekCount, 0)
+        let calls = await player.calls
+        XCTAssertFalse(calls.contains { if case .seek = $0 { return true }; if case .setRate = $0 { return true }; return false })
     }
 
     func testARouteTransitionSuspendsCorrectionEntirelyAndDoesNotSpendTheSeekBudget() async {

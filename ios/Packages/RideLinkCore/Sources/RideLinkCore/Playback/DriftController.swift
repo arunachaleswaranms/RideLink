@@ -18,6 +18,19 @@ public enum DriftAction: Sendable, Equatable {
     case declareSyncFailure
 }
 
+/// A hard seek whose residual has not been observed yet (ADR-004 Amendment A1 decision 4): the
+/// compensation it was made with, and the timeline anchor it was made under. A residual observed under
+/// a different anchor belongs to a different restart and teaches nothing.
+public struct PendingSeek: Sendable, Equatable {
+    public let compensationMs: Int64
+    public let anchorSessionUs: Int64
+
+    public init(compensationMs: Int64, anchorSessionUs: Int64) {
+        self.compensationMs = compensationMs
+        self.anchorSessionUs = anchorSessionUs
+    }
+}
+
 /// The ladder's carried state. `nudgeRate` is what makes the hysteresis real rather than nominal: an
 /// evaluation that would ask for a rate already in force emits `.none`, so a drift hovering at the
 /// 25 ms boundary cannot produce a stream of identical rate commands.
@@ -27,56 +40,107 @@ public struct DriftState: Sendable, Equatable {
     /// Session instants of the hard seeks still inside the 60 s window. Bounded by that window.
     public let hardSeekAtSessionUs: [Int64]
     public let failed: Bool
+    /// ADR-004 Amendment A1: how long this device's output takes to restart after a seek, learned
+    /// from its own seeks' residuals. A property of the device and its route, so
+    /// `DriftController.newEpoch` keeps it.
+    public let restartCompensationMs: Int64
+    public let pendingSeek: PendingSeek?
 
     public init(
         nudging: Bool = false,
         nudgeRate: Double = DriftController.rateNormal,
         hardSeekAtSessionUs: [Int64] = [],
-        failed: Bool = false
+        failed: Bool = false,
+        restartCompensationMs: Int64 = 0,
+        pendingSeek: PendingSeek? = nil
     ) {
         self.nudging = nudging
         self.nudgeRate = nudgeRate
         self.hardSeekAtSessionUs = hardSeekAtSessionUs
         self.failed = failed
+        self.restartCompensationMs = restartCompensationMs
+        self.pendingSeek = pendingSeek
     }
 
     func with(
         nudging: Bool? = nil,
         nudgeRate: Double? = nil,
         hardSeekAtSessionUs: [Int64]? = nil,
-        failed: Bool? = nil
+        failed: Bool? = nil,
+        restartCompensationMs: Int64? = nil,
+        pendingSeek: PendingSeek?? = nil
     ) -> DriftState {
         DriftState(
             nudging: nudging ?? self.nudging,
             nudgeRate: nudgeRate ?? self.nudgeRate,
             hardSeekAtSessionUs: hardSeekAtSessionUs ?? self.hardSeekAtSessionUs,
-            failed: failed ?? self.failed
+            failed: failed ?? self.failed,
+            restartCompensationMs: restartCompensationMs ?? self.restartCompensationMs,
+            pendingSeek: pendingSeek ?? self.pendingSeek
         )
     }
 }
 
+/// The output this device must match (ADR-004 Amendment A1 decision 2): the leader's latest
+/// `POSITION_REPORT`, as its drift against the **same** `PlaybackTimeline` at the session instant it
+/// was sampled. A leader has none — its own output is the reference.
+public struct DriftReference: Sendable, Equatable {
+    public let driftMs: Int64
+    public let atSessionUs: Int64
+    public let playing: Bool
+
+    public init(driftMs: Int64, atSessionUs: Int64, playing: Bool) {
+        self.driftMs = driftMs
+        self.atSessionUs = atSessionUs
+        self.playing = playing
+    }
+}
+
 /// One tick of input. `driftMs` is always `actual - expected` against the authoritative
-/// `PlaybackTimeline`; `routeTransitioning` is true while **either** peer reports
-/// `AUDIO_STATE.route_state: "transitioning"` (PROTOCOL §4.4).
+/// `PlaybackTimeline`, sampled at `nowSessionUs`; `routeTransitioning` is true while **either** peer
+/// reports `AUDIO_STATE.route_state: "transitioning"` (PROTOCOL §4.4). `anchorSessionUs` is that
+/// timeline's anchor — the last instant this device's output restarted because a command said so.
 public struct DriftInput: Sendable, Equatable {
     public let driftMs: Int64
     public let nowSessionUs: Int64
     public let expectedPositionMs: Int64
     public let playing: Bool
     public let routeTransitioning: Bool
+    public let anchorSessionUs: Int64
+    public let reference: DriftReference?
 
-    public init(driftMs: Int64, nowSessionUs: Int64, expectedPositionMs: Int64, playing: Bool, routeTransitioning: Bool) {
+    public init(
+        driftMs: Int64,
+        nowSessionUs: Int64,
+        expectedPositionMs: Int64,
+        playing: Bool,
+        routeTransitioning: Bool,
+        anchorSessionUs: Int64,
+        reference: DriftReference?
+    ) {
         self.driftMs = driftMs
         self.nowSessionUs = nowSessionUs
         self.expectedPositionMs = expectedPositionMs
         self.playing = playing
         self.routeTransitioning = routeTransitioning
+        self.anchorSessionUs = anchorSessionUs
+        self.reference = reference
     }
 }
 
+/// `errorMs` is the inter-phone error the ladder acted on, or nil when it had no usable reference.
 public struct DriftOutcome: Sendable, Equatable {
     public let action: DriftAction
     public let state: DriftState
+    public let errorMs: Int64?
+
+    public init(action: DriftAction, state: DriftState, errorMs: Int64? = nil) {
+        self.action = action
+        self.state = state
+        self.errorMs = errorMs
+    }
+
+    func with(errorMs: Int64?) -> DriftOutcome { DriftOutcome(action: action, state: state, errorMs: errorMs) }
 }
 
 /// ARCHITECTURE §7.3 / ADR-004's four-tier drift ladder, as a pure `(state, input) -> (action, state)`
@@ -93,6 +157,11 @@ public struct DriftOutcome: Sendable, Equatable {
 /// | `25 ... 120` | rate nudge |
 /// | `121 ... 2000` | hard seek |
 /// | `> 2000` | sync failure |
+///
+/// The magnitude is the **inter-phone error** (ADR-004 Amendment A1): this device's drift minus its
+/// `DriftReference`'s, both against the same timeline. A lag both phones share is never chased, and a
+/// differential one — one phone's Bluetooth path — is corrected exactly as any other error. With no
+/// usable reference the ladder makes no new decision and releases any nudge.
 ///
 /// Suspension, hysteresis and the seek budget sit on top of that table:
 /// - while `routeTransitioning`, **nothing** happens — no nudge, no seek, and the hard-seek counter
@@ -120,30 +189,88 @@ public enum DriftController {
     public static let maxHardSeeksInWindow = 3
     public static let hardSeekWindowUs: Int64 = 60_000_000
 
+    /// ADR-004 Amendment A1 decision 3: a sample taken this soon after a restart may still be inside
+    /// the stretch where the position is frozen because output has not begun. More than twice the
+    /// largest lag measured on a phone (about 650 ms).
+    public static let referenceSettleUs: Int64 = 1_500_000
+
+    /// Two and a bit `POSITION_REPORT` intervals: an older reference is a lost link, not a sample.
+    public static let maxReferenceAgeUs: Int64 = 12_000_000
+
+    /// A restart longer than this is a stall, not a latency, and must not be learned as one.
+    public static let maxRestartCompensationMs: Int64 = 1_000
+
     public static func evaluate(state: DriftState, input: DriftInput) -> DriftOutcome {
         // Already failed: correction is over until the caller resets this state for a new timeline
         // or a new session. The rate was restored when the failure was declared.
         if state.failed { return DriftOutcome(action: .none, state: state) }
 
-        // Not playing: nothing to correct, but a nudge left in force must not survive the pause.
-        if !input.playing { return state.nudging ? releaseNudge(state) : DriftOutcome(action: .none, state: state) }
+        // Not playing: nothing to correct, but a nudge left in force must not survive the pause, and
+        // a seek's residual can no longer be told apart from the pause's.
+        if !input.playing { return releaseNudgeIfActive(state.with(pendingSeek: .some(nil))) }
 
         // ARCHITECTURE §7.3: the ladder is suspended while either peer's route is transitioning.
         // Deliberately *before* every tier, and deliberately leaving `nudging` untouched — suspended
-        // means "make no new decision", not "undo the last one".
-        if input.routeTransitioning { return DriftOutcome(action: .none, state: state) }
+        // means "make no new decision", not "undo the last one". A new route has a new restart
+        // latency, so what was learned about the old one is forgotten.
+        if input.routeTransitioning {
+            return DriftOutcome(action: .none, state: state.with(restartCompensationMs: 0, pendingSeek: .some(nil)))
+        }
 
-        let magnitude = input.driftMs < 0 ? -input.driftMs : input.driftMs
+        guard let reference = input.reference, usable(state, input, reference) else {
+            return releaseNudgeIfActive(state)
+        }
 
-        if magnitude > failMs { return fail(state) }
-        if magnitude > nudgeMaxMs { return hardSeek(state, input) }
-        if magnitude >= deadBandMs { return nudge(state, input) }
-        if state.nudging, magnitude < convergedMs { return releaseNudge(state) }
-        return DriftOutcome(action: .none, state: state)
+        let errorMs = input.driftMs - reference.driftMs
+        let learned = learn(state, input, errorMs)
+        let magnitude = errorMs < 0 ? -errorMs : errorMs
+
+        let outcome: DriftOutcome
+        if magnitude > failMs {
+            outcome = fail(learned)
+        } else if magnitude > nudgeMaxMs {
+            outcome = hardSeek(learned, input, reference)
+        } else if magnitude >= deadBandMs {
+            outcome = nudge(learned, errorMs)
+        } else if learned.nudging, magnitude < convergedMs {
+            outcome = releaseNudge(learned)
+        } else {
+            outcome = DriftOutcome(action: .none, state: learned)
+        }
+        return outcome.with(errorMs: errorMs)
     }
 
-    /// Everything a new playback epoch, a new session, or a user cancellation resets.
+    /// Everything a new session or a user cancellation resets.
     public static func reset() -> DriftState { DriftState() }
+
+    /// A new playback epoch: a fresh ladder and a fresh seek budget, but this device's output still
+    /// restarts as slowly as it did (ADR-004 Amendment A1 decision 4).
+    public static func newEpoch(_ state: DriftState) -> DriftState {
+        DriftState(restartCompensationMs: state.restartCompensationMs)
+    }
+
+    /// ADR-004 Amendment A1 decision 3: every reason a reference or a local sample cannot be compared.
+    private static func usable(_ state: DriftState, _ input: DriftInput, _ reference: DriftReference) -> Bool {
+        let settledFrom = input.anchorSessionUs + referenceSettleUs
+        let lastSeekUs = state.hardSeekAtSessionUs.last
+        return reference.playing &&
+            reference.atSessionUs >= settledFrom &&
+            input.nowSessionUs - reference.atSessionUs <= maxReferenceAgeUs &&
+            input.nowSessionUs >= settledFrom &&
+            (lastSeekUs.map { input.nowSessionUs - $0 >= referenceSettleUs } ?? true)
+    }
+
+    /// ADR-004 Amendment A1 decision 4. After a seek made with compensation `c`, the output restarts
+    /// `L` later, so the first settled error is `c - L`: the latency is `c - error`.
+    private static func learn(_ state: DriftState, _ input: DriftInput, _ errorMs: Int64) -> DriftState {
+        guard let pending = state.pendingSeek else { return state }
+        // A residual under a different anchor belongs to a different restart: forget the seek, keep
+        // what was learned before it.
+        let latencyMs = pending.anchorSessionUs == input.anchorSessionUs
+            ? min(max(pending.compensationMs - errorMs, 0), maxRestartCompensationMs)
+            : state.restartCompensationMs
+        return state.with(restartCompensationMs: latencyMs, pendingSeek: .some(nil))
+    }
 
     private static func fail(_ state: DriftState) -> DriftOutcome {
         DriftOutcome(
@@ -152,7 +279,7 @@ public enum DriftController {
         )
     }
 
-    private static func hardSeek(_ state: DriftState, _ input: DriftInput) -> DriftOutcome {
+    private static func hardSeek(_ state: DriftState, _ input: DriftInput, _ reference: DriftReference) -> DriftOutcome {
         let recent = state.hardSeekAtSessionUs.filter { input.nowSessionUs - $0 <= hardSeekWindowUs }
         let withThisOne = recent + [input.nowSessionUs]
         if withThisOne.count >= maxHardSeeksInWindow {
@@ -163,17 +290,30 @@ public enum DriftController {
         }
         // A hard seek also ends any nudge in force: the player is being placed exactly where it
         // should be, so there is nothing left to slew toward and rate 1.0 is the correct baseline.
+        // "Where it should be" is where the reference output is, plus the time this device's output
+        // takes to restart — a seek re-incurs that latency (ADR-004 Amendment A1 decision 4).
+        let compensationMs = state.restartCompensationMs
+        let targetMs = max(input.expectedPositionMs + reference.driftMs + compensationMs, 0)
         return DriftOutcome(
-            action: .hardSeek(positionMs: input.expectedPositionMs),
-            state: state.with(nudging: false, nudgeRate: rateNormal, hardSeekAtSessionUs: withThisOne)
+            action: .hardSeek(positionMs: targetMs),
+            state: state.with(
+                nudging: false,
+                nudgeRate: rateNormal,
+                hardSeekAtSessionUs: withThisOne,
+                pendingSeek: PendingSeek(compensationMs: compensationMs, anchorSessionUs: input.anchorSessionUs)
+            )
         )
     }
 
-    private static func nudge(_ state: DriftState, _ input: DriftInput) -> DriftOutcome {
-        // Ahead of the timeline (positive drift) means play slower; behind means play faster.
-        let target = input.driftMs > 0 ? rateSlower : rateFaster
+    private static func nudge(_ state: DriftState, _ errorMs: Int64) -> DriftOutcome {
+        // Ahead of the reference (positive error) means play slower; behind means play faster.
+        let target = errorMs > 0 ? rateSlower : rateFaster
         if state.nudging, state.nudgeRate == target { return DriftOutcome(action: .none, state: state) }
         return DriftOutcome(action: .nudge(rate: target), state: state.with(nudging: true, nudgeRate: target))
+    }
+
+    private static func releaseNudgeIfActive(_ state: DriftState) -> DriftOutcome {
+        state.nudging ? releaseNudge(state) : DriftOutcome(action: .none, state: state)
     }
 
     private static func releaseNudge(_ state: DriftState) -> DriftOutcome {

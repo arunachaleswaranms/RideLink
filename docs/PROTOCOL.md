@@ -670,15 +670,20 @@ Rules:
 8. **Nothing may overtake held authoritative work** ([ADR-024 Amendment A2](DECISIONS/ADR-024-synchronized-playback-integration.md)). Once rule 7 holds a command, every later authoritative frame whose semantics could change that command's meaning — a `QUEUE_SNAPSHOT` (§9), a `PLAYBACK_STATE` — is held **behind it, in arrival order**, and the whole stream replays in that order when the clock recovers. Without this, a `NEXT` authored against `queue_revision` *n* executes against *n+1* and the two phones select different tracks, with rule 1 and rule 3 both satisfied. `POSITION_REPORT` is deliberately **never** held: it produces one diagnostics figure and can change no command's meaning. Rule 3's revision check is evaluated against the state the command will actually be applied to — immediately when nothing is held, at replay time when something is — and a mismatch at replay time takes rule 6's halt-and-reconcile posture, because in a stream the leader actually produced it cannot occur.
 9. **An issuer may not act on authority it did not deliver** ([ADR-024 Amendment A2](DECISIONS/ADR-024-synchronized-playback-integration.md)). A leader commits a `command_seq`, a `queue_revision` or a local audible effect only once the frame carrying it has been **accepted by the authenticated transport** — being queued for sending is not delivery, and a write that failed is not a send. Every outbound frame is bound to the authentication generation that authorised it (§4.2/ADR-023 §3) and is refused rather than written under any other. When an authoritative frame cannot be delivered, the issuer **stops being authoritative for that authentication generation**: no further command, no further queue mutation, no further `PLAYBACK_STATE`, and the condition is surfaced. Local playback is unaffected (ADR-004, FR-025) and recovery is a new session — there is no message that tells a peer about a command it never received, and a peer that never received one does not know to request state.
 
-`POSITION_REPORT` (every 5 s, both directions) drives drift detection:
+`POSITION_REPORT` (every 5 s, both directions) drives drift detection. Its `position_ms` is a live
+read of the player at the instant `at_session_us` names. On a follower, the leader's report is the
+drift reference the ladder corrects against ([ADR-004 Amendment A1](DECISIONS/ADR-004-local-synchronized-playback.md#amendment-a1--22-october-2026--correct-the-inter-phone-error-not-a-lag-both-phones-share)).
+It is still never a command:
 
 ```json
 { "track_hash": "sha256:1f3a…", "position_ms": 45120,
   "at_session_us": 90260000000, "playing": true, "playback_rate": 1.0 }
 ```
 
-`PLAYBACK_STATE` is the full authoritative snapshot the leader emits after any correction or
-reconnect — the reconciliation anchor, not an incremental update. Its shape is §10's
+`PLAYBACK_STATE` is the full authoritative snapshot the leader emits on reconnect and reconciliation
+— the reconciliation anchor, not an incremental update. A leader no longer emits one after a drift
+correction, because since [ADR-004 Amendment A1](DECISIONS/ADR-004-local-synchronized-playback.md#amendment-a1--22-october-2026--correct-the-inter-phone-error-not-a-lag-both-phones-share)
+a leader never corrects (ADR-024 Amendment A16). The shape is unchanged. Its shape is §10's
 `STATE_SNAPSHOT.playback` plus the two ordering values an anchor needs (ADR-024 §4):
 
 ```json

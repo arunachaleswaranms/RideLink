@@ -375,6 +375,12 @@ public final class MusicCoordinator {
 
     public func syncSeek(positionMs: Int64) async { await player.execute(.seek(positionMs: positionMs)) }
 
+    /// ADR-004 Amendment A1 decision 1: the live position, stamped by the caller's clock. A read, not an
+    /// effect.
+    public func syncSamplePosition(monotonicNowUs: @escaping @Sendable () -> Int64) async -> PlayerPositionSample {
+        await player.samplePosition(monotonicNowUs: monotonicNowUs)
+    }
+
     /// ADR-004's rate-nudge tier. Always exactly 1.0 when correction ends (brief §38).
     public func syncSetRate(_ rate: Double) async { await player.execute(.setRate(rate: rate)) }
 

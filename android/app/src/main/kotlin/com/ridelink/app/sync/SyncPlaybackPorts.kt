@@ -5,6 +5,7 @@ import com.ridelink.core.model.ContentHash
 import com.ridelink.core.model.LocalEntryId
 import com.ridelink.core.playback.PlaybackMessage
 import com.ridelink.core.playback.QueueMessage
+import com.ridelink.core.player.PlayerPositionSample
 import com.ridelink.core.player.PlayerState
 import com.ridelink.core.sync.SessionClockEstimate
 import com.ridelink.network.control.ControlEvent
@@ -103,6 +104,15 @@ interface SyncContentPort {
  */
 interface SyncPlayerPort {
     val playerState: StateFlow<PlayerState>
+
+    /**
+     * ADR-004 Amendment A1 decision 1: the player's position read live and stamped with
+     * [monotonicNowUs] — the coordinator's own clock — in the same step as the read. Every drift
+     * measurement, `POSITION_REPORT`, `PLAYBACK_STATE` and `STATE_SNAPSHOT` is taken from this at
+     * its own instant, never from [playerState], whose position is published by a 250 ms UI loop. A
+     * read, not an effect.
+     */
+    suspend fun samplePosition(monotonicNowUs: () -> Long): PlayerPositionSample
 
     /**
      * Brief §26's materialisation point, and **only** that: the item that is actually current

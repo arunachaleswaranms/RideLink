@@ -3,6 +3,7 @@ package com.ridelink.app.sync
 import com.ridelink.core.model.PeerId
 import com.ridelink.core.model.SessionId
 import com.ridelink.core.playback.PlaybackMessage
+import com.ridelink.core.player.PlayerPositionSample
 import com.ridelink.core.player.PlayerState
 import com.ridelink.core.sync.SessionClock
 import com.ridelink.core.sync.SessionClockEstimate
@@ -18,7 +19,9 @@ import kotlin.test.Test
 import kotlin.test.fail
 
 /**
- * STATUS §4 problem 131 — **reproduction only; these tests are expected to FAIL on current code.**
+ * STATUS §4 problem 131 — the reproduction from PR #29, now the regression for ADR-004 Amendment A1.
+ * The first two cases failed against `main` at `3715551` (unmodified production) and their
+ * assertions are unchanged; the third was added with the fix.
  *
  * Physical evidence (two Android phones, built-in speakers, build 47d7cde, 19–20 Oct 2026): both
  * phones reported `local drift` of about −350 to −650 ms (±~120 ms jitter, no trend), made two or
@@ -43,7 +46,9 @@ import kotlin.test.fail
  *    value and pairs it with a *fresh* session instant. The model publishes on a 253 ms period
  *    (250 ms plus main-thread slack, so the staleness sweeps 0..253 ms as it does on a device).
  *
- * Neither test asserts a particular remedy. Each asserts a property any correct fix must have.
+ * Neither of the first two tests asserts a particular remedy. Each asserts a property any correct
+ * fix must have. The third asserts the constraint the fix was held to: a **differential** lag (one
+ * phone's Bluetooth path) must still be corrected, never concealed.
  *
  * The common-mode case also shows a third, code-established mechanism. The leader's `PLAYBACK_STATE`
  * after a hard seek or `SYNC_FAILED` carries its *cached* position. The follower re-anchors to it
@@ -104,6 +109,49 @@ class SyncPlaybackOutputLatencyTest {
                         "with a fresh session instant\n$trace",
                 )
             }
+            // Since ADR-004 Amendment A1 the leader never corrects, so its seek count above cannot
+            // fail on its own. The follower is the one that acts, and it is exactly on time too.
+            val follower = sim.follower.coordinator.diagnostics.value
+            val worstFollower = sim.samples.maxOf { kotlin.math.abs(it.followerDriftMs ?: 0) }
+            if (worstFollower >= STALE_SAMPLE_TOLERANCE_MS || follower.hardSeekCount > 0) {
+                fail(
+                    "problem 131 (b): the follower is exactly on the timeline yet measured |drift| up to " +
+                        "$worstFollower ms and hard-seeked ${follower.hardSeekCount} time(s)\n$trace",
+                )
+            }
+        }
+
+    /**
+     * ADR-004 Amendment A1's constraint: a lag only **one** phone has — the follower's Bluetooth
+     * path adding 200 ms, and its output restarting 550 ms after a seek where the leader's takes
+     * 350 ms — is real inter-phone error and must be corrected, not hidden as common-mode. The
+     * follower makes at most two seeks (the first teaches its restart latency), never fails, and
+     * ends audibly aligned with the leader. The leader, which is the reference, never seeks.
+     */
+    @Test
+    fun `a lag only one phone has is still corrected, within the seek budget`() =
+        runTest(StandardTestDispatcher()) {
+            val sim =
+                TwoPhoneSimulation(this, outputLatencyUs = 350_000, positionTickUs = 253_000, followerOutputLatencyUs = 550_000)
+            sim.connectAndPlay()
+            sim.runFor(SIXTY_SECONDS_US)
+
+            val trace = sim.trace()
+            val leader = sim.leader.coordinator.diagnostics.value
+            val follower = sim.follower.coordinator.diagnostics.value
+            val finalOffsetUs = kotlin.math.abs(sim.lastInterPhoneOffsetUs)
+            if (follower.hardSeekCount !in 1..2 ||
+                leader.hardSeekCount != 0 ||
+                SyncState.SYNC_FAILED in listOf(leader.syncState, follower.syncState) ||
+                finalOffsetUs > CONVERGED_TOLERANCE_US
+            ) {
+                fail(
+                    "ADR-004 A1: a 200 ms differential lag must be corrected, not concealed — " +
+                        "follower hardSeeks=${follower.hardSeekCount} state=${follower.syncState} " +
+                        "learned=${follower.restartCompensationMs} ms, leader hardSeeks=${leader.hardSeekCount} " +
+                        "state=${leader.syncState}, final inter-phone offset $finalOffsetUs us\n$trace",
+                )
+            }
         }
 
     // --- the harness ------------------------------------------------------------------------------
@@ -144,10 +192,11 @@ class SyncPlaybackOutputLatencyTest {
         private val scope: TestScope,
         outputLatencyUs: Long,
         positionTickUs: Long,
+        followerOutputLatencyUs: Long = outputLatencyUs,
     ) {
         val leader: Phone = build(SyncTestValues.leaderPeerId, LEADER_START_US, 0L, 100, outputLatencyUs, positionTickUs)
         val follower: Phone =
-            build(SyncTestValues.followerPeerId, LEADER_START_US - OFFSET_US, -OFFSET_US, 500, outputLatencyUs, positionTickUs)
+            build(SyncTestValues.followerPeerId, LEADER_START_US - OFFSET_US, -OFFSET_US, 500, followerOutputLatencyUs, positionTickUs)
         private var sessionNowUs = LEADER_START_US
         val samples = mutableListOf<Sample>()
         var maxInterPhoneOffsetUs = 0L
@@ -157,6 +206,9 @@ class SyncPlaybackOutputLatencyTest {
         var maxInterPhoneOffsetBeforeCorrectionUs = 0L
             private set
         private var interPhoneOffsetUs = 0L
+
+        /** The leader's audible position minus the follower's at the last instant both were playing. */
+        val lastInterPhoneOffsetUs: Long get() = interPhoneOffsetUs
 
         init {
             leader.session.forwardTo(follower.session)
@@ -322,6 +374,12 @@ class SyncPlaybackOutputLatencyTest {
                 )
         }
 
+        /** `ExoPlayer.currentPosition` read live: what is presented right now (ADR-004 Amendment A1). */
+        override suspend fun samplePosition(monotonicNowUs: () -> Long): PlayerPositionSample {
+            val atUs = monotonicNowUs()
+            return PlayerPositionSample(presentedPositionUs(atUs) / MICROS_PER_MS, TRACK_DURATION_MS, isPlaying, rate, atUs)
+        }
+
         /** `onIsPlayingChanged(true)` restarts the tick loop, which samples immediately. */
         private fun restartTicking() {
             tickOriginUs = nowUs()
@@ -395,6 +453,9 @@ class SyncPlaybackOutputLatencyTest {
 
         /** Observation 2's measured bound on the real phones. */
         const val INTER_PHONE_TOLERANCE_US = 2_000L
+
+        /** The ladder's own dead band: what a converged correction leaves at most. */
+        const val CONVERGED_TOLERANCE_US = 25_000L
 
         init {
             // Session time is the leader's clock (ADR-010); the follower's local = session - OFFSET.

@@ -77,6 +77,13 @@ public protocol SyncContentPort: Sendable {
 public protocol SyncPlayerPort: Sendable {
     func playerState() async -> PlayerState
 
+    /// ADR-004 Amendment A1 decision 1: the player's position read live and stamped with
+    /// `monotonicNowUs` — the coordinator's own clock — in the same step as the read. Every drift
+    /// measurement, `POSITION_REPORT`, `PLAYBACK_STATE` and `STATE_SNAPSHOT` is taken from this at its
+    /// own instant, never from `playerState()`, whose position is published by a 250 ms UI loop. A
+    /// read, not an effect.
+    func samplePosition(monotonicNowUs: @escaping @Sendable () -> Int64) async -> PlayerPositionSample
+
     /// Brief §26's materialisation point, and **only** that: the item that is actually current
     /// becomes the local queue's one selected entry, so Now Playing metadata describes what is
     /// loaded. The authoritative shared queue is deliberately never copied into `LocalQueue`

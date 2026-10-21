@@ -22,6 +22,9 @@ final class DriftVectorTests: XCTestCase {
         XCTAssertEqual(constants.doubleVal("rate_faster"), DriftController.rateFaster)
         XCTAssertEqual(constants.int("max_hard_seeks_in_window"), DriftController.maxHardSeeksInWindow)
         XCTAssertEqual(constants.int64("hard_seek_window_us"), DriftController.hardSeekWindowUs)
+        XCTAssertEqual(constants.int64("reference_settle_us"), DriftController.referenceSettleUs)
+        XCTAssertEqual(constants.int64("max_reference_age_us"), DriftController.maxReferenceAgeUs)
+        XCTAssertEqual(constants.int64("max_restart_compensation_ms"), DriftController.maxRestartCompensationMs)
     }
 
     func testSingleEvaluations() throws {
@@ -34,6 +37,7 @@ final class DriftVectorTests: XCTestCase {
             let expected = row.dict("expected")
             assertAction(name, expected.dict("action"), outcome.action)
             XCTAssertEqual(state(expected.dict("state")), outcome.state, "\(name): state after")
+            XCTAssertEqual(nullableInt64(expected["error_ms"]), outcome.errorMs, "\(name): error")
         }
         XCTAssertFalse(rows.isEmpty)
     }
@@ -49,29 +53,61 @@ final class DriftVectorTests: XCTestCase {
                 let outcome = DriftController.evaluate(state: carried, input: driftInput(step.dict("input")))
                 assertAction(name, step.dict("action"), outcome.action)
                 XCTAssertEqual(state(step.dict("state_after")), outcome.state, "\(name): state after")
+                XCTAssertEqual(nullableInt64(step["error_ms"]), outcome.errorMs, "\(name): error")
                 carried = outcome.state
             }
         }
         XCTAssertFalse(sequences.isEmpty)
     }
 
+    func testEpochs() throws {
+        let rows = try document().array("epochs")
+        for element in rows {
+            guard let row = element as? [String: Any] else { continue }
+            let name = row.str("name")
+            let before = state(row.dict("state"))
+            let after: DriftState
+            switch row.str("op") {
+            case "new_epoch": after = DriftController.newEpoch(before)
+            case "reset": after = DriftController.reset()
+            default: XCTFail("\(name): unknown op"); continue
+            }
+            XCTAssertEqual(state(row.dict("expected")), after, "\(name): state after")
+        }
+        XCTAssertFalse(rows.isEmpty)
+    }
+
+    private func nullableInt64(_ value: Any?) -> Int64? {
+        (value as? NSNumber)?.int64Value
+    }
+
     private func state(_ json: [String: Any]) -> DriftState {
-        DriftState(
+        let pending = json["pending_seek"] as? [String: Any]
+        return DriftState(
             nudging: json.boolVal("nudging"),
             nudgeRate: json.doubleVal("nudge_rate"),
             // swiftlint:disable:next force_cast
             hardSeekAtSessionUs: (json["hard_seek_at_session_us"] as! [Any]).map { ($0 as! NSNumber).int64Value },
-            failed: json.boolVal("failed")
+            failed: json.boolVal("failed"),
+            restartCompensationMs: json.int64("restart_compensation_ms"),
+            pendingSeek: pending.map {
+                PendingSeek(compensationMs: $0.int64("compensation_ms"), anchorSessionUs: $0.int64("anchor_session_us"))
+            }
         )
     }
 
     private func driftInput(_ json: [String: Any]) -> DriftInput {
-        DriftInput(
+        let reference = json["reference"] as? [String: Any]
+        return DriftInput(
             driftMs: json.int64("drift_ms"),
             nowSessionUs: json.int64("now_session_us"),
             expectedPositionMs: json.int64("expected_position_ms"),
             playing: json.boolVal("playing"),
-            routeTransitioning: json.boolVal("route_transitioning")
+            routeTransitioning: json.boolVal("route_transitioning"),
+            anchorSessionUs: json.int64("anchor_session_us"),
+            reference: reference.map {
+                DriftReference(driftMs: $0.int64("drift_ms"), atSessionUs: $0.int64("at_session_us"), playing: $0.boolVal("playing"))
+            }
         )
     }
 

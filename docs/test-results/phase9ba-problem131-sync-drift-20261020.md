@@ -166,3 +166,22 @@ validate them.
    - Repeat over Bluetooth on at least one phone.
 4. Then choose among options 2–4 in an ADR-004 amendment, with the measured latencies (L1, G, and
    the Bluetooth differential) as evidence.
+
+## 6. Resolution (22 October 2026, software only)
+
+[ADR-004 Amendment A1](../DECISIONS/ADR-004-local-synchronized-playback.md#amendment-a1--22-october-2026--correct-the-inter-phone-error-not-a-lag-both-phones-share)
+chose among §4's options on the evidence above. [ADR-024 Amendment A16](../DECISIONS/ADR-024-synchronized-playback-integration.md#amendment-a16--22-october-2026--10s-drift-is-now-measured-against-the-leaders-and-a-correction-re-states-nothing)
+records what that changes in Phase 5.
+
+| Finding | Disposition |
+|---|---|
+| E1 (common-mode) | The ladder acts on the inter-phone error against the leader's settled report, so only the follower corrects. This is option 4, the variant §4 left open. It is chosen because it is the one that neither chases a common lag (option 2's aim) nor hides a differential one (option 2's flaw) |
+| E2 (a seek re-incurs the lag) | The hard-seek target adds a restart latency learned from the seek's own residual. This is option 3, without assuming any measured value |
+| E3 (stale sample) | Live, instant-stamped reads on both platforms: §5 step 1, as recommended |
+| E4 (leader re-anchoring) | The leader no longer corrects, so it no longer emits a correction-caused `PLAYBACK_STATE`. The remaining snapshots use live samples. Because the error is a difference of two drifts against the **same** timeline, a re-anchor cancels out of it either way |
+| E5 (pre-roll not awaited) | Unchanged and recorded. It lengthens a cold start, but under A1 a lag both phones share is no longer corrected, so it no longer causes a seek |
+| §5 step 2 (restart-latency instrumentation) | Partly. The learned `restartCompensationMs` and the inter-phone `syncErrorMs` are now on both diagnostics screens. A direct per-restart measurement is still not built |
+
+`SyncPlaybackOutputLatencyTest` now passes. Its two original cases are unchanged. A third case, a
+differential lag that must be corrected, was added. §5 steps 3 and 4's physical retest is still
+required. TEST_PLAN §5.2's problem-131 note has been rewritten for the amended model.

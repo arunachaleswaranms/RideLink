@@ -124,6 +124,8 @@ private fun SyncDiagnosticsBlock(sync: SyncPlaybackCoordinator) {
         SyncDiagnosticRow("queue revision / size", "${d.queueRevision} / ${d.queueSize}")
         SyncDiagnosticRow("local drift", d.localDriftMs?.let { "$it ms" } ?: "—")
         SyncDiagnosticRow("peer drift", d.peerDriftMs?.let { "$it ms" } ?: "—")
+        SyncDiagnosticRow("sync error", d.syncErrorMs?.let { "$it ms" } ?: "—")
+        SyncDiagnosticRow("restart compensation", "${d.restartCompensationMs} ms")
         SyncDiagnosticRow("last correction", d.lastCorrection.name)
         SyncDiagnosticRow("playback rate", d.playbackRate.toString())
         SyncDiagnosticRow("hard seeks", d.hardSeekCount.toString())

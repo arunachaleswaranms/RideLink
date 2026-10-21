@@ -730,6 +730,10 @@ final class SyncPlaybackClosureAuditTests: XCTestCase {
         }
         await awaitTickArmed()
         let tickAt = clock.pendingDeadlines().max() ?? clock.now()
+        // ADR-004 Amendment A1: a follower corrects only against a settled leader report.
+        let considered = await coordinator.diagnostics.inboundProcessedCount
+        await session.deliverLeaderReport(trackHash: SyncTestValues.hash(1), anchorSessionUs: anchor, atSessionUs: tickAt - 1_000_000)
+        await awaitProcessed(beyond: considered)
         await player.setState(
             PlayerState(positionMs: (tickAt - anchor) / 1_000 + 400, durationMs: 600_000, playing: true, rate: 1.0)
         )

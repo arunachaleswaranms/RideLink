@@ -131,10 +131,21 @@ data class SyncPlaybackDiagnostics(
     val queueRevision: Long = 0,
     val queueSize: Int = 0,
     val currentTrackHash: ContentHash? = null,
-    /** This device's own drift against the authoritative timeline — the figure the ladder acts on. */
+    /** This device's own drift against the authoritative timeline, from a live position sample. */
     val localDriftMs: Long? = null,
-    /** The peer's drift against the **same** authoritative timeline, from its `POSITION_REPORT`. Diagnostics only. */
+    /**
+     * The peer's drift against the **same** authoritative timeline, from its `POSITION_REPORT`. On a
+     * follower, the leader's is also the drift reference (ADR-004 Amendment A1).
+     */
     val peerDriftMs: Long? = null,
+    /**
+     * ADR-004 Amendment A1: the inter-phone error the ladder last acted on — local drift minus the
+     * reference's — or null when it had no usable reference (always, on the leader). This, not
+     * [localDriftMs], is the figure the ladder corrects.
+     */
+    val syncErrorMs: Long? = null,
+    /** ADR-004 Amendment A1 decision 4: this device's learned output-restart latency, added to a hard seek. */
+    val restartCompensationMs: Long = 0,
     val lastCorrection: SyncCorrection = SyncCorrection.NONE,
     val playbackRate: Double = 1.0,
     val hardSeekCount: Int = 0,

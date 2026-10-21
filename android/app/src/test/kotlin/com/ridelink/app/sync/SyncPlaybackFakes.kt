@@ -6,6 +6,7 @@ import com.ridelink.core.model.LocalEntryId
 import com.ridelink.core.model.PeerId
 import com.ridelink.core.playback.PlaybackMessage
 import com.ridelink.core.playback.QueueMessage
+import com.ridelink.core.player.PlayerPositionSample
 import com.ridelink.core.player.PlayerState
 import com.ridelink.core.sync.SessionClockEstimate
 import com.ridelink.network.control.ControlEvent
@@ -162,6 +163,28 @@ class FakeSyncSession : SyncSessionPort {
     fun deliver(message: QueueMessage) = playback.queueSink?.submit(message, currentAuthGeneration)
 
     /**
+     * ADR-004 Amendment A1: the leader's `POSITION_REPORT`, [driftMs] off a timeline anchored at
+     * ([anchorPositionMs], [anchorSessionUs]) and sampled at [atSessionUs]. A follower's ladder makes
+     * no decision without a settled reference like this one, so every follower correction test
+     * delivers one first.
+     */
+    fun deliverLeaderReport(
+        trackHash: ContentHash,
+        anchorSessionUs: Long,
+        atSessionUs: Long,
+        anchorPositionMs: Long = 0,
+        driftMs: Long = 0,
+    ) = deliver(
+        PlaybackMessage.PositionReport(
+            trackHash,
+            anchorPositionMs + (atSessionUs - anchorSessionUs) / 1_000 + driftMs,
+            atSessionUs,
+            true,
+            1.0,
+        ),
+    )
+
+    /**
      * Delivers a frame tagged with a generation the caller chooses — the read loop still producing
      * under a session that has already ended, which is the interleaving ADR-024 Amendment A6 is
      * about. Mirrors the iOS fake's overload of the same name.
@@ -231,6 +254,19 @@ class FakeSyncPlayer : SyncPlayerPort {
     fun setState(state: PlayerState) {
         stateFlow.value = state
     }
+
+    /**
+     * When set, what the engine reports *now* — deliberately different from the published
+     * [playerState], which is how a test proves synchronisation reads the engine and not the 250 ms
+     * UI cache (ADR-004 Amendment A1 decision 1).
+     */
+    var livePositionMs: Long? = null
+
+    /** Tests write the position they mean, so the live read is whatever was last written. */
+    override suspend fun samplePosition(monotonicNowUs: () -> Long): PlayerPositionSample =
+        stateFlow.value.let {
+            PlayerPositionSample(livePositionMs ?: it.positionMs, it.durationMs, it.playing, it.rate, monotonicNowUs())
+        }
 
     override suspend fun select(content: SyncPlayableContent) {
         record(Call.Select(content.contentHash))

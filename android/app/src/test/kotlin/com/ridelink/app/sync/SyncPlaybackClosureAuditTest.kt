@@ -861,6 +861,9 @@ class SyncPlaybackClosureAuditTest {
             player.gate = gate
             player.gateOn = { it is FakeSyncPlayer.Call.Seek }
             val tickAt = clock.pendingDeadlines.max()
+            // ADR-004 Amendment A1: a follower corrects only against a settled leader report.
+            session.deliverLeaderReport(HASH_A, anchor, tickAt - 1_000_000)
+            runCurrent()
             player.setState(PlayerState(positionMs = (tickAt - anchor) / 1_000 + 400, durationMs = 600_000, playing = true))
             clock.advanceTo(tickAt)
             runCurrent()
