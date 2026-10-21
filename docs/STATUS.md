@@ -1,5 +1,28 @@
 # RideLink — Status
 
+**20 October 2026 — Phase 9B-A full Android ↔ Android qualification, run 2: BLOCKED.**
+Same installed `47d7cde` build (PR #24 unmerged). Device B was released at the end of the run, and
+RideLink was uninstalled from it at the user's request. [Report, run 2](PHASE9BA_ANDROID_ANDROID_FULL_QUALIFICATION.md#run-2--continuation-1920-october-2026).
+- **Passed:** shared catalogue and transfer both ways (43.6 MB; I-23's 1,133-entry manifest), UJ-05,
+  S-01/S-02/S-06/S-07/I-09 functionally, I-25 on the built-in route (voice over synced music,
+  user-confirmed; PTT ducks the peer's music to 25 %), AF-01 (`0x82`), AF-02 (`0x2`), N-03, AF-08
+  (force-stop approximation), I-26 functionally.
+- **Measured:** the two phones' loudspeaker output was within **≤ 2 ms** of each other across 78 clicks
+  (PLAY, PAUSE/RESUME, SEEK, steady state), by a validated single-microphone method. Built-in speakers
+  only; no Bluetooth figure.
+- **Failed:** I-10 (a follower's PAUSE took 0.5–0.65 s idle and 1.9 s during a 40 MB transfer), V-06
+  (problem 129, 3 of 3), AF-07 on Android 17 (problem 135).
+- **Reproduced again:** problems 125 (twice), 127 (twice), 129 (3 of 3), and the 128 family.
+- **New:** 131 (drift controller chases a common-mode output latency → audible hard seeks and
+  `SYNC_FAILED`; investigation PR #29), 132 (backgrounded session frozen in `RECONNECTING` for 8 h), 133
+  (dial refused within milliseconds after restarts, never retried), 134 (follower's *Play on both
+  phones* for the leader's own track wedges at `WAITING_FOR_CONTENT`), 135 (Recents swipe mid-ride does
+  not end the session on Android 17).
+- **Not run:** every row needing PR #24 (PROC-125, S-09/S-11/S-12, I-05/I-12/I-13/I-17, V-07, AF-05),
+  first-time pairing (needs #27), the permission rows, the hotspot rows.
+- **Next:** review #28, #24, #26, #27; fix 131, then 134/135/133; resume with a second Android phone
+  (A must forget B's old identity first).
+
 **19 October 2026 — Problem 125 (orphaned reconnect ladder after an inbound promotion) FIXED IN
 SOFTWARE on branch `fix/reconnect-ladder-orphan`, pending independent review; not installed on either
 phone.** Found by the Phase 9B-A qualification run on `47d7cde` (two Android phones, five
@@ -8715,6 +8738,10 @@ as of this write-up — see §7.
 | 128 | **OPEN. Found 19 October 2026 (Phase 9B-A full qualification; Android, physical).** A peer in `ENDING` accepts and authenticates a new inbound connection and attaches voice. After a BYE, B's teardown took 5.1 s. In that window its still-open listener accepted A's new dial (`known peer …, silent connect`, `voice subsystem attached`), and then `ENDING → IDLE` BYE'd it, so A's *Search again* landed at *Not connected* | Medium (a recovery action fails; session work after `ENDING`, which rule 21 forbids; nothing was left running afterwards) | [Evidence](PHASE9BA_ANDROID_ANDROID_FULL_QUALIFICATION.md#13-defects-found-in-this-run). Likely fix: stop accepting at the start of `ENDING`, or refuse admission while retiring |
 | 129 | **OPEN. Found 19 October 2026 (Phase 9B-A full qualification; Android, physical).** In-app *End intercom* intermittently (2 of 3) leaves the `microphone`-typed foreground service and a stale *"Intercom on — Starting the microphone…"* notification, while the app says *Intercom off* and no recorder runs. The notification's own End intercom clears it. `IntercomStopOwner.requestStop()` skips the release on `TimedOut` or an epoch change; which branch was taken is not visible, because intercom actions are not in the diagnostics export | Medium (a misleading privacy surface; a microphone foreground service held without capture) | [Evidence](PHASE9BA_ANDROID_ANDROID_FULL_QUALIFICATION.md#13-defects-found-in-this-run). Also: log intercom start, end, mute and rebuild to the diagnostics export |
 | 130 | **OPEN. Found 19 October 2026 (Phase 9B-A full qualification; Android, physical).** A benign simultaneous reconnect surfaced as a security alert. During a natural drop with both ladders dialling, A logged `handshake refused: unexpected_message_type` and showed a *Connection refused* security card. The reconnect succeeded 1.85 s later | Low–Medium (alarm fatigue undermines ADR-012's warnings) | [Evidence](PHASE9BA_ANDROID_ANDROID_FULL_QUALIFICATION.md#13-defects-found-in-this-run). Classify duplicate-resolution protocol errors as non-security |
+| 132 | **OPEN. Found 20 October 2026 (Phase 9B-A run 2; Android, physical).** A session that loses its link while the app is backgrounded with no foreground service (synchronised playback had ended) stays in `RECONNECTING` indefinitely: A showed *Reconnecting…* for ≈ 8 h with no logged event, and `ReconnectBudgetExhausted` was logged ≈ 60 s after the app was opened. Inference, not established: the frozen cached process suspends the ladder's timers. Impact low (resolves on open; a ride keeps a foreground service) |
+| 133 | **OPEN. Found 20 October 2026 (Phase 9B-A run 2; Android, physical).** After both apps restart, each phone's dial ends in `PairingRejectedOrTimeout` 3–46 ms after `PeerSelected` and is never retried (*"Couldn't reach the other phone yet. Stop searching, then find it again."*); only *Stop searching → Find* recovers, and the session then forms through the peer's inbound dial. Seen 3 times. Root cause not established; a stale resolved address is a hypothesis (the export does not log the dialled address) |
+| 134 | **OPEN. Found 20 October 2026 (Phase 9B-A run 2; Android, physical).** A follower's *Play on both phones* for a track in the **leader's own library** leaves the leader at `WAITING_FOR_CONTENT` (*"Waiting for the track to download…"*) with no `command_seq` allocated, and nothing plays until the leader presses Next/Previous. Reproduced 2 of 2, in two sessions. The same track played normally when reached through a leader-ordered Next |
+| 135 | **OPEN. Found 20 October 2026 (Phase 9B-A run 2; Android 17, physical).** AF-07 fails on the moto g57 power: mid-ride, swiping RideLink from Recents removed the task, but 46 s later the process, the `mediaPlayback` foreground service, its notification, the music and the control session were all still running. ARCHITECTURE requires `onTaskRemoved → ENDING`. Whether the callback is not delivered or not handled is not established. (The OnePlus kills the process instead, Phase 9A.) |
 
 Resolved 26 Aug 2026 session: `CLAUDE.md` in `.gitignore` (was problem 1); `.DS_Store` tracking
 (was problem 7 — the claim was incorrect; the files are untracked and now ignored); the ADR-015/
