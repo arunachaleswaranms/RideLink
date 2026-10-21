@@ -1,5 +1,33 @@
 # RideLink — Status
 
+**22 October 2026 — Problem 136: an iOS CI test race, test-only fix on branch
+`fix/ios-obligation-test-retry-race` (draft PR, not merged).**
+- **What happened:** after main (`1d4d524`, a workflow-only change) was merged into PRs #24 and #26,
+  their iOS jobs failed 3 times in 4 runs (attempt 1 on both, then #26's rerun) in
+  `SyncPlaybackAcceptedObligationTests`, on two different tests:
+  - `testASecondClockHoldInOneSessionRecoversOnTheRetryCadence`: *timed out waiting for: C2 recovered on
+    the retry cadence*;
+  - `testAClockReadyAcceptedCommandWaitsForCapacityWithoutLossOrSpinAndReleasesOnce`: 4 capacity waits
+    where 6 were expected.
+
+  Both PRs had passed on their previous heads, the code under test was identical, and the runner image
+  was identical (`macos-26-arm64` 20261013.0424.1, Xcode 26.6). #24's rerun passed.
+- **Cause (in the test, not the product):** `advanceRetries` moved the virtual clock after a fixed 50
+  yields. The deferred drain parks at `now + deferredRetryIntervalUs`, read **when it parks**. If the
+  test advanced first, the drain parked on a deadline computed from the advanced instant, which nothing
+  then reached, and a retry pass was lost. **Reproduced on unmodified main** under CPU load: 1 failing
+  run in 12.
+- **Fix (test only):** the two tests whose premise is a running drain now advance through
+  `advanceParkedRetries`, which waits until the drain is parked on its cadence before moving time.
+  Tests that advance time to prove *nothing* runs keep `advanceRetries`, because no drain parks there.
+  The capacity test waits for the drain to park again after its sixth pass, instead of `settle(400)`,
+  before reading counts. No production code, wire format or vector changed.
+- **Verified on this machine, under 20 busy processes on 10 cores:** 118 of 120 runs of the suite were
+  clean. The 2 failing runs were in a batch that did not record which assertions failed, and 80
+  further runs that did record them were all clean. So **a residual load sensitivity elsewhere in the
+  suite is not ruled out.** Unloaded, the suite passes.
+- **Next:** review; then merge into the open fix PRs, so their iOS jobs stop failing on this test.
+
 **19 October 2026 — Phase 9B-A full Android ↔ Android qualification, run 1: BLOCKED.**
 The merged `47d7cde` build (`afafa4c1…2b65`, same signer) was installed in place on both phones.
 Identities, pins, data and permissions were preserved. The user ended the run at a checkpoint after
@@ -8688,6 +8716,7 @@ as of this write-up — see §7.
 | 128 | **OPEN. Found 19 October 2026 (Phase 9B-A full qualification; Android, physical).** A peer in `ENDING` accepts and authenticates a new inbound connection and attaches voice. After a BYE, B's teardown took 5.1 s. In that window its still-open listener accepted A's new dial (`known peer …, silent connect`, `voice subsystem attached`), and then `ENDING → IDLE` BYE'd it, so A's *Search again* landed at *Not connected* | Medium (a recovery action fails; session work after `ENDING`, which rule 21 forbids; nothing was left running afterwards) | [Evidence](PHASE9BA_ANDROID_ANDROID_FULL_QUALIFICATION.md#13-defects-found-in-this-run). Likely fix: stop accepting at the start of `ENDING`, or refuse admission while retiring |
 | 129 | **OPEN. Found 19 October 2026 (Phase 9B-A full qualification; Android, physical).** In-app *End intercom* intermittently (2 of 3) leaves the `microphone`-typed foreground service and a stale *"Intercom on — Starting the microphone…"* notification, while the app says *Intercom off* and no recorder runs. The notification's own End intercom clears it. `IntercomStopOwner.requestStop()` skips the release on `TimedOut` or an epoch change; which branch was taken is not visible, because intercom actions are not in the diagnostics export | Medium (a misleading privacy surface; a microphone foreground service held without capture) | [Evidence](PHASE9BA_ANDROID_ANDROID_FULL_QUALIFICATION.md#13-defects-found-in-this-run). Also: log intercom start, end, mute and rebuild to the diagnostics export |
 | 130 | **OPEN. Found 19 October 2026 (Phase 9B-A full qualification; Android, physical).** A benign simultaneous reconnect surfaced as a security alert. During a natural drop with both ladders dialling, A logged `handshake refused: unexpected_message_type` and showed a *Connection refused* security card. The reconnect succeeded 1.85 s later | Low–Medium (alarm fatigue undermines ADR-012's warnings) | [Evidence](PHASE9BA_ANDROID_ANDROID_FULL_QUALIFICATION.md#13-defects-found-in-this-run). Classify duplicate-resolution protocol errors as non-security |
+| 136 | **FIXED IN SOFTWARE (test only) 22 October 2026, branch `fix/ios-obligation-test-retry-race`, draft PR, pending review. Found 21 October 2026 in CI (iOS; pre-existing since Phase 8, `2aa728f`).** `SyncPlaybackAcceptedObligationTests.advanceRetries` advanced the virtual clock after a fixed number of yields. A deferred drain that had not yet parked then parked on a deadline computed from the advanced instant, which nothing reached: a 5 s timeout, or 4 retry passes counted instead of 6. It failed 3 of 4 iOS CI runs on PRs #24/#26, and 1 run in 12 under local CPU load on unmodified main | Low (CI-only; no product defect; blocks green CI on unrelated PRs) | The two tests that require a running drain advance only once it is parked on its cadence (`advanceParkedRetries`), and the capacity test waits for the re-park before reading counts. Measured under load: 118 of 120 runs clean, and the 2 failing runs' assertions were not recorded, so a residual sensitivity is not ruled out |
 
 Resolved 26 Aug 2026 session: `CLAUDE.md` in `.gitignore` (was problem 1); `.DS_Store` tracking
 (was problem 7 — the claim was incorrect; the files are untracked and now ignored); the ADR-015/
