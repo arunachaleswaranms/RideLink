@@ -83,7 +83,7 @@ struct MainScreen: View {
                     }
                     // One button, four meanings, decided by `SessionFsm`'s own legal transitions rather
                     // than by this screen (`docs/STATUS.md` §4 problem 53).
-                    if let action = sessionAction(coordinator.state.status) {
+                    if let action = UiPresentation.sessionAction(coordinator.state.status) {
                         let secondary = coordinator.state.status == .connected || action == .stopDiscovery
                         if secondary {
                             Button(action.label) { perform(action) }.buttonStyle(.bordered)
@@ -457,44 +457,6 @@ private struct DiagnosticsCard: View {
             Text(label).font(.caption).foregroundStyle(.secondary)
             Text(value).font(.body)
         }
-    }
-}
-
-/// What the one session button does from a given state — the UI half of `docs/STATUS.md` §4 problem
-/// 53. Every case maps to an event `SessionFsm` accepts from that state, so the button is never
-/// offered for a transition the FSM would reject.
-///
-/// `nil` for `PAIRING`, `CONNECTING` and `ENDING`: the first two are waiting on two humans or a
-/// handshake and have no FSM event to abandon them, and `ENDING` is a teardown in progress — offering
-/// a button there would invite exactly the successor race this pass closes.
-///
-/// `nil` for `ERROR` too, and for a different reason: its only exit is `.errorAcknowledged`, and
-/// nothing in the app emits `.fatalError`, so the state cannot be entered. Wiring a button to a state
-/// no production path reaches would be dead code; the remaining gap is recorded in `docs/STATUS.md`
-/// §4 rather than papered over here.
-private enum SessionAction {
-    case start
-    case stopDiscovery
-    case end
-    case retry
-
-    var label: String {
-        switch self {
-        case .start: return "Find other phone"
-        case .stopDiscovery: return "Stop searching"
-        case .end: return "End session"
-        case .retry: return "Search again"
-        }
-    }
-}
-
-private func sessionAction(_ status: SessionStatus) -> SessionAction? {
-    switch status {
-    case .idle: return .start
-    case .discovering: return .stopDiscovery
-    case .connected, .rideActive, .reconnecting: return .end
-    case .disconnected: return .retry
-    case .pairing, .connecting, .ending, .error: return nil
     }
 }
 

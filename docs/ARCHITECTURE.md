@@ -334,6 +334,13 @@ is a confirmed control in the *Paired phones* list on both platforms. It works l
   to pass the trust gate. The check is serialised with the forget: under one monitor on Android, on
   the manager's actor on iOS. So a handshake that read the pin before the forget is offered the
   six-digit code, not a silent connect.
+- The `IDLE` check holds until the write lands
+  ([Amendment A2](DECISIONS/ADR-012-spki-peer-identity.md#amendment-a2--21-october-2026--a-forget-admitted-in-idle-cannot-act-inside-a-newer-session)).
+  On iOS, the policy is read on the main actor and the write runs on the manager's actor, so a
+  session could start in between. `ForgetPeerFence` closes that window. The forget's admission is
+  taken in the same step as the status read, and each session start spends it in the same step as
+  `IDLE -> DISCOVERING`. The write runs under the fence's lock, and only if no session has begun
+  since. Android reads and writes in one non-suspending call.
 - Forgetting is local. The procedure forgets on both phones. A phone that forgot never authenticates
   on the other phone's leftover trust.
 

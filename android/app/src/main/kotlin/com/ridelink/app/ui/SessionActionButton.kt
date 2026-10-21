@@ -68,7 +68,7 @@ fun StartRideButton(
  * no production path reaches would be dead code; the remaining gap is recorded in `docs/STATUS.md`
  * §4 rather than papered over here.
  */
-private enum class SessionAction(
+internal enum class SessionAction(
     val label: String,
 ) {
     START("Find other phone"),
@@ -77,7 +77,7 @@ private enum class SessionAction(
     RETRY("Search again"),
 }
 
-private fun sessionAction(status: SessionStatus): SessionAction? =
+internal fun sessionAction(status: SessionStatus): SessionAction? =
     when (status) {
         SessionStatus.IDLE -> SessionAction.START
         SessionStatus.DISCOVERING -> SessionAction.STOP_DISCOVERY

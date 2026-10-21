@@ -180,3 +180,76 @@ decision above changes. This amendment says how the forget is offered and what i
   The iOS app target has no test bundle, so its coordinator is covered through the shared
   `ForgetPeerPolicy` and `UiPresentation` tests only.
 - **Physical:** pending. See TEST_PLAN's problem 126 section for the I-02/I-16 procedure.
+
+## Amendment A2 — 21 October 2026 — a forget admitted in `IDLE` cannot act inside a newer session
+
+**Found by independent review of PR #27** (the Amendment A1 change, before merge). Amendment A1
+point 4 says a forget that lands after an activation is impossible "in a live session" by point 3.
+On iOS that did not hold. `SessionCoordinator.forgetPeer` read `ForgetPeerPolicy` on the main actor
+and then awaited `ControlSessionManager.forgetTrustedPeer`, which is a hop to another actor. The main
+actor is free during that hop, so *Find other phone* can start a session in it. That session can
+dial, read the pin, pass the trust gate and authenticate before the forget's write is scheduled, and
+the write then removed a **live** session's pin. A scratch reproduction against the unamended
+PR #27 head (`bcc2d75`) showed exactly that: status `CONNECTED`, pin gone. Android was not affected.
+Its `forgetPeer` reads the policy and writes under `TrustRevocationGate`'s monitor in one
+non-suspending call, and both it and *Find other phone* are UI-thread click handlers.
+
+### Decision
+
+1. **A forget is admitted by one idle period, and a session start spends it.** iOS's
+   `ForgetPeerFence` counts session starts. `forgetPeer` takes a `ForgetPeerAdmission` in the same
+   synchronous step as its policy read. `beginDiscoverySession` calls `sessionBegan()` in the same
+   synchronous step as `IDLE -> DISCOVERING`, before any of the new session's work.
+2. **The check and the write are atomic.** `ControlSessionManager.forgetTrustedPeer` now requires the
+   admission and runs the store write under the fence's lock only if no session has begun since. It
+   returns false otherwise, and the coordinator reports `refusedSessionActive` with nothing changed.
+   A `sessionBegan()` that arrives while a write is in progress waits for it, so that write is
+   ordered before the session and the session's handshake reads a store without the pin. There is no
+   third order.
+3. **Nothing else moves.** A refused forget ends nothing, so `retireSession` stays the one teardown
+   owner (ADR-026, CLAUDE.md rule 21). The forget is still offered only in `IDLE`. The A1 re-check in
+   `promote` stays as the defence for a handshake already in flight. No wire change, and no vector
+   moved.
+4. **Android is not mirrored, deliberately.** It has no suspension to fence. A test holds
+   `forgetPeer` to a non-suspending function type, so making it `suspend` fails to compile there
+   first.
+
+The lock is held across one atomic file replace of the trusted-peer list. `sessionBegan()` can wait
+on it only when a session is started during the write itself. An actor or an `await` there would
+re-open the window the fence closes, because the start must be synchronous with the transition.
+
+### Recovery from `pin_mismatch` through the available UI
+
+The review also asked for a test of recovery from `pin_mismatch` through the controls the app actually
+offers. The session button's mapping moved from `MainScreen` (untestable, since the app target has no
+test bundle) to `UiPresentation.sessionAction` (unchanged), so the test drives the production mapping.
+The recovery is:
+1. A refused handshake leaves the phone in `DISCOVERING`. `SessionGate` turns `.handshakeRefused`
+   into `pairingRejectedOrTimeout` from `PAIRING`, and into nothing from `DISCOVERING`.
+2. *Stop searching* is the button offered there, and *Forget* is disabled with its reason.
+3. *Stop searching* reaches `IDLE`, where *Forget* is enabled and succeeds.
+4. *Find other phone* then meets the new key as a first meeting, confirmed on both screens.
+
+### Verification
+
+- `ForgetPeerSessionRaceTests` (iOS, `RideLinkPlatform`), with real managers over real loopback
+  TLS 1.3, and the coordinator's statements performed in the coordinator's own order:
+  - **the review's race:** forget admitted in `.idle`, then a session started and authenticated
+    silently on the pin, then the write. The write is refused, the pin is intact, and the session
+    stays `CONNECTED`;
+  - **the legitimate order:** written before the session began, the session shows the code and
+    never connects silently;
+  - **at the lock:** a session start issued while a write is in progress waits for it (absence
+    proved over 300 ms), then every earlier admission is spent;
+  - the fence admits only in `.idle`;
+  - **`pin_mismatch` recovery end to end:** a reinstalled phone B (same `peer_id`, new key) is
+    refused. *Stop searching* reaches `.idle`, *Forget* succeeds, and *Find other phone* pairs the
+    new key only after both users confirm.
+- `SessionCoordinatorForgetPeerTest` (Android, real coordinator):
+  - the same `pin_mismatch` recovery through `sessionAction`, `cancelDiscovery` and `forgetPeer`;
+  - the non-suspension pin.
+- **Not covered:**
+  - the iOS app-target coordinator still has no test bundle. Its two statements (`admit` beside the
+    status read, and `sessionBegan()` beside the transition) are performed by the test in the same
+    order, not executed from the coordinator itself.
+  - **Physical:** pending.

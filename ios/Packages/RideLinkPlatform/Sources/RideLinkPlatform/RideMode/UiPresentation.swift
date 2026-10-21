@@ -96,6 +96,30 @@ public enum UiPresentation {
         }
     }
 
+    /// What the one session button does from a given state — the UI half of `docs/STATUS.md` §4 problem
+    /// 53. Every case maps to an event `SessionFsm` accepts from that state, so the button is never
+    /// offered for a transition the FSM would reject. Here rather than in `MainScreen` so it is testable:
+    /// the app target has no test bundle, and recovery from `pin_mismatch` runs through this button
+    /// (ADR-012 Amendment A2). Mirrors Android's `sessionAction`.
+    ///
+    /// `nil` for `PAIRING`, `CONNECTING` and `ENDING`: the first two are waiting on two humans or a
+    /// handshake and have no FSM event to abandon them, and `ENDING` is a teardown in progress — offering
+    /// a button there would invite exactly the successor race this pass closes.
+    ///
+    /// `nil` for `ERROR` too, and for a different reason: its only exit is `.errorAcknowledged`, and
+    /// nothing in the app emits `.fatalError`, so the state cannot be entered. Wiring a button to a state
+    /// no production path reaches would be dead code; the remaining gap is recorded in `docs/STATUS.md`
+    /// §4 rather than papered over here.
+    public static func sessionAction(_ status: SessionStatus) -> SessionAction? {
+        switch status {
+        case .idle: return .start
+        case .discovering: return .stopDiscovery
+        case .connected, .rideActive, .reconnecting: return .end
+        case .disconnected: return .retry
+        case .pairing, .connecting, .ending, .error: return nil
+        }
+    }
+
     // MARK: - Paired phones (STATUS §4 problem 126, ADR-012 Amendment A1)
 
     /// Why *Forget* is disabled in `status`, or nil when it is offered. Reads the same `ForgetPeerPolicy`
@@ -131,4 +155,22 @@ public enum UiPresentation {
         "The other phone's identity key has changed. That happens after a reinstall — but it is "
             + "also what an impersonation attempt looks like. RideLink will not reconnect until you "
             + "forget this phone under Paired phones, on both phones, and pair again with a new code."
+}
+
+/// The one session button's four meanings (`UiPresentation.sessionAction`). Mirrors Android's
+/// `SessionAction`.
+public enum SessionAction: Sendable, Equatable, CaseIterable {
+    case start
+    case stopDiscovery
+    case end
+    case retry
+
+    public var label: String {
+        switch self {
+        case .start: return "Find other phone"
+        case .stopDiscovery: return "Stop searching"
+        case .end: return "End session"
+        case .retry: return "Search again"
+        }
+    }
 }

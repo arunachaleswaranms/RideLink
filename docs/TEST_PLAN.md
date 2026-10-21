@@ -12,13 +12,18 @@ the already-pinned `decide`.
 | `ForgetPeerTrustGateTest` / `ForgetPeerTrustGateTests` | `:network` / `RideLinkPlatform`, real managers, real loopback TLS 1.3 | (a) after both phones forget, the next dial shows equal six digits, nothing authenticates until both confirm, and both pins are rewritten. (b) A forget that lands **after the handshake read the pin** (forced deterministically by a store that runs the forget on that lookup) shows the code, never `PeerTrusted`/`Connected`, and then pairs afresh. (c) One-sided: the phone that forgot never authenticates, even though the other phone connects on its own pin. (d) A pin *replaced* in that window is refused as `pin_mismatch`, with no prompt |
 | `SessionCoordinatorForgetPeerTest` | `:app`, real `SessionCoordinator` | In `IDLE`, only the selected pin goes; the list refreshes, the identity prefix is unchanged and the `pin_mismatch` alert clears. The forget is refused in `DISCOVERING`, `PAIRING`, `CONNECTED`, `RIDE_ACTIVE` and `RECONNECTING`, with nothing changed and nothing torn down. *End session* then reaches `IDLE` through `TeardownComplete`, after which the forget succeeds. A persistence failure returns `FAILED` and keeps the phone listed. A new pairing appears in the list |
 | `UiLabelsTest` / `UiPresentationTests` (new cases) | `:app` / `RideLinkPlatform` | The button's hint is null only in `IDLE`. The confirmation names the six-digit code and says the identity is kept, and no copy says "peer" |
+| `ForgetPeerSessionRaceTests` (ADR-012 A2) | `RideLinkPlatform`, real managers, real loopback TLS 1.3 | (e) **The review's race:** a forget admitted in `.idle`, then *Find other phone* during the actor hop, and that session authenticates silently on the pin. The forget's write is then **refused**, the pin is intact, and the session stays `CONNECTED`. A scratch run of this ordering against the unamended PR #27 head removed the live session's pin. (f) A forget written before the session began sends that session to the code. (g) At the lock, a session start issued during a write waits for it (absence proved over 300 ms), then every earlier admission is spent. (h) `pin_mismatch` recovery through the production `UiPresentation.sessionAction`: a reinstalled phone (same `peer_id`, new key) is refused, and the phone stays in `DISCOVERING` with *Stop searching* offered and *Forget* disabled. *Stop searching* reaches `.idle`, *Forget* succeeds, and *Find other phone* pairs the new key only after both users confirm |
+| `SessionCoordinatorForgetPeerTest` (two new cases, ADR-012 A2) | `:app`, real `SessionCoordinator` | The same `pin_mismatch` recovery through `sessionAction`, `cancelDiscovery` and `forgetPeer`, with the alert cleared at the end. `forgetPeer` is held to a non-suspending function type, which is why Android has no equivalent of the iOS race |
 
 **Reverted-fix check, both platforms:** with `promote`'s re-check disabled, three of the four
 `ForgetPeerTrustGateTest` (Android) and `ForgetPeerTrustGateTests` (iOS) cases fail. Case (a) is the ordinary path and passes either way.
 
 **Not covered:** the iOS app target has no unit-test bundle, so iOS `SessionCoordinator.forgetPeer`
 (the `.idle` refusal and the list refresh) and the SwiftUI view are covered only through the shared
-policy and presentation tests. There is no Compose UI test.
+policy and presentation tests and through `ForgetPeerSessionRaceTests`. That test performs the
+coordinator's two A2 statements in the coordinator's order (`admit` beside the status read, and
+`sessionBegan()` beside `IDLE -> DISCOVERING`); it does not execute them from the coordinator itself.
+There is no Compose UI test.
 
 **Physical procedure for I-02 and I-16 using Forget (Android ↔ Android first, then Android ↔ iOS).**
 Read no SAS digits aloud into any record, and let the users press every security confirmation.

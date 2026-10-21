@@ -19,8 +19,10 @@ final class ForgetPeerTrustGateTests: XCTestCase {
     func testAfterBothPhonesForgetTheNextConnectionAsksForTheCodeAndConnectsOnlyAfterBothConfirm() async throws {
         let (a, b) = try TestSessions.pairedPeers("aaaaaaaaaaaaaaaa", "bbbbbbbbbbbbbbbb")
         try await withSessions(a, store: a.trustedPeers, b) { sessionA, port, sessionB in
-            try await sessionA.manager.forgetTrustedPeer(b.peerId)
-            try await sessionB.manager.forgetTrustedPeer(a.peerId)
+            let forgotA = try await sessionA.manager.forgetTrustedPeer(b.peerId, admittedBy: Self.idleAdmission())
+            let forgotB = try await sessionB.manager.forgetTrustedPeer(a.peerId, admittedBy: Self.idleAdmission())
+            XCTAssertTrue(forgotA)
+            XCTAssertTrue(forgotB)
             XCTAssertNil(a.trustedPeers.byPeerId(b.peerId))
             XCTAssertNil(b.trustedPeers.byPeerId(a.peerId))
 
@@ -110,6 +112,12 @@ final class ForgetPeerTrustGateTests: XCTestCase {
             XCTAssertEqual(a.trustedPeers.byPeerId(b.peerId)?.identitySpkiSha256, replacement)
             XCTAssertFalse(sessionB.events.contains { if case .pairingSucceeded = $0 { return true }; return false })
         }
+    }
+
+    /// A forget admitted by a fresh fence in `.idle`, for tests about the manager's trust gate rather
+    /// than about the coordinator's ordering of a forget against a session start.
+    private static func idleAdmission() -> ForgetPeerAdmission {
+        ForgetPeerFence().admit(status: .idle)!
     }
 
     // MARK: - helpers

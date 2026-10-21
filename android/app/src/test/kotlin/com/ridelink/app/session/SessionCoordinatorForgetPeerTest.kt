@@ -1,5 +1,8 @@
 package com.ridelink.app.session
 
+import com.ridelink.app.ui.SessionAction
+import com.ridelink.app.ui.forgetPeerUnavailableHint
+import com.ridelink.app.ui.sessionAction
 import com.ridelink.core.logging.InMemoryLogSink
 import com.ridelink.core.model.ConnTiebreak
 import com.ridelink.core.model.PeerId
@@ -25,6 +28,7 @@ import kotlinx.coroutines.withTimeout
 import java.io.IOException
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 
 /**
@@ -99,6 +103,52 @@ class SessionCoordinatorForgetPeerTest {
             assertEquals(true, coordinator.applyEvent(SessionEvent.PeerSelected))
             assertEquals(ForgetPeerResult.REFUSED_SESSION_ACTIVE, coordinator.forgetPeer(rider))
             assertEquals(2, store.all().size)
+        }
+
+    /**
+     * ADR-012 Amendment A2: recovery from `pin_mismatch` through the controls the screen actually
+     * offers. The refusal leaves this phone searching. *Stop searching* is the session button offered
+     * there, and *Forget* is disabled with its reason. The button reaches `IDLE`, where *Forget* is
+     * enabled and succeeds, and *Find other phone* is offered again for the fresh code.
+     */
+    @Test
+    fun `recovery from pin_mismatch runs through Stop searching to IDLE and then Forget`() =
+        withCoordinator { coordinator, store ->
+            assertEquals(SessionAction.START, sessionAction(coordinator.state.value.status))
+            coordinator.startDiscovery()
+            assertEquals(true, coordinator.applyEvent(SessionEvent.PeerSelected))
+            coordinator.handleControlEvent(ControlEvent.HandshakeRefused("pin_mismatch"))
+
+            val refused = coordinator.state.value.status
+            assertEquals(SessionStatus.DISCOVERING, refused, "pin_mismatch is never resolved by pairing")
+            assertEquals("pin_mismatch", coordinator.securityAlert.value)
+            assertEquals(SessionAction.STOP_DISCOVERY, sessionAction(refused))
+            assertNotNull(forgetPeerUnavailableHint(refused))
+            assertEquals(ForgetPeerResult.REFUSED_SESSION_ACTIVE, coordinator.forgetPeer(rider))
+            assertEquals(rider, store.byPeerId(rider.peerId))
+
+            coordinator.cancelDiscovery()
+            awaitStatus(coordinator, SessionStatus.IDLE)
+
+            assertNull(forgetPeerUnavailableHint(SessionStatus.IDLE))
+            assertEquals(ForgetPeerResult.FORGOTTEN, coordinator.forgetPeer(rider))
+            assertNull(store.byPeerId(rider.peerId))
+            assertNull(coordinator.securityAlert.value, "the alert asked for this forget, and it is done")
+            assertEquals(SessionAction.START, sessionAction(coordinator.state.value.status))
+        }
+
+    /**
+     * ADR-012 Amendment A2's Android half. The iOS coordinator reads the policy and then hops to another
+     * actor to write, and *Find other phone* could start a session in between. Android's [SessionCoordinator.forgetPeer]
+     * reads the policy and writes under [com.ridelink.network.control.TrustRevocationGate]'s monitor
+     * in one non-suspending call, so there is no window. This reference compiles only while that stays
+     * true: making `forgetPeer` `suspend` would reopen the iOS race here, and it breaks this test first.
+     */
+    @Test
+    fun `forgetPeer has no suspension point between its policy read and its write`() =
+        withCoordinator { coordinator, _ ->
+            val nonSuspending: (TrustedPeer) -> ForgetPeerResult = coordinator::forgetPeer
+            assertEquals(ForgetPeerResult.FORGOTTEN, nonSuspending(rider))
         }
 
     /** A forget that did not persist must not be reported as one: the phone is still trusted. */

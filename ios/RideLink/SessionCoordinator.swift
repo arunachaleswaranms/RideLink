@@ -131,6 +131,10 @@ public final class SessionCoordinator {
     /// The single owner of teardown ordering and completion — see `SessionTeardownOwner`.
     private let teardown = SessionTeardownOwner()
 
+    /// Orders a *Forget peer* write against the next session's start (ADR-012 Amendment A2). Told
+    /// synchronously in `beginDiscoverySession`, the one place a session begins.
+    private let forgetFence = ForgetPeerFence()
+
     /// Ordered delivery for `ControlEvent`/`PairingPrompt` (see `OrderedEventChannel`): each gets
     /// its own channel plus exactly one long-lived consumer, replacing a
     /// `Task { @MainActor in ... }` per event, which only preserved *creation* order, not the
@@ -366,18 +370,23 @@ public final class SessionCoordinator {
     ///
     /// Refused outside `.idle` (`ForgetPeerPolicy`): a live session is ended with `endSession()`, whose
     /// single teardown owner is the one way a session ends (ADR-026), never by a forget. The policy is
-    /// read before the actor hop; a session that starts during the hop is still safe, because the
-    /// manager re-checks the pin on its own actor before any trusted connection passes the gate.
+    /// read here, on the main actor, but the write happens after a hop to the manager actor, and
+    /// *Find other phone* can start a session during that hop. So the policy read also takes a
+    /// `ForgetPeerAdmission`, and the write runs only if no session has begun since. A forget that
+    /// loses that race is refused with nothing changed (ADR-012 Amendment A2).
     @discardableResult
     public func forgetPeer(_ peer: TrustedPeer) async -> ForgetPeerResult {
         let status = state.status
-        guard ForgetPeerPolicy.permits(status) else {
+        guard let admission = forgetFence.admit(status: status) else {
             logger.warn("SessionCoordinator", "forget \(peer.peerId) refused in \(status): end the session first")
             return .refusedSessionActive
         }
         let result: ForgetPeerResult
         do {
-            try await controlSessionManager.forgetTrustedPeer(peer.peerId)
+            guard try await controlSessionManager.forgetTrustedPeer(peer.peerId, admittedBy: admission) else {
+                logger.warn("SessionCoordinator", "forget \(peer.peerId) refused: a session began before it was written")
+                return .refusedSessionActive
+            }
             logger.info("SessionCoordinator", "forgot \(peer.peerId) (\(peer.identitySpkiSha256)); next connection pairs afresh")
             // The alert was about this pin; with the pin gone it describes nothing.
             securityAlert = nil
@@ -477,6 +486,9 @@ public final class SessionCoordinator {
 
     private func beginDiscoverySession(_ event: SessionEvent, retireHere: Bool) {
         guard applyEvent(event) else { return }
+        // Same synchronous step as the transition, before anything below can reach the store: a
+        // forget admitted in the `.idle` that just ended can no longer write (ADR-012 Amendment A2).
+        forgetFence.sessionBegan()
         // `.startDiscovery` carries no FSM effect, so the (from a cold `IDLE`, empty) retirement
         // happens here; `.retryRequested` carries the deliberate-end effect and `runEffect` has
         // already done it, synchronously, inside the `applyEvent` above. Either way the successor

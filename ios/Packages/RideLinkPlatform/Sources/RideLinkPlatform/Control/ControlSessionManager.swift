@@ -717,7 +717,9 @@ public actor ControlSessionManager {
         // `activateAuthenticatedSession` without another one. `forgetTrustedPeer` is isolated to this
         // actor, so a forget is either before this check (and the peer gets PROTOCOL §4.5's code
         // instead of a silent connect) or after the activation (which only a live session can contain,
-        // and the coordinator refuses to forget a live session's peer).
+        // and the coordinator refuses to forget a live session's peer — across the hop to this actor
+        // too, because the write needs a `ForgetPeerAdmission` that a session start has not spent,
+        // ADR-012 Amendment A2).
         let decision: PinDecision
         if case .trusted = pinDecision {
             decision = PeerTrust.recheck(
@@ -770,10 +772,14 @@ public actor ControlSessionManager {
     /// session has exactly one owner (ADR-026), so the coordinator refuses to forget outside `.idle`
     /// (`ForgetPeerPolicy`) rather than this growing a second teardown path.
     ///
+    /// The coordinator's policy read happens on the main actor, before the hop to this actor, so the
+    /// write also needs `admission` (ADR-012 Amendment A2): it runs only if no session has begun since
+    /// the forget was admitted in `.idle`. Returns false, with nothing changed, when one has.
+    ///
     /// Throws when the store could not make the removal durable; the peer is then still trusted, and
     /// the caller must say so rather than report success.
-    public func forgetTrustedPeer(_ peerId: PeerId) throws {
-        try trustedPeers.forget(peerId)
+    public func forgetTrustedPeer(_ peerId: PeerId, admittedBy admission: ForgetPeerAdmission) throws -> Bool {
+        try admission.perform { try trustedPeers.forget(peerId) }
     }
 
     /// The one place a connection becomes an authenticated RideLink session, and therefore the one
