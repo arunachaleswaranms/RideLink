@@ -1,5 +1,34 @@
 # RideLink — Status
 
+**22 October 2026 — Problem 136: an iOS CI test race, test-only fix on branch
+`fix/ios-obligation-test-retry-race` (PR #31; code approved by independent review, merge gated on a
+passing Swift CodeQL).**
+- **What happened:** after main (`1d4d524`, a workflow-only change) was merged into PRs #24 and #26,
+  their iOS jobs failed 3 times in 4 runs (attempt 1 on both, then #26's rerun) in
+  `SyncPlaybackAcceptedObligationTests`, on two different tests:
+  - `testASecondClockHoldInOneSessionRecoversOnTheRetryCadence`: *timed out waiting for: C2 recovered on
+    the retry cadence*;
+  - `testAClockReadyAcceptedCommandWaitsForCapacityWithoutLossOrSpinAndReleasesOnce`: 4 capacity waits
+    where 6 were expected.
+
+  Both PRs had passed on their previous heads, the code under test was identical, and the runner image
+  was identical (`macos-26-arm64` 20261013.0424.1, Xcode 26.6). #24's rerun passed.
+- **Cause (in the test, not the product):** `advanceRetries` moved the virtual clock after a fixed 50
+  yields. The deferred drain parks at `now + deferredRetryIntervalUs`, read **when it parks**. If the
+  test advanced first, the drain parked on a deadline computed from the advanced instant, which nothing
+  then reached, and a retry pass was lost. **Reproduced on unmodified main** under CPU load: 1 failing
+  run in 12.
+- **Fix (test only):** the two tests whose premise is a running drain now advance through
+  `advanceParkedRetries`, which waits until the drain is parked on its cadence before moving time.
+  Tests that advance time to prove *nothing* runs keep `advanceRetries`, because no drain parks there.
+  The capacity test waits for the drain to park again after its sixth pass, instead of `settle(400)`,
+  before reading counts. No production code, wire format or vector changed.
+- **Verified on this machine, under 20 busy processes on 10 cores:** 118 of 120 runs of the suite were
+  clean. The 2 failing runs were in a batch that did not record which assertions failed, and 80
+  further runs that did record them were all clean. So **a residual load sensitivity elsewhere in the
+  suite is not ruled out.** Unloaded, the suite passes.
+- **Next:** review; then merge into the open fix PRs, so their iOS jobs stop failing on this test.
+
 **20 October 2026 — Phase 9B-A full Android ↔ Android qualification, run 2: BLOCKED.**
 Same installed `47d7cde` build (PR #24 unmerged). Device B was released at the end of the run, and
 RideLink was uninstalled from it at the user's request. [Report, run 2](PHASE9BA_ANDROID_ANDROID_FULL_QUALIFICATION.md#run-2--continuation-1920-october-2026).
@@ -8742,6 +8771,7 @@ as of this write-up — see §7.
 | 133 | **OPEN. Found 20 October 2026 (Phase 9B-A run 2; Android, physical).** After both apps restart, each phone's dial ends in `PairingRejectedOrTimeout` 3–46 ms after `PeerSelected` and is never retried (*"Couldn't reach the other phone yet. Stop searching, then find it again."*); only *Stop searching → Find* recovers, and the session then forms through the peer's inbound dial. Seen 3 times. Root cause not established; a stale resolved address is a hypothesis (the export does not log the dialled address) |
 | 134 | **OPEN. Found 20 October 2026 (Phase 9B-A run 2; Android, physical).** A follower's *Play on both phones* for a track in the **leader's own library** leaves the leader at `WAITING_FOR_CONTENT` (*"Waiting for the track to download…"*) with no `command_seq` allocated, and nothing plays until the leader presses Next/Previous. Reproduced 2 of 2, in two sessions. The same track played normally when reached through a leader-ordered Next |
 | 135 | **OPEN. Found 20 October 2026 (Phase 9B-A run 2; Android 17, physical).** AF-07 fails on the moto g57 power: mid-ride, swiping RideLink from Recents removed the task, but 46 s later the process, the `mediaPlayback` foreground service, its notification, the music and the control session were all still running. ARCHITECTURE requires `onTaskRemoved → ENDING`. Whether the callback is not delivered or not handled is not established. (The OnePlus kills the process instead, Phase 9A.) |
+| 136 | **FIXED IN SOFTWARE (test only) 22 October 2026, branch `fix/ios-obligation-test-retry-race`, PR #31, code approved by independent review. Found 21 October 2026 in CI (iOS; pre-existing since Phase 8, `2aa728f`).** `SyncPlaybackAcceptedObligationTests.advanceRetries` advanced the virtual clock after a fixed number of yields. A deferred drain that had not yet parked then parked on a deadline computed from the advanced instant, which nothing reached: a 5 s timeout, or 4 retry passes counted instead of 6. It failed 3 of 4 iOS CI runs on PRs #24/#26, and 1 run in 12 under local CPU load on unmodified main | Low (CI-only; no product defect; blocks green CI on unrelated PRs) | The two tests that require a running drain advance only once it is parked on its cadence (`advanceParkedRetries`), and the capacity test waits for the re-park before reading counts. Measured under load: 118 of 120 runs clean, and the 2 failing runs' assertions were not recorded, so a residual sensitivity is not ruled out |
 
 Resolved 26 Aug 2026 session: `CLAUDE.md` in `.gitignore` (was problem 1); `.DS_Store` tracking
 (was problem 7 — the claim was incorrect; the files are untracked and now ignored); the ADR-015/
