@@ -360,6 +360,8 @@ class AppContainer(
                 scope = appScope,
                 endIntercomAndAwaitRelease = sessionCoordinator::endIntercomAndAwaitRelease,
                 releaseForegroundService = { RideForegroundService.stopIntercom(context) },
+                // SessionCoordinator stays the one production logger (SessionCoordinatorDiagnosticsExportTest).
+                recordDecision = sessionCoordinator::recordIntercomServiceDecision,
             )
         installRideNotificationCommands()
         observeVoiceForNotification()

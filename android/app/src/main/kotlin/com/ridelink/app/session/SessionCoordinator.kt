@@ -2,6 +2,7 @@ package com.ridelink.app.session
 
 import com.ridelink.app.music.CoexistenceDiagnostics
 import com.ridelink.app.music.IntercomMusicCoexistenceCoordinator
+import com.ridelink.app.service.IntercomServiceDecision
 import com.ridelink.core.audiopolicy.AudioRouteSnapshot
 import com.ridelink.core.audiopolicy.IntercomPolicy
 import com.ridelink.core.audiopolicy.RideStartDecision
@@ -135,6 +136,10 @@ enum class RideBoundaryOutcome {
      */
     SUPERSEDED_BY_LIVE_RIDE_AUTHORITY,
 }
+
+/** The diagnostics-log tag for intercom start/end/mute/rebuild records (STATUS §4 problem 129). */
+private const val INTERCOM_LOG_TAG = "Intercom"
+private const val MICROS_PER_MILLI = 1_000L
 
 /**
  * The single owner of session state (CLAUDE.md rule 8 / ARCHITECTURE §3 rule 4). No view model
@@ -356,11 +361,19 @@ class SessionCoordinator(
         // the moment the user taps" is exactly the lifetime that will carry its offer. Null in the
         // gap between two links, which records consent and starts no negotiation — see
         // `VoiceInput.StartRequested.controlGeneration` (STATUS §4 problem 61).
-        voice?.start(controlSessionManager.liveAuthenticatedGeneration)
+        val controller = voice ?: return
+        val generation = controlSessionManager.liveAuthenticatedGeneration
+        // STATUS §4 problem 129: intercom actions were absent from the diagnostics export, which made
+        // a stranded microphone service undiagnosable from the phone. Booleans and the local
+        // generation counter only — nothing here names a peer, a device or a voice session.
+        logger.info(INTERCOM_LOG_TAG, "intercom start requested (control generation ${generation ?: "none"})")
+        controller.start(generation)
     }
 
     fun endIntercom() {
-        voice?.stop()
+        val controller = voice ?: return
+        logger.info(INTERCOM_LOG_TAG, "intercom end requested (not awaited)")
+        controller.stop()
     }
 
     /**
@@ -377,11 +390,51 @@ class SessionCoordinator(
      * This phase's final hardening pass (Issue 2): the result is [StopReleaseResult], never
      * discarded — a caller must not stop the foreground service on [StopReleaseResult.TimedOut], the
      * one outcome that does **not** prove capture was released.
+     *
+     * STATUS §4 problem 129: and so this no longer *returns* `TimedOut` for a release that is merely
+     * slow. The 5 s caller window used to be final here, and it is structurally at or before
+     * `AndroidVoiceAudioSession.close()`'s own route-settlement window (STATUS §2r/§2s), so an End
+     * whose route confirmation was late returned `TimedOut`, `IntercomStopOwner` skipped the service
+     * release, and nothing ever asked again: the `microphone` foreground service and an *Intercom on —
+     * Starting the microphone…* notification outlived capture. The window now only logs, and this
+     * waits for the same `StopRequested` to finish ([VoiceController.stopAndAwaitReleaseCompletion])
+     * — the rule [releaseAndShutdown] already applies to a session teardown (problem 39). The
+     * controller is captured once, so a late release only ever answers for the intercom it was asked
+     * to end; `IntercomStopOwner`'s start epoch still keeps it off a newer one.
      */
-    suspend fun endIntercomAndAwaitRelease(): StopReleaseResult = voice?.stopAndAwaitRelease() ?: StopReleaseResult.AlreadyReleased
+    suspend fun endIntercomAndAwaitRelease(): StopReleaseResult {
+        val controller = voice
+        if (controller == null) {
+            logger.info(INTERCOM_LOG_TAG, "intercom end requested with no voice subsystem; nothing to release")
+            return StopReleaseResult.AlreadyReleased
+        }
+        logger.info(INTERCOM_LOG_TAG, "intercom end requested")
+        val startedUs = environment.monotonicNowUs()
+        val result =
+            controller.stopAndAwaitReleaseCompletion(
+                onCallerWindowElapsed = {
+                    logger.warn(
+                        INTERCOM_LOG_TAG,
+                        "intercom end: capture release still running after ${controller.stopAwaitTimeoutMs} ms; " +
+                            "keeping the microphone foreground service until it completes",
+                    )
+                },
+            )
+        val elapsedMs = (environment.monotonicNowUs() - startedUs) / MICROS_PER_MILLI
+        val outcome = if (result == StopReleaseResult.AlreadyReleased) "already released" else "released"
+        logger.info(INTERCOM_LOG_TAG, "intercom end: capture $outcome after $elapsedMs ms")
+        return result
+    }
+
+    /** `IntercomStopOwner`'s foreground-service decision, recorded in the diagnostics log (problem 129). */
+    fun recordIntercomServiceDecision(decision: IntercomServiceDecision) {
+        logger.info(INTERCOM_LOG_TAG, "intercom end: foreground service decision $decision")
+    }
 
     fun setMicrophoneMuted(muted: Boolean) {
-        voice?.setMicrophoneMuted(muted)
+        val controller = voice ?: return
+        logger.info(INTERCOM_LOG_TAG, "intercom mute set to $muted")
+        controller.setMicrophoneMuted(muted)
     }
 
     /**
@@ -825,7 +878,13 @@ class SessionCoordinator(
                 // can authenticate a successor without passing through it at all, so by the time
                 // this runs the controller's mailbox may already hold the *successor's* admitted
                 // frames. Naming the retired lifetime is what stops this discarding them.
-                voice?.onControlLinkLost(event.retiredAuthGeneration)
+                voice?.let { controller ->
+                    logger.info(
+                        INTERCOM_LOG_TAG,
+                        "voice control link lost (retired control generation ${event.retiredAuthGeneration ?: "none"}); capture kept",
+                    )
+                    controller.onControlLinkLost(event.retiredAuthGeneration)
+                }
             }
             ControlEvent.DuplicateConnectionClosed,
             ControlEvent.ReconnectBudgetExhausted,
@@ -854,6 +913,7 @@ class SessionCoordinator(
             // genuine diagnostics once they arrive (Phase 6 review blocker 2; ADR-027 Amendment A1).
             // One Connected event supplies authority and the §7.8 rebuild opportunity. The reducer
             // handles pending Start intent and consent without consulting a diagnostics projection.
+            logger.info(INTERCOM_LOG_TAG, "voice re-authenticated under control generation $authGeneration (rebuild opportunity)")
             voice?.controlAuthenticated(authGeneration)
             return
         }

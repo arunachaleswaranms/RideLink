@@ -147,6 +147,53 @@ class VoiceControllerStopAwaitTest {
             assertEquals(0, voice.pendingStopCompletionCount, "100 timed-out waiters must return the count to zero")
         }
 
+    /**
+     * STATUS §4 problem 129: the in-app End's wait. The caller window elapsing is reported once and
+     * is **not** an answer — the call returns only when the same stalled release has really
+     * finished, and then as [StopReleaseResult.Released], never `TimedOut`. No second `close()`.
+     */
+    @Test
+    fun `stopAndAwaitReleaseCompletion reports a slow release and then waits for the same release`() =
+        withIntercom(stopAwaitTimeoutMs = SHORT_TIMEOUT_MS) { voice, fakes ->
+            voice.start()
+            fakes.awaitEngineCall("createOffer")
+            fakes.await("capture open") { fakes.audio.isOpen }
+            val closeGate = CompletableDeferred<Unit>()
+            fakes.audio.closeGate = closeGate
+            var windowElapsed = 0
+
+            val call = async { voice.stopAndAwaitReleaseCompletion(onCallerWindowElapsed = { windowElapsed += 1 }) }
+            delay(SHORT_TIMEOUT_MS * SETTLE_MULTIPLIER)
+            assertFalse(call.isCompleted, "a slow release is not an answer")
+            assertEquals(1, windowElapsed, "the elapsed caller window is reported exactly once")
+            assertEquals(1, voice.pendingStopCompletionCount, "still waiting on the one in-flight stop")
+
+            closeGate.complete(Unit)
+            assertEquals(StopReleaseResult.Released, withTimeout(AWAIT_TIMEOUT_MS) { call.await() })
+            assertFalse(fakes.audio.isOpen)
+            assertEquals(1, fakes.audio.closeCaptureCount, "the same release finished; no second close()")
+            assertEquals(0, voice.pendingStopCompletionCount, "the waiter does not leak")
+        }
+
+    /** Cancelling the waiting caller removes its waiter (Issue 10) and leaves the release running. */
+    @Test
+    fun `cancelling stopAndAwaitReleaseCompletion does not leak its waiter`() =
+        withIntercom(stopAwaitTimeoutMs = SHORT_TIMEOUT_MS) { voice, fakes ->
+            voice.start()
+            fakes.awaitEngineCall("createOffer")
+            fakes.await("capture open") { fakes.audio.isOpen }
+            val closeGate = CompletableDeferred<Unit>()
+            fakes.audio.closeGate = closeGate
+
+            val call = async { voice.stopAndAwaitReleaseCompletion() }
+            delay(SHORT_TIMEOUT_MS * SETTLE_MULTIPLIER)
+            call.cancel()
+            fakes.await("waiter removed") { voice.pendingStopCompletionCount == 0 }
+
+            closeGate.complete(Unit)
+            fakes.await("release still finishes") { !fakes.audio.isOpen }
+        }
+
     /** Shutdown during an already-stopped voice session is safe — no hang, no exception. */
     @Test
     fun `shutdown when voice was never started is safe`() =
@@ -319,6 +366,7 @@ class VoiceControllerStopAwaitTest {
         const val SETTLE_TURNS = 25
         const val CONCURRENT_STOP_CALLERS = 5
         const val REPEATED_TIMEOUT_COUNT = 100
+        const val SETTLE_MULTIPLIER = 5L
         const val GEN_1 = "11111111111111111111111111111111"
         const val GEN_2 = "22222222222222222222222222222222"
     }

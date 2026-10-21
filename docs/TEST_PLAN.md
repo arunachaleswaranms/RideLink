@@ -1,5 +1,60 @@
 # RideLink — Test Plan
 
+## Problem 129 additions — End intercom and the microphone service (19 October 2026)
+
+[ADR-021 Amendment A9](DECISIONS/ADR-021-intercom-transmission-and-capture-ownership.md#amendment-a9--19-october-2026--a-slow-in-app-end-is-not-a-timed-out-one),
+STATUS §4 problem 129. An in-app End whose capture release outlasted the 5 s caller window was treated
+as unproven forever. The `microphone` foreground service and its notification then outlived capture.
+
+**Regression (JVM, no device)**
+
+- `IntercomEndForegroundServiceTest` (`:app`) drives a real `SessionCoordinator`, `VoiceController`
+  and `IntercomStopOwner`, wired as `AppContainer` wires them. Capture release is held past the
+  caller window, then completed.
+  - **Slow End (the reproduction):** the service is not released while capture is held. It is
+    released exactly once after capture is. `close()` runs once, the session stays `CONNECTED`, and
+    the session's own service stop is not used. This fails against the unfixed code.
+  - **Fast End:** released once; the session stays `CONNECTED`.
+  - **Start between a slow End and its release:** the new intercom keeps the service.
+  - **Release never completes:** the service is never released.
+  - **Diagnostics:** start, end, the slow-release warning, the release outcome and the service
+    decision are all in the log. This fails against the unfixed code.
+- `VoiceControllerStopAwaitTest` (`:network`): `stopAndAwaitReleaseCompletion` reports the elapsed
+  window once and waits for the same release, with no second `close()` and no leaked waiter.
+  Cancelling it removes its waiter.
+
+**Physical (both phones, after review and an in-place install)**
+
+For each step, record:
+- RideLink's foreground-service type (`dumpsys activity services`): `0x80`, `0x2`, or absent.
+- The notification's text and actions.
+- Whether an `AudioRecord` is active.
+- The *Intercom* card.
+- The diagnostics-export lines tagged `Intercom`, including `foreground service decision`.
+
+Expected after every End: no `0x80` and no intercom notification within about 10 s, even when the
+log shows `capture release still running`. The control session stays connected throughout.
+
+1. **End from the app, on A.** Start the intercom on both phones, talk for 30 s, then press *End
+   intercom* in A's app. Repeat 5 times.
+2. **End from the notification, on A.** The same, with the notification's *End intercom*. Repeat 3
+   times.
+3. **Steps 1 and 2 on B.** B is the other role (leader or follower).
+4. **Repeated start and end.** Ten start/end cycles on A, about 5 s apart. Then one cycle with
+   *Start* pressed within 1 s of *End*. That intercom must keep `0x80` and capture.
+5. **End during reconnect.** With the intercom on, turn B's Wi-Fi off. While A shows
+   *Reconnecting*, press A's *End intercom* (in the app if shown, otherwise in the notification).
+   A must drop `0x80` and its notification. When B's
+   Wi-Fi is back, the session reconnects with the intercom off.
+6. **End while locked.** With the intercom on, lock A. End from the lock-screen notification, then
+   unlock and check the same facts.
+7. **Music-only ride (ADR-022 A1).** Play local music, then start and end the intercom. The service
+   must fall back to `0x2` (`mediaPlayback`) with only the media notification. Music keeps playing.
+
+Also record, as a related check and not part of this fix: a phone in `DISCONNECTED` keeps capture
+and `0x80` by design until *Search again* or End. Check that the notification's *End intercom*
+releases both there. The `DISCONNECTED` screen has no in-app End (follow-up in STATUS problem 129).
+
 ## Phase 9B-A problem 125 additions (19 October 2026)
 
 STATUS §4 problem 125: after a reconnect that the **peer** completed by dialling in, this phone's own
