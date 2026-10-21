@@ -184,11 +184,13 @@ class ControlSessionManager(
     random: Random = Random,
     /** How long a candidate may take to complete `HELLO`/`HELLO_ACK`; see [handleCandidate]. */
     private val helloExchangeTimeoutMs: Long = HELLO_EXCHANGE_TIMEOUT_MS,
+    /** The reconnect ladder's two test seams; production passes nothing. */
+    private val reconnectSeams: ReconnectSeams = ReconnectSeams(),
 ) {
     private val seqCounter = SeqCounter()
     private val arbiter = DuplicateConnectionArbiter(localPeerId, ConnTiebreakGenerator.generate())
     private val reconnectController =
-        ReconnectController(scope, random) { ms -> delay(ms) }
+        ReconnectController(scope, random, reconnectSeams.delayMs)
 
     /**
      * Where the fire-and-forget socket writes below run (a courtesy `BYE`/`ERROR` before closing).
@@ -661,11 +663,18 @@ class ControlSessionManager(
             activeSocket = candidate.socket
             activeSessionId = candidate.outcome.sessionId
             endedDeliberately = false
+            // Ends any ladder in progress, not merely its budget (STATUS §4 problem 125). This
+            // promotion may be the peer's inbound dial, which reconnects the session without this
+            // side's ladder ever succeeding; a bare reset() left that ladder dialling inside the live
+            // session with a fresh 120 s, after which it reported DISCONNECTED into a connected
+            // session and left the next link loss with no budget at all. Inside this lock, beside the
+            // ownership change, so a pending exhaustion is ordered against it
+            // (the exhaustion commit in [beginReconnect]).
+            reconnectController.connectionPromoted()
         }
         clock.reset()
         authenticatedConnection = null
         lastPongAtMonoUs = monotonicNowUs()
-        reconnectController.reset()
 
         val isLeader = candidate.outcome.leaderPeerId == localPeerId
         pendingActivation =
@@ -1266,10 +1275,31 @@ class ControlSessionManager(
     ) {
         _diagnostics.update { it.copy(controlState = ControlState.RECONNECTING) }
         reconnectController.start(
-            onAttempt = { attemptConnection(host, port, local) },
-            onExhausted = {
-                _diagnostics.update { it.copy(controlState = ControlState.DISCONNECTED) }
-                _events.tryEmit(ControlEvent.ReconnectBudgetExhausted)
+            onAttempt = {
+                // Published per attempt: publishing once, at ladder start, left the card one ladder
+                // behind (STATUS §4 problem 125).
+                _diagnostics.update { it.copy(reconnectCount = reconnectController.reconnectCount) }
+                attemptConnection(host, port, local)
+            },
+            onExhausted = { run ->
+                // Acts on the ladder's decision only if it still describes this manager (problem 125,
+                // review round 2). The ladder decides on its own coroutine and this runs after; an
+                // inbound promotion can land between the two, and a stale DISCONNECTED plus
+                // ReconnectBudgetExhausted would then fall on the promoted session (an FSM still in
+                // RECONNECTING would take the exhaustion and strand a valid successor). So the effects
+                // commit only under [stateLock] — where [promote] takes ownership of a connection and
+                // ends the ladder's run — and only while no connection is active, the manager is not
+                // shut down, and `run` still owns the budget ([ReconnectController.commitExhaustion],
+                // checked and ended at once). Either the exhaustion commits first, and a later
+                // promotion is an ordinary fresh connection, or the promotion ended the run first, and
+                // this does nothing.
+                reconnectSeams.exhaustionHook()
+                stateLock.withLock {
+                    if (!isShutDown && activeSocket == null && reconnectController.commitExhaustion(run)) {
+                        _diagnostics.update { it.copy(controlState = ControlState.DISCONNECTED) }
+                        _events.tryEmit(ControlEvent.ReconnectBudgetExhausted)
+                    }
+                }
             },
         )
         _diagnostics.update { it.copy(reconnectCount = reconnectController.reconnectCount) }
@@ -1306,7 +1336,7 @@ class ControlSessionManager(
         endedDeliberately = true
         reconnectController.cancel()
         // …and reset, not merely cancel: `cancel()` leaves `attempt`/`elapsedMs` where the previous
-        // session spent them. `promote` resets them too, so this is not reachable today, but an
+        // session spent them. `promote` ends the run and resets them too, but an
         // exhausted 120 s budget handed to the next session is exactly the class of defect this
         // pass exists to close — session-lifetime state surviving into a successor.
         reconnectController.reset()
