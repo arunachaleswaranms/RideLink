@@ -69,10 +69,14 @@ jobs:
         include:
           - language: java-kotlin
             runner: ubuntu-latest
+            timeout: 45
+          # Swift analysis on macos-26 has taken 42-56 minutes and is cancelled at 45, which
+          # reports CANCELLED rather than a result. The limit is raised for Swift only.
           - language: swift
             runner: macos-26
+            timeout: 90
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 45
+    timeout-minutes: ${{ matrix.timeout }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - if: matrix.language == 'java-kotlin'
