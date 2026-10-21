@@ -28,13 +28,23 @@ import java.util.concurrent.atomic.AtomicLong
  * start is recorded with [noteStart], a stop captures the start epoch it was asked to end, and its
  * release applies only if no start has happened since.
  *
- * A timed-out release is never treated as proof the microphone is safe to reclaim: the stop is
- * skipped, and the diagnostics card already shows the stalled route transition.
+ * A [StopReleaseResult.TimedOut] is never treated as proof the microphone is safe to reclaim: the
+ * stop is skipped. **But a slow release is not a timed-out one** (STATUS §4 problem 129). The
+ * production `endIntercomAndAwaitRelease` (`SessionCoordinator`'s) used to return `TimedOut` after a
+ * 5 s caller window that is structurally at or before the release's own route-settlement window, and
+ * this owner then never asked again — so an End whose route confirmation was late left the
+ * `microphone` service and an *Intercom on — Starting the microphone…* notification behind, with
+ * capture already released. It now waits for that same release to finish and only then answers, so
+ * `TimedOut` reaches here only from a caller that genuinely gave up.
+ *
+ * [recordDecision] reports which branch was taken, because problem 129 was undiagnosable without
+ * it. A closed enum rather than a string, so this cannot become a second free-text log path.
  */
 class IntercomStopOwner(
     private val scope: CoroutineScope,
     private val endIntercomAndAwaitRelease: suspend () -> StopReleaseResult,
     private val releaseForegroundService: () -> Unit,
+    private val recordDecision: (IntercomServiceDecision) -> Unit = {},
 ) {
     private val startEpoch = AtomicLong(0)
 
@@ -48,9 +58,26 @@ class IntercomStopOwner(
         return scope.launch {
             when (endIntercomAndAwaitRelease()) {
                 StopReleaseResult.Released, StopReleaseResult.AlreadyReleased ->
-                    if (startEpoch.get() == stoppingEpoch) releaseForegroundService()
-                StopReleaseResult.TimedOut -> Unit
+                    if (startEpoch.get() == stoppingEpoch) {
+                        recordDecision(IntercomServiceDecision.RELEASED)
+                        releaseForegroundService()
+                    } else {
+                        recordDecision(IntercomServiceDecision.KEPT_FOR_NEWER_START)
+                    }
+                StopReleaseResult.TimedOut -> recordDecision(IntercomServiceDecision.KEPT_RELEASE_UNPROVEN)
             }
         }
     }
+}
+
+/** What [IntercomStopOwner] did with the foreground service after an End (STATUS §4 problem 129). */
+enum class IntercomServiceDecision {
+    /** Capture is released and no newer start exists: the intercom's hold on the service was dropped. */
+    RELEASED,
+
+    /** Capture is released, but the user started the intercom again meanwhile; the new one keeps it. */
+    KEPT_FOR_NEWER_START,
+
+    /** The release was not proven, so the microphone may still be held; the service is kept. */
+    KEPT_RELEASE_UNPROVEN,
 }

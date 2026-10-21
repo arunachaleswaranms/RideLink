@@ -1,5 +1,34 @@
 # RideLink — Status
 
+**22 October 2026 — Problem 136: an iOS CI test race, test-only fix on branch
+`fix/ios-obligation-test-retry-race` (PR #31; code approved by independent review, merge gated on a
+passing Swift CodeQL).**
+- **What happened:** after main (`1d4d524`, a workflow-only change) was merged into PRs #24 and #26,
+  their iOS jobs failed 3 times in 4 runs (attempt 1 on both, then #26's rerun) in
+  `SyncPlaybackAcceptedObligationTests`, on two different tests:
+  - `testASecondClockHoldInOneSessionRecoversOnTheRetryCadence`: *timed out waiting for: C2 recovered on
+    the retry cadence*;
+  - `testAClockReadyAcceptedCommandWaitsForCapacityWithoutLossOrSpinAndReleasesOnce`: 4 capacity waits
+    where 6 were expected.
+
+  Both PRs had passed on their previous heads, the code under test was identical, and the runner image
+  was identical (`macos-26-arm64` 20261013.0424.1, Xcode 26.6). #24's rerun passed.
+- **Cause (in the test, not the product):** `advanceRetries` moved the virtual clock after a fixed 50
+  yields. The deferred drain parks at `now + deferredRetryIntervalUs`, read **when it parks**. If the
+  test advanced first, the drain parked on a deadline computed from the advanced instant, which nothing
+  then reached, and a retry pass was lost. **Reproduced on unmodified main** under CPU load: 1 failing
+  run in 12.
+- **Fix (test only):** the two tests whose premise is a running drain now advance through
+  `advanceParkedRetries`, which waits until the drain is parked on its cadence before moving time.
+  Tests that advance time to prove *nothing* runs keep `advanceRetries`, because no drain parks there.
+  The capacity test waits for the drain to park again after its sixth pass, instead of `settle(400)`,
+  before reading counts. No production code, wire format or vector changed.
+- **Verified on this machine, under 20 busy processes on 10 cores:** 118 of 120 runs of the suite were
+  clean. The 2 failing runs were in a batch that did not record which assertions failed, and 80
+  further runs that did record them were all clean. So **a residual load sensitivity elsewhere in the
+  suite is not ruled out.** Unloaded, the suite passes.
+- **Next:** review; then merge into the open fix PRs, so their iOS jobs stop failing on this test.
+
 **21 October 2026 — Problem 126 review follow-up: iOS *Forget peer* race FIXED IN SOFTWARE on
 branch `fix/forget-peer` (PR #27, updated in place, still draft, not merged); not installed.**
 - **Finding (independent review of PR #27):** iOS `SessionCoordinator.forgetPeer` checked `.idle` on
@@ -34,6 +63,29 @@ branch `fix/forget-peer` (PR #27, updated in place, still draft, not merged); no
   A2 statements in the coordinator's order; it does not call the coordinator. Nothing ran on a phone.
 - **Next:** independent re-review of PR #27. Do not merge before that.
 
+**20 October 2026 — Phase 9B-A full Android ↔ Android qualification, run 2: BLOCKED.**
+Same installed `47d7cde` build (PR #24 unmerged). Device B was released at the end of the run, and
+RideLink was uninstalled from it at the user's request. [Report, run 2](PHASE9BA_ANDROID_ANDROID_FULL_QUALIFICATION.md#run-2--continuation-1920-october-2026).
+- **Passed:** shared catalogue and transfer both ways (43.6 MB; I-23's 1,133-entry manifest), UJ-05,
+  S-01/S-02/S-06/S-07/I-09 functionally, I-25 on the built-in route (voice over synced music,
+  user-confirmed; PTT ducks the peer's music to 25 %), AF-01 (`0x82`), AF-02 (`0x2`), N-03, AF-08
+  (force-stop approximation), I-26 functionally.
+- **Measured:** the two phones' loudspeaker output was within **≤ 2 ms** of each other across 78 clicks
+  (PLAY, PAUSE/RESUME, SEEK, steady state), by a validated single-microphone method. Built-in speakers
+  only; no Bluetooth figure.
+- **Failed:** I-10 (a follower's PAUSE took 0.5–0.65 s idle and 1.9 s during a 40 MB transfer), V-06
+  (problem 129, 3 of 3), AF-07 on Android 17 (problem 135).
+- **Reproduced again:** problems 125 (twice), 127 (twice), 129 (3 of 3), and the 128 family.
+- **New:** 131 (drift controller chases a common-mode output latency → audible hard seeks and
+  `SYNC_FAILED`; investigation PR #29), 132 (backgrounded session frozen in `RECONNECTING` for 8 h), 133
+  (dial refused within milliseconds after restarts, never retried), 134 (follower's *Play on both
+  phones* for the leader's own track wedges at `WAITING_FOR_CONTENT`), 135 (Recents swipe mid-ride does
+  not end the session on Android 17).
+- **Not run:** every row needing PR #24 (PROC-125, S-09/S-11/S-12, I-05/I-12/I-13/I-17, V-07, AF-05),
+  first-time pairing (needs #27), the permission rows, the hotspot rows.
+- **Next:** review #28, #24, #26, #27; fix 131, then 134/135/133; resume with a second Android phone
+  (A must forget B's old identity first).
+
 **19 October 2026 (later) — Problem 126 FIXED IN SOFTWARE on branch `fix/forget-peer` (draft PR,
 pending independent review); not installed on either phone.**
 - [ADR-012 Amendment A1](DECISIONS/ADR-012-spki-peer-identity.md#amendment-a1--19-october-2026--forget-peer-is-a-user-visible-control-and-it-cannot-be-bypassed):
@@ -58,6 +110,21 @@ pending independent review); not installed on either phone.**
   automated test.
 - **Next:** independent review. Then install, and run TEST_PLAN's problem 126 procedure (I-02 and
   I-16 using Forget on both phones).
+
+**19 October 2026 (later) — Problem 129 FIXED IN SOFTWARE on branch `fix/intercom-stop-fgs`,
+pending independent review; not installed on either phone.**
+- **Root cause:** the in-app End's capture-release wait returned `TimedOut` after a 5 s caller
+  window that is structurally at or before the release's own route-settlement window.
+  `IntercomStopOwner` treated that as final, so the `microphone` service outlived capture.
+- **Fix:** [ADR-021 Amendment A9](DECISIONS/ADR-021-intercom-transmission-and-capture-ownership.md#amendment-a9--19-october-2026--a-slow-in-app-end-is-not-a-timed-out-one).
+  The window is now reported and the same release is awaited. Intercom start, end, mute,
+  re-authentication, link loss and the service decision now appear in the diagnostics export. No
+  wire, vector or FSM change, and no iOS change (not applicable).
+- **Verified:** `IntercomEndForegroundServiceTest` fails against the unfixed code and passes after
+  the fix (8 of 8 repeated runs, with `VoiceControllerStopAwaitTest`). Android
+  `test ktlintCheck detekt lint assembleDebug` passes.
+- **Not verified:** the device-level trigger is inferred, not measured.
+- **Next:** independent review, then TEST_PLAN "Problem 129 additions" on both phones.
 
 **19 October 2026 — Problem 125 (orphaned reconnect ladder after an inbound promotion) FIXED IN
 SOFTWARE on branch `fix/reconnect-ladder-orphan`, pending independent review; not installed on either
@@ -8772,8 +8839,13 @@ as of this write-up — see §7.
 | 126 | **FIXED IN SOFTWARE 19 October 2026 (branch `fix/forget-peer`, draft PR, pending independent review; not yet on the phones; physical retest pending). Found 19 October 2026 (Phase 9B-A full qualification; both platforms; pre-existing).** Neither app had a *Forget peer* control: `SessionCoordinator.forgetPeer` existed on Android and iOS, and nothing in production called it. ADR-012, ARCHITECTURE §4.3 and PROTOCOL §4.5.3 make *forget and re-pair* the only recovery from a genuine key change or `pin_mismatch`, so the shipped apps had none short of clearing app data, which also destroys the identity. Found while fixing it: a forget landing between the handshake's pin read and promotion (the 300 ms duplicate-resolution grace period) was overruled by the stale `Trusted` verdict, and iOS's file store swallowed a failed forget write (`try?`) | Medium (no supported recovery from `pin_mismatch`; blocks fresh-pairing qualification: I-02, I-16, I-20, pairing interruption) | [Evidence](PHASE9BA_ANDROID_ANDROID_FULL_QUALIFICATION.md#13-defects-found-in-this-run). Fix: [ADR-012 Amendment A1](DECISIONS/ADR-012-spki-peer-identity.md#amendment-a1--19-october-2026--forget-peer-is-a-user-visible-control-and-it-cannot-be-bypassed): *Paired phones* with a confirmed *Forget* on both platforms, which removes only that pin (never the identity, `peer_id`, library, settings or another record); refused outside `IDLE` (`ForgetPeerPolicy`), so the user ends the session first and there is one teardown owner; `promote` re-checks the pin (`PeerTrust.recheck`) under the same monitor (Android `TrustRevocationGate`) or actor (iOS) as the forget, so absent means the code and different means `pin_mismatch`; a failed write throws and keeps the peer trusted. No wire change; no vector moved. Tests: `ForgetPeerTrustGateTest`/`Tests` (real loopback TLS; three of four cases fail with the re-check reverted), `SessionCoordinatorForgetPeerTest`, `ForgetPeerTest`/`Tests`, and the file-store and label cases. Limitation, by design: forgetting is local, and a one-sided forget fails closed (the phone that forgot never authenticates), so the procedure forgets on both phones. **Review follow-up, 21 October 2026 ([ADR-012 Amendment A2](DECISIONS/ADR-012-spki-peer-identity.md#amendment-a2--21-october-2026--a-forget-admitted-in-idle-cannot-act-inside-a-newer-session)):** on iOS, a forget admitted in `.idle` could write after a session that started during the actor hop had authenticated, removing a live session's pin (reproduced against `bcc2d75`). `ForgetPeerFence` now refuses that write. `ForgetPeerSessionRaceTests` covers the race and the `pin_mismatch` recovery through the UI (iOS, real TLS); `SessionCoordinatorForgetPeerTest` covers the same recovery on Android. **Physical retest pending:** TEST_PLAN, problem 126 section |
 | 127 | **OPEN. Found 19 October 2026 (Phase 9B-A full qualification; Android, physical).** The platform recorder closes and reopens per mute and per PTT utterance, and on every voice rebuild. `dumpsys audio` shows `rec stop` at each PTT release and at mute, a **new** recorder session at each press or unmute, and new sessions on rebuilds, on both phones. RideLink's own `mic (device)` stays `open`, but the WebRTC audio device module's `AudioRecord` does not, contrary to the purpose of rule 17 / ADR-021 (no per-utterance capture open, because it renegotiates a Bluetooth endpoint). Root cause inside WebRTC not established | Medium–High (Bluetooth impact unmeasured; it is TEST_PLAN A-10's risk) | [Evidence](PHASE9BA_ANDROID_ANDROID_FULL_QUALIFICATION.md#13-defects-found-in-this-run). Investigate before A-10 or helmet testing. iOS not checked |
 | 128 | **OPEN. Found 19 October 2026 (Phase 9B-A full qualification; Android, physical).** A peer in `ENDING` accepts and authenticates a new inbound connection and attaches voice. After a BYE, B's teardown took 5.1 s. In that window its still-open listener accepted A's new dial (`known peer …, silent connect`, `voice subsystem attached`), and then `ENDING → IDLE` BYE'd it, so A's *Search again* landed at *Not connected* | Medium (a recovery action fails; session work after `ENDING`, which rule 21 forbids; nothing was left running afterwards) | [Evidence](PHASE9BA_ANDROID_ANDROID_FULL_QUALIFICATION.md#13-defects-found-in-this-run). Likely fix: stop accepting at the start of `ENDING`, or refuse admission while retiring |
-| 129 | **OPEN. Found 19 October 2026 (Phase 9B-A full qualification; Android, physical).** In-app *End intercom* intermittently (2 of 3) leaves the `microphone`-typed foreground service and a stale *"Intercom on — Starting the microphone…"* notification, while the app says *Intercom off* and no recorder runs. The notification's own End intercom clears it. `IntercomStopOwner.requestStop()` skips the release on `TimedOut` or an epoch change; which branch was taken is not visible, because intercom actions are not in the diagnostics export | Medium (a misleading privacy surface; a microphone foreground service held without capture) | [Evidence](PHASE9BA_ANDROID_ANDROID_FULL_QUALIFICATION.md#13-defects-found-in-this-run). Also: log intercom start, end, mute and rebuild to the diagnostics export |
+| 129 | **FIXED IN SOFTWARE (19 October 2026, branch `fix/intercom-stop-fgs`, [ADR-021 Amendment A9](DECISIONS/ADR-021-intercom-transmission-and-capture-ownership.md#amendment-a9--19-october-2026--a-slow-in-app-end-is-not-a-timed-out-one)); pending independent review; physical retest pending.** Found 19 October 2026 (Phase 9B-A full qualification; Android, physical). In-app *End intercom* intermittently (2 of 3) left the `microphone`-typed foreground service and a stale *"Intercom on — Starting the microphone…"* notification, while the app said *Intercom off* and no recorder ran. The notification's own End intercom cleared it. **Root cause:** `SessionCoordinator.endIntercomAndAwaitRelease` returned `VoiceController.stopAndAwaitRelease()`'s `TimedOut` after its 5 s caller window. That window starts before `engine.release()`, so it is always at or before `AndroidVoiceAudioSession.close()`'s own 5 s route-settlement window (§2r/§2s). `IntercomStopOwner` treated `TimedOut` as final and never asked again. ADR-021 A5 had fixed this shape for session teardown (problem 39) and explicitly left this path as it was. The notification text is the signature: the service still believed the intercom was active, while the controller reported capture closed. The epoch branch is ruled out, because it needs a new *Start* press and the run had none. **Fix:** `VoiceController.stopAndAwaitReleaseCompletion` reports the elapsed window, then keeps waiting on the same `StopRequested`, so the service is released once capture really is. The epoch guard, "never before capture", "a never-finishing release keeps the service" and "End is not End session" are unchanged. Intercom start, end, release outcome and duration, slow release, mute, re-authentication, link loss and the owner's decision are now in the diagnostics export (privacy-safe, `SessionCoordinator` only). **Unverified:** the device-level trigger (which platform callback is late on the OnePlus) is inferred from code and the notification signature, not measured. The new log lines will show it. iOS is not affected (no foreground service, no bounded stop-await) | ~~Medium~~ Fixed in software (a misleading privacy surface; a microphone foreground service held without capture) | [Evidence](PHASE9BA_ANDROID_ANDROID_FULL_QUALIFICATION.md#13-defects-found-in-this-run). Regression: `IntercomEndForegroundServiceTest`, which fails against the unfixed code. Physical procedure: TEST_PLAN "Problem 129 additions". **Follow-up, not fixed here:** the `DISCONNECTED` screen has no in-app End intercom. Holding capture and the `0x80` service there is by design until *Search again* (USER_RETRY), whose retirement does release them, as run 1 showed. Until an in-app control is added, the notification's End intercom is the only way to end the intercom from that screen. Problem 125 is what put a phone in `DISCONNECTED` spuriously |
 | 130 | **OPEN. Found 19 October 2026 (Phase 9B-A full qualification; Android, physical).** A benign simultaneous reconnect surfaced as a security alert. During a natural drop with both ladders dialling, A logged `handshake refused: unexpected_message_type` and showed a *Connection refused* security card. The reconnect succeeded 1.85 s later | Low–Medium (alarm fatigue undermines ADR-012's warnings) | [Evidence](PHASE9BA_ANDROID_ANDROID_FULL_QUALIFICATION.md#13-defects-found-in-this-run). Classify duplicate-resolution protocol errors as non-security |
+| 132 | **OPEN. Found 20 October 2026 (Phase 9B-A run 2; Android, physical).** A session that loses its link while the app is backgrounded with no foreground service (synchronised playback had ended) stays in `RECONNECTING` indefinitely: A showed *Reconnecting…* for ≈ 8 h with no logged event, and `ReconnectBudgetExhausted` was logged ≈ 60 s after the app was opened. Inference, not established: the frozen cached process suspends the ladder's timers. Impact low (resolves on open; a ride keeps a foreground service) |
+| 133 | **OPEN. Found 20 October 2026 (Phase 9B-A run 2; Android, physical).** After both apps restart, each phone's dial ends in `PairingRejectedOrTimeout` 3–46 ms after `PeerSelected` and is never retried (*"Couldn't reach the other phone yet. Stop searching, then find it again."*); only *Stop searching → Find* recovers, and the session then forms through the peer's inbound dial. Seen 3 times. Root cause not established; a stale resolved address is a hypothesis (the export does not log the dialled address) |
+| 134 | **OPEN. Found 20 October 2026 (Phase 9B-A run 2; Android, physical).** A follower's *Play on both phones* for a track in the **leader's own library** leaves the leader at `WAITING_FOR_CONTENT` (*"Waiting for the track to download…"*) with no `command_seq` allocated, and nothing plays until the leader presses Next/Previous. Reproduced 2 of 2, in two sessions. The same track played normally when reached through a leader-ordered Next |
+| 135 | **OPEN. Found 20 October 2026 (Phase 9B-A run 2; Android 17, physical).** AF-07 fails on the moto g57 power: mid-ride, swiping RideLink from Recents removed the task, but 46 s later the process, the `mediaPlayback` foreground service, its notification, the music and the control session were all still running. ARCHITECTURE requires `onTaskRemoved → ENDING`. Whether the callback is not delivered or not handled is not established. (The OnePlus kills the process instead, Phase 9A.) |
+| 136 | **FIXED IN SOFTWARE (test only) 22 October 2026, branch `fix/ios-obligation-test-retry-race`, PR #31, code approved by independent review. Found 21 October 2026 in CI (iOS; pre-existing since Phase 8, `2aa728f`).** `SyncPlaybackAcceptedObligationTests.advanceRetries` advanced the virtual clock after a fixed number of yields. A deferred drain that had not yet parked then parked on a deadline computed from the advanced instant, which nothing reached: a 5 s timeout, or 4 retry passes counted instead of 6. It failed 3 of 4 iOS CI runs on PRs #24/#26, and 1 run in 12 under local CPU load on unmodified main | Low (CI-only; no product defect; blocks green CI on unrelated PRs) | The two tests that require a running drain advance only once it is parked on its cadence (`advanceParkedRetries`), and the capacity test waits for the re-park before reading counts. Measured under load: 118 of 120 runs clean, and the 2 failing runs' assertions were not recorded, so a residual sensitivity is not ruled out |
 
 Resolved 26 Aug 2026 session: `CLAUDE.md` in `.gitignore` (was problem 1); `.DS_Store` tracking
 (was problem 7 — the claim was incorrect; the files are untracked and now ignored); the ADR-015/
