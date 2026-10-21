@@ -46,24 +46,128 @@ final class ReconnectPolicyTests: XCTestCase {
         try await withTimeout(seconds: 5) {
             await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
                 Task {
-                    await controller.start(
+                    controller.start(
                         onAttempt: {
                             let n = await attempts.increment()
                             if n >= 3 { continuation.resume() }
                             return n >= 3
                         },
-                        onExhausted: { continuation.resume() }
+                        onExhausted: { _ in continuation.resume() }
                     )
                 }
             }
         }
 
         let finalCount = await attempts.count
-        let reconnectCount = await controller.reconnectCount
+        let reconnectCount = controller.reconnectCount
         let delays = await recorder.delays
         XCTAssertEqual(finalCount, 3)
         XCTAssertEqual(reconnectCount, 3)
         XCTAssertTrue(delays.allSatisfy { $0 > 0 }, "every attempt must be preceded by a positive delay: \(delays)")
+    }
+
+    // MARK: - STATUS §4 problem 125: a promotion ends the run, whichever connection it promoted
+
+    func testAPromotionWhileTheLadderIsParkedEndsTheRunAndTheNextRunHasAFullBudget() async throws {
+        let gate = DelayGate()
+        let controller = ReconnectController(randomFraction: { 0.1 }, delayMs: { _ in await gate.wait() })
+        let first = Tally()
+        controller.start(onAttempt: { await first.attempt(); return false }, onExhausted: { _ in await first.exhaust() })
+        try await poll { await gate.parkedCount >= 1 }
+
+        controller.connectionPromoted() // e.g. the peer dialled in
+        await gate.openForever()
+        try await Task.sleep(nanoseconds: Self.settleNs)
+        let firstAttempts = await first.attempts
+        let firstExhausted = await first.exhausted
+        XCTAssertEqual(firstAttempts, 0, "the ended run made no attempt")
+        XCTAssertFalse(firstExhausted, "and reported no exhaustion")
+
+        let second = Tally()
+        controller.start(onAttempt: { await second.attempt(); return false }, onExhausted: { _ in await second.exhaust() })
+        try await poll { await second.exhausted }
+        let secondAttempts = await second.attempts
+        XCTAssertGreaterThanOrEqual(secondAttempts, 16, "the next link loss gets a full budget")
+        let firstExhaustedLater = await first.exhausted
+        XCTAssertFalse(firstExhaustedLater)
+    }
+
+    func testAPromotionDuringAnAttemptRetiresTheRunWithoutCancellingTheAttempt() async throws {
+        let controller = ReconnectController(randomFraction: { 0.1 }, delayMs: { _ in })
+        let gate = DelayGate()
+        let tally = Tally()
+        controller.start(
+            onAttempt: {
+                await tally.attempt()
+                await gate.wait() // e.g. a handshake whose connection only this attempt closes
+                await tally.complete(cancelled: Task.isCancelled)
+                return false // this dial lost to the peer's, which was promoted meanwhile
+            },
+            onExhausted: { _ in await tally.exhaust() }
+        )
+        try await poll { await gate.parkedCount >= 1 }
+        controller.connectionPromoted()
+        await gate.openForever()
+        try await poll { await tally.completions >= 1 }
+        try await Task.sleep(nanoseconds: Self.settleNs)
+
+        let attempts = await tally.attempts
+        let cancelled = await tally.sawCancellation
+        let exhausted = await tally.exhausted
+        XCTAssertFalse(cancelled, "an in-flight attempt is never cancelled")
+        XCTAssertEqual(attempts, 1, "no attempt after the promotion")
+        XCTAssertFalse(exhausted, "a retired run never reports exhaustion")
+    }
+
+    func testAPromotionPerformedByTheLaddersOwnAttemptDoesNotCancelThatAttempt() async throws {
+        let controller = ReconnectController(randomFraction: { 0.1 }, delayMs: { _ in })
+        let tally = Tally()
+        controller.start(
+            onAttempt: {
+                await tally.attempt()
+                controller.connectionPromoted() // promote() runs on this very task
+                await tally.complete(cancelled: Task.isCancelled)
+                return true
+            },
+            onExhausted: { _ in await tally.exhaust() }
+        )
+        try await poll { await tally.completions >= 1 }
+        try await Task.sleep(nanoseconds: Self.settleNs)
+        let cancelled = await tally.sawCancellation
+        let attempts = await tally.attempts
+        let exhausted = await tally.exhausted
+        XCTAssertFalse(cancelled, "the promoting attempt is not cancelled under itself")
+        XCTAssertEqual(attempts, 1)
+        XCTAssertFalse(exhausted)
+    }
+
+    func testAnExhaustionCommitsOnceAndNeverAfterAPromotionEndedItsRun() async throws {
+        let controller = ReconnectController(randomFraction: { 0.1 }, delayMs: { _ in })
+        let first = RunBox()
+        controller.start(onAttempt: { false }, onExhausted: { run in first.set(run) })
+        try await poll { first.get() != nil }
+        let decided = try XCTUnwrap(first.get())
+        XCTAssertTrue(controller.commitExhaustion(decided), "the deciding run still owns the budget")
+        XCTAssertFalse(controller.commitExhaustion(decided), "and commits exactly once")
+
+        controller.connectionPromoted() // refreshes the budget for the next run
+        let second = RunBox()
+        controller.start(onAttempt: { false }, onExhausted: { run in second.set(run) })
+        try await poll { second.get() != nil }
+        let stale = try XCTUnwrap(second.get())
+        controller.connectionPromoted() // a promotion lands between the decision and its commit
+        XCTAssertFalse(controller.commitExhaustion(stale), "a promotion that ended the run first wins")
+    }
+
+    private static let settleNs: UInt64 = 200_000_000
+
+    private func poll(_ condition: @escaping @Sendable () async -> Bool) async throws {
+        let deadline = Date().addingTimeInterval(5)
+        while Date() < deadline {
+            if await condition() { return }
+            try await Task.sleep(nanoseconds: 5_000_000)
+        }
+        throw ControlTransportError.notReady
     }
 
     private func withTimeout<T: Sendable>(seconds: Double, _ operation: @escaping @Sendable () async -> T) async throws -> T {
@@ -78,4 +182,45 @@ final class ReconnectPolicyTests: XCTestCase {
             return result
         }
     }
+}
+
+private actor Tally {
+    private(set) var attempts = 0
+    private(set) var completions = 0
+    private(set) var sawCancellation = false
+    private(set) var exhausted = false
+
+    func attempt() { attempts += 1 }
+    func complete(cancelled: Bool) {
+        completions += 1
+        if cancelled { sawCancellation = true }
+    }
+    func exhaust() { exhausted = true }
+}
+
+/// Parks every caller until `openForever()`; afterwards every call returns at once.
+private actor DelayGate {
+    private var open = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+    private(set) var parkedCount = 0
+
+    func wait() async {
+        if open { return }
+        parkedCount += 1
+        await withCheckedContinuation { waiters.append($0) }
+    }
+
+    func openForever() {
+        open = true
+        let pending = waiters
+        waiters = []
+        pending.forEach { $0.resume() }
+    }
+}
+
+private final class RunBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var run: ReconnectRun?
+    func set(_ value: ReconnectRun) { lock.withLock { run = value } }
+    func get() -> ReconnectRun? { lock.withLock { run } }
 }
