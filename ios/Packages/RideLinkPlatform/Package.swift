@@ -20,7 +20,7 @@ let package = Package(
         // question (the checksum still guards that); *availability* was, because an SPM binaryTarget
         // resolves a GitHub release asset that upstream can remove. `151.0.1` is not a usable
         // replacement: its manifest still points at the deleted `151.0.0` URL.
-        .package(url: "https://github.com/stasel/WebRTC.git", exact: "152.0.0"),
+        .package(url: "https://github.com/stasel/WebRTC.git", exact: "153.0.0"),
         // Phase 3's local music database (ADR-014's iOS mirror of Android's Room usage). Reviewed
         // per this phase's brief §5 before adding, the first dependency here besides the pinned
         // WebRTC pod: groue/GRDB.swift, MIT licence, a thin Swift wrapper over the platform's own
