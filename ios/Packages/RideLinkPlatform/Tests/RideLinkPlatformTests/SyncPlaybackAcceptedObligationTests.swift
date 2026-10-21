@@ -108,8 +108,9 @@ final class SyncPlaybackAcceptedObligationTests: XCTestCase {
         XCTAssertEqual(retainedWhileClockHeld, 1, "a clock-held command takes no local work capacity")
 
         await setClock(ready: true)
-        await advanceRetries(6)
-        await settle(400)
+        await advanceParkedRetries(6)
+        // Parked again only once the sixth pass has run, so the counts below are final.
+        await expectParkedOnRetryCadence()
         let held = await coordinator.deferredEvents.map(\.acceptedCommandSeq)
         XCTAssertEqual(held, [2], "C1 was popped or lost while capacity was unavailable")
         let applied = await coordinator.lastAppliedSeq
@@ -329,7 +330,7 @@ final class SyncPlaybackAcceptedObligationTests: XCTestCase {
             XCTAssertEqual(held, [seq], "C\(seq) accepted and held")
             await setClock(ready: true)
             // Exactly one retry interval — far short of the 5 s tick.
-            await advanceRetries(1)
+            await advanceParkedRetries(1)
             await expect("C\(seq) recovered on the retry cadence") {
                 let applied = await self.coordinator.lastAppliedSeq
                 let drained = await self.coordinator.deferredEvents.isEmpty
@@ -403,6 +404,27 @@ final class SyncPlaybackAcceptedObligationTests: XCTestCase {
         for _ in 0 ..< count {
             clock.advance(to: clock.now() + Phase5GateBounds.deferredRetryIntervalUs)
             await settle(50)
+        }
+    }
+
+    /// `advanceRetries` for a test whose premise is that a held command's drain **is** running: time
+    /// moves only once the drain is parked on its cadence (STATUS §4 problem 136). The drain parks at
+    /// `now + deferredRetryIntervalUs`, read when it parks. Advancing before that let it park on a
+    /// deadline computed from the advanced instant, which nothing then reached. A fixed number of yields
+    /// made the right order likely, not certain, so under CI load a pass was lost: a 5 s hang, or 4
+    /// passes counted instead of 6. Tests that advance time to prove that *nothing* runs keep
+    /// `advanceRetries`, because no drain parks there.
+    private func advanceParkedRetries(_ count: Int) async {
+        for _ in 0 ..< count {
+            await expectParkedOnRetryCadence()
+            clock.advance(to: clock.now() + Phase5GateBounds.deferredRetryIntervalUs)
+            await settle(50)
+        }
+    }
+
+    private func expectParkedOnRetryCadence() async {
+        await expect("the drain is parked on its retry cadence") {
+            self.clock.pendingDeadlines().contains(self.clock.now() + Phase5GateBounds.deferredRetryIntervalUs)
         }
     }
 
