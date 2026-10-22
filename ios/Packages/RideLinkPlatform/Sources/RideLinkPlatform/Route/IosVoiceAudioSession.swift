@@ -411,6 +411,7 @@ public actor IosVoiceAudioSession: VoiceAudioSession {
         next.lastTransitionDurationUs = lifecycle.transition.lastDurationUs
         next.transitionTimedOutCount = lifecycle.transition.timedOutCount
         next.lastTransitionTimedOut = lifecycle.transition.lastSettlementTimedOut
+        next.transitionBeganCount = lifecycle.transition.beganCount
         snapshot = next
         sink?(next)
     }

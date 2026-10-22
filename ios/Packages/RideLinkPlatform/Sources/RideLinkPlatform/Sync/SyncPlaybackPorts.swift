@@ -156,10 +156,34 @@ public protocol SyncDeadlineSleeper: Sendable {
     func sleep(untilLocalMonoUs: Int64) async
 }
 
+/// What one drift tick knows about routes: whether **either** peer reports
+/// `AUDIO_STATE.route_state: "transitioning"` (PROTOCOL §4.4, ARCHITECTURE §7.3's suspension
+/// condition), and this device's own count of route transitions begun
+/// (`AudioRouteSnapshot.transitionBeganCount`, ADR-004 Amendment A1 decision 4).
+public struct SyncRouteObservation: Sendable, Equatable {
+    public let transitioning: Bool
+    public let localChangeCount: Int64
+
+    public init(transitioning: Bool, localChangeCount: Int64) {
+        self.transitioning = transitioning
+        self.localChangeCount = localChangeCount
+    }
+}
+
 /// Whether **either** peer currently reports `AUDIO_STATE.route_state: "transitioning"` (PROTOCOL
 /// §4.4) — ARCHITECTURE §7.3's suspension condition for the drift ladder.
 public protocol SyncRouteStatePort: Sendable {
     func isRouteTransitioning() async -> Bool
+
+    /// Both route facts the drift tick needs, read together in one hop. The default reports a local
+    /// route that never changes, for ports that have none to count.
+    func routeObservation() async -> SyncRouteObservation
+}
+
+public extension SyncRouteStatePort {
+    func routeObservation() async -> SyncRouteObservation {
+        SyncRouteObservation(transitioning: await isRouteTransitioning(), localChangeCount: 0)
+    }
 }
 
 /// Zero-behaviour-change wrapper reaching the manager's `PlaybackRelay`.

@@ -92,7 +92,8 @@ final class DriftVectorTests: XCTestCase {
             restartCompensationMs: json.int64("restart_compensation_ms"),
             pendingSeek: pending.map {
                 PendingSeek(compensationMs: $0.int64("compensation_ms"), anchorSessionUs: $0.int64("anchor_session_us"))
-            }
+            },
+            routeChangeCount: nullableInt64(json["route_change_count"])
         )
     }
 
@@ -107,7 +108,8 @@ final class DriftVectorTests: XCTestCase {
             anchorSessionUs: json.int64("anchor_session_us"),
             reference: reference.map {
                 DriftReference(driftMs: $0.int64("drift_ms"), atSessionUs: $0.int64("at_session_us"), playing: $0.boolVal("playing"))
-            }
+            },
+            routeChangeCount: json.int64("route_change_count")
         )
     }
 

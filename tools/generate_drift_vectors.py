@@ -33,6 +33,15 @@ lands, and nothing else:
   - a route transition and a pause forget a pending seek; a route transition also forgets the
     learned latency; a new epoch keeps it and resets everything else.
 
+PR #32's review (22 October 2026) added three rules on top:
+  - the route is followed first, before the failed and not-playing early returns, so a route change
+    forgets the learned latency while paused and after a sync failure too;
+  - besides either peer's `transitioning`, a change in this device's own count of route transitions
+    begun (`route_change_count`) forgets it, which catches a transition that started and settled
+    between two ticks; the state remembers the count the latency was learned under;
+  - a reference stamped after this device's own sample (`at_session_us > now_session_us`) is not
+    usable.
+
 An independent third transcription, not a port of either platform's `DriftController`. Edit this
 generator, never the JSON.
 
@@ -63,11 +72,20 @@ BASE_US = 10_000_000
 
 def initial_state() -> dict:
     return {"nudging": False, "nudge_rate": RATE_NORMAL, "hard_seek_at_session_us": [], "failed": False,
-            "restart_compensation_ms": 0, "pending_seek": None}
+            "restart_compensation_ms": 0, "pending_seek": None, "route_change_count": None}
 
 
 def new_epoch(state: dict) -> dict:
-    return {**initial_state(), "restart_compensation_ms": state["restart_compensation_ms"]}
+    return {**initial_state(), "restart_compensation_ms": state["restart_compensation_ms"],
+            "route_change_count": state["route_change_count"]}
+
+
+def follow_route(state: dict, t: dict) -> dict:
+    known = state["route_change_count"]
+    if t["route_transitioning"] or (known is not None and known != t["route_change_count"]):
+        return {**state, "restart_compensation_ms": 0, "pending_seek": None,
+                "route_change_count": t["route_change_count"]}
+    return {**state, "route_change_count": t["route_change_count"]}
 
 
 def settled_reference(now_session_us: int, drift_ms: int = 0) -> dict:
@@ -88,6 +106,8 @@ def reference_usable(state: dict, t: dict) -> bool:
     earliest = t["anchor_session_us"] + REFERENCE_SETTLE_US
     if ref["at_session_us"] < earliest or now < earliest:
         return False
+    if ref["at_session_us"] > now:
+        return False
     if now - ref["at_session_us"] > MAX_REFERENCE_AGE_US:
         return False
     seeks = state["hard_seek_at_session_us"]
@@ -96,6 +116,7 @@ def reference_usable(state: dict, t: dict) -> bool:
 
 def evaluate(state: dict, t: dict) -> tuple[dict, dict, int | None]:
     """Returns (action, new_state, error_ms)."""
+    state = follow_route(state, t)
     if state["failed"]:
         return {"kind": "NONE"}, state, None
 
@@ -104,7 +125,7 @@ def evaluate(state: dict, t: dict) -> tuple[dict, dict, int | None]:
         return action, after, None
 
     if t["route_transitioning"]:
-        return {"kind": "NONE"}, {**state, "restart_compensation_ms": 0, "pending_seek": None}, None
+        return {"kind": "NONE"}, state, None
 
     if not reference_usable(state, t):
         action, after = release_if_nudging(state)
@@ -172,7 +193,7 @@ def single_rows() -> list[dict]:
             drift = magnitude * sign
             t = {"drift_ms": drift, "now_session_us": BASE_US, "expected_position_ms": 45_000,
                  "playing": True, "route_transitioning": False, "anchor_session_us": ANCHOR_US,
-                 "reference": settled_reference(BASE_US)}
+                 "reference": settled_reference(BASE_US), "route_change_count": 0}
             rows.append(row(f"fresh-drift-{drift}ms", initial_state(), t))
 
     # ADR-004 Amendment A1: the target is where the reference output is, plus the learned restart
@@ -180,7 +201,7 @@ def single_rows() -> list[dict]:
     def at(drift, ref_drift, expected=45_000, state=None):
         t = {"drift_ms": drift, "now_session_us": BASE_US, "expected_position_ms": expected,
              "playing": True, "route_transitioning": False, "anchor_session_us": ANCHOR_US,
-             "reference": settled_reference(BASE_US, ref_drift)}
+             "reference": settled_reference(BASE_US, ref_drift), "route_change_count": 0}
         return state or initial_state(), t
 
     rows.append(row("a1-common-mode-lag-is-not-chased", *at(-375, -375)))
@@ -196,7 +217,7 @@ def single_rows() -> list[dict]:
 
 
 def tick(drift, at_s, playing=True, transitioning=False, expected=45_000, ref_drift=0,
-         reference="settled", anchor_us=ANCHOR_US):
+         reference="settled", anchor_us=ANCHOR_US, routes=0):
     now = BASE_US + at_s * 1_000_000
     if reference == "settled":
         ref = settled_reference(now, ref_drift)
@@ -210,6 +231,7 @@ def tick(drift, at_s, playing=True, transitioning=False, expected=45_000, ref_dr
         "route_transitioning": transitioning,
         "anchor_session_us": anchor_us,
         "reference": ref,
+        "route_change_count": routes,
     }
 
 
@@ -342,6 +364,48 @@ def sequence_rows() -> list[dict]:
             [tick(-575, 0, ref_drift=-375), tick(-925, 5, ref_drift=-375), tick(-375, 10, transitioning=True),
              tick(-575, 70, ref_drift=-375)],
         ),
+        # --- PR #32 review: every route change forgets the learned latency -------------------------
+        (
+            "a1r-a-route-change-while-playing-forgets-the-learned-latency",
+            # Learns 550 by 15s; at 70s this device's route count has moved with no transition
+            # visible at the tick, and the next seek is uncompensated again.
+            [tick(-575, 0, ref_drift=-375), tick(-925, 5, ref_drift=-375), tick(-375, 10, ref_drift=-375),
+             tick(-575, 70, ref_drift=-375, routes=1)],
+        ),
+        (
+            "a1r-a-route-transition-while-paused-forgets-the-learned-latency",
+            [tick(-575, 0, ref_drift=-375), tick(-925, 5, ref_drift=-375),
+             tick(-375, 10, playing=False, transitioning=True), tick(-575, 70, ref_drift=-375)],
+        ),
+        (
+            "a1r-a-route-change-while-paused-between-ticks-forgets-the-learned-latency",
+            [tick(-575, 0, ref_drift=-375), tick(-925, 5, ref_drift=-375),
+             tick(-375, 10, playing=False, routes=1), tick(-575, 70, ref_drift=-375, routes=1)],
+        ),
+        (
+            "a1r-a-route-change-after-sync-failure-forgets-the-learned-latency",
+            # Learns 550, then fails on a 2.5s error; the ladder stays failed and does nothing, but
+            # the route change it sees is still applied to what a new epoch would inherit.
+            [tick(-575, 0, ref_drift=-375), tick(-925, 5, ref_drift=-375), tick(-2_900, 10, ref_drift=-375),
+             tick(-375, 15, routes=1), tick(-375, 20, transitioning=True, routes=2)],
+        ),
+        (
+            "a1r-a-route-change-between-ticks-is-seen-at-the-next-tick",
+            # No tick ever sees `transitioning`; the count alone says the route changed in between.
+            [tick(-575, 0, ref_drift=-375, routes=4), tick(-925, 5, ref_drift=-375, routes=4),
+             tick(-375, 10, ref_drift=-375, routes=4), tick(-375, 15, ref_drift=-375, routes=5)],
+        ),
+        (
+            "a1r-a-pending-seek-under-a-changed-route-teaches-nothing",
+            [tick(-575, 0, ref_drift=-375), tick(-925, 5, ref_drift=-375, routes=1)],
+        ),
+        (
+            "a1r-a-future-dated-reference-is-not-usable",
+            # 1 us ahead of this device's sample, one hour ahead, then exactly at it.
+            [tick(400, 0, reference={"drift_ms": 0, "at_session_us": BASE_US + 1, "playing": True}),
+             tick(400, 0, reference={"drift_ms": 0, "at_session_us": BASE_US + 3_600_000_000, "playing": True}),
+             tick(400, 0, reference={"drift_ms": 0, "at_session_us": BASE_US, "playing": True})],
+        ),
         (
             "a1-a-pause-forgets-a-pending-seek",
             [tick(-575, 0, ref_drift=-375), tick(-925, 5, ref_drift=-375, playing=False),
@@ -364,9 +428,10 @@ def epoch_rows() -> list[dict]:
     """`new_epoch` and `reset` — what a new playback epoch keeps and what a new session clears."""
     learned = {"nudging": True, "nudge_rate": RATE_FASTER, "hard_seek_at_session_us": [BASE_US, BASE_US + 5_000_000],
                "failed": True, "restart_compensation_ms": 550,
-               "pending_seek": {"compensation_ms": 550, "anchor_session_us": ANCHOR_US}}
+               "pending_seek": {"compensation_ms": 550, "anchor_session_us": ANCHOR_US},
+               "route_change_count": 3}
     return [
-        {"name": "new-epoch-keeps-only-the-learned-latency", "op": "new_epoch", "state": learned,
+        {"name": "new-epoch-keeps-only-the-learned-latency-and-its-route", "op": "new_epoch", "state": learned,
          "expected": new_epoch(learned)},
         {"name": "reset-clears-everything", "op": "reset", "state": learned, "expected": initial_state()},
     ]
@@ -400,6 +465,10 @@ def main() -> None:
             "Without a usable reference the action is NONE or RESTORE_RATE, never a seek, a nudge or a "
             "failure, and error_ms is null: a leader, which has no reference, never corrects.",
             "restart_compensation_ms is always within 0..max_restart_compensation_ms.",
+            "Any step with route_transitioning, or whose route_change_count differs from the state's "
+            "route_change_count before it, leaves restart_compensation_ms 0 and pending_seek null — "
+            "whether playing, paused or failed (PR #32 review).",
+            "A reference with at_session_us > now_session_us is never usable: error_ms is null.",
         ],
         "constants": {
             "dead_band_ms": DEAD_BAND_MS,

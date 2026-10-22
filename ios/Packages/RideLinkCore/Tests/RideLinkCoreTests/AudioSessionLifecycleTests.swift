@@ -61,6 +61,32 @@ final class AudioSessionLifecycleTests: XCTestCase {
         XCTAssertEqual(3_000, transition.lastDurationUs, "so the whole transition is measured, not its tail")
     }
 
+    /// ADR-004 Amendment A1 decision 4 (PR #32 review): the drift ladder learns that the route moved
+    /// from this count, so a transition that began and settled between two of its ticks must still have
+    /// moved it — once per transition, however many callbacks the transition produced.
+    func testEveryTransitionBegunIsCountedOnceAndSettlingOrTimingOutKeepsTheCount() {
+        var transition = RouteTransitionTracker.begin(RouteTransitionState(), nowMonoUs: 1_000)
+        transition = RouteTransitionTracker.begin(transition, nowMonoUs: 2_000)
+        XCTAssertEqual(1, transition.beganCount, "a burst of callbacks is one transition")
+        transition = RouteTransitionTracker.settle(transition, nowMonoUs: 3_000)
+        XCTAssertEqual(1, transition.beganCount, "settling does not undo it")
+        transition = RouteTransitionTracker.begin(transition, nowMonoUs: 4_000)
+        transition = RouteTransitionTracker.timeout(
+            transition, nowMonoUs: 4_000 + RouteTransitionTracker.defaultTimeoutUs
+        )
+        XCTAssertFalse(transition.transitioning)
+        XCTAssertEqual(2, transition.beganCount, "and neither does a timeout settlement")
+    }
+
+    func testAMediaServicesResetKeepsCountingTransitionsRatherThanStartingAgain() {
+        let state = AudioSessionState(open: true, generation: 3, transition: RouteTransitionState(beganCount: 5))
+        let outcome = AudioSessionLifecycle.reduce(
+            state: state,
+            event: .mediaServicesReset(generation: 3, atMonoUs: 7_000)
+        )
+        XCTAssertEqual(6, outcome.state.transition.beganCount, "a restarted count could repeat a value already seen")
+    }
+
     // MARK: - openRequested / closeRequested / openAborted (this phase's final hardening pass, Issue 1)
 
     /// The whole point of `.openRequested`: a transition begun by it is already live when a settling

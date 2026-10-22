@@ -281,6 +281,10 @@ class AppContainer(
             // so `emitStateSnapshot`'s admission onto this coordinator's own ordered outbound queue
             // and `QUEUE_SNAPSHOT`/`PLAYBACK_STATE`'s admission share the one underlying writer.
             resync = ResyncRelayAdapter(controlSessionManager.resync),
+            // ADR-004 Amendment A1 decision 4: this device's own route transitions, counted by the
+            // audio session's lifecycle, so one that came and went between two drift ticks still
+            // invalidates the learned restart compensation. Read-only; decides no audio policy.
+            localRouteChangeCount = { sessionCoordinator.voiceDiagnostics.value.route.transitionBeganCount },
         )
 
     /**

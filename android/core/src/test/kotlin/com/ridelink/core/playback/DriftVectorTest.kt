@@ -106,6 +106,7 @@ class DriftVectorTest {
                 (json["pending_seek"] as? JsonObject)?.let {
                     PendingSeek(it["compensation_ms"]!!.jsonPrimitive.long, it["anchor_session_us"]!!.jsonPrimitive.long)
                 },
+            routeChangeCount = nullableLong(json["route_change_count"]!!),
         )
 
     private fun inputOf(json: JsonObject): DriftInput =
@@ -124,6 +125,7 @@ class DriftVectorTest {
                         playing = it["playing"]!!.jsonPrimitive.content.toBoolean(),
                     )
                 },
+            routeChangeCount = json["route_change_count"]!!.jsonPrimitive.long,
         )
 
     private fun assertAction(

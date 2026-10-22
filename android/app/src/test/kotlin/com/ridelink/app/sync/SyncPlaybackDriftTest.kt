@@ -35,6 +35,7 @@ class SyncPlaybackDriftTest {
     private lateinit var clock: FakeMonotonicClock
     private lateinit var coordinator: SyncPlaybackCoordinator
     private var routeTransitioning = false
+    private var routeChanges = 0L
     private var idSeed = 200
 
     private fun build(scope: CoroutineScope) {
@@ -54,6 +55,7 @@ class SyncPlaybackDriftTest {
                 sleeper = clock.sleeper,
                 routeTransitioning = { routeTransitioning },
                 nextQueueItemId = { SyncTestValues.ulid(idSeed++) },
+                localRouteChangeCount = { routeChanges },
             )
     }
 
@@ -87,9 +89,10 @@ class SyncPlaybackDriftTest {
         scope: TestScope,
         driftMs: Long,
         playing: Boolean = true,
+        referenceDriftMs: Long = 0,
     ) {
         val nextTickUs = clock.pendingDeadlines.max()
-        session.deliverLeaderReport(SyncTestValues.hash(1), ANCHOR_US, nextTickUs - 1_000_000)
+        session.deliverLeaderReport(SyncTestValues.hash(1), ANCHOR_US, nextTickUs - 1_000_000, driftMs = referenceDriftMs)
         scope.runCurrent()
         val elapsedMs = (nextTickUs - ANCHOR_US) / 1_000
         player.setState(PlayerState(positionMs = elapsedMs + driftMs, durationMs = 600_000, playing = playing))
@@ -241,6 +244,46 @@ class SyncPlaybackDriftTest {
             assertEquals(-5, diagnostics.syncErrorMs, "the error the ladder acts on is the difference")
             assertEquals(0, diagnostics.hardSeekCount)
             assertTrue(player.calls.none { it is FakeSyncPlayer.Call.Seek || it is FakeSyncPlayer.Call.SetRate })
+        }
+
+    /**
+     * PR #32 review, at this layer: the learned restart compensation is forgotten when this device's
+     * route-transition count moves between two ticks, with no tick ever seeing `transitioning`. The
+     * table decides that (`protocol/vectors/drift/`); this proves the coordinator feeds it the count.
+     */
+    @Test
+    fun `a route change between two ticks forgets the learned restart compensation`() =
+        runTest(StandardTestDispatcher()) {
+            build(backgroundScope)
+            startPlaying(this)
+            tick(this, driftMs = -575, referenceDriftMs = -375) // a 200 ms differential: seek, uncompensated
+            tick(this, driftMs = -925, referenceDriftMs = -375) // its residual teaches 550 ms; seek again
+            tick(this, driftMs = -375, referenceDriftMs = -375) // converged
+            assertEquals(550, coordinator.diagnostics.value.restartCompensationMs, "the premise: 550 ms was learned")
+
+            routeChanges += 1 // a transition began and settled while no tick was looking
+            tick(this, driftMs = -375, referenceDriftMs = -375)
+            assertEquals(0, coordinator.diagnostics.value.restartCompensationMs, "a new route has a new restart latency")
+            assertEquals(2, coordinator.diagnostics.value.hardSeekCount, "and forgetting it is not itself a correction")
+        }
+
+    /**
+     * PR #32 review: a leader report stamped after this device's own sample — here an hour after —
+     * cannot be compared with it, so the ladder makes no decision on it, however large the error.
+     */
+    @Test
+    fun `a leader report stamped after this device's sample is not acted on`() =
+        runTest(StandardTestDispatcher()) {
+            build(backgroundScope)
+            startPlaying(this)
+            val nextTickUs = clock.pendingDeadlines.max()
+            session.deliverLeaderReport(SyncTestValues.hash(1), ANCHOR_US, nextTickUs + 3_600_000_000)
+            runCurrent()
+            player.setState(PlayerState(positionMs = (nextTickUs - ANCHOR_US) / 1_000 + 400, durationMs = 600_000, playing = true))
+            clock.advanceTo(nextTickUs)
+            runCurrent()
+            assertTrue(player.calls.none { it is FakeSyncPlayer.Call.Seek || it is FakeSyncPlayer.Call.SetRate })
+            assertNull(coordinator.diagnostics.value.syncErrorMs, "a future-dated reference is no reference")
         }
 
     @Test

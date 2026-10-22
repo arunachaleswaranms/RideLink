@@ -45,6 +45,10 @@ public struct DriftState: Sendable, Equatable {
     /// `DriftController.newEpoch` keeps it.
     public let restartCompensationMs: Int64
     public let pendingSeek: PendingSeek?
+    /// The `DriftInput.routeChangeCount` that `restartCompensationMs` and `pendingSeek` belong to. Nil
+    /// until the first evaluation. Any other count means this device's route has changed since —
+    /// possibly and briefly between two ticks — so both are forgotten.
+    public let routeChangeCount: Int64?
 
     public init(
         nudging: Bool = false,
@@ -52,7 +56,8 @@ public struct DriftState: Sendable, Equatable {
         hardSeekAtSessionUs: [Int64] = [],
         failed: Bool = false,
         restartCompensationMs: Int64 = 0,
-        pendingSeek: PendingSeek? = nil
+        pendingSeek: PendingSeek? = nil,
+        routeChangeCount: Int64? = nil
     ) {
         self.nudging = nudging
         self.nudgeRate = nudgeRate
@@ -60,6 +65,7 @@ public struct DriftState: Sendable, Equatable {
         self.failed = failed
         self.restartCompensationMs = restartCompensationMs
         self.pendingSeek = pendingSeek
+        self.routeChangeCount = routeChangeCount
     }
 
     func with(
@@ -68,7 +74,8 @@ public struct DriftState: Sendable, Equatable {
         hardSeekAtSessionUs: [Int64]? = nil,
         failed: Bool? = nil,
         restartCompensationMs: Int64? = nil,
-        pendingSeek: PendingSeek?? = nil
+        pendingSeek: PendingSeek?? = nil,
+        routeChangeCount: Int64?? = nil
     ) -> DriftState {
         DriftState(
             nudging: nudging ?? self.nudging,
@@ -76,7 +83,8 @@ public struct DriftState: Sendable, Equatable {
             hardSeekAtSessionUs: hardSeekAtSessionUs ?? self.hardSeekAtSessionUs,
             failed: failed ?? self.failed,
             restartCompensationMs: restartCompensationMs ?? self.restartCompensationMs,
-            pendingSeek: pendingSeek ?? self.pendingSeek
+            pendingSeek: pendingSeek ?? self.pendingSeek,
+            routeChangeCount: routeChangeCount ?? self.routeChangeCount
         )
     }
 }
@@ -100,6 +108,9 @@ public struct DriftReference: Sendable, Equatable {
 /// `PlaybackTimeline`, sampled at `nowSessionUs`; `routeTransitioning` is true while **either** peer
 /// reports `AUDIO_STATE.route_state: "transitioning"` (PROTOCOL §4.4). `anchorSessionUs` is that
 /// timeline's anchor — the last instant this device's output restarted because a command said so.
+/// `routeChangeCount` is this device's own count of route transitions begun, as its route layer
+/// reports it. It only ever matters whether it *changed*, so a route layer that restarts its count when
+/// the audio session is recreated is still read correctly.
 public struct DriftInput: Sendable, Equatable {
     public let driftMs: Int64
     public let nowSessionUs: Int64
@@ -108,6 +119,7 @@ public struct DriftInput: Sendable, Equatable {
     public let routeTransitioning: Bool
     public let anchorSessionUs: Int64
     public let reference: DriftReference?
+    public let routeChangeCount: Int64
 
     public init(
         driftMs: Int64,
@@ -116,7 +128,8 @@ public struct DriftInput: Sendable, Equatable {
         playing: Bool,
         routeTransitioning: Bool,
         anchorSessionUs: Int64,
-        reference: DriftReference?
+        reference: DriftReference?,
+        routeChangeCount: Int64
     ) {
         self.driftMs = driftMs
         self.nowSessionUs = nowSessionUs
@@ -125,6 +138,7 @@ public struct DriftInput: Sendable, Equatable {
         self.routeTransitioning = routeTransitioning
         self.anchorSessionUs = anchorSessionUs
         self.reference = reference
+        self.routeChangeCount = routeChangeCount
     }
 }
 
@@ -201,28 +215,30 @@ public enum DriftController {
     public static let maxRestartCompensationMs: Int64 = 1_000
 
     public static func evaluate(state: DriftState, input: DriftInput) -> DriftOutcome {
+        // ADR-004 Amendment A1 decision 4: a new route has a new restart latency, so what was learned
+        // about the old one is forgotten — first, before any early return, so it holds while failed
+        // and while paused too, and for a transition that came and went between two ticks.
+        let current = followRoute(state, input)
+
         // Already failed: correction is over until the caller resets this state for a new timeline
         // or a new session. The rate was restored when the failure was declared.
-        if state.failed { return DriftOutcome(action: .none, state: state) }
+        if current.failed { return DriftOutcome(action: .none, state: current) }
 
         // Not playing: nothing to correct, but a nudge left in force must not survive the pause, and
         // a seek's residual can no longer be told apart from the pause's.
-        if !input.playing { return releaseNudgeIfActive(state.with(pendingSeek: .some(nil))) }
+        if !input.playing { return releaseNudgeIfActive(current.with(pendingSeek: .some(nil))) }
 
         // ARCHITECTURE §7.3: the ladder is suspended while either peer's route is transitioning.
         // Deliberately *before* every tier, and deliberately leaving `nudging` untouched — suspended
-        // means "make no new decision", not "undo the last one". A new route has a new restart
-        // latency, so what was learned about the old one is forgotten.
-        if input.routeTransitioning {
-            return DriftOutcome(action: .none, state: state.with(restartCompensationMs: 0, pendingSeek: .some(nil)))
-        }
+        // means "make no new decision", not "undo the last one".
+        if input.routeTransitioning { return DriftOutcome(action: .none, state: current) }
 
-        guard let reference = input.reference, usable(state, input, reference) else {
-            return releaseNudgeIfActive(state)
+        guard let reference = input.reference, usable(current, input, reference) else {
+            return releaseNudgeIfActive(current)
         }
 
         let errorMs = input.driftMs - reference.driftMs
-        let learned = learn(state, input, errorMs)
+        let learned = learn(current, input, errorMs)
         let magnitude = errorMs < 0 ? -errorMs : errorMs
 
         let outcome: DriftOutcome
@@ -246,15 +262,28 @@ public enum DriftController {
     /// A new playback epoch: a fresh ladder and a fresh seek budget, but this device's output still
     /// restarts as slowly as it did (ADR-004 Amendment A1 decision 4).
     public static func newEpoch(_ state: DriftState) -> DriftState {
-        DriftState(restartCompensationMs: state.restartCompensationMs)
+        DriftState(restartCompensationMs: state.restartCompensationMs, routeChangeCount: state.routeChangeCount)
+    }
+
+    /// ADR-004 Amendment A1 decision 4. Either peer transitioning, or this device's count of route
+    /// transitions differing from the one the compensation was learned under, forgets it.
+    private static func followRoute(_ state: DriftState, _ input: DriftInput) -> DriftState {
+        let changed = input.routeTransitioning || (state.routeChangeCount.map { $0 != input.routeChangeCount } ?? false)
+        return changed
+            ? state.with(restartCompensationMs: 0, pendingSeek: .some(nil), routeChangeCount: .some(input.routeChangeCount))
+            : state.with(routeChangeCount: .some(input.routeChangeCount))
     }
 
     /// ADR-004 Amendment A1 decision 3: every reason a reference or a local sample cannot be compared.
     private static func usable(_ state: DriftState, _ input: DriftInput, _ reference: DriftReference) -> Bool {
         let settledFrom = input.anchorSessionUs + referenceSettleUs
         let lastSeekUs = state.hardSeekAtSessionUs.last
+        // A reference sampled after this device's own sample cannot be compared with it. A genuine one
+        // that merely arrived early is usable on the next tick; one stamped implausibly far ahead
+        // never becomes usable while it is still ahead.
         return reference.playing &&
             reference.atSessionUs >= settledFrom &&
+            reference.atSessionUs <= input.nowSessionUs &&
             input.nowSessionUs - reference.atSessionUs <= maxReferenceAgeUs &&
             input.nowSessionUs >= settledFrom &&
             (lastSeekUs.map { input.nowSessionUs - $0 >= referenceSettleUs } ?? true)

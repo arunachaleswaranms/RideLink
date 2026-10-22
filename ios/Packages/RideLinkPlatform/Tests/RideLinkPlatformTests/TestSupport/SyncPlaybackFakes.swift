@@ -506,6 +506,16 @@ actor FakeRouteState: SyncRouteStatePort {
 
     func set(_ value: Bool) { transitioning = value }
 
+    private var localChangeCount: Int64 = 0
+
+    /// A local route transition that began and settled with no tick looking.
+    func countRouteChange() { localChangeCount += 1 }
+
+    /// Goes through `isRouteTransitioning()`, so a gate a test arms to park a tick parks it here too.
+    func routeObservation() async -> SyncRouteObservation {
+        SyncRouteObservation(transitioning: await isRouteTransitioning(), localChangeCount: localChangeCount)
+    }
+
     func isRouteTransitioning() async -> Bool {
         guard gateArmed else { return transitioning }
         if gateSkips > 0 {

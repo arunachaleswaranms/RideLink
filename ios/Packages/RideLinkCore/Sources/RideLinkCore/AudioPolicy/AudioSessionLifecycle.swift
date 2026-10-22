@@ -51,19 +51,25 @@ public struct RouteTransitionState: Sendable, Equatable {
     public var timedOutCount: Int
     /// Whether the most recent settlement was the failure timeout rather than a platform callback.
     public var lastSettlementTimedOut: Bool
+    /// How many transitions have **begun** — never decreases for the life of this state. A transition
+    /// that starts and settles between two drift ticks leaves this changed when `transitioning` no
+    /// longer shows it (ADR-004 Amendment A1 decision 4, PR #32 review).
+    public var beganCount: Int64
 
     public init(
         transitioning: Bool = false,
         startedAtMonoUs: Int64? = nil,
         lastDurationUs: Int64? = nil,
         timedOutCount: Int = 0,
-        lastSettlementTimedOut: Bool = false
+        lastSettlementTimedOut: Bool = false,
+        beganCount: Int64 = 0
     ) {
         self.transitioning = transitioning
         self.startedAtMonoUs = startedAtMonoUs
         self.lastDurationUs = lastDurationUs
         self.timedOutCount = timedOutCount
         self.lastSettlementTimedOut = lastSettlementTimedOut
+        self.beganCount = beganCount
     }
 
     public var lastDurationMs: Double? {
@@ -91,6 +97,7 @@ public enum RouteTransitionTracker {
         next.transitioning = true
         next.startedAtMonoUs = nowMonoUs
         next.lastSettlementTimedOut = false
+        next.beganCount = state.beganCount + 1
         return next
     }
 
@@ -102,7 +109,8 @@ public enum RouteTransitionTracker {
             startedAtMonoUs: nil,
             lastDurationUs: duration,
             timedOutCount: state.timedOutCount,
-            lastSettlementTimedOut: false
+            lastSettlementTimedOut: false,
+            beganCount: state.beganCount
         )
     }
 
@@ -394,7 +402,11 @@ public enum AudioSessionLifecycle {
             generation: state.generation + 1,
             interrupted: false,
             awaitingResume: false,
-            transition: RouteTransitionTracker.begin(RouteTransitionState(), nowMonoUs: nowMonoUs),
+            // The count of transitions begun survives the reset: it is what tells the drift ladder that
+            // the route moved, and restarting it could repeat a value it already saw.
+            transition: RouteTransitionTracker.begin(
+                RouteTransitionState(beganCount: state.transition.beganCount), nowMonoUs: nowMonoUs
+            ),
             lastFailure: .mediaServicesReset
         )
         return AudioSessionOutcome(

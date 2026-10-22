@@ -117,7 +117,8 @@ That is why the decision below learns the restart latency rather than assuming o
    the pure table decides each one:
    - it is `playing`;
    - it was sampled at least `REFERENCE_SETTLE_US` (1.5 s) after the timeline's anchor;
-   - it is at most `MAX_REFERENCE_AGE_US` (12 s) old;
+   - it is at most `MAX_REFERENCE_AGE_US` (12 s) old, and it was sampled **no later** than this
+     device's own sample (a future-dated reference is never usable while it is still ahead);
    - the local sample is also at least 1.5 s after the anchor and after this device's last hard seek.
    The settle window excludes the frozen-position stretch while output starts. 1.5 s is more than
    twice the largest lag observed (about 650 ms, staleness included).
@@ -129,8 +130,13 @@ That is why the decision below learns the restart latency rather than assuming o
      own seeks: `compensation used − error observed`, clamped to 0…`MAX_RESTART_COMPENSATION_MS`
      (1 000 ms; anything longer is a stall, not a latency).
    - It starts at 0. It survives a new playback epoch, because it is a property of this device's
-     output. It is forgotten on a route transition, because a route change changes that property,
-     and on a full reset.
+     output. It is forgotten on a full reset and on **any** route change, because a route change
+     changes that property. A route change is either peer reporting `transitioning`, or this
+     device's own count of route transitions begun (`RouteTransitionState.beganCount`, carried as
+     `AudioRouteSnapshot.transitionBeganCount`) differing from the count the compensation was learned
+     under. The count is what catches a transition that began and settled between two 5 s ticks.
+     The route is followed **first**, before the failed and not-playing early returns, so this holds
+     while paused and after `SYNC_FAILED` too.
    - A sample taken under a different anchor than the seek was made under teaches nothing.
    - On a phone whose position includes no restart latency (iOS render time), it stays at 0 and
      the target is ADR-004's original one.
@@ -186,3 +192,37 @@ That is why the decision below learns the restart latency rather than assuming o
 - `SyncPlaybackOutputLatencyTest` (the reproduction, PR #29) passes unchanged in its assertions.
   It gains a differential-latency case that must **correct** rather than conceal.
 - **The physical retest is still required** (TEST_PLAN §5.2's problem-131 note).
+
+### Review round 1 (22 October 2026, PR #32): what changed in this amendment, and why
+
+The independent review found three cases where decision 4's "forgotten on a route transition" did
+not hold, and one unbounded input in decision 3. All four are fixed in the pure table on both
+platforms. Nothing else in the amendment moved: the tiers, the seek budget, the leader-reference
+model and every lifetime guard are unchanged.
+
+1. **While paused.** `!playing` returned before the route was looked at, so a transition while
+   paused left the compensation standing. The route is now followed before every early return.
+2. **After `SYNC_FAILED`.** The failed-state return came first too. A route change is now applied to
+   what the next epoch inherits, although the failed ladder still does nothing.
+3. **Between ticks.** `routeTransitioning` is sampled once every 5 s, so a transition that came and
+   went between two ticks was invisible.
+   - `RouteTransitionState` now counts transitions begun. The count never decreases, a burst of
+     callbacks counts once, and it survives a media-services reset rather than restarting.
+   - The count reaches the drift input as `routeChangeCount`, read in the same step as the
+     suspension condition, so iOS adds no new suspension point.
+   - Only whether the count *changed* matters, so a count that restarts with a new audio session is
+     still read as a change, which is the safe direction.
+4. **Future-dated references.** The age check accepted any reference stamped after "now", so one
+   stamped an hour ahead never aged out. A reference stamped after this device's own sample is now
+   not usable. No tolerance constant was introduced: a genuine report that merely arrived ahead of
+   the local sample becomes usable on the next tick.
+
+New vector rows (`a1r-*`, 7 sequences, 2 epoch rows updated) pin each case. Mirrored coordinator
+regressions on both platforms prove the count is fed through. `AudioSessionLifecycle` tests pin the
+counter itself.
+
+**Known limit, recorded rather than solved.** The count, like ARCHITECTURE §7.3's existing
+`transitioning` suspension, comes from the voice audio session's route tracking. While the intercom is
+off, a route change during music-only playback is counted by neither. A stale compensation then
+costs at most one mis-aimed seek: its residual is relearned, or the ladder fails honestly within its
+budget. It is never concealed. Tracking the music player's own output route is a separate change.

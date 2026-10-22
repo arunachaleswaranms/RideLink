@@ -265,6 +265,42 @@ final class SyncPlaybackDriftTests: XCTestCase {
         XCTAssertFalse(calls.contains { if case .seek = $0 { return true }; if case .setRate = $0 { return true }; return false })
     }
 
+    /// PR #32 review, at this layer: the learned restart compensation is forgotten when this device's
+    /// route-transition count moves between two ticks, with no tick ever seeing `transitioning`. The
+    /// table decides that (`protocol/vectors/drift/`); this proves the coordinator feeds it the count.
+    /// Mirrors Android's `a route change between two ticks forgets the learned restart compensation`.
+    func testARouteChangeBetweenTwoTicksForgetsTheLearnedRestartCompensation() async {
+        await startPlaying()
+        await tick(driftMs: -575, referenceDriftMs: -375) // a 200 ms differential: seek, uncompensated
+        await tick(driftMs: -925, referenceDriftMs: -375) // its residual teaches 550 ms; seek again
+        await tick(driftMs: -375, referenceDriftMs: -375) // converged
+        let learned = await coordinator.diagnostics.restartCompensationMs
+        XCTAssertEqual(learned, 550, "the premise: 550 ms was learned")
+
+        await routeState.countRouteChange() // a transition began and settled while no tick was looking
+        await tick(driftMs: -375, referenceDriftMs: -375)
+        let diagnostics = await coordinator.diagnostics
+        XCTAssertEqual(diagnostics.restartCompensationMs, 0, "a new route has a new restart latency")
+        XCTAssertEqual(diagnostics.hardSeekCount, 2, "and forgetting it is not itself a correction")
+    }
+
+    /// PR #32 review: a leader report stamped after this device's own sample — here an hour after —
+    /// cannot be compared with it, so the ladder makes no decision on it, however large the error.
+    func testALeaderReportStampedAfterThisDevicesSampleIsNotActedOn() async {
+        await startPlaying()
+        await awaitTickArmed()
+        guard let nextTickUs = clock.pendingDeadlines().max() else { return XCTFail("no tick is armed") }
+        await deliverAndAwait(.positionReport(
+            trackHash: SyncTestValues.hash(1), positionMs: (nextTickUs - anchorUs) / 1_000,
+            atSessionUs: nextTickUs + 3_600_000_000, playing: true, playbackRate: 1.0
+        ))
+        await tick(driftMs: 400, withReference: false)
+        let calls = await player.calls
+        XCTAssertFalse(calls.contains { if case .seek = $0 { return true }; if case .setRate = $0 { return true }; return false })
+        let syncError = await coordinator.diagnostics.syncErrorMs
+        XCTAssertNil(syncError, "a future-dated reference is no reference")
+    }
+
     func testARouteTransitionSuspendsCorrectionEntirelyAndDoesNotSpendTheSeekBudget() async {
         await startPlaying()
         await routeState.set(true)

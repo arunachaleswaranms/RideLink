@@ -145,6 +145,13 @@ class SyncPlaybackCoordinator(
      * and call site that has no resync channel at all; [emitStateSnapshot] is Phase 7's only caller.
      */
     private val resync: ResyncChannelPort? = null,
+    /**
+     * This device's own count of route transitions begun ([com.ridelink.core.audiopolicy.AudioRouteSnapshot.transitionBeganCount]).
+     * ADR-004 Amendment A1 decision 4: read every tick so a transition that began and settled between
+     * two ticks still forgets the learned restart compensation. Defaults to a route that never
+     * changes, for tests that do not exercise it.
+     */
+    private val localRouteChangeCount: () -> Long = { 0 },
     /** Injectable purely so a test can force the ingress edge at 1 or 2 rather than racing 256 frames. */
     inboundCapacity: Int = Phase5GateBounds.DEFAULT_INBOUND_CAPACITY,
     /** Injectable for the same reason: how many authoritative events may wait for a trustworthy clock. */
@@ -3826,6 +3833,7 @@ class SyncPlaybackCoordinator(
         )
         if (!owns(generation, token)) return
         val transitioning = routeTransitioning()
+        val routeChanges = localRouteChangeCount()
         val driftMs = active.driftMs(sample.positionMs, nowSessionUs, durationMs)
         val outcome =
             DriftController.evaluate(
@@ -3840,6 +3848,7 @@ class SyncPlaybackCoordinator(
                     // ADR-004 Amendment A1 decision 2: the leader's output is the reference, so the
                     // leader has none to match and never corrects for drift.
                     reference = if (role == PlaybackRole.FOLLOWER) peerReference else null,
+                    routeChangeCount = routeChanges,
                 ),
             )
         driftState = outcome.state

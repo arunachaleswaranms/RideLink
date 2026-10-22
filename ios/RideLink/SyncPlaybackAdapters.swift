@@ -136,9 +136,18 @@ struct SessionRouteStatePort: SyncRouteStatePort {
     let session: SessionCoordinator
 
     func isRouteTransitioning() async -> Bool {
+        await routeObservation().transitioning
+    }
+
+    /// ADR-004 Amendment A1 decision 4: this device's own route transitions, counted by the audio
+    /// session's lifecycle, read in the same main-actor hop as the suspension condition.
+    func routeObservation() async -> SyncRouteObservation {
         await MainActor.run {
-            session.voiceDiagnostics.route.routeState == .transitioning ||
-                session.peerAudioState?.routeState == .transitioning
+            SyncRouteObservation(
+                transitioning: session.voiceDiagnostics.route.routeState == .transitioning ||
+                    session.peerAudioState?.routeState == .transitioning,
+                localChangeCount: session.voiceDiagnostics.route.transitionBeganCount
+            )
         }
     }
 }

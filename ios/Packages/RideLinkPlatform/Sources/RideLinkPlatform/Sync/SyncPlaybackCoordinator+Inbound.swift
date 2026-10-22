@@ -1758,7 +1758,11 @@ extension SyncPlaybackCoordinator {
                 playbackRate: sample.rate
             ))
         ))
-        let transitioning = await routeState.isRouteTransitioning()
+        // ADR-004 Amendment A1 decision 4: the local route-transition count rides along in the same
+        // read, so a transition that began and settled between two ticks still forgets the learned
+        // restart compensation — and no second suspension is added to this tick.
+        let route = await routeState.routeObservation()
+        let transitioning = route.transitioning
         // Amendment A5 Finding B, third window: `driftState` and six diagnostics fields follow, and
         // ADR-004's ladder is evaluated from values this tick sampled — so a retired tick resuming
         // here restated the live session's drift, clock offset, RTT and correction from a dead
@@ -1777,7 +1781,8 @@ extension SyncPlaybackCoordinator {
                 anchorSessionUs: active.anchorSessionUs,
                 // ADR-004 Amendment A1 decision 2: the leader's output is the reference, so the leader
                 // has none to match and never corrects for drift.
-                reference: role == .follower ? peerReference : nil
+                reference: role == .follower ? peerReference : nil,
+                routeChangeCount: route.localChangeCount
             )
         )
         driftState = outcome.state

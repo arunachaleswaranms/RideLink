@@ -8,7 +8,9 @@
     "Every DECLARE_SYNC_FAILURE row leaves nudging false and nudge_rate exactly 1.0.",
     "HARD_SEEK's position_ms is the authoritative timeline's expected position plus the reference's drift against that same timeline plus restart_compensation_ms, floored at 0 (ADR-004 Amendment A1). With a zero reference and nothing learned it is exactly the expected position, which is every pre-amendment row.",
     "Without a usable reference the action is NONE or RESTORE_RATE, never a seek, a nudge or a failure, and error_ms is null: a leader, which has no reference, never corrects.",
-    "restart_compensation_ms is always within 0..max_restart_compensation_ms."
+    "restart_compensation_ms is always within 0..max_restart_compensation_ms.",
+    "Any step with route_transitioning, or whose route_change_count differs from the state's route_change_count before it, leaves restart_compensation_ms 0 and pending_seek null — whether playing, paused or failed (PR #32 review).",
+    "A reference with at_session_us > now_session_us is never usable: error_ms is null."
   ],
   "constants": {
     "dead_band_ms": 25,
@@ -34,7 +36,8 @@
           "hard_seek_at_session_us": [],
           "failed": false,
           "restart_compensation_ms": 0,
-          "pending_seek": null
+          "pending_seek": null,
+          "route_change_count": null
         },
         "drift_ms": 0,
         "now_session_us": 10000000,
@@ -46,7 +49,8 @@
           "drift_ms": 0,
           "at_session_us": 9000000,
           "playing": true
-        }
+        },
+        "route_change_count": 0
       },
       "expected": {
         "action": {
@@ -58,7 +62,8 @@
           "hard_seek_at_session_us": [],
           "failed": false,
           "restart_compensation_ms": 0,
-          "pending_seek": null
+          "pending_seek": null,
+          "route_change_count": 0
         },
         "error_ms": 0
       }
@@ -72,7 +77,8 @@
           "hard_seek_at_session_us": [],
           "failed": false,
           "restart_compensation_ms": 0,
-          "pending_seek": null
+          "pending_seek": null,
+          "route_change_count": null
         },
         "drift_ms": 1,
         "now_session_us": 10000000,
@@ -84,7 +90,8 @@
           "drift_ms": 0,
           "at_session_us": 9000000,
           "playing": true
-        }
+        },
+        "route_change_count": 0
       },
       "expected": {
         "action": {
@@ -96,7 +103,8 @@
           "hard_seek_at_session_us": [],
           "failed": false,
           "restart_compensation_ms": 0,
-          "pending_seek": null
+          "pending_seek": null,
+          "route_change_count": 0
         },
         "error_ms": 1
       }
@@ -110,7 +118,8 @@
           "hard_seek_at_session_us": [],
           "failed": false,
           "restart_compensation_ms": 0,
-          "pending_seek": null
+          "pending_seek": null,
+          "route_change_count": null
         },
         "drift_ms": -1,
         "now_session_us": 10000000,
@@ -122,7 +131,8 @@
           "drift_ms": 0,
           "at_session_us": 9000000,
           "playing": true
-        }
+        },
+        "route_change_count": 0
       },
       "expected": {
         "action": {
@@ -134,7 +144,8 @@
           "hard_seek_at_session_us": [],
           "failed": false,
           "restart_compensation_ms": 0,
-          "pending_seek": null
+          "pending_seek": null,
+          "route_change_count": 0
         },
         "error_ms": -1
       }
@@ -148,7 +159,8 @@
           "hard_seek_at_session_us": [],
           "failed": false,
           "restart_compensation_ms": 0,
-          "pending_seek": null
+          "pending_seek": null,
+          "route_change_count": null
         },
         "drift_ms": 14,
         "now_session_us": 10000000,
@@ -160,7 +172,8 @@
           "drift_ms": 0,
           "at_session_us": 9000000,
           "playing": true
-        }
+        },
+        "route_change_count": 0
       },
       "expected": {
         "action": {
@@ -172,7 +185,8 @@
           "hard_seek_at_session_us": [],
           "failed": false,
           "restart_compensation_ms": 0,
-          "pending_seek": null
+          "pending_seek": null,
+          "route_change_count": 0
         },
         "error_ms": 14
       }
@@ -186,7 +200,8 @@
           "hard_seek_at_session_us": [],
           "failed": false,
           "restart_compensation_ms": 0,
-          "pending_seek": null
+          "pending_seek": null,
+          "route_change_count": null
         },
         "drift_ms": -14,
         "now_session_us": 10000000,
@@ -198,7 +213,8 @@
           "drift_ms": 0,
           "at_session_us": 9000000,
           "playing": true
-        }
+        },
+        "route_change_count": 0
       },
       "expected": {
         "action": {
@@ -210,7 +226,8 @@
           "hard_seek_at_session_us": [],
           "failed": false,
           "restart_compensation_ms": 0,
-          "pending_seek": null
+          "pending_seek": null,
+          "route_change_count": 0
         },
         "error_ms": -14
       }
@@ -224,7 +241,8 @@
           "hard_seek_at_session_us": [],
           "failed": false,
           "restart_compensation_ms": 0,
-          "pending_seek": null
+          "pending_seek": null,
+          "route_change_count": null
         },
         "drift_ms": 15,
         "now_session_us": 10000000,
@@ -236,7 +254,8 @@
           "drift_ms": 0,
           "at_session_us": 9000000,
           "playing": true
-        }
+        },
+        "route_change_count": 0
       },
       "expected": {
         "action": {
@@ -248,7 +267,8 @@
           "hard_seek_at_session_us": [],
           "failed": false,
           "restart_compensation_ms": 0,
-          "pending_seek": null
+          "pending_seek": null,
+          "route_change_count": 0
         },
         "error_ms": 15
       }
@@ -262,7 +282,8 @@
           "hard_seek_at_session_us": [],
           "failed": false,
           "restart_compensation_ms": 0,
-          "pending_seek": null
+          "pending_seek": null,
+          "route_change_count": null
         },
         "drift_ms": -15,
         "now_session_us": 10000000,
@@ -274,7 +295,8 @@
           "drift_ms": 0,
           "at_session_us": 9000000,
           "playing": true
-        }
+        },
+        "route_change_count": 0
       },
       "expected": {
         "action": {
@@ -286,7 +308,8 @@
           "hard_seek_at_session_us": [],
           "failed": false,
           "restart_compensation_ms": 0,
-          "pending_seek": null
+          "pending_seek": null,
+          "route_change_count": 0
         },
         "error_ms": -15
       }
@@ -300,7 +323,8 @@
           "hard_seek_at_session_us": [],
           "failed": false,
           "restart_compensation_ms": 0,
-          "pending_seek": null
+          "pending_seek": null,
+          "route_change_count": null
         },
         "drift_ms": 24,
         "now_session_us": 10000000,
@@ -312,7 +336,8 @@
           "drift_ms": 0,
           "at_session_us": 9000000,
           "playing": true
-        }
+        },
+        "route_change_count": 0
       },
       "expected": {
         "action": {
@@ -324,7 +349,8 @@
           "hard_seek_at_session_us": [],
           "failed": false,
           "restart_compensation_ms": 0,
-          "pending_seek": null
+          "pending_seek": null,
+          "route_change_count": 0
         },
         "error_ms": 24
       }
@@ -338,7 +364,8 @@
           "hard_seek_at_session_us": [],
           "failed": false,
           "restart_compensation_ms": 0,
-          "pending_seek": null
+          "pending_seek": null,
+          "route_change_count": null
         },
         "drift_ms": -24,
         "now_session_us": 10000000,
@@ -350,7 +377,8 @@
           "drift_ms": 0,
           "at_session_us": 9000000,
           "playing": true
-        }
+        },
+        "route_change_count": 0
       },
       "expected": {
         "action": {
@@ -362,7 +390,8 @@
           "hard_seek_at_session_us": [],
           "failed": false,
           "restart_compensation_ms": 0,
-          "pending_seek": null
+          "pending_seek": null,
+          "route_change_count": 0
         },
         "error_ms": -24
       }
@@ -376,7 +405,8 @@
           "hard_seek_at_session_us": [],
           "failed": false,
           "restart_compensation_ms": 0,
-          "pending_seek": null
+          "pending_seek": null,
+          "route_change_count": null
         },
         "drift_ms": 25,
         "now_session_us": 10000000,
@@ -388,7 +418,8 @@
           "drift_ms": 0,
           "at_session_us": 9000000,
           "playing": true
-        }
+        },
+        "route_change_count": 0
       },
       "expected": {
         "action": {
@@ -401,7 +432,8 @@
           "hard_seek_at_session_us": [],
           "failed": false,
           "restart_compensation_ms": 0,
-          "pending_seek": null
+          "pending_seek": null,
+          "route_change_count": 0
         },
         "error_ms": 25
       }
@@ -415,7 +447,8 @@
           "hard_seek_at_session_us": [],
           "failed": false,
           "restart_compensation_ms": 0,
-          "pending_seek": null
+          "pending_seek": null,
+          "route_change_count": null
         },
         "drift_ms": -25,
         "now_session_us": 10000000,
@@ -427,7 +460,8 @@
           "drift_ms": 0,
           "at_session_us": 9000000,
           "playing": true
-        }
+        },
+        "route_change_count": 0
       },
       "expected": {
         "action": {
@@ -440,7 +474,8 @@
           "hard_seek_at_session_us": [],
           "failed": false,
           "restart_compensation_ms": 0,
-          "pending_seek": null
+          "pending_seek": null,
+          "route_change_count": 0
         },
         "error_ms": -25
       }
@@ -454,7 +489,8 @@
           "hard_seek_at_session_us": [],
           "failed": false,
           "restart_compensation_ms": 0,
-          "pending_seek": null
+          "pending_seek": null,
+          "route_change_count": null
         },
         "drift_ms": 26,
         "now_session_us": 10000000,
@@ -466,7 +502,8 @@
           "drift_ms": 0,
           "at_session_us": 9000000,
           "playing": true
-        }
+        },
+        "route_change_count": 0
       },
       "expected": {
         "action": {
@@ -479,7 +516,8 @@
           "hard_seek_at_session_us": [],
           "failed": false,
           "restart_compensation_ms": 0,
-          "pending_seek": null
+          "pending_seek": null,
+          "route_change_count": 0
         },
         "error_ms": 26
       }
@@ -493,7 +531,8 @@
           "hard_seek_at_session_us": [],
           "failed": false,
           "restart_compensation_ms": 0,
-          "pending_seek": null
+          "pending_seek": null,
+          "route_change_count": null
         },
         "drift_ms": -26,
         "now_session_us": 10000000,
@@ -505,7 +544,8 @@
           "drift_ms": 0,
           "at_session_us": 9000000,
           "playing": true
-        }
+        },
+        "route_change_count": 0
       },
       "expected": {
         "action": {
@@ -518,7 +558,8 @@
           "hard_seek_at_session_us": [],
           "failed": false,
           "restart_compensation_ms": 0,
-          "pending_seek": null
+          "pending_seek": null,
+          "route_change_count": 0
         },
         "error_ms": -26
       }
@@ -532,7 +573,8 @@
           "hard_seek_at_session_us": [],
           "failed": false,
           "restart_compensation_ms": 0,
-          "pending_seek": null
+          "pending_seek": null,
+          "route_change_count": null
         },
         "drift_ms": 119,
         "now_session_us": 10000000,
@@ -544,7 +586,8 @@
           "drift_ms": 0,
           "at_session_us": 9000000,
           "playing": true
-        }
+        },
+        "route_change_count": 0
       },
       "expected": {
         "action": {
@@ -557,7 +600,8 @@
           "hard_seek_at_session_us": [],
           "failed": false,
           "restart_compensation_ms": 0,
-          "pending_seek": null
+          "pending_seek": null,
+          "route_change_count": 0
         },
         "error_ms": 119
       }
@@ -571,7 +615,8 @@
           "hard_seek_at_session_us": [],
           "failed": false,
           "restart_compensation_ms": 0,
-          "pending_seek": null
+          "pending_seek": null,
+          "route_change_count": null
         },
         "drift_ms": -119,
         "now_session_us": 10000000,
@@ -583,7 +628,8 @@
           "drift_ms": 0,
           "at_session_us": 9000000,
           "playing": true
-        }
+        },
+        "route_change_count": 0
       },
       "expected": {
         "action": {
@@ -596,7 +642,8 @@
           "hard_seek_at_session_us": [],
           "failed": false,
           "restart_compensation_ms": 0,
-          "pending_seek": null
+          "pending_seek": null,
+          "route_change_count": 0
         },
         "error_ms": -119
       }
@@ -610,7 +657,8 @@
           "hard_seek_at_session_us": [],
           "failed": false,
           "restart_compensation_ms": 0,
-          "pending_seek": null
+          "pending_seek": null,
+          "route_change_count": null
         },
         "drift_ms": 120,
         "now_session_us": 10000000,
@@ -622,7 +670,8 @@
           "drift_ms": 0,
           "at_session_us": 9000000,
           "playing": true
-        }
+        },
+        "route_change_count": 0
       },
       "expected": {
         "action": {
@@ -635,7 +684,8 @@
           "hard_seek_at_session_us": [],
           "failed": false,
           "restart_compensation_ms": 0,
-          "pending_seek": null
+          "pending_seek": null,
+          "route_change_count": 0
         },
         "error_ms": 120
       }
@@ -649,7 +699,8 @@
           "hard_seek_at_session_us": [],
           "failed": false,
           "restart_compensation_ms": 0,
-          "pending_seek": null
+          "pending_seek": null,
+          "route_change_count": null
         },
         "drift_ms": -120,
         "now_session_us": 10000000,
@@ -661,7 +712,8 @@
           "drift_ms": 0,
           "at_session_us": 9000000,
           "playing": true
-        }
+        },
+        "route_change_count": 0
       },
       "expected": {
         "action": {
@@ -674,7 +726,8 @@
           "hard_seek_at_session_us": [],
           "failed": false,
           "restart_compensation_ms": 0,
-          "pending_seek": null
+          "pending_seek": null,
+          "route_change_count": 0
         },
         "error_ms": -120
       }
@@ -688,7 +741,8 @@
           "hard_seek_at_session_us": [],
           "failed": false,
           "restart_compensation_ms": 0,
-          "pending_seek": null
+          "pending_seek": null,
+          "route_change_count": null
         },
         "drift_ms": 121,
         "now_session_us": 10000000,
@@ -700,7 +754,8 @@
           "drift_ms": 0,
           "at_session_us": 9000000,
           "playing": true
-        }
+        },
+        "route_change_count": 0
       },
       "expected": {
         "action": {
@@ -718,7 +773,8 @@
           "pending_seek": {
             "compensation_ms": 0,
             "anchor_session_us": 1000000
-          }
+          },
+          "route_change_count": 0
         },
         "error_ms": 121
       }
@@ -732,7 +788,8 @@
           "hard_seek_at_session_us": [],
           "failed": false,
           "restart_compensation_ms": 0,
-          "pending_seek": null
+          "pending_seek": null,
+          "route_change_count": null
         },
         "drift_ms": -121,
         "now_session_us": 10000000,
@@ -744,7 +801,8 @@
           "drift_ms": 0,
           "at_session_us": 9000000,
           "playing": true
-        }
+        },
+        "route_change_count": 0
       },
       "expected": {
         "action": {
@@ -762,7 +820,8 @@
           "pending_seek": {
             "compensation_ms": 0,
             "anchor_session_us": 1000000
-          }
+          },
+          "route_change_count": 0
         },
         "error_ms": -121
       }
@@ -776,7 +835,8 @@
           "hard_seek_at_session_us": [],
           "failed": false,
           "restart_compensation_ms": 0,
-          "pending_seek": null
+          "pending_seek": null,
+          "route_change_count": null
         },
         "drift_ms": 1999,
         "now_session_us": 10000000,
@@ -788,7 +848,8 @@
           "drift_ms": 0,
           "at_session_us": 9000000,
           "playing": true
-        }
+        },
+        "route_change_count": 0
       },
       "expected": {
         "action": {
@@ -806,7 +867,8 @@
           "pending_seek": {
             "compensation_ms": 0,
             "anchor_session_us": 1000000
-          }
+          },
+          "route_change_count": 0
         },
         "error_ms": 1999
       }
@@ -820,7 +882,8 @@
           "hard_seek_at_session_us": [],
           "failed": false,
           "restart_compensation_ms": 0,
-          "pending_seek": null
+          "pending_seek": null,
+          "route_change_count": null
         },
         "drift_ms": -1999,
         "now_session_us": 10000000,
@@ -832,7 +895,8 @@
           "drift_ms": 0,
           "at_session_us": 9000000,
           "playing": true
-        }
+        },
+        "route_change_count": 0
       },
       "expected": {
         "action": {
@@ -850,7 +914,8 @@
           "pending_seek": {
             "compensation_ms": 0,
             "anchor_session_us": 1000000
-          }
+          },
+          "route_change_count": 0
         },
         "error_ms": -1999
       }
@@ -864,7 +929,8 @@
           "hard_seek_at_session_us": [],
           "failed": false,
           "restart_compensation_ms": 0,
-          "pending_seek": null
+          "pending_seek": null,
+          "route_change_count": null
         },
         "drift_ms": 2000,
         "now_session_us": 10000000,
@@ -876,7 +942,8 @@
           "drift_ms": 0,
           "at_session_us": 9000000,
           "playing": true
-        }
+        },
+        "route_change_count": 0
       },
       "expected": {
         "action": {
@@ -894,7 +961,8 @@
           "pending_seek": {
             "compensation_ms": 0,
             "anchor_session_us": 1000000
-          }
+          },
+          "route_change_count": 0
         },
         "error_ms": 2000
       }
@@ -908,7 +976,8 @@
           "hard_seek_at_session_us": [],
           "failed": false,
           "restart_compensation_ms": 0,
-          "pending_seek": null
+          "pending_seek": null,
+          "route_change_count": null
         },
         "drift_ms": -2000,
         "now_session_us": 10000000,
@@ -920,7 +989,8 @@
           "drift_ms": 0,
           "at_session_us": 9000000,
           "playing": true
-        }
+        },
+        "route_change_count": 0
       },
       "expected": {
         "action": {
@@ -938,7 +1008,8 @@
           "pending_seek": {
             "compensation_ms": 0,
             "anchor_session_us": 1000000
-          }
+          },
+          "route_change_count": 0
         },
         "error_ms": -2000
       }
@@ -952,7 +1023,8 @@
           "hard_seek_at_session_us": [],
           "failed": false,
           "restart_compensation_ms": 0,
-          "pending_seek": null
+          "pending_seek": null,
+          "route_change_count": null
         },
         "drift_ms": 2001,
         "now_session_us": 10000000,
@@ -964,7 +1036,8 @@
           "drift_ms": 0,
           "at_session_us": 9000000,
           "playing": true
-        }
+        },
+        "route_change_count": 0
       },
       "expected": {
         "action": {
@@ -976,7 +1049,8 @@
           "hard_seek_at_session_us": [],
           "failed": true,
           "restart_compensation_ms": 0,
-          "pending_seek": null
+          "pending_seek": null,
+          "route_change_count": 0
         },
         "error_ms": 2001
       }
@@ -990,7 +1064,8 @@
           "hard_seek_at_session_us": [],
           "failed": false,
           "restart_compensation_ms": 0,
-          "pending_seek": null
+          "pending_seek": null,
+          "route_change_count": null
         },
         "drift_ms": -2001,
         "now_session_us": 10000000,
@@ -1002,7 +1077,8 @@
           "drift_ms": 0,
           "at_session_us": 9000000,
           "playing": true
-        }
+        },
+        "route_change_count": 0
       },
       "expected": {
         "action": {
@@ -1014,7 +1090,8 @@
           "hard_seek_at_session_us": [],
           "failed": true,
           "restart_compensation_ms": 0,
-          "pending_seek": null
+          "pending_seek": null,
+          "route_change_count": 0
         },
         "error_ms": -2001
       }
@@ -1028,7 +1105,8 @@
           "hard_seek_at_session_us": [],
           "failed": false,
           "restart_compensation_ms": 0,
-          "pending_seek": null
+          "pending_seek": null,
+          "route_change_count": null
         },
         "drift_ms": 60000,
         "now_session_us": 10000000,
@@ -1040,7 +1118,8 @@
           "drift_ms": 0,
           "at_session_us": 9000000,
           "playing": true
-        }
+        },
+        "route_change_count": 0
       },
       "expected": {
         "action": {
@@ -1052,7 +1131,8 @@
           "hard_seek_at_session_us": [],
           "failed": true,
           "restart_compensation_ms": 0,
-          "pending_seek": null
+          "pending_seek": null,
+          "route_change_count": 0
         },
         "error_ms": 60000
       }
@@ -1066,7 +1146,8 @@
           "hard_seek_at_session_us": [],
           "failed": false,
           "restart_compensation_ms": 0,
-          "pending_seek": null
+          "pending_seek": null,
+          "route_change_count": null
         },
         "drift_ms": -60000,
         "now_session_us": 10000000,
@@ -1078,7 +1159,8 @@
           "drift_ms": 0,
           "at_session_us": 9000000,
           "playing": true
-        }
+        },
+        "route_change_count": 0
       },
       "expected": {
         "action": {
@@ -1090,7 +1172,8 @@
           "hard_seek_at_session_us": [],
           "failed": true,
           "restart_compensation_ms": 0,
-          "pending_seek": null
+          "pending_seek": null,
+          "route_change_count": 0
         },
         "error_ms": -60000
       }
@@ -1104,7 +1187,8 @@
           "hard_seek_at_session_us": [],
           "failed": false,
           "restart_compensation_ms": 0,
-          "pending_seek": null
+          "pending_seek": null,
+          "route_change_count": null
         },
         "drift_ms": -375,
         "now_session_us": 10000000,
@@ -1116,7 +1200,8 @@
           "drift_ms": -375,
           "at_session_us": 9000000,
           "playing": true
-        }
+        },
+        "route_change_count": 0
       },
       "expected": {
         "action": {
@@ -1128,7 +1213,8 @@
           "hard_seek_at_session_us": [],
           "failed": false,
           "restart_compensation_ms": 0,
-          "pending_seek": null
+          "pending_seek": null,
+          "route_change_count": 0
         },
         "error_ms": 0
       }
@@ -1142,7 +1228,8 @@
           "hard_seek_at_session_us": [],
           "failed": false,
           "restart_compensation_ms": 0,
-          "pending_seek": null
+          "pending_seek": null,
+          "route_change_count": null
         },
         "drift_ms": -380,
         "now_session_us": 10000000,
@@ -1154,7 +1241,8 @@
           "drift_ms": -372,
           "at_session_us": 9000000,
           "playing": true
-        }
+        },
+        "route_change_count": 0
       },
       "expected": {
         "action": {
@@ -1166,7 +1254,8 @@
           "hard_seek_at_session_us": [],
           "failed": false,
           "restart_compensation_ms": 0,
-          "pending_seek": null
+          "pending_seek": null,
+          "route_change_count": 0
         },
         "error_ms": -8
       }
@@ -1180,7 +1269,8 @@
           "hard_seek_at_session_us": [],
           "failed": false,
           "restart_compensation_ms": 0,
-          "pending_seek": null
+          "pending_seek": null,
+          "route_change_count": null
         },
         "drift_ms": -575,
         "now_session_us": 10000000,
@@ -1192,7 +1282,8 @@
           "drift_ms": -375,
           "at_session_us": 9000000,
           "playing": true
-        }
+        },
+        "route_change_count": 0
       },
       "expected": {
         "action": {
@@ -1210,7 +1301,8 @@
           "pending_seek": {
             "compensation_ms": 0,
             "anchor_session_us": 1000000
-          }
+          },
+          "route_change_count": 0
         },
         "error_ms": -200
       }
@@ -1224,7 +1316,8 @@
           "hard_seek_at_session_us": [],
           "failed": false,
           "restart_compensation_ms": 0,
-          "pending_seek": null
+          "pending_seek": null,
+          "route_change_count": null
         },
         "drift_ms": -415,
         "now_session_us": 10000000,
@@ -1236,7 +1329,8 @@
           "drift_ms": -375,
           "at_session_us": 9000000,
           "playing": true
-        }
+        },
+        "route_change_count": 0
       },
       "expected": {
         "action": {
@@ -1249,7 +1343,8 @@
           "hard_seek_at_session_us": [],
           "failed": false,
           "restart_compensation_ms": 0,
-          "pending_seek": null
+          "pending_seek": null,
+          "route_change_count": 0
         },
         "error_ms": -40
       }
@@ -1263,7 +1358,8 @@
           "hard_seek_at_session_us": [],
           "failed": false,
           "restart_compensation_ms": 550,
-          "pending_seek": null
+          "pending_seek": null,
+          "route_change_count": null
         },
         "drift_ms": -575,
         "now_session_us": 10000000,
@@ -1275,7 +1371,8 @@
           "drift_ms": -375,
           "at_session_us": 9000000,
           "playing": true
-        }
+        },
+        "route_change_count": 0
       },
       "expected": {
         "action": {
@@ -1293,7 +1390,8 @@
           "pending_seek": {
             "compensation_ms": 550,
             "anchor_session_us": 1000000
-          }
+          },
+          "route_change_count": 0
         },
         "error_ms": -200
       }
@@ -1307,7 +1405,8 @@
           "hard_seek_at_session_us": [],
           "failed": false,
           "restart_compensation_ms": 0,
-          "pending_seek": null
+          "pending_seek": null,
+          "route_change_count": null
         },
         "drift_ms": -575,
         "now_session_us": 10000000,
@@ -1319,7 +1418,8 @@
           "drift_ms": -375,
           "at_session_us": 9000000,
           "playing": true
-        }
+        },
+        "route_change_count": 0
       },
       "expected": {
         "action": {
@@ -1337,7 +1437,8 @@
           "pending_seek": {
             "compensation_ms": 0,
             "anchor_session_us": 1000000
-          }
+          },
+          "route_change_count": 0
         },
         "error_ms": -200
       }
@@ -1351,7 +1452,8 @@
           "hard_seek_at_session_us": [],
           "failed": false,
           "restart_compensation_ms": 0,
-          "pending_seek": null
+          "pending_seek": null,
+          "route_change_count": null
         },
         "drift_ms": -3000,
         "now_session_us": 10000000,
@@ -1363,7 +1465,8 @@
           "drift_ms": -3000,
           "at_session_us": 9000000,
           "playing": true
-        }
+        },
+        "route_change_count": 0
       },
       "expected": {
         "action": {
@@ -1375,7 +1478,8 @@
           "hard_seek_at_session_us": [],
           "failed": false,
           "restart_compensation_ms": 0,
-          "pending_seek": null
+          "pending_seek": null,
+          "route_change_count": 0
         },
         "error_ms": 0
       }
@@ -1389,7 +1493,8 @@
           "hard_seek_at_session_us": [],
           "failed": false,
           "restart_compensation_ms": 0,
-          "pending_seek": null
+          "pending_seek": null,
+          "route_change_count": null
         },
         "drift_ms": -2600,
         "now_session_us": 10000000,
@@ -1401,7 +1506,8 @@
           "drift_ms": -375,
           "at_session_us": 9000000,
           "playing": true
-        }
+        },
+        "route_change_count": 0
       },
       "expected": {
         "action": {
@@ -1413,7 +1519,8 @@
           "hard_seek_at_session_us": [],
           "failed": true,
           "restart_compensation_ms": 0,
-          "pending_seek": null
+          "pending_seek": null,
+          "route_change_count": 0
         },
         "error_ms": -2225
       }
@@ -1435,7 +1542,8 @@
               "drift_ms": 0,
               "at_session_us": 9000000,
               "playing": true
-            }
+            },
+            "route_change_count": 0
           },
           "action": {
             "kind": "NUDGE",
@@ -1447,7 +1555,8 @@
             "hard_seek_at_session_us": [],
             "failed": false,
             "restart_compensation_ms": 0,
-            "pending_seek": null
+            "pending_seek": null,
+            "route_change_count": 0
           },
           "error_ms": 30
         },
@@ -1463,7 +1572,8 @@
               "drift_ms": 0,
               "at_session_us": 14000000,
               "playing": true
-            }
+            },
+            "route_change_count": 0
           },
           "action": {
             "kind": "NONE"
@@ -1474,7 +1584,8 @@
             "hard_seek_at_session_us": [],
             "failed": false,
             "restart_compensation_ms": 0,
-            "pending_seek": null
+            "pending_seek": null,
+            "route_change_count": 0
           },
           "error_ms": 20
         },
@@ -1490,7 +1601,8 @@
               "drift_ms": 0,
               "at_session_us": 19000000,
               "playing": true
-            }
+            },
+            "route_change_count": 0
           },
           "action": {
             "kind": "NONE"
@@ -1501,7 +1613,8 @@
             "hard_seek_at_session_us": [],
             "failed": false,
             "restart_compensation_ms": 0,
-            "pending_seek": null
+            "pending_seek": null,
+            "route_change_count": 0
           },
           "error_ms": 24
         },
@@ -1517,7 +1630,8 @@
               "drift_ms": 0,
               "at_session_us": 24000000,
               "playing": true
-            }
+            },
+            "route_change_count": 0
           },
           "action": {
             "kind": "NONE"
@@ -1528,7 +1642,8 @@
             "hard_seek_at_session_us": [],
             "failed": false,
             "restart_compensation_ms": 0,
-            "pending_seek": null
+            "pending_seek": null,
+            "route_change_count": 0
           },
           "error_ms": 16
         },
@@ -1544,7 +1659,8 @@
               "drift_ms": 0,
               "at_session_us": 29000000,
               "playing": true
-            }
+            },
+            "route_change_count": 0
           },
           "action": {
             "kind": "RESTORE_RATE"
@@ -1555,7 +1671,8 @@
             "hard_seek_at_session_us": [],
             "failed": false,
             "restart_compensation_ms": 0,
-            "pending_seek": null
+            "pending_seek": null,
+            "route_change_count": 0
           },
           "error_ms": 10
         },
@@ -1571,7 +1688,8 @@
               "drift_ms": 0,
               "at_session_us": 34000000,
               "playing": true
-            }
+            },
+            "route_change_count": 0
           },
           "action": {
             "kind": "NONE"
@@ -1582,7 +1700,8 @@
             "hard_seek_at_session_us": [],
             "failed": false,
             "restart_compensation_ms": 0,
-            "pending_seek": null
+            "pending_seek": null,
+            "route_change_count": 0
           },
           "error_ms": 20
         }
@@ -1603,7 +1722,8 @@
               "drift_ms": 0,
               "at_session_us": 9000000,
               "playing": true
-            }
+            },
+            "route_change_count": 0
           },
           "action": {
             "kind": "NUDGE",
@@ -1615,7 +1735,8 @@
             "hard_seek_at_session_us": [],
             "failed": false,
             "restart_compensation_ms": 0,
-            "pending_seek": null
+            "pending_seek": null,
+            "route_change_count": 0
           },
           "error_ms": 40
         },
@@ -1631,7 +1752,8 @@
               "drift_ms": 0,
               "at_session_us": 14000000,
               "playing": true
-            }
+            },
+            "route_change_count": 0
           },
           "action": {
             "kind": "NONE"
@@ -1642,7 +1764,8 @@
             "hard_seek_at_session_us": [],
             "failed": false,
             "restart_compensation_ms": 0,
-            "pending_seek": null
+            "pending_seek": null,
+            "route_change_count": 0
           },
           "error_ms": 45
         },
@@ -1658,7 +1781,8 @@
               "drift_ms": 0,
               "at_session_us": 19000000,
               "playing": true
-            }
+            },
+            "route_change_count": 0
           },
           "action": {
             "kind": "NONE"
@@ -1669,7 +1793,8 @@
             "hard_seek_at_session_us": [],
             "failed": false,
             "restart_compensation_ms": 0,
-            "pending_seek": null
+            "pending_seek": null,
+            "route_change_count": 0
           },
           "error_ms": 50
         }
@@ -1690,7 +1815,8 @@
               "drift_ms": 0,
               "at_session_us": 9000000,
               "playing": true
-            }
+            },
+            "route_change_count": 0
           },
           "action": {
             "kind": "NUDGE",
@@ -1702,7 +1828,8 @@
             "hard_seek_at_session_us": [],
             "failed": false,
             "restart_compensation_ms": 0,
-            "pending_seek": null
+            "pending_seek": null,
+            "route_change_count": 0
           },
           "error_ms": 40
         },
@@ -1718,7 +1845,8 @@
               "drift_ms": 0,
               "at_session_us": 14000000,
               "playing": true
-            }
+            },
+            "route_change_count": 0
           },
           "action": {
             "kind": "NUDGE",
@@ -1730,7 +1858,8 @@
             "hard_seek_at_session_us": [],
             "failed": false,
             "restart_compensation_ms": 0,
-            "pending_seek": null
+            "pending_seek": null,
+            "route_change_count": 0
           },
           "error_ms": -40
         },
@@ -1746,7 +1875,8 @@
               "drift_ms": 0,
               "at_session_us": 19000000,
               "playing": true
-            }
+            },
+            "route_change_count": 0
           },
           "action": {
             "kind": "NONE"
@@ -1757,7 +1887,8 @@
             "hard_seek_at_session_us": [],
             "failed": false,
             "restart_compensation_ms": 0,
-            "pending_seek": null
+            "pending_seek": null,
+            "route_change_count": 0
           },
           "error_ms": -45
         }
@@ -1778,7 +1909,8 @@
               "drift_ms": 0,
               "at_session_us": 9000000,
               "playing": true
-            }
+            },
+            "route_change_count": 0
           },
           "action": {
             "kind": "HARD_SEEK",
@@ -1795,7 +1927,8 @@
             "pending_seek": {
               "compensation_ms": 0,
               "anchor_session_us": 1000000
-            }
+            },
+            "route_change_count": 0
           },
           "error_ms": 300
         },
@@ -1811,7 +1944,8 @@
               "drift_ms": 0,
               "at_session_us": 19000000,
               "playing": true
-            }
+            },
+            "route_change_count": 0
           },
           "action": {
             "kind": "HARD_SEEK",
@@ -1829,7 +1963,8 @@
             "pending_seek": {
               "compensation_ms": 0,
               "anchor_session_us": 1000000
-            }
+            },
+            "route_change_count": 0
           },
           "error_ms": 300
         },
@@ -1845,7 +1980,8 @@
               "drift_ms": 0,
               "at_session_us": 29000000,
               "playing": true
-            }
+            },
+            "route_change_count": 0
           },
           "action": {
             "kind": "DECLARE_SYNC_FAILURE"
@@ -1860,7 +1996,8 @@
             ],
             "failed": true,
             "restart_compensation_ms": 0,
-            "pending_seek": null
+            "pending_seek": null,
+            "route_change_count": 0
           },
           "error_ms": 300
         },
@@ -1876,7 +2013,8 @@
               "drift_ms": 0,
               "at_session_us": 39000000,
               "playing": true
-            }
+            },
+            "route_change_count": 0
           },
           "action": {
             "kind": "NONE"
@@ -1891,7 +2029,8 @@
             ],
             "failed": true,
             "restart_compensation_ms": 0,
-            "pending_seek": null
+            "pending_seek": null,
+            "route_change_count": 0
           },
           "error_ms": null
         }
@@ -1912,7 +2051,8 @@
               "drift_ms": 0,
               "at_session_us": 9000000,
               "playing": true
-            }
+            },
+            "route_change_count": 0
           },
           "action": {
             "kind": "HARD_SEEK",
@@ -1929,7 +2069,8 @@
             "pending_seek": {
               "compensation_ms": 0,
               "anchor_session_us": 1000000
-            }
+            },
+            "route_change_count": 0
           },
           "error_ms": 300
         },
@@ -1945,7 +2086,8 @@
               "drift_ms": 0,
               "at_session_us": 19000000,
               "playing": true
-            }
+            },
+            "route_change_count": 0
           },
           "action": {
             "kind": "HARD_SEEK",
@@ -1963,7 +2105,8 @@
             "pending_seek": {
               "compensation_ms": 0,
               "anchor_session_us": 1000000
-            }
+            },
+            "route_change_count": 0
           },
           "error_ms": 300
         },
@@ -1979,7 +2122,8 @@
               "drift_ms": 0,
               "at_session_us": 84000000,
               "playing": true
-            }
+            },
+            "route_change_count": 0
           },
           "action": {
             "kind": "HARD_SEEK",
@@ -1996,7 +2140,8 @@
             "pending_seek": {
               "compensation_ms": 0,
               "anchor_session_us": 1000000
-            }
+            },
+            "route_change_count": 0
           },
           "error_ms": 300
         },
@@ -2012,7 +2157,8 @@
               "drift_ms": 0,
               "at_session_us": 89000000,
               "playing": true
-            }
+            },
+            "route_change_count": 0
           },
           "action": {
             "kind": "HARD_SEEK",
@@ -2030,7 +2176,8 @@
             "pending_seek": {
               "compensation_ms": 0,
               "anchor_session_us": 1000000
-            }
+            },
+            "route_change_count": 0
           },
           "error_ms": 300
         }
@@ -2051,7 +2198,8 @@
               "drift_ms": 0,
               "at_session_us": 9000000,
               "playing": true
-            }
+            },
+            "route_change_count": 0
           },
           "action": {
             "kind": "NONE"
@@ -2062,7 +2210,8 @@
             "hard_seek_at_session_us": [],
             "failed": false,
             "restart_compensation_ms": 0,
-            "pending_seek": null
+            "pending_seek": null,
+            "route_change_count": 0
           },
           "error_ms": null
         },
@@ -2078,7 +2227,8 @@
               "drift_ms": 0,
               "at_session_us": 14000000,
               "playing": true
-            }
+            },
+            "route_change_count": 0
           },
           "action": {
             "kind": "NONE"
@@ -2089,7 +2239,8 @@
             "hard_seek_at_session_us": [],
             "failed": false,
             "restart_compensation_ms": 0,
-            "pending_seek": null
+            "pending_seek": null,
+            "route_change_count": 0
           },
           "error_ms": null
         },
@@ -2105,7 +2256,8 @@
               "drift_ms": 0,
               "at_session_us": 19000000,
               "playing": true
-            }
+            },
+            "route_change_count": 0
           },
           "action": {
             "kind": "NONE"
@@ -2116,7 +2268,8 @@
             "hard_seek_at_session_us": [],
             "failed": false,
             "restart_compensation_ms": 0,
-            "pending_seek": null
+            "pending_seek": null,
+            "route_change_count": 0
           },
           "error_ms": null
         }
@@ -2137,7 +2290,8 @@
               "drift_ms": 0,
               "at_session_us": 9000000,
               "playing": true
-            }
+            },
+            "route_change_count": 0
           },
           "action": {
             "kind": "HARD_SEEK",
@@ -2154,7 +2308,8 @@
             "pending_seek": {
               "compensation_ms": 0,
               "anchor_session_us": 1000000
-            }
+            },
+            "route_change_count": 0
           },
           "error_ms": 300
         },
@@ -2170,7 +2325,8 @@
               "drift_ms": 0,
               "at_session_us": 14000000,
               "playing": true
-            }
+            },
+            "route_change_count": 0
           },
           "action": {
             "kind": "NONE"
@@ -2183,7 +2339,8 @@
             ],
             "failed": false,
             "restart_compensation_ms": 0,
-            "pending_seek": null
+            "pending_seek": null,
+            "route_change_count": 0
           },
           "error_ms": null
         },
@@ -2199,7 +2356,8 @@
               "drift_ms": 0,
               "at_session_us": 19000000,
               "playing": true
-            }
+            },
+            "route_change_count": 0
           },
           "action": {
             "kind": "NONE"
@@ -2212,7 +2370,8 @@
             ],
             "failed": false,
             "restart_compensation_ms": 0,
-            "pending_seek": null
+            "pending_seek": null,
+            "route_change_count": 0
           },
           "error_ms": null
         },
@@ -2228,7 +2387,8 @@
               "drift_ms": 0,
               "at_session_us": 24000000,
               "playing": true
-            }
+            },
+            "route_change_count": 0
           },
           "action": {
             "kind": "HARD_SEEK",
@@ -2246,7 +2406,8 @@
             "pending_seek": {
               "compensation_ms": 0,
               "anchor_session_us": 1000000
-            }
+            },
+            "route_change_count": 0
           },
           "error_ms": 300
         },
@@ -2262,7 +2423,8 @@
               "drift_ms": 0,
               "at_session_us": 29000000,
               "playing": true
-            }
+            },
+            "route_change_count": 0
           },
           "action": {
             "kind": "DECLARE_SYNC_FAILURE"
@@ -2277,7 +2439,8 @@
             ],
             "failed": true,
             "restart_compensation_ms": 0,
-            "pending_seek": null
+            "pending_seek": null,
+            "route_change_count": 0
           },
           "error_ms": 300
         }
@@ -2298,7 +2461,8 @@
               "drift_ms": 0,
               "at_session_us": 9000000,
               "playing": true
-            }
+            },
+            "route_change_count": 0
           },
           "action": {
             "kind": "NUDGE",
@@ -2310,7 +2474,8 @@
             "hard_seek_at_session_us": [],
             "failed": false,
             "restart_compensation_ms": 0,
-            "pending_seek": null
+            "pending_seek": null,
+            "route_change_count": 0
           },
           "error_ms": 40
         },
@@ -2326,7 +2491,8 @@
               "drift_ms": 0,
               "at_session_us": 14000000,
               "playing": true
-            }
+            },
+            "route_change_count": 0
           },
           "action": {
             "kind": "NONE"
@@ -2337,7 +2503,8 @@
             "hard_seek_at_session_us": [],
             "failed": false,
             "restart_compensation_ms": 0,
-            "pending_seek": null
+            "pending_seek": null,
+            "route_change_count": 0
           },
           "error_ms": null
         },
@@ -2353,7 +2520,8 @@
               "drift_ms": 0,
               "at_session_us": 19000000,
               "playing": true
-            }
+            },
+            "route_change_count": 0
           },
           "action": {
             "kind": "RESTORE_RATE"
@@ -2364,7 +2532,8 @@
             "hard_seek_at_session_us": [],
             "failed": false,
             "restart_compensation_ms": 0,
-            "pending_seek": null
+            "pending_seek": null,
+            "route_change_count": 0
           },
           "error_ms": 10
         }
@@ -2385,7 +2554,8 @@
               "drift_ms": 0,
               "at_session_us": 9000000,
               "playing": true
-            }
+            },
+            "route_change_count": 0
           },
           "action": {
             "kind": "NUDGE",
@@ -2397,7 +2567,8 @@
             "hard_seek_at_session_us": [],
             "failed": false,
             "restart_compensation_ms": 0,
-            "pending_seek": null
+            "pending_seek": null,
+            "route_change_count": 0
           },
           "error_ms": 40
         },
@@ -2413,7 +2584,8 @@
               "drift_ms": 0,
               "at_session_us": 14000000,
               "playing": true
-            }
+            },
+            "route_change_count": 0
           },
           "action": {
             "kind": "RESTORE_RATE"
@@ -2424,7 +2596,8 @@
             "hard_seek_at_session_us": [],
             "failed": false,
             "restart_compensation_ms": 0,
-            "pending_seek": null
+            "pending_seek": null,
+            "route_change_count": 0
           },
           "error_ms": null
         },
@@ -2440,7 +2613,8 @@
               "drift_ms": 0,
               "at_session_us": 19000000,
               "playing": true
-            }
+            },
+            "route_change_count": 0
           },
           "action": {
             "kind": "NONE"
@@ -2451,7 +2625,8 @@
             "hard_seek_at_session_us": [],
             "failed": false,
             "restart_compensation_ms": 0,
-            "pending_seek": null
+            "pending_seek": null,
+            "route_change_count": 0
           },
           "error_ms": null
         }
@@ -2472,7 +2647,8 @@
               "drift_ms": 0,
               "at_session_us": 9000000,
               "playing": true
-            }
+            },
+            "route_change_count": 0
           },
           "action": {
             "kind": "DECLARE_SYNC_FAILURE"
@@ -2483,7 +2659,8 @@
             "hard_seek_at_session_us": [],
             "failed": true,
             "restart_compensation_ms": 0,
-            "pending_seek": null
+            "pending_seek": null,
+            "route_change_count": 0
           },
           "error_ms": 2001
         },
@@ -2499,7 +2676,8 @@
               "drift_ms": 0,
               "at_session_us": 14000000,
               "playing": true
-            }
+            },
+            "route_change_count": 0
           },
           "action": {
             "kind": "NONE"
@@ -2510,7 +2688,8 @@
             "hard_seek_at_session_us": [],
             "failed": true,
             "restart_compensation_ms": 0,
-            "pending_seek": null
+            "pending_seek": null,
+            "route_change_count": 0
           },
           "error_ms": null
         },
@@ -2526,7 +2705,8 @@
               "drift_ms": 0,
               "at_session_us": 19000000,
               "playing": true
-            }
+            },
+            "route_change_count": 0
           },
           "action": {
             "kind": "NONE"
@@ -2537,7 +2717,8 @@
             "hard_seek_at_session_us": [],
             "failed": true,
             "restart_compensation_ms": 0,
-            "pending_seek": null
+            "pending_seek": null,
+            "route_change_count": 0
           },
           "error_ms": null
         }
@@ -2558,7 +2739,8 @@
               "drift_ms": 0,
               "at_session_us": 9000000,
               "playing": true
-            }
+            },
+            "route_change_count": 0
           },
           "action": {
             "kind": "NUDGE",
@@ -2570,7 +2752,8 @@
             "hard_seek_at_session_us": [],
             "failed": false,
             "restart_compensation_ms": 0,
-            "pending_seek": null
+            "pending_seek": null,
+            "route_change_count": 0
           },
           "error_ms": 40
         },
@@ -2586,7 +2769,8 @@
               "drift_ms": 0,
               "at_session_us": 14000000,
               "playing": true
-            }
+            },
+            "route_change_count": 0
           },
           "action": {
             "kind": "HARD_SEEK",
@@ -2603,7 +2787,8 @@
             "pending_seek": {
               "compensation_ms": 0,
               "anchor_session_us": 1000000
-            }
+            },
+            "route_change_count": 0
           },
           "error_ms": 300
         },
@@ -2619,7 +2804,8 @@
               "drift_ms": 0,
               "at_session_us": 19000000,
               "playing": true
-            }
+            },
+            "route_change_count": 0
           },
           "action": {
             "kind": "NONE"
@@ -2632,7 +2818,8 @@
             ],
             "failed": false,
             "restart_compensation_ms": 0,
-            "pending_seek": null
+            "pending_seek": null,
+            "route_change_count": 0
           },
           "error_ms": 10
         }
@@ -2653,7 +2840,8 @@
               "drift_ms": 0,
               "at_session_us": 9000000,
               "playing": true
-            }
+            },
+            "route_change_count": 0
           },
           "action": {
             "kind": "NONE"
@@ -2664,7 +2852,8 @@
             "hard_seek_at_session_us": [],
             "failed": false,
             "restart_compensation_ms": 0,
-            "pending_seek": null
+            "pending_seek": null,
+            "route_change_count": 0
           },
           "error_ms": 0
         },
@@ -2680,7 +2869,8 @@
               "drift_ms": 0,
               "at_session_us": 14000000,
               "playing": true
-            }
+            },
+            "route_change_count": 0
           },
           "action": {
             "kind": "NONE"
@@ -2691,7 +2881,8 @@
             "hard_seek_at_session_us": [],
             "failed": false,
             "restart_compensation_ms": 0,
-            "pending_seek": null
+            "pending_seek": null,
+            "route_change_count": 0
           },
           "error_ms": 24
         },
@@ -2707,7 +2898,8 @@
               "drift_ms": 0,
               "at_session_us": 19000000,
               "playing": true
-            }
+            },
+            "route_change_count": 0
           },
           "action": {
             "kind": "NONE"
@@ -2718,7 +2910,8 @@
             "hard_seek_at_session_us": [],
             "failed": false,
             "restart_compensation_ms": 0,
-            "pending_seek": null
+            "pending_seek": null,
+            "route_change_count": 0
           },
           "error_ms": -24
         }
@@ -2739,7 +2932,8 @@
               "drift_ms": 0,
               "at_session_us": 9000000,
               "playing": true
-            }
+            },
+            "route_change_count": 0
           },
           "action": {
             "kind": "NONE"
@@ -2750,7 +2944,8 @@
             "hard_seek_at_session_us": [],
             "failed": false,
             "restart_compensation_ms": 0,
-            "pending_seek": null
+            "pending_seek": null,
+            "route_change_count": 0
           },
           "error_ms": null
         },
@@ -2766,7 +2961,8 @@
               "drift_ms": 0,
               "at_session_us": 14000000,
               "playing": true
-            }
+            },
+            "route_change_count": 0
           },
           "action": {
             "kind": "NONE"
@@ -2777,7 +2973,8 @@
             "hard_seek_at_session_us": [],
             "failed": false,
             "restart_compensation_ms": 0,
-            "pending_seek": null
+            "pending_seek": null,
+            "route_change_count": 0
           },
           "error_ms": null
         }
@@ -2794,7 +2991,8 @@
             "playing": true,
             "route_transitioning": false,
             "anchor_session_us": 1000000,
-            "reference": null
+            "reference": null,
+            "route_change_count": 0
           },
           "action": {
             "kind": "NONE"
@@ -2805,7 +3003,8 @@
             "hard_seek_at_session_us": [],
             "failed": false,
             "restart_compensation_ms": 0,
-            "pending_seek": null
+            "pending_seek": null,
+            "route_change_count": 0
           },
           "error_ms": null
         },
@@ -2817,7 +3016,8 @@
             "playing": true,
             "route_transitioning": false,
             "anchor_session_us": 1000000,
-            "reference": null
+            "reference": null,
+            "route_change_count": 0
           },
           "action": {
             "kind": "NONE"
@@ -2828,7 +3028,8 @@
             "hard_seek_at_session_us": [],
             "failed": false,
             "restart_compensation_ms": 0,
-            "pending_seek": null
+            "pending_seek": null,
+            "route_change_count": 0
           },
           "error_ms": null
         },
@@ -2840,7 +3041,8 @@
             "playing": true,
             "route_transitioning": false,
             "anchor_session_us": 1000000,
-            "reference": null
+            "reference": null,
+            "route_change_count": 0
           },
           "action": {
             "kind": "NONE"
@@ -2851,7 +3053,8 @@
             "hard_seek_at_session_us": [],
             "failed": false,
             "restart_compensation_ms": 0,
-            "pending_seek": null
+            "pending_seek": null,
+            "route_change_count": 0
           },
           "error_ms": null
         }
@@ -2872,7 +3075,8 @@
               "drift_ms": 0,
               "at_session_us": 9000000,
               "playing": true
-            }
+            },
+            "route_change_count": 0
           },
           "action": {
             "kind": "NUDGE",
@@ -2884,7 +3088,8 @@
             "hard_seek_at_session_us": [],
             "failed": false,
             "restart_compensation_ms": 0,
-            "pending_seek": null
+            "pending_seek": null,
+            "route_change_count": 0
           },
           "error_ms": 40
         },
@@ -2896,7 +3101,8 @@
             "playing": true,
             "route_transitioning": false,
             "anchor_session_us": 1000000,
-            "reference": null
+            "reference": null,
+            "route_change_count": 0
           },
           "action": {
             "kind": "RESTORE_RATE"
@@ -2907,7 +3113,8 @@
             "hard_seek_at_session_us": [],
             "failed": false,
             "restart_compensation_ms": 0,
-            "pending_seek": null
+            "pending_seek": null,
+            "route_change_count": 0
           },
           "error_ms": null
         },
@@ -2923,7 +3130,8 @@
               "drift_ms": 0,
               "at_session_us": 19000000,
               "playing": true
-            }
+            },
+            "route_change_count": 0
           },
           "action": {
             "kind": "NUDGE",
@@ -2935,7 +3143,8 @@
             "hard_seek_at_session_us": [],
             "failed": false,
             "restart_compensation_ms": 0,
-            "pending_seek": null
+            "pending_seek": null,
+            "route_change_count": 0
           },
           "error_ms": 40
         }
@@ -2956,7 +3165,8 @@
               "drift_ms": 0,
               "at_session_us": 9000000,
               "playing": false
-            }
+            },
+            "route_change_count": 0
           },
           "action": {
             "kind": "NONE"
@@ -2967,7 +3177,8 @@
             "hard_seek_at_session_us": [],
             "failed": false,
             "restart_compensation_ms": 0,
-            "pending_seek": null
+            "pending_seek": null,
+            "route_change_count": 0
           },
           "error_ms": null
         }
@@ -2988,7 +3199,8 @@
               "drift_ms": 0,
               "at_session_us": 2000000,
               "playing": true
-            }
+            },
+            "route_change_count": 0
           },
           "action": {
             "kind": "NONE"
@@ -2999,7 +3211,8 @@
             "hard_seek_at_session_us": [],
             "failed": false,
             "restart_compensation_ms": 0,
-            "pending_seek": null
+            "pending_seek": null,
+            "route_change_count": 0
           },
           "error_ms": null
         },
@@ -3015,7 +3228,8 @@
               "drift_ms": 0,
               "at_session_us": 2500000,
               "playing": true
-            }
+            },
+            "route_change_count": 0
           },
           "action": {
             "kind": "HARD_SEEK",
@@ -3032,7 +3246,8 @@
             "pending_seek": {
               "compensation_ms": 0,
               "anchor_session_us": 1000000
-            }
+            },
+            "route_change_count": 0
           },
           "error_ms": 400
         }
@@ -3053,7 +3268,8 @@
               "drift_ms": 0,
               "at_session_us": 12999999,
               "playing": true
-            }
+            },
+            "route_change_count": 0
           },
           "action": {
             "kind": "NONE"
@@ -3064,7 +3280,8 @@
             "hard_seek_at_session_us": [],
             "failed": false,
             "restart_compensation_ms": 0,
-            "pending_seek": null
+            "pending_seek": null,
+            "route_change_count": 0
           },
           "error_ms": null
         },
@@ -3080,7 +3297,8 @@
               "drift_ms": 0,
               "at_session_us": 13000000,
               "playing": true
-            }
+            },
+            "route_change_count": 0
           },
           "action": {
             "kind": "HARD_SEEK",
@@ -3097,7 +3315,8 @@
             "pending_seek": {
               "compensation_ms": 0,
               "anchor_session_us": 1000000
-            }
+            },
+            "route_change_count": 0
           },
           "error_ms": 400
         }
@@ -3118,7 +3337,8 @@
               "drift_ms": 0,
               "at_session_us": 10000000,
               "playing": true
-            }
+            },
+            "route_change_count": 0
           },
           "action": {
             "kind": "NONE"
@@ -3129,7 +3349,8 @@
             "hard_seek_at_session_us": [],
             "failed": false,
             "restart_compensation_ms": 0,
-            "pending_seek": null
+            "pending_seek": null,
+            "route_change_count": 0
           },
           "error_ms": null
         }
@@ -3150,7 +3371,8 @@
               "drift_ms": -375,
               "at_session_us": 9000000,
               "playing": true
-            }
+            },
+            "route_change_count": 0
           },
           "action": {
             "kind": "NONE"
@@ -3161,7 +3383,8 @@
             "hard_seek_at_session_us": [],
             "failed": false,
             "restart_compensation_ms": 0,
-            "pending_seek": null
+            "pending_seek": null,
+            "route_change_count": 0
           },
           "error_ms": 0
         },
@@ -3177,7 +3400,8 @@
               "drift_ms": -371,
               "at_session_us": 14000000,
               "playing": true
-            }
+            },
+            "route_change_count": 0
           },
           "action": {
             "kind": "NONE"
@@ -3188,7 +3412,8 @@
             "hard_seek_at_session_us": [],
             "failed": false,
             "restart_compensation_ms": 0,
-            "pending_seek": null
+            "pending_seek": null,
+            "route_change_count": 0
           },
           "error_ms": -21
         },
@@ -3204,7 +3429,8 @@
               "drift_ms": -640,
               "at_session_us": 19000000,
               "playing": true
-            }
+            },
+            "route_change_count": 0
           },
           "action": {
             "kind": "NONE"
@@ -3215,7 +3441,8 @@
             "hard_seek_at_session_us": [],
             "failed": false,
             "restart_compensation_ms": 0,
-            "pending_seek": null
+            "pending_seek": null,
+            "route_change_count": 0
           },
           "error_ms": -10
         },
@@ -3231,7 +3458,8 @@
               "drift_ms": -380,
               "at_session_us": 24000000,
               "playing": true
-            }
+            },
+            "route_change_count": 0
           },
           "action": {
             "kind": "NONE"
@@ -3242,7 +3470,8 @@
             "hard_seek_at_session_us": [],
             "failed": false,
             "restart_compensation_ms": 0,
-            "pending_seek": null
+            "pending_seek": null,
+            "route_change_count": 0
           },
           "error_ms": 20
         }
@@ -3263,7 +3492,8 @@
               "drift_ms": -375,
               "at_session_us": 9000000,
               "playing": true
-            }
+            },
+            "route_change_count": 0
           },
           "action": {
             "kind": "HARD_SEEK",
@@ -3280,7 +3510,8 @@
             "pending_seek": {
               "compensation_ms": 0,
               "anchor_session_us": 1000000
-            }
+            },
+            "route_change_count": 0
           },
           "error_ms": -200
         },
@@ -3296,7 +3527,8 @@
               "drift_ms": -375,
               "at_session_us": 14000000,
               "playing": true
-            }
+            },
+            "route_change_count": 0
           },
           "action": {
             "kind": "HARD_SEEK",
@@ -3314,7 +3546,8 @@
             "pending_seek": {
               "compensation_ms": 550,
               "anchor_session_us": 1000000
-            }
+            },
+            "route_change_count": 0
           },
           "error_ms": -550
         },
@@ -3330,7 +3563,8 @@
               "drift_ms": -375,
               "at_session_us": 19000000,
               "playing": true
-            }
+            },
+            "route_change_count": 0
           },
           "action": {
             "kind": "NONE"
@@ -3344,7 +3578,8 @@
             ],
             "failed": false,
             "restart_compensation_ms": 550,
-            "pending_seek": null
+            "pending_seek": null,
+            "route_change_count": 0
           },
           "error_ms": 0
         },
@@ -3360,7 +3595,8 @@
               "drift_ms": -375,
               "at_session_us": 24000000,
               "playing": true
-            }
+            },
+            "route_change_count": 0
           },
           "action": {
             "kind": "NONE"
@@ -3374,7 +3610,8 @@
             ],
             "failed": false,
             "restart_compensation_ms": 550,
-            "pending_seek": null
+            "pending_seek": null,
+            "route_change_count": 0
           },
           "error_ms": 5
         }
@@ -3395,7 +3632,8 @@
               "drift_ms": -375,
               "at_session_us": 9000000,
               "playing": true
-            }
+            },
+            "route_change_count": 0
           },
           "action": {
             "kind": "HARD_SEEK",
@@ -3412,7 +3650,8 @@
             "pending_seek": {
               "compensation_ms": 0,
               "anchor_session_us": 1000000
-            }
+            },
+            "route_change_count": 0
           },
           "error_ms": -200
         },
@@ -3428,7 +3667,8 @@
               "drift_ms": -375,
               "at_session_us": 10000000,
               "playing": true
-            }
+            },
+            "route_change_count": 0
           },
           "action": {
             "kind": "NONE"
@@ -3444,7 +3684,8 @@
             "pending_seek": {
               "compensation_ms": 0,
               "anchor_session_us": 1000000
-            }
+            },
+            "route_change_count": 0
           },
           "error_ms": null
         },
@@ -3460,7 +3701,8 @@
               "drift_ms": -375,
               "at_session_us": 14000000,
               "playing": true
-            }
+            },
+            "route_change_count": 0
           },
           "action": {
             "kind": "HARD_SEEK",
@@ -3478,7 +3720,8 @@
             "pending_seek": {
               "compensation_ms": 550,
               "anchor_session_us": 1000000
-            }
+            },
+            "route_change_count": 0
           },
           "error_ms": -550
         }
@@ -3499,7 +3742,8 @@
               "drift_ms": -375,
               "at_session_us": 9000000,
               "playing": true
-            }
+            },
+            "route_change_count": 0
           },
           "action": {
             "kind": "HARD_SEEK",
@@ -3516,7 +3760,8 @@
             "pending_seek": {
               "compensation_ms": 0,
               "anchor_session_us": 1000000
-            }
+            },
+            "route_change_count": 0
           },
           "error_ms": -200
         },
@@ -3532,7 +3777,8 @@
               "drift_ms": -375,
               "at_session_us": 14000000,
               "playing": true
-            }
+            },
+            "route_change_count": 0
           },
           "action": {
             "kind": "HARD_SEEK",
@@ -3550,7 +3796,8 @@
             "pending_seek": {
               "compensation_ms": 0,
               "anchor_session_us": 1000000
-            }
+            },
+            "route_change_count": 0
           },
           "error_ms": 300
         }
@@ -3571,7 +3818,8 @@
               "drift_ms": -375,
               "at_session_us": 9000000,
               "playing": true
-            }
+            },
+            "route_change_count": 0
           },
           "action": {
             "kind": "HARD_SEEK",
@@ -3588,7 +3836,8 @@
             "pending_seek": {
               "compensation_ms": 0,
               "anchor_session_us": 1000000
-            }
+            },
+            "route_change_count": 0
           },
           "error_ms": -200
         },
@@ -3604,7 +3853,8 @@
               "drift_ms": -375,
               "at_session_us": 14000000,
               "playing": true
-            }
+            },
+            "route_change_count": 0
           },
           "action": {
             "kind": "HARD_SEEK",
@@ -3622,7 +3872,8 @@
             "pending_seek": {
               "compensation_ms": 1000,
               "anchor_session_us": 1000000
-            }
+            },
+            "route_change_count": 0
           },
           "error_ms": -1500
         }
@@ -3643,7 +3894,8 @@
               "drift_ms": -375,
               "at_session_us": 9000000,
               "playing": true
-            }
+            },
+            "route_change_count": 0
           },
           "action": {
             "kind": "HARD_SEEK",
@@ -3660,7 +3912,8 @@
             "pending_seek": {
               "compensation_ms": 0,
               "anchor_session_us": 1000000
-            }
+            },
+            "route_change_count": 0
           },
           "error_ms": -200
         },
@@ -3676,7 +3929,8 @@
               "drift_ms": -375,
               "at_session_us": 14000000,
               "playing": true
-            }
+            },
+            "route_change_count": 0
           },
           "action": {
             "kind": "HARD_SEEK",
@@ -3694,7 +3948,8 @@
             "pending_seek": {
               "compensation_ms": 0,
               "anchor_session_us": 12000000
-            }
+            },
+            "route_change_count": 0
           },
           "error_ms": -550
         }
@@ -3715,7 +3970,8 @@
               "drift_ms": -375,
               "at_session_us": 9000000,
               "playing": true
-            }
+            },
+            "route_change_count": 0
           },
           "action": {
             "kind": "HARD_SEEK",
@@ -3732,7 +3988,8 @@
             "pending_seek": {
               "compensation_ms": 0,
               "anchor_session_us": 1000000
-            }
+            },
+            "route_change_count": 0
           },
           "error_ms": -200
         },
@@ -3748,7 +4005,8 @@
               "drift_ms": -375,
               "at_session_us": 14000000,
               "playing": true
-            }
+            },
+            "route_change_count": 0
           },
           "action": {
             "kind": "HARD_SEEK",
@@ -3766,7 +4024,8 @@
             "pending_seek": {
               "compensation_ms": 550,
               "anchor_session_us": 1000000
-            }
+            },
+            "route_change_count": 0
           },
           "error_ms": -550
         },
@@ -3782,7 +4041,8 @@
               "drift_ms": 0,
               "at_session_us": 19000000,
               "playing": true
-            }
+            },
+            "route_change_count": 0
           },
           "action": {
             "kind": "NONE"
@@ -3796,7 +4056,8 @@
             ],
             "failed": false,
             "restart_compensation_ms": 0,
-            "pending_seek": null
+            "pending_seek": null,
+            "route_change_count": 0
           },
           "error_ms": null
         },
@@ -3812,7 +4073,8 @@
               "drift_ms": -375,
               "at_session_us": 79000000,
               "playing": true
-            }
+            },
+            "route_change_count": 0
           },
           "action": {
             "kind": "HARD_SEEK",
@@ -3829,9 +4091,925 @@
             "pending_seek": {
               "compensation_ms": 0,
               "anchor_session_us": 1000000
-            }
+            },
+            "route_change_count": 0
           },
           "error_ms": -200
+        }
+      ]
+    },
+    {
+      "name": "a1r-a-route-change-while-playing-forgets-the-learned-latency",
+      "steps": [
+        {
+          "input": {
+            "drift_ms": -575,
+            "now_session_us": 10000000,
+            "expected_position_ms": 45000,
+            "playing": true,
+            "route_transitioning": false,
+            "anchor_session_us": 1000000,
+            "reference": {
+              "drift_ms": -375,
+              "at_session_us": 9000000,
+              "playing": true
+            },
+            "route_change_count": 0
+          },
+          "action": {
+            "kind": "HARD_SEEK",
+            "position_ms": 44625
+          },
+          "state_after": {
+            "nudging": false,
+            "nudge_rate": 1.0,
+            "hard_seek_at_session_us": [
+              10000000
+            ],
+            "failed": false,
+            "restart_compensation_ms": 0,
+            "pending_seek": {
+              "compensation_ms": 0,
+              "anchor_session_us": 1000000
+            },
+            "route_change_count": 0
+          },
+          "error_ms": -200
+        },
+        {
+          "input": {
+            "drift_ms": -925,
+            "now_session_us": 15000000,
+            "expected_position_ms": 45000,
+            "playing": true,
+            "route_transitioning": false,
+            "anchor_session_us": 1000000,
+            "reference": {
+              "drift_ms": -375,
+              "at_session_us": 14000000,
+              "playing": true
+            },
+            "route_change_count": 0
+          },
+          "action": {
+            "kind": "HARD_SEEK",
+            "position_ms": 45175
+          },
+          "state_after": {
+            "nudging": false,
+            "nudge_rate": 1.0,
+            "hard_seek_at_session_us": [
+              10000000,
+              15000000
+            ],
+            "failed": false,
+            "restart_compensation_ms": 550,
+            "pending_seek": {
+              "compensation_ms": 550,
+              "anchor_session_us": 1000000
+            },
+            "route_change_count": 0
+          },
+          "error_ms": -550
+        },
+        {
+          "input": {
+            "drift_ms": -375,
+            "now_session_us": 20000000,
+            "expected_position_ms": 45000,
+            "playing": true,
+            "route_transitioning": false,
+            "anchor_session_us": 1000000,
+            "reference": {
+              "drift_ms": -375,
+              "at_session_us": 19000000,
+              "playing": true
+            },
+            "route_change_count": 0
+          },
+          "action": {
+            "kind": "NONE"
+          },
+          "state_after": {
+            "nudging": false,
+            "nudge_rate": 1.0,
+            "hard_seek_at_session_us": [
+              10000000,
+              15000000
+            ],
+            "failed": false,
+            "restart_compensation_ms": 550,
+            "pending_seek": null,
+            "route_change_count": 0
+          },
+          "error_ms": 0
+        },
+        {
+          "input": {
+            "drift_ms": -575,
+            "now_session_us": 80000000,
+            "expected_position_ms": 45000,
+            "playing": true,
+            "route_transitioning": false,
+            "anchor_session_us": 1000000,
+            "reference": {
+              "drift_ms": -375,
+              "at_session_us": 79000000,
+              "playing": true
+            },
+            "route_change_count": 1
+          },
+          "action": {
+            "kind": "HARD_SEEK",
+            "position_ms": 44625
+          },
+          "state_after": {
+            "nudging": false,
+            "nudge_rate": 1.0,
+            "hard_seek_at_session_us": [
+              80000000
+            ],
+            "failed": false,
+            "restart_compensation_ms": 0,
+            "pending_seek": {
+              "compensation_ms": 0,
+              "anchor_session_us": 1000000
+            },
+            "route_change_count": 1
+          },
+          "error_ms": -200
+        }
+      ]
+    },
+    {
+      "name": "a1r-a-route-transition-while-paused-forgets-the-learned-latency",
+      "steps": [
+        {
+          "input": {
+            "drift_ms": -575,
+            "now_session_us": 10000000,
+            "expected_position_ms": 45000,
+            "playing": true,
+            "route_transitioning": false,
+            "anchor_session_us": 1000000,
+            "reference": {
+              "drift_ms": -375,
+              "at_session_us": 9000000,
+              "playing": true
+            },
+            "route_change_count": 0
+          },
+          "action": {
+            "kind": "HARD_SEEK",
+            "position_ms": 44625
+          },
+          "state_after": {
+            "nudging": false,
+            "nudge_rate": 1.0,
+            "hard_seek_at_session_us": [
+              10000000
+            ],
+            "failed": false,
+            "restart_compensation_ms": 0,
+            "pending_seek": {
+              "compensation_ms": 0,
+              "anchor_session_us": 1000000
+            },
+            "route_change_count": 0
+          },
+          "error_ms": -200
+        },
+        {
+          "input": {
+            "drift_ms": -925,
+            "now_session_us": 15000000,
+            "expected_position_ms": 45000,
+            "playing": true,
+            "route_transitioning": false,
+            "anchor_session_us": 1000000,
+            "reference": {
+              "drift_ms": -375,
+              "at_session_us": 14000000,
+              "playing": true
+            },
+            "route_change_count": 0
+          },
+          "action": {
+            "kind": "HARD_SEEK",
+            "position_ms": 45175
+          },
+          "state_after": {
+            "nudging": false,
+            "nudge_rate": 1.0,
+            "hard_seek_at_session_us": [
+              10000000,
+              15000000
+            ],
+            "failed": false,
+            "restart_compensation_ms": 550,
+            "pending_seek": {
+              "compensation_ms": 550,
+              "anchor_session_us": 1000000
+            },
+            "route_change_count": 0
+          },
+          "error_ms": -550
+        },
+        {
+          "input": {
+            "drift_ms": -375,
+            "now_session_us": 20000000,
+            "expected_position_ms": 45000,
+            "playing": false,
+            "route_transitioning": true,
+            "anchor_session_us": 1000000,
+            "reference": {
+              "drift_ms": 0,
+              "at_session_us": 19000000,
+              "playing": true
+            },
+            "route_change_count": 0
+          },
+          "action": {
+            "kind": "NONE"
+          },
+          "state_after": {
+            "nudging": false,
+            "nudge_rate": 1.0,
+            "hard_seek_at_session_us": [
+              10000000,
+              15000000
+            ],
+            "failed": false,
+            "restart_compensation_ms": 0,
+            "pending_seek": null,
+            "route_change_count": 0
+          },
+          "error_ms": null
+        },
+        {
+          "input": {
+            "drift_ms": -575,
+            "now_session_us": 80000000,
+            "expected_position_ms": 45000,
+            "playing": true,
+            "route_transitioning": false,
+            "anchor_session_us": 1000000,
+            "reference": {
+              "drift_ms": -375,
+              "at_session_us": 79000000,
+              "playing": true
+            },
+            "route_change_count": 0
+          },
+          "action": {
+            "kind": "HARD_SEEK",
+            "position_ms": 44625
+          },
+          "state_after": {
+            "nudging": false,
+            "nudge_rate": 1.0,
+            "hard_seek_at_session_us": [
+              80000000
+            ],
+            "failed": false,
+            "restart_compensation_ms": 0,
+            "pending_seek": {
+              "compensation_ms": 0,
+              "anchor_session_us": 1000000
+            },
+            "route_change_count": 0
+          },
+          "error_ms": -200
+        }
+      ]
+    },
+    {
+      "name": "a1r-a-route-change-while-paused-between-ticks-forgets-the-learned-latency",
+      "steps": [
+        {
+          "input": {
+            "drift_ms": -575,
+            "now_session_us": 10000000,
+            "expected_position_ms": 45000,
+            "playing": true,
+            "route_transitioning": false,
+            "anchor_session_us": 1000000,
+            "reference": {
+              "drift_ms": -375,
+              "at_session_us": 9000000,
+              "playing": true
+            },
+            "route_change_count": 0
+          },
+          "action": {
+            "kind": "HARD_SEEK",
+            "position_ms": 44625
+          },
+          "state_after": {
+            "nudging": false,
+            "nudge_rate": 1.0,
+            "hard_seek_at_session_us": [
+              10000000
+            ],
+            "failed": false,
+            "restart_compensation_ms": 0,
+            "pending_seek": {
+              "compensation_ms": 0,
+              "anchor_session_us": 1000000
+            },
+            "route_change_count": 0
+          },
+          "error_ms": -200
+        },
+        {
+          "input": {
+            "drift_ms": -925,
+            "now_session_us": 15000000,
+            "expected_position_ms": 45000,
+            "playing": true,
+            "route_transitioning": false,
+            "anchor_session_us": 1000000,
+            "reference": {
+              "drift_ms": -375,
+              "at_session_us": 14000000,
+              "playing": true
+            },
+            "route_change_count": 0
+          },
+          "action": {
+            "kind": "HARD_SEEK",
+            "position_ms": 45175
+          },
+          "state_after": {
+            "nudging": false,
+            "nudge_rate": 1.0,
+            "hard_seek_at_session_us": [
+              10000000,
+              15000000
+            ],
+            "failed": false,
+            "restart_compensation_ms": 550,
+            "pending_seek": {
+              "compensation_ms": 550,
+              "anchor_session_us": 1000000
+            },
+            "route_change_count": 0
+          },
+          "error_ms": -550
+        },
+        {
+          "input": {
+            "drift_ms": -375,
+            "now_session_us": 20000000,
+            "expected_position_ms": 45000,
+            "playing": false,
+            "route_transitioning": false,
+            "anchor_session_us": 1000000,
+            "reference": {
+              "drift_ms": 0,
+              "at_session_us": 19000000,
+              "playing": true
+            },
+            "route_change_count": 1
+          },
+          "action": {
+            "kind": "NONE"
+          },
+          "state_after": {
+            "nudging": false,
+            "nudge_rate": 1.0,
+            "hard_seek_at_session_us": [
+              10000000,
+              15000000
+            ],
+            "failed": false,
+            "restart_compensation_ms": 0,
+            "pending_seek": null,
+            "route_change_count": 1
+          },
+          "error_ms": null
+        },
+        {
+          "input": {
+            "drift_ms": -575,
+            "now_session_us": 80000000,
+            "expected_position_ms": 45000,
+            "playing": true,
+            "route_transitioning": false,
+            "anchor_session_us": 1000000,
+            "reference": {
+              "drift_ms": -375,
+              "at_session_us": 79000000,
+              "playing": true
+            },
+            "route_change_count": 1
+          },
+          "action": {
+            "kind": "HARD_SEEK",
+            "position_ms": 44625
+          },
+          "state_after": {
+            "nudging": false,
+            "nudge_rate": 1.0,
+            "hard_seek_at_session_us": [
+              80000000
+            ],
+            "failed": false,
+            "restart_compensation_ms": 0,
+            "pending_seek": {
+              "compensation_ms": 0,
+              "anchor_session_us": 1000000
+            },
+            "route_change_count": 1
+          },
+          "error_ms": -200
+        }
+      ]
+    },
+    {
+      "name": "a1r-a-route-change-after-sync-failure-forgets-the-learned-latency",
+      "steps": [
+        {
+          "input": {
+            "drift_ms": -575,
+            "now_session_us": 10000000,
+            "expected_position_ms": 45000,
+            "playing": true,
+            "route_transitioning": false,
+            "anchor_session_us": 1000000,
+            "reference": {
+              "drift_ms": -375,
+              "at_session_us": 9000000,
+              "playing": true
+            },
+            "route_change_count": 0
+          },
+          "action": {
+            "kind": "HARD_SEEK",
+            "position_ms": 44625
+          },
+          "state_after": {
+            "nudging": false,
+            "nudge_rate": 1.0,
+            "hard_seek_at_session_us": [
+              10000000
+            ],
+            "failed": false,
+            "restart_compensation_ms": 0,
+            "pending_seek": {
+              "compensation_ms": 0,
+              "anchor_session_us": 1000000
+            },
+            "route_change_count": 0
+          },
+          "error_ms": -200
+        },
+        {
+          "input": {
+            "drift_ms": -925,
+            "now_session_us": 15000000,
+            "expected_position_ms": 45000,
+            "playing": true,
+            "route_transitioning": false,
+            "anchor_session_us": 1000000,
+            "reference": {
+              "drift_ms": -375,
+              "at_session_us": 14000000,
+              "playing": true
+            },
+            "route_change_count": 0
+          },
+          "action": {
+            "kind": "HARD_SEEK",
+            "position_ms": 45175
+          },
+          "state_after": {
+            "nudging": false,
+            "nudge_rate": 1.0,
+            "hard_seek_at_session_us": [
+              10000000,
+              15000000
+            ],
+            "failed": false,
+            "restart_compensation_ms": 550,
+            "pending_seek": {
+              "compensation_ms": 550,
+              "anchor_session_us": 1000000
+            },
+            "route_change_count": 0
+          },
+          "error_ms": -550
+        },
+        {
+          "input": {
+            "drift_ms": -2900,
+            "now_session_us": 20000000,
+            "expected_position_ms": 45000,
+            "playing": true,
+            "route_transitioning": false,
+            "anchor_session_us": 1000000,
+            "reference": {
+              "drift_ms": -375,
+              "at_session_us": 19000000,
+              "playing": true
+            },
+            "route_change_count": 0
+          },
+          "action": {
+            "kind": "DECLARE_SYNC_FAILURE"
+          },
+          "state_after": {
+            "nudging": false,
+            "nudge_rate": 1.0,
+            "hard_seek_at_session_us": [
+              10000000,
+              15000000
+            ],
+            "failed": true,
+            "restart_compensation_ms": 1000,
+            "pending_seek": null,
+            "route_change_count": 0
+          },
+          "error_ms": -2525
+        },
+        {
+          "input": {
+            "drift_ms": -375,
+            "now_session_us": 25000000,
+            "expected_position_ms": 45000,
+            "playing": true,
+            "route_transitioning": false,
+            "anchor_session_us": 1000000,
+            "reference": {
+              "drift_ms": 0,
+              "at_session_us": 24000000,
+              "playing": true
+            },
+            "route_change_count": 1
+          },
+          "action": {
+            "kind": "NONE"
+          },
+          "state_after": {
+            "nudging": false,
+            "nudge_rate": 1.0,
+            "hard_seek_at_session_us": [
+              10000000,
+              15000000
+            ],
+            "failed": true,
+            "restart_compensation_ms": 0,
+            "pending_seek": null,
+            "route_change_count": 1
+          },
+          "error_ms": null
+        },
+        {
+          "input": {
+            "drift_ms": -375,
+            "now_session_us": 30000000,
+            "expected_position_ms": 45000,
+            "playing": true,
+            "route_transitioning": true,
+            "anchor_session_us": 1000000,
+            "reference": {
+              "drift_ms": 0,
+              "at_session_us": 29000000,
+              "playing": true
+            },
+            "route_change_count": 2
+          },
+          "action": {
+            "kind": "NONE"
+          },
+          "state_after": {
+            "nudging": false,
+            "nudge_rate": 1.0,
+            "hard_seek_at_session_us": [
+              10000000,
+              15000000
+            ],
+            "failed": true,
+            "restart_compensation_ms": 0,
+            "pending_seek": null,
+            "route_change_count": 2
+          },
+          "error_ms": null
+        }
+      ]
+    },
+    {
+      "name": "a1r-a-route-change-between-ticks-is-seen-at-the-next-tick",
+      "steps": [
+        {
+          "input": {
+            "drift_ms": -575,
+            "now_session_us": 10000000,
+            "expected_position_ms": 45000,
+            "playing": true,
+            "route_transitioning": false,
+            "anchor_session_us": 1000000,
+            "reference": {
+              "drift_ms": -375,
+              "at_session_us": 9000000,
+              "playing": true
+            },
+            "route_change_count": 4
+          },
+          "action": {
+            "kind": "HARD_SEEK",
+            "position_ms": 44625
+          },
+          "state_after": {
+            "nudging": false,
+            "nudge_rate": 1.0,
+            "hard_seek_at_session_us": [
+              10000000
+            ],
+            "failed": false,
+            "restart_compensation_ms": 0,
+            "pending_seek": {
+              "compensation_ms": 0,
+              "anchor_session_us": 1000000
+            },
+            "route_change_count": 4
+          },
+          "error_ms": -200
+        },
+        {
+          "input": {
+            "drift_ms": -925,
+            "now_session_us": 15000000,
+            "expected_position_ms": 45000,
+            "playing": true,
+            "route_transitioning": false,
+            "anchor_session_us": 1000000,
+            "reference": {
+              "drift_ms": -375,
+              "at_session_us": 14000000,
+              "playing": true
+            },
+            "route_change_count": 4
+          },
+          "action": {
+            "kind": "HARD_SEEK",
+            "position_ms": 45175
+          },
+          "state_after": {
+            "nudging": false,
+            "nudge_rate": 1.0,
+            "hard_seek_at_session_us": [
+              10000000,
+              15000000
+            ],
+            "failed": false,
+            "restart_compensation_ms": 550,
+            "pending_seek": {
+              "compensation_ms": 550,
+              "anchor_session_us": 1000000
+            },
+            "route_change_count": 4
+          },
+          "error_ms": -550
+        },
+        {
+          "input": {
+            "drift_ms": -375,
+            "now_session_us": 20000000,
+            "expected_position_ms": 45000,
+            "playing": true,
+            "route_transitioning": false,
+            "anchor_session_us": 1000000,
+            "reference": {
+              "drift_ms": -375,
+              "at_session_us": 19000000,
+              "playing": true
+            },
+            "route_change_count": 4
+          },
+          "action": {
+            "kind": "NONE"
+          },
+          "state_after": {
+            "nudging": false,
+            "nudge_rate": 1.0,
+            "hard_seek_at_session_us": [
+              10000000,
+              15000000
+            ],
+            "failed": false,
+            "restart_compensation_ms": 550,
+            "pending_seek": null,
+            "route_change_count": 4
+          },
+          "error_ms": 0
+        },
+        {
+          "input": {
+            "drift_ms": -375,
+            "now_session_us": 25000000,
+            "expected_position_ms": 45000,
+            "playing": true,
+            "route_transitioning": false,
+            "anchor_session_us": 1000000,
+            "reference": {
+              "drift_ms": -375,
+              "at_session_us": 24000000,
+              "playing": true
+            },
+            "route_change_count": 5
+          },
+          "action": {
+            "kind": "NONE"
+          },
+          "state_after": {
+            "nudging": false,
+            "nudge_rate": 1.0,
+            "hard_seek_at_session_us": [
+              10000000,
+              15000000
+            ],
+            "failed": false,
+            "restart_compensation_ms": 0,
+            "pending_seek": null,
+            "route_change_count": 5
+          },
+          "error_ms": 0
+        }
+      ]
+    },
+    {
+      "name": "a1r-a-pending-seek-under-a-changed-route-teaches-nothing",
+      "steps": [
+        {
+          "input": {
+            "drift_ms": -575,
+            "now_session_us": 10000000,
+            "expected_position_ms": 45000,
+            "playing": true,
+            "route_transitioning": false,
+            "anchor_session_us": 1000000,
+            "reference": {
+              "drift_ms": -375,
+              "at_session_us": 9000000,
+              "playing": true
+            },
+            "route_change_count": 0
+          },
+          "action": {
+            "kind": "HARD_SEEK",
+            "position_ms": 44625
+          },
+          "state_after": {
+            "nudging": false,
+            "nudge_rate": 1.0,
+            "hard_seek_at_session_us": [
+              10000000
+            ],
+            "failed": false,
+            "restart_compensation_ms": 0,
+            "pending_seek": {
+              "compensation_ms": 0,
+              "anchor_session_us": 1000000
+            },
+            "route_change_count": 0
+          },
+          "error_ms": -200
+        },
+        {
+          "input": {
+            "drift_ms": -925,
+            "now_session_us": 15000000,
+            "expected_position_ms": 45000,
+            "playing": true,
+            "route_transitioning": false,
+            "anchor_session_us": 1000000,
+            "reference": {
+              "drift_ms": -375,
+              "at_session_us": 14000000,
+              "playing": true
+            },
+            "route_change_count": 1
+          },
+          "action": {
+            "kind": "HARD_SEEK",
+            "position_ms": 44625
+          },
+          "state_after": {
+            "nudging": false,
+            "nudge_rate": 1.0,
+            "hard_seek_at_session_us": [
+              10000000,
+              15000000
+            ],
+            "failed": false,
+            "restart_compensation_ms": 0,
+            "pending_seek": {
+              "compensation_ms": 0,
+              "anchor_session_us": 1000000
+            },
+            "route_change_count": 1
+          },
+          "error_ms": -550
+        }
+      ]
+    },
+    {
+      "name": "a1r-a-future-dated-reference-is-not-usable",
+      "steps": [
+        {
+          "input": {
+            "drift_ms": 400,
+            "now_session_us": 10000000,
+            "expected_position_ms": 45000,
+            "playing": true,
+            "route_transitioning": false,
+            "anchor_session_us": 1000000,
+            "reference": {
+              "drift_ms": 0,
+              "at_session_us": 10000001,
+              "playing": true
+            },
+            "route_change_count": 0
+          },
+          "action": {
+            "kind": "NONE"
+          },
+          "state_after": {
+            "nudging": false,
+            "nudge_rate": 1.0,
+            "hard_seek_at_session_us": [],
+            "failed": false,
+            "restart_compensation_ms": 0,
+            "pending_seek": null,
+            "route_change_count": 0
+          },
+          "error_ms": null
+        },
+        {
+          "input": {
+            "drift_ms": 400,
+            "now_session_us": 10000000,
+            "expected_position_ms": 45000,
+            "playing": true,
+            "route_transitioning": false,
+            "anchor_session_us": 1000000,
+            "reference": {
+              "drift_ms": 0,
+              "at_session_us": 3610000000,
+              "playing": true
+            },
+            "route_change_count": 0
+          },
+          "action": {
+            "kind": "NONE"
+          },
+          "state_after": {
+            "nudging": false,
+            "nudge_rate": 1.0,
+            "hard_seek_at_session_us": [],
+            "failed": false,
+            "restart_compensation_ms": 0,
+            "pending_seek": null,
+            "route_change_count": 0
+          },
+          "error_ms": null
+        },
+        {
+          "input": {
+            "drift_ms": 400,
+            "now_session_us": 10000000,
+            "expected_position_ms": 45000,
+            "playing": true,
+            "route_transitioning": false,
+            "anchor_session_us": 1000000,
+            "reference": {
+              "drift_ms": 0,
+              "at_session_us": 10000000,
+              "playing": true
+            },
+            "route_change_count": 0
+          },
+          "action": {
+            "kind": "HARD_SEEK",
+            "position_ms": 45000
+          },
+          "state_after": {
+            "nudging": false,
+            "nudge_rate": 1.0,
+            "hard_seek_at_session_us": [
+              10000000
+            ],
+            "failed": false,
+            "restart_compensation_ms": 0,
+            "pending_seek": {
+              "compensation_ms": 0,
+              "anchor_session_us": 1000000
+            },
+            "route_change_count": 0
+          },
+          "error_ms": 400
         }
       ]
     },
@@ -3850,7 +5028,8 @@
               "drift_ms": -375,
               "at_session_us": 9000000,
               "playing": true
-            }
+            },
+            "route_change_count": 0
           },
           "action": {
             "kind": "HARD_SEEK",
@@ -3867,7 +5046,8 @@
             "pending_seek": {
               "compensation_ms": 0,
               "anchor_session_us": 1000000
-            }
+            },
+            "route_change_count": 0
           },
           "error_ms": -200
         },
@@ -3883,7 +5063,8 @@
               "drift_ms": -375,
               "at_session_us": 14000000,
               "playing": true
-            }
+            },
+            "route_change_count": 0
           },
           "action": {
             "kind": "NONE"
@@ -3896,7 +5077,8 @@
             ],
             "failed": false,
             "restart_compensation_ms": 0,
-            "pending_seek": null
+            "pending_seek": null,
+            "route_change_count": 0
           },
           "error_ms": null
         },
@@ -3912,7 +5094,8 @@
               "drift_ms": -375,
               "at_session_us": 19000000,
               "playing": true
-            }
+            },
+            "route_change_count": 0
           },
           "action": {
             "kind": "HARD_SEEK",
@@ -3930,7 +5113,8 @@
             "pending_seek": {
               "compensation_ms": 0,
               "anchor_session_us": 1000000
-            }
+            },
+            "route_change_count": 0
           },
           "error_ms": -550
         }
@@ -3939,7 +5123,7 @@
   ],
   "epochs": [
     {
-      "name": "new-epoch-keeps-only-the-learned-latency",
+      "name": "new-epoch-keeps-only-the-learned-latency-and-its-route",
       "op": "new_epoch",
       "state": {
         "nudging": true,
@@ -3953,7 +5137,8 @@
         "pending_seek": {
           "compensation_ms": 550,
           "anchor_session_us": 1000000
-        }
+        },
+        "route_change_count": 3
       },
       "expected": {
         "nudging": false,
@@ -3961,7 +5146,8 @@
         "hard_seek_at_session_us": [],
         "failed": false,
         "restart_compensation_ms": 550,
-        "pending_seek": null
+        "pending_seek": null,
+        "route_change_count": 3
       }
     },
     {
@@ -3979,7 +5165,8 @@
         "pending_seek": {
           "compensation_ms": 550,
           "anchor_session_us": 1000000
-        }
+        },
+        "route_change_count": 3
       },
       "expected": {
         "nudging": false,
@@ -3987,7 +5174,8 @@
         "hard_seek_at_session_us": [],
         "failed": false,
         "restart_compensation_ms": 0,
-        "pending_seek": null
+        "pending_seek": null,
+        "route_change_count": null
       }
     }
   ]

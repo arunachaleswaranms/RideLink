@@ -83,6 +83,31 @@ class AudioSessionLifecycleTest {
         assertEquals(3_000L, transition.lastDurationUs, "so the whole transition is measured, not its tail")
     }
 
+    /**
+     * ADR-004 Amendment A1 decision 4 (PR #32 review): the drift ladder learns that the route moved
+     * from this count, so a transition that began and settled between two of its ticks must still
+     * have moved it — once per transition, however many callbacks the transition produced.
+     */
+    @Test
+    fun `every transition begun is counted once, and settling or timing out keeps the count`() {
+        var transition = RouteTransitionTracker.begin(RouteTransitionState(), nowMonoUs = 1_000)
+        transition = RouteTransitionTracker.begin(transition, nowMonoUs = 2_000)
+        assertEquals(1L, transition.beganCount, "a burst of callbacks is one transition")
+        transition = RouteTransitionTracker.settle(transition, nowMonoUs = 3_000)
+        assertEquals(1L, transition.beganCount, "settling does not undo it")
+        transition = RouteTransitionTracker.begin(transition, nowMonoUs = 4_000)
+        transition = RouteTransitionTracker.timeout(transition, nowMonoUs = 4_000 + RouteTransitionTracker.DEFAULT_TIMEOUT_US)
+        assertFalse(transition.transitioning)
+        assertEquals(2L, transition.beganCount, "and neither does a timeout settlement")
+    }
+
+    @Test
+    fun `a media services reset keeps counting transitions rather than starting again`() {
+        val state = AudioSessionState(open = true, generation = 3, transition = RouteTransitionState(beganCount = 5))
+        val outcome = AudioSessionLifecycle.reduce(state, AudioSessionEvent.MediaServicesReset(3, atMonoUs = 7_000))
+        assertEquals(6L, outcome.state.transition.beganCount, "a restarted count could repeat a value already seen")
+    }
+
     // --- OpenRequested / CloseRequested / OpenAborted (this phase's final hardening pass, Issue 1) --
 
     /**

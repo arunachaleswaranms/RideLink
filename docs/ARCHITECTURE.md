@@ -806,14 +806,18 @@ instant:
   share is never chased. A differential lag, such as one phone's Bluetooth path, is corrected as any
   other error.
 - **A leader report is usable only when it is settled.** It must be `playing`, sampled ≥ 1.5 s after
-  the anchor and ≤ 12 s old. The local sample must also be ≥ 1.5 s past the anchor and past this
+  the anchor, ≤ 12 s old, and stamped no later than this device's own sample. The local sample must
+  also be ≥ 1.5 s past the anchor and past this
   device's last hard seek. Without such a report the ladder decides nothing and releases any nudge
   to 1.0.
 - **A hard seek lands where the reference output will be once this device's output has restarted.**
   The target is `expected + leader drift + restartCompensationMs`. Media3's position stands still
   while an `AudioTrack` restarts, so a seek re-incurs the latency it was meant to remove. The
   compensation is learned from each seek's own residual, clamped to 0–1 000 ms, kept across playback
-  epochs and forgotten on a route change.
+  epochs, and forgotten on any route change. A route change is either peer transitioning, or this
+  device's own count of route transitions begun having moved, which catches one that came and went
+  between two ticks. The route is checked before every early return, so this holds while paused and
+  after a sync failure too.
 - **Every position used for synchronisation is a live read at its own instant**
   (`SyncPlayerPort.samplePosition`), never the 250 ms UI cache paired with "now".
 
