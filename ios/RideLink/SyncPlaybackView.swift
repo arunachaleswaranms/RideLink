@@ -74,6 +74,8 @@ struct SyncPlaybackView: View {
             row("queue revision / size", "\(diagnostics.queueRevision) / \(diagnostics.queueSize)")
             row("local drift", diagnostics.localDriftMs.map { "\($0) ms" } ?? "—")
             row("peer drift", diagnostics.peerDriftMs.map { "\($0) ms" } ?? "—")
+            row("sync error", diagnostics.syncErrorMs.map { "\($0) ms" } ?? "—")
+            row("restart compensation", "\(diagnostics.restartCompensationMs) ms")
             row("last correction", diagnostics.lastCorrection.rawValue)
             row("playback rate", String(diagnostics.playbackRate))
             row("hard seeks", String(diagnostics.hardSeekCount))

@@ -188,6 +188,11 @@ data class AudioRouteSnapshot(
     val transitionTimedOutCount: Int = 0,
     /** True until a new transition begins after the most recent timeout settlement. Local only. */
     val lastTransitionTimedOut: Boolean = false,
+    /**
+     * [RouteTransitionState.beganCount]: route transitions begun on this device. Local only and never
+     * encoded; the drift ladder reads whether it changed (ADR-004 Amendment A1 decision 4).
+     */
+    val transitionBeganCount: Long = 0,
 ) {
     /**
      * ADR-016, as corrected by its Amendment A1: `reduced` whenever the effective output profile is a

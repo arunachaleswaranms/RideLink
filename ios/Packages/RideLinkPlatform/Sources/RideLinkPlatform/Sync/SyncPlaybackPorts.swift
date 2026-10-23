@@ -77,6 +77,13 @@ public protocol SyncContentPort: Sendable {
 public protocol SyncPlayerPort: Sendable {
     func playerState() async -> PlayerState
 
+    /// ADR-004 Amendment A1 decision 1: the player's position read live and stamped with
+    /// `monotonicNowUs` — the coordinator's own clock — in the same step as the read. Every drift
+    /// measurement, `POSITION_REPORT`, `PLAYBACK_STATE` and `STATE_SNAPSHOT` is taken from this at its
+    /// own instant, never from `playerState()`, whose position is published by a 250 ms UI loop. A
+    /// read, not an effect.
+    func samplePosition(monotonicNowUs: @escaping @Sendable () -> Int64) async -> PlayerPositionSample
+
     /// Brief §26's materialisation point, and **only** that: the item that is actually current
     /// becomes the local queue's one selected entry, so Now Playing metadata describes what is
     /// loaded. The authoritative shared queue is deliberately never copied into `LocalQueue`
@@ -149,10 +156,34 @@ public protocol SyncDeadlineSleeper: Sendable {
     func sleep(untilLocalMonoUs: Int64) async
 }
 
+/// What one drift tick knows about routes: whether **either** peer reports
+/// `AUDIO_STATE.route_state: "transitioning"` (PROTOCOL §4.4, ARCHITECTURE §7.3's suspension
+/// condition), and this device's own count of route transitions begun
+/// (`AudioRouteSnapshot.transitionBeganCount`, ADR-004 Amendment A1 decision 4).
+public struct SyncRouteObservation: Sendable, Equatable {
+    public let transitioning: Bool
+    public let localChangeCount: Int64
+
+    public init(transitioning: Bool, localChangeCount: Int64) {
+        self.transitioning = transitioning
+        self.localChangeCount = localChangeCount
+    }
+}
+
 /// Whether **either** peer currently reports `AUDIO_STATE.route_state: "transitioning"` (PROTOCOL
 /// §4.4) — ARCHITECTURE §7.3's suspension condition for the drift ladder.
 public protocol SyncRouteStatePort: Sendable {
     func isRouteTransitioning() async -> Bool
+
+    /// Both route facts the drift tick needs, read together in one hop. The default reports a local
+    /// route that never changes, for ports that have none to count.
+    func routeObservation() async -> SyncRouteObservation
+}
+
+public extension SyncRouteStatePort {
+    func routeObservation() async -> SyncRouteObservation {
+        SyncRouteObservation(transitioning: await isRouteTransitioning(), localChangeCount: 0)
+    }
 }
 
 /// Zero-behaviour-change wrapper reaching the manager's `PlaybackRelay`.

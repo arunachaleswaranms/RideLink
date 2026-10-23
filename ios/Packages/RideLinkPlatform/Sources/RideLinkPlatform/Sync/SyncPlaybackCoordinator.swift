@@ -57,9 +57,10 @@ import RideLinkCore
 ///   held a command whose clock was untrusted but let a later `QUEUE_SNAPSHOT` apply straight past
 ///   it, so the held `NEXT` resolved against a revision it was never authored against. The whole
 ///   authoritative stream is now held in arrival order and replayed in it (Finding D).
-/// - **A correction's snapshot keeps the correction's own identity** (`emitPlaybackStateIfOwned`).
-///   Reading the *live* generation inside the emit meant a snapshot caused by a correction in
-///   Session A could be enqueued into Session B (Finding E).
+/// - **A correction's snapshot kept the correction's own identity** (Finding E). Reading the *live*
+///   generation inside the emit meant a snapshot caused by a correction in Session A could be
+///   enqueued into Session B. ADR-024 Amendment A16 removed the snapshot itself: since ADR-004
+///   Amendment A1 a leader never corrects, so no correction re-states authoritative state.
 public actor SyncPlaybackCoordinator {
     let monotonicNowUs: @Sendable () -> Int64
     let localPeerId: PeerId
@@ -306,6 +307,11 @@ public actor SyncPlaybackCoordinator {
     }
 
     var driftState = DriftController.reset()
+
+    /// ADR-004 Amendment A1 decision 2: the leader's latest `POSITION_REPORT` for the current epoch, as
+    /// its drift against this device's timeline. Read only by a follower; whether it is still usable
+    /// is `DriftController`'s question, not this property's.
+    var peerReference: DriftReference?
     private var tickTask: Task<Void, Never>?
 
     /// Ends the PROTOCOL §5 cadence loop. `tickTask` is `private`, and the inbound half of this
@@ -754,6 +760,7 @@ public actor SyncPlaybackCoordinator {
         // read `timeline?.trackHash`/`timeline?.queueItemId` — both wiped here — instead of anything
         // that survives a link loss the way ADR-004 says local playback itself does.
         driftState = DriftController.reset()
+        peerReference = nil
         playbackDesynchronized = false
         queueDesynchronized = false
         // ADR-024 Amendment A8: `queueState` is deliberately **not** reset here. Everything above it
@@ -776,6 +783,7 @@ public actor SyncPlaybackCoordinator {
         diagnostics.currentTrackHash = nil
         diagnostics.localDriftMs = nil
         diagnostics.peerDriftMs = nil
+        diagnostics.syncErrorMs = nil
         diagnostics.lastCorrection = .none
         diagnostics.playbackRate = DriftController.rateNormal
         diagnostics.hardSeekCount = 0
@@ -1068,6 +1076,7 @@ public actor SyncPlaybackCoordinator {
         deferredDrainTask?.cancel()
         deferredDrainTask = nil
         driftState = DriftController.reset()
+        peerReference = nil
         // Amendment A6 Finding B: **every** coordinator write this path makes happens here, before
         // the one suspension it takes, and nothing follows that suspension.
         //
@@ -1085,6 +1094,7 @@ public actor SyncPlaybackCoordinator {
         diagnostics.deferredCommandCount = 0
         diagnostics.localDriftMs = nil
         diagnostics.peerDriftMs = nil
+        diagnostics.syncErrorMs = nil
         diagnostics.playbackRate = DriftController.rateNormal
         diagnostics.cancelledPendingPlayCount += cancelled
         publishDiagnostics()
@@ -1648,12 +1658,14 @@ public actor SyncPlaybackCoordinator {
         // they must never disagree.
         if !keepDelivered { rideAuthorityEpoch = 0 }
         driftState = DriftController.reset()
+        peerReference = nil
         // Amendment A6 Finding B, swept: the identical post-`restoreRate` write shape, in the second
         // of that call's three callers. Every write first, the unfenced player effect last.
         diagnostics.syncState = .inactive
         diagnostics.currentTrackHash = currentPlaybackIdentity?.trackHash
         diagnostics.localDriftMs = nil
         diagnostics.peerDriftMs = nil
+        diagnostics.syncErrorMs = nil
         diagnostics.deferredCommandCount = deferredEvents.count
         diagnostics.playbackRate = DriftController.rateNormal
         diagnostics.cancelledPendingPlayCount += cancelled

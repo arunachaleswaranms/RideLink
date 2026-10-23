@@ -92,3 +92,24 @@ public struct PlayerState: Sendable, Equatable {
         localEntryId != nil && durationMs > 0 && positionMs >= durationMs && !playing
     }
 }
+
+/// One position read and the monotonic instant it was taken (ADR-004 Amendment A1 decision 1).
+///
+/// `PlayerState.positionMs` is published by a 250 ms loop for the UI. Pairing that cached value with
+/// a fresh instant reports up to 250 ms of drift that does not exist (STATUS problem 131), so
+/// synchronisation reads this instead and measures at `atMonoUs`, never at "now".
+public struct PlayerPositionSample: Sendable, Equatable {
+    public let positionMs: Int64
+    public let durationMs: Int64
+    public let playing: Bool
+    public let rate: Double
+    public let atMonoUs: Int64
+
+    public init(positionMs: Int64, durationMs: Int64, playing: Bool, rate: Double, atMonoUs: Int64) {
+        self.positionMs = positionMs
+        self.durationMs = durationMs
+        self.playing = playing
+        self.rate = rate
+        self.atMonoUs = atMonoUs
+    }
+}

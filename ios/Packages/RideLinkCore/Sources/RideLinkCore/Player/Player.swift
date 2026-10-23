@@ -21,6 +21,12 @@ public protocol Player: Sendable {
     /// Pushed on every state change, including position ticks while playing.
     func setStateSink(_ sink: @escaping @Sendable (PlayerState) -> Void) async
 
+    /// The engine's position **now**, stamped with `monotonicNowUs` at the moment it is read
+    /// (ADR-004 Amendment A1 decision 1). A real binding reads its engine live. The default — the
+    /// published `state`, stamped now — exists for fakes that have no engine to read, and is exactly
+    /// the stale pairing synchronisation must not use in production.
+    func samplePosition(monotonicNowUs: @escaping @Sendable () -> Int64) async -> PlayerPositionSample
+
     /// Installs the Phase 6 coexistence lifetime. Delayed predecessor effects become inert.
     func beginCoexistenceLifetime(_ generation: Int64) async
 
@@ -41,6 +47,14 @@ public protocol Player: Sendable {
 }
 
 public extension Player {
+    func samplePosition(monotonicNowUs: @escaping @Sendable () -> Int64) async -> PlayerPositionSample {
+        let current = await state
+        return PlayerPositionSample(
+            positionMs: current.positionMs, durationMs: current.durationMs, playing: current.playing,
+            rate: current.rate, atMonoUs: monotonicNowUs()
+        )
+    }
+
     func beginCoexistenceLifetime(_: Int64) async {}
     func setCoexistenceGain(_: Double, generation _: Int64) async -> Bool { false }
     func pauseForVoice(generation _: Int64, trackToken _: String) async -> Bool { false }

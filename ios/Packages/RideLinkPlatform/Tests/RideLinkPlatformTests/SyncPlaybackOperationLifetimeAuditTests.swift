@@ -67,7 +67,7 @@ final class SyncPlaybackOperationLifetimeAuditTests: XCTestCase {
     /// `PlaybackBounds.positionReportIntervalMs`, in microseconds.
     private static let positionReportUs: Int64 = 5_000_000
 
-    private func build() async {
+    private func build(localPeerId: PeerId = SyncTestValues.leaderPeerId) async {
         session = FakeSyncSession()
         player = FakeSyncPlayer()
         content = FakeSyncContent()
@@ -78,7 +78,7 @@ final class SyncPlaybackOperationLifetimeAuditTests: XCTestCase {
         idSeed += 50
         coordinator = SyncPlaybackCoordinator(
             monotonicNowUs: { clock.now() },
-            localPeerId: SyncTestValues.leaderPeerId,
+            localPeerId: localPeerId,
             session: session,
             player: player,
             content: content,
@@ -338,17 +338,26 @@ final class SyncPlaybackOperationLifetimeAuditTests: XCTestCase {
     /// session — parked inside a rate nudge across the whole boundary — woke up and moved the live
     /// session's counter. Exactly A3 Finding C's shape, one function further along.
     func testACorrectionParkedInsideItsOnlyPlayerCallHasNoEffectOnTheSessionThatReplacedIt() async {
-        await build()
-        await connectAsLeader()
-        let deadlineA = await playAndStart(Self.hashA)
+        // ADR-004 Amendment A1: only a follower corrects — the leader's output is the reference — so
+        // the correction that parks across the boundary is a follower's. Mirrors Android's case.
+        await build(localPeerId: SyncTestValues.followerPeerId)
+        await followerConnects(generation: 1)
+        let anchorA = clock.now()
+        await deliverAndAwait(followerPlay(Self.hashA, effectiveAtUs: anchorA))
+        await expect("Session A is playing") { [self] in await player.calls.contains(.start) }
+        await expect("the cadence tick is armed") { [self] in !clock.pendingDeadlines().isEmpty }
+        guard let tickAtUs = clock.pendingDeadlines().max() else { return XCTFail("no tick is armed") }
+        await deliverAndAwait(.positionReport(
+            trackHash: Self.hashA, positionMs: (tickAtUs - 1_000_000 - anchorA) / 1_000,
+            atSessionUs: tickAtUs - 1_000_000, playing: true, playbackRate: 1.0
+        ))
 
-        // Enough drift for ADR-004's first tier, and a parked `setRate` to hold the correction open.
+        // Enough error for ADR-004's first tier, and a parked `setRate` to hold the correction open.
         await player.gateCalls { call in
             if case .setRate = call { return true }
             return false
         }
-        let tickAtUs = clock.now() + Self.positionReportUs
-        let expectedMs = (tickAtUs - deadlineA) / 1_000
+        let expectedMs = (tickAtUs - anchorA) / 1_000
         await player.setState(
             PlayerState(
                 positionMs: expectedMs + Self.nudgeDriftMs, durationMs: Self.trackDurationMs, playing: true, rate: 1.0
@@ -357,8 +366,18 @@ final class SyncPlaybackOperationLifetimeAuditTests: XCTestCase {
         clock.advance(to: tickAtUs)
         await expect("the correction parked inside its rate nudge") { [self] in await player.isGateParked }
 
-        await boundary(generation: 2)
-        _ = await establishSessionB()
+        await coordinator.handleLinkLost()
+        await followerConnects(generation: 2)
+        await deliverAndAwait(followerPlay(Self.hashX, effectiveAtUs: clock.now()))
+        await expect("Session B is playing its own track") { [self] in
+            await coordinator.diagnostics.currentTrackHash == Self.hashX
+        }
+        // Session B's own start is scheduled work too; let it land before the snapshot below, or the
+        // comparison catches B's own `markSynced` rather than anything Session A did.
+        await expect("Session B's own start landed") { [self] in
+            await coordinator.diagnostics.syncState == .synced
+        }
+        await player.setState(PlayerState(positionMs: 0, durationMs: Self.trackDurationMs, playing: true, rate: 1.0))
 
         let callsBefore = await player.calls
         let diagnosticsBefore = await coordinator.diagnostics
@@ -375,6 +394,34 @@ final class SyncPlaybackOperationLifetimeAuditTests: XCTestCase {
         )
         let sentAfter = await session.playbackMessages().count
         XCTAssertEqual(sentAfter, sentBefore, "and puts nothing on Session B's wire")
+    }
+
+    private func followerConnects(generation: Int64) async {
+        await session.setClock(SessionClockEstimate(offsetToLeaderUs: 0, rttP95Us: 8_000, ready: true))
+        await session.setGeneration(generation)
+        await coordinator.handleConnected(isLocalLeader: false)
+        await content.addLocal(Self.hashA)
+        await content.addLocal(Self.hashX)
+        await awaitOutboundQuiescent()
+    }
+
+    private func followerPlay(_ hash: ContentHash, effectiveAtUs: Int64) -> PlaybackMessage {
+        .play(
+            header: PlaybackCommandHeader(
+                commandSeq: 1, effectiveAtSessionUs: effectiveAtUs, issuedBy: SyncTestValues.leaderPeerId, queueRevision: 0
+            ),
+            trackHash: hash,
+            positionMs: 0,
+            queueItemId: SyncTestValues.ulid(hash == Self.hashA ? 21 : 22)
+        )
+    }
+
+    private func deliverAndAwait(_ message: PlaybackMessage) async {
+        let before = await coordinator.diagnostics.inboundProcessedCount
+        await session.deliver(message)
+        await expect("the frame was considered") { [self] in
+            await coordinator.diagnostics.inboundProcessedCount > before
+        }
     }
 
     // MARK: - Same-session controls

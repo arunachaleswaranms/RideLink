@@ -24,6 +24,15 @@ interface Player {
     fun setStateSink(sink: (PlayerState) -> Unit)
 
     /**
+     * The engine's position **now**, stamped with [monotonicNowUs] at the moment it is read
+     * (ADR-004 Amendment A1 decision 1). A real binding reads its engine live. This default — the
+     * published [state], stamped now — exists for fakes that have no engine to read, and is exactly
+     * the stale pairing synchronisation must not use in production.
+     */
+    suspend fun samplePosition(monotonicNowUs: () -> Long): PlayerPositionSample =
+        state.let { PlayerPositionSample(it.positionMs, it.durationMs, it.playing, it.rate, monotonicNowUs()) }
+
+    /**
      * Installs the Phase 6 coexistence lifetime. A later generation invalidates every delayed gain,
      * pause and resume from its predecessor before that effect can touch the renderer.
      */

@@ -2575,3 +2575,38 @@ cases fail. Removing each new guard alone fails exactly its own cases on both pl
 intent requirement restored → R4-1; empty-queue resume restored → R4-2; the load's `Play` requiring
 its own intent → both R4-5; the in-flight deferral removed → both R4-5. No wire, vector or protocol
 change.
+
+## Amendment A16 — 22 October 2026 — §10's drift is now measured against the leader's, and a correction re-states nothing
+
+**Status of the ADR: still Accepted.** This records what [ADR-004 Amendment A1](ADR-004-local-synchronized-playback.md#amendment-a1--22-october-2026--correct-the-inter-phone-error-not-a-lag-both-phones-share)
+changes in this ADR. The evidence and the decision are there. STATUS §4 problem 131. No wire change.
+
+1. **§10 is refined, not reversed.** Each device still measures its own drift against the
+   authoritative `PlaybackTimeline`, and still never subtracts one phone's raw position from the
+   other's. What changes is what the ladder is fed and who acts on it:
+   - the ladder is fed this device's drift **minus the leader's**, both against the same timeline,
+     each at the session instant it was sampled;
+   - only the follower corrects, because the leader's output is the reference.
+   §10's "corrective input, never a command" is now literal: on a follower, the leader's
+   `POSITION_REPORT` is the reference input. It is still never a command and still cannot outrank
+   one.
+2. **§10's "it keeps correcting through a moment when reports are not arriving" no longer holds.**
+   With no usable reference, the ladder makes no new decision and releases any nudge to 1.0. ADR-004
+   A1's consequences section says why that costs less than 25 ms over a five-minute gap.
+3. **Amendment A2 Finding E's correction-caused `PLAYBACK_STATE` is removed.** Only a leader emits
+   `PLAYBACK_STATE`, and a leader no longer corrects. So
+   `emitPlaybackStateIfOwned` and its call sites in `applyCorrection` could no longer run, and they
+   are deleted on both platforms rather than kept as unreachable code with an audit's name on it. A
+   follower's correction emits nothing on the wire. The reconciliation re-broadcast
+   (`emitCurrentPlaybackState`) and its live-generation proof are unchanged.
+   - Finding E's regressions are replaced by:
+     - a regression that a leader in the hard-seek band neither seeks nor re-states anything;
+     - two follower-correction regressions that keep Finding E's ownership halves (session ended,
+       epoch superseded) proving zero effects.
+4. **`PLAYBACK_STATE`, `STATE_SNAPSHOT` and `POSITION_REPORT` carry a live position sample** at its
+   own session instant (`SyncPlayerPort.samplePosition`), not the 250 ms UI cache paired with "now".
+   The fields and their meaning are unchanged. Only the value is no longer up to 250 ms stale.
+5. **A playback epoch keeps one fact across it** (§11): `DriftState.restartCompensationMs`, through
+   `DriftController.newEpoch`. It describes this device's output, not the epoch. A `PLAY` and a
+   re-anchoring `PLAYBACK_STATE` call `newEpoch`. A new session, End Ride and every other full reset
+   still call `reset()`.

@@ -105,11 +105,19 @@ public struct SyncPlaybackDiagnostics: Sendable, Equatable {
     public var queueRevision: Int64 = 0
     public var queueSize = 0
     public var currentTrackHash: ContentHash?
-    /// This device's own drift against the authoritative timeline — the figure the ladder acts on.
+    /// This device's own drift against the authoritative timeline, from a live position sample.
     public var localDriftMs: Int64?
-    /// The peer's drift against the **same** authoritative timeline, from its `POSITION_REPORT`.
-    /// Diagnostics only; it is never a correction input (brief §33).
+    /// The peer's drift against the **same** authoritative timeline, from its `POSITION_REPORT`. On a
+    /// follower, the leader's is also the drift reference (ADR-004 Amendment A1); it is never a
+    /// command.
     public var peerDriftMs: Int64?
+    /// ADR-004 Amendment A1: the inter-phone error the ladder last acted on — local drift minus the
+    /// reference's — or nil when it had no usable reference (always, on the leader). This, not
+    /// `localDriftMs`, is the figure the ladder corrects.
+    public var syncErrorMs: Int64?
+    /// ADR-004 Amendment A1 decision 4: this device's learned output-restart latency, added to a
+    /// hard seek.
+    public var restartCompensationMs: Int64 = 0
     public var lastCorrection: SyncCorrection = .none
     public var playbackRate = 1.0
     public var hardSeekCount = 0

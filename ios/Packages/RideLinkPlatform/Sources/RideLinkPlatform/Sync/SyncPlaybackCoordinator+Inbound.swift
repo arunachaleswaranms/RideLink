@@ -211,9 +211,10 @@ extension SyncPlaybackCoordinator {
         // atomic with having taken it. Each handler proves for itself as well (A3 Finding B).
         guard stillCurrentNow(generation) else { return }
         switch message {
-        case .positionReport(let trackHash, let positionMs, let atSessionUs, _, _):
+        case .positionReport(let trackHash, let positionMs, let atSessionUs, let playing, _):
             await onPeerPositionReport(
-                trackHash: trackHash, positionMs: positionMs, atSessionUs: atSessionUs, generation: generation
+                trackHash: trackHash, positionMs: positionMs, atSessionUs: atSessionUs, playing: playing,
+                generation: generation
             )
         case .playbackState(let commandSeq, let queueRevision, let trackHash, let queueItemId, let positionMs, let playing, let atSessionUs):
             // Round 7: captured here, atomically with the dispatch — the guard above is synchronous
@@ -341,7 +342,7 @@ extension SyncPlaybackCoordinator {
         }
         guard role == .leader else { return }
         let estimate = await estimate()
-        let state = await player.playerState()
+        let sample = await player.samplePosition(monotonicNowUs: monotonicNowUs) // ADR-004 Amendment A1
         guard await stillCurrent(generation) else { return }
         // No `await` between this proof and the enqueue below (Amendment A1/A5's pattern).
         guard stillCurrentNow(generation) else { return }
@@ -355,9 +356,9 @@ extension SyncPlaybackCoordinator {
             ResyncPlaybackSnapshot(
                 trackHash: currentPlaybackIdentity?.trackHash,
                 queueItemId: currentPlaybackIdentity?.queueItemId,
-                positionMs: max(state.positionMs, 0),
-                playing: state.playing,
-                atSessionUs: est.sessionUs(localMonoUs: monotonicNowUs())
+                positionMs: max(sample.positionMs, 0),
+                playing: sample.playing,
+                atSessionUs: est.sessionUs(localMonoUs: sample.atMonoUs)
             )
         }
         let message = ResyncMessage.stateSnapshot(
@@ -1361,7 +1362,9 @@ extension SyncPlaybackCoordinator {
         guard mayRepresent(ride, delivered: delivered) else { return .rejectedRide }
         let token = epoch.begin()
         currentEpochToken = token
-        driftState = DriftController.reset()
+        // ADR-004 Amendment A1: a new epoch keeps only what was learned about this device's output.
+        driftState = DriftController.newEpoch(driftState)
+        peerReference = nil
         queueState = SharedQueue.select(state: queueState, queueItemId: queueItemId)
         timeline = PlaybackTimeline(
             trackHash: trackHash, queueItemId: queueItemId, anchorPositionMs: positionMs,
@@ -1452,6 +1455,7 @@ extension SyncPlaybackCoordinator {
         guard mayRepresent(ride, delivered: delivered) else { return }
         let token = currentEpochToken
         timeline = timeline?.reanchored(positionMs: positionMs, sessionUs: header.effectiveAtSessionUs, playing: playing)
+        peerReference = nil // PR #32 review round 2: measured against the anchor just replaced
         representDelivered(delivered, token: token)
         // Amendment A4 Finding A: these are two effects, and they used to sit inside one closure
         // behind one ownership proof. `player.pause()` suspends — the hop to `MusicCoordinator` and
@@ -1482,6 +1486,7 @@ extension SyncPlaybackCoordinator {
         guard mayRepresent(ride, delivered: delivered) else { return }
         let token = currentEpochToken
         timeline = timeline?.reanchored(positionMs: targetPositionMs, sessionUs: header.effectiveAtSessionUs)
+        peerReference = nil // PR #32 review round 2: measured against the anchor just replaced
         representDelivered(delivered, token: token)
         scheduleAt(
             header.effectiveAtSessionUs, estimate: estimate, generation: generation, token: token,
@@ -1529,6 +1534,7 @@ extension SyncPlaybackCoordinator {
             let token = epoch.begin()
             currentEpochToken = token
             timeline = nil
+            peerReference = nil
             // Independent review, Blocker 2B: authoritative "nothing loaded", not merely a
             // control-lifetime reset — the identity genuinely has nothing to report now.
             currentPlaybackIdentity = nil
@@ -1729,8 +1735,11 @@ extension SyncPlaybackCoordinator {
             publishDiagnostics()
             return
         }
-        let nowSessionUs = estimate.sessionUs(localMonoUs: monotonicNowUs())
-        let state = await player.playerState()
+        // ADR-004 Amendment A1 decision 1 (STATUS problem 131): a live read, measured at the instant it
+        // was taken. The published state's position comes from a 250 ms loop, and the session instant
+        // used to be taken *before* even that was awaited — up to 250 ms of drift that did not exist.
+        let sample = await player.samplePosition(monotonicNowUs: monotonicNowUs)
+        let nowSessionUs = estimate.sessionUs(localMonoUs: sample.atMonoUs)
         // Amendment A5 Finding B, second window: the enqueue below used to happen *before* any
         // post-suspension proof — the `owns` check sat after it. The frame was correctly refused at
         // the wire, because it carries Session A's generation, but enqueueing and counting it moved
@@ -1738,7 +1747,7 @@ extension SyncPlaybackCoordinator {
         // is not an exemption. No `await` from here to the enqueue.
         guard await owns(generation: generation, token: token) else { return }
         guard ownsNow(generation: generation, token: token) else { return }
-        let durationMs: Int64? = state.durationMs > 0 ? state.durationMs : nil
+        let durationMs: Int64? = sample.durationMs > 0 ? sample.durationMs : nil
         // ADVISORY (Amendment A2): one diagnostics number on the peer's screen. A failed report is
         // one missing sample, superseded by the next tick 5 s later — never a divergence.
         enqueueOutbound(Phase5Outbound(
@@ -1746,28 +1755,38 @@ extension SyncPlaybackCoordinator {
             authority: .advisory,
             frame: .playback(.positionReport(
                 trackHash: active.trackHash,
-                positionMs: max(state.positionMs, 0),
+                positionMs: max(sample.positionMs, 0),
                 atSessionUs: nowSessionUs,
-                playing: state.playing,
-                playbackRate: state.rate
+                playing: sample.playing,
+                playbackRate: sample.rate
             ))
         ))
-        let transitioning = await routeState.isRouteTransitioning()
+        // ADR-004 Amendment A1 decision 4: the local route-transition count rides along in the same
+        // read, so a transition that began and settled between two ticks still forgets the learned
+        // restart compensation — and no second suspension is added to this tick.
+        let route = await routeState.routeObservation()
+        let transitioning = route.transitioning
         // Amendment A5 Finding B, third window: `driftState` and six diagnostics fields follow, and
         // ADR-004's ladder is evaluated from values this tick sampled — so a retired tick resuming
         // here restated the live session's drift, clock offset, RTT and correction from a dead
         // session's measurements. No `await` from here to those writes.
         guard await owns(generation: generation, token: token) else { return }
         guard ownsNow(generation: generation, token: token) else { return }
-        let drift = active.driftMs(actualPositionMs: state.positionMs, atSessionUs: nowSessionUs, durationMs: durationMs)
+        let drift = active.driftMs(actualPositionMs: sample.positionMs, atSessionUs: nowSessionUs, durationMs: durationMs)
         let outcome = DriftController.evaluate(
             state: driftState,
             input: DriftInput(
                 driftMs: drift,
                 nowSessionUs: nowSessionUs,
                 expectedPositionMs: active.expectedPositionMs(atSessionUs: nowSessionUs, durationMs: durationMs),
-                playing: active.playing && state.playing,
-                routeTransitioning: transitioning
+                playing: active.playing && sample.playing,
+                routeTransitioning: transitioning,
+                anchorSessionUs: active.anchorSessionUs,
+                // ADR-004 Amendment A1 decision 2: the leader's output is the reference, so the leader
+                // has none to match and never corrects for drift.
+                reference: role == .follower ? peerReference : nil,
+                routeChangeCount: route.localChangeCount,
+                anchorPositionMs: active.anchorPositionMs
             )
         )
         driftState = outcome.state
@@ -1776,6 +1795,8 @@ extension SyncPlaybackCoordinator {
         diagnostics.rttP95Us = estimate.rttP95Us
         diagnostics.leadUs = estimate.leadUs
         diagnostics.localDriftMs = drift
+        diagnostics.syncErrorMs = outcome.errorMs
+        diagnostics.restartCompensationMs = outcome.state.restartCompensationMs
         diagnostics.routeTransitioning = transitioning
         publishDiagnostics()
         await applyCorrection(outcome.action, generation: generation, token: token)
@@ -1821,9 +1842,9 @@ extension SyncPlaybackCoordinator {
             guard ownsNow(generation: generation, token: token) else { return } // Amendment A5
             diagnostics.lastCorrection = .hardSeek
             diagnostics.hardSeekCount += 1
-            // Amendment A2 Finding E: the correction's *own* generation and epoch, carried to the
-            // enqueue rather than replaced there by whatever is live by then.
-            await emitPlaybackStateIfOwned(generation: generation, token: token)
+            // No `PLAYBACK_STATE` follows any more (ADR-024 Amendment A16): only a leader emits one,
+            // and since ADR-004 Amendment A1 a leader never corrects — its output is the reference —
+            // so a correction is always a follower's and re-states nothing.
         case .declareSyncFailure:
             // ARCHITECTURE §7.3 tier four and FR-025: stop correcting, restore exactly 1.0, surface
             // it — and leave local music playing.
@@ -1835,7 +1856,6 @@ extension SyncPlaybackCoordinator {
             diagnostics.playbackRate = DriftController.rateNormal
             diagnostics.lastCorrection = .syncFailed
             diagnostics.syncState = .syncFailed
-            await emitPlaybackStateIfOwned(generation: generation, token: token)
         }
         publishDiagnostics()
     }
@@ -1843,53 +1863,28 @@ extension SyncPlaybackCoordinator {
     /// PROTOCOL §5's authoritative snapshot, emitted **because the leader chose to re-state its
     /// current state now** — the reconciliation re-broadcast, and nothing else.
     ///
-    /// Amendment A2 Finding E made this a separate function from `emitPlaybackStateIfOwned`. Reading
-    /// the live generation is correct *here*, because "now" is what this call means; it is exactly
-    /// wrong for a snapshot that exists as a consequence of some earlier operation, and one function
-    /// cannot honestly serve both.
+    /// Reading the live generation is correct *here*, because "now" is what this call means.
+    /// Amendment A2 Finding E gave a *correction's* snapshot a separate function that carried the
+    /// correction's own generation and epoch instead; ADR-024 Amendment A16 removed it with the last
+    /// correction a leader could make.
     func emitCurrentPlaybackState() async {
         guard role == .leader else { return }
         let generation = await session.currentAuthGeneration()
-        await emitPlaybackStateFrame(generation: generation, token: nil)
+        await emitPlaybackStateFrame(generation: generation)
     }
 
-    /// PROTOCOL §5's authoritative snapshot, emitted **as a consequence of a correction**, and
-    /// therefore carrying that correction's own authorisation all the way to the enqueue
-    /// (Amendment A2 Finding E).
+    /// The emit's body.
     ///
-    /// The old shape took no arguments and read `session.currentAuthGeneration()` *inside itself*. A
-    /// correction that had legitimately proved `owns(generation: A, token: A)` before calling it
-    /// could therefore have that proof replaced, one `await` later, by whatever generation happened
-    /// to be live — so a snapshot caused by a correction in Session A could be enqueued into
-    /// Session B. On an actor that window is not theoretical: every `await` in the chain is a
-    /// re-entrancy point. It is the same "authorising generation versus live generation" distinction
-    /// ADR-023 Amendments A3/A5 drew in Phase 4, and A1 Finding F's "a superseded correction has zero
-    /// effects" was one read of the live generation short of being true.
-    ///
-    /// The proof is taken again *immediately before* the enqueue, with no `await` between, so none
-    /// of the reads above it is a hole in it.
-    func emitPlaybackStateIfOwned(generation: Int64, token: Int64) async {
-        guard role == .leader else { return }
-        await emitPlaybackStateFrame(generation: generation, token: token)
-    }
-
-    /// The two emits' shared body.
-    ///
-    /// **ADR-024 Amendment A5** replaced the `stillOwned` closure this took with `token`, for a
-    /// reason the closure could not express: the proof it held was `async`, so taking it was itself a
-    /// re-entrancy point and "no `await` from here to the enqueue" was true of the statements and
-    /// false of the guard. A token — present for a correction's snapshot, absent for the leader's
-    /// "state as of now" re-broadcast — lets both halves of the proof be taken here, adjacently.
-    private func emitPlaybackStateFrame(generation: Int64, token: Int64?) async {
+    /// **ADR-024 Amendment A5** made both halves of the ownership proof adjacent to the enqueue, with
+    /// no `await` between them. Its `token` parameter, which served a correction's snapshot, went
+    /// with that snapshot in ADR-024 Amendment A16.
+    private func emitPlaybackStateFrame(generation: Int64) async {
         guard !outboundAuthorityLost, let estimate = await estimate() else { return }
-        let state = await player.playerState()
-        if let token {
-            guard await owns(generation: generation, token: token) else { return }
-            guard ownsNow(generation: generation, token: token) else { return }
-        } else {
-            guard await stillCurrent(generation) else { return }
-            guard stillCurrentNow(generation) else { return }
-        }
+        // ADR-004 Amendment A1 decision 1: the anchor this re-states is a live read at its own
+        // instant, never the 250 ms UI cache paired with "now".
+        let sample = await player.samplePosition(monotonicNowUs: monotonicNowUs)
+        guard await stillCurrent(generation) else { return }
+        guard stillCurrentNow(generation) else { return }
         // No `await` from here to the enqueue: the actor makes the proof and the hand-off atomic.
         // ADVISORY (Amendment A2): PROTOCOL §5 calls this "the full authoritative snapshot … the
         // reconciliation anchor, not an incremental update", so the next one subsumes it and a
@@ -1902,9 +1897,9 @@ extension SyncPlaybackCoordinator {
                 queueRevision: queueState.revision,
                 trackHash: timeline?.trackHash,
                 queueItemId: timeline?.queueItemId,
-                positionMs: max(state.positionMs, 0),
-                playing: state.playing,
-                atSessionUs: estimate.sessionUs(localMonoUs: monotonicNowUs())
+                positionMs: max(sample.positionMs, 0),
+                playing: sample.playing,
+                atSessionUs: estimate.sessionUs(localMonoUs: sample.atMonoUs)
             ))
         ))
     }
@@ -1914,8 +1909,10 @@ extension SyncPlaybackCoordinator {
     /// instant before this epoch's anchor, which is what makes `content_hash` alone insufficient
     /// (brief §32) without adding a generation field to the wire.
     ///
-    /// It is never a command and can never outrank one — the only thing it produces is a number on
-    /// the diagnostics screen. **ADR-024 Amendment A5 Finding C: that is not the same as producing
+    /// It is never a command and can never outrank one. It produces the diagnostics number and, on a
+    /// follower, the drift reference (ADR-004 Amendment A1 decision 2): the leader's drift against
+    /// **this** device's timeline at the instant the leader sampled it. `DriftController` alone decides
+    /// whether that reference is still usable. **ADR-024 Amendment A5 Finding C: a report is not
     /// nothing.** This carried no `generation` at all, so after `player.playerState()` suspended
     /// there was nothing it *could* prove — and a report admitted under Session A wrote FR-023's
     /// observed-peer-drift figure, computed against Session A's anchor for a track Session B is not
@@ -1931,6 +1928,7 @@ extension SyncPlaybackCoordinator {
         trackHash: ContentHash,
         positionMs: Int64,
         atSessionUs: Int64,
+        playing: Bool,
         generation: Int64
     ) async {
         guard let active = timeline, trackHash == active.trackHash, atSessionUs >= active.anchorSessionUs else { return }
@@ -1941,7 +1939,12 @@ extension SyncPlaybackCoordinator {
         guard ownsNow(generation: generation, token: token) else { return }
         let durationMs: Int64? = state.durationMs > 0 ? state.durationMs : nil
         let expected = active.expectedPositionMs(atSessionUs: atSessionUs, durationMs: durationMs)
-        diagnostics.peerDriftMs = positionMs - expected
+        let peerDriftMs = positionMs - expected
+        peerReference = DriftReference(
+            driftMs: peerDriftMs, atSessionUs: atSessionUs, playing: playing,
+            anchorSessionUs: active.anchorSessionUs, anchorPositionMs: active.anchorPositionMs
+        )
+        diagnostics.peerDriftMs = peerDriftMs
         publishDiagnostics()
     }
 
@@ -2109,7 +2112,11 @@ extension SyncPlaybackCoordinator {
         }
         guard let active = timeline, fields.trackHash == active.trackHash else { return .applied }
         timeline = active.reanchored(positionMs: fields.positionMs, sessionUs: fields.atSessionUs, playing: fields.playing)
-        driftState = DriftController.reset()
+        driftState = DriftController.newEpoch(driftState)
+        // PR #32 review round 2: the leader's last report was measured against the anchor just
+        // replaced. This re-anchor can move it to an *earlier* instant, where every freshness rule
+        // would pass the old drift; `DriftController` refuses it by anchor identity regardless.
+        peerReference = nil
         representAuthoritativeSequence(commandSeq)
         return .applied
     }
@@ -2136,6 +2143,7 @@ extension SyncPlaybackCoordinator {
             // scheduled effect from the epoch we lost track of is superseded, and nothing replaces it.
             epoch.supersede()
             timeline = nil
+            peerReference = nil
             // Independent review, Blocker 2B/2D: the *leader's own* authoritative say-so that
             // nothing is loaded — genuinely different from this device merely having lost track of
             // its own identity across a reconnect (which is what the caller's routing fix now keeps

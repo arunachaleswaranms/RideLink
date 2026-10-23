@@ -156,6 +156,26 @@ actor FakeSyncSession: SyncSessionPort {
 
     func deliver(_ message: QueueMessage) { queueSink?.submit(message, generation: generation) }
 
+    /// ADR-004 Amendment A1: the leader's `POSITION_REPORT`, `driftMs` off a timeline anchored at
+    /// (`anchorPositionMs`, `anchorSessionUs`) and sampled at `atSessionUs`. A follower's ladder makes
+    /// no decision without a settled reference like this one, so every follower correction test
+    /// delivers one first. Mirrors the Android fake's `deliverLeaderReport`.
+    func deliverLeaderReport(
+        trackHash: ContentHash,
+        anchorSessionUs: Int64,
+        atSessionUs: Int64,
+        anchorPositionMs: Int64 = 0,
+        driftMs: Int64 = 0
+    ) {
+        deliver(.positionReport(
+            trackHash: trackHash,
+            positionMs: anchorPositionMs + (atSessionUs - anchorSessionUs) / 1_000 + driftMs,
+            atSessionUs: atSessionUs,
+            playing: true,
+            playbackRate: 1.0
+        ))
+    }
+
     /// Delivers a frame tagged with a generation the caller chooses — used to prove that a frame
     /// dispatched under a session that has since ended is inert.
     func deliver(_ message: PlaybackMessage, generation: Int64) { playbackSink?.submit(message, generation: generation) }
@@ -246,6 +266,22 @@ actor FakeSyncPlayer: SyncPlayerPort {
     /// Supplied only by the two-peer test, which needs the instant a start happened rather than just
     /// the fact that it did.
     func stampStartsWith(_ clock: @escaping @Sendable () -> Int64) { monotonicNowUs = clock }
+
+    /// When set, what the engine reports *now* — deliberately different from the published state,
+    /// which is how a test proves synchronisation reads the engine and not the 250 ms UI cache
+    /// (ADR-004 Amendment A1 decision 1).
+    private var livePositionMs: Int64?
+
+    func setLivePosition(_ positionMs: Int64?) { livePositionMs = positionMs }
+
+    /// Goes through `playerState()`, so the state gate a test arms to park a tick parks it here too.
+    func samplePosition(monotonicNowUs: @escaping @Sendable () -> Int64) async -> PlayerPositionSample {
+        let published = await playerState()
+        return PlayerPositionSample(
+            positionMs: livePositionMs ?? published.positionMs, durationMs: published.durationMs,
+            playing: published.playing, rate: published.rate, atMonoUs: monotonicNowUs()
+        )
+    }
 
     func playerState() async -> PlayerState {
         if stateGateArmed {
@@ -469,6 +505,16 @@ actor FakeRouteState: SyncRouteStatePort {
     private var gateContinuation: CheckedContinuation<Void, Never>?
 
     func set(_ value: Bool) { transitioning = value }
+
+    private var localChangeCount: Int64 = 0
+
+    /// A local route transition that began and settled with no tick looking.
+    func countRouteChange() { localChangeCount += 1 }
+
+    /// Goes through `isRouteTransitioning()`, so a gate a test arms to park a tick parks it here too.
+    func routeObservation() async -> SyncRouteObservation {
+        SyncRouteObservation(transitioning: await isRouteTransitioning(), localChangeCount: localChangeCount)
+    }
 
     func isRouteTransitioning() async -> Bool {
         guard gateArmed else { return transitioning }

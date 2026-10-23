@@ -70,7 +70,10 @@ class SyncPlaybackOperationLifetimeAuditTest {
     private lateinit var coordinator: SyncPlaybackCoordinator
     private var idSeed = 2_400
 
-    private fun build(scope: CoroutineScope) {
+    private fun build(
+        scope: CoroutineScope,
+        localPeerId: com.ridelink.core.model.PeerId = SyncTestValues.leaderPeerId,
+    ) {
         idSeed += 10
         session = FakeSyncSession()
         player = FakeSyncPlayer()
@@ -80,7 +83,7 @@ class SyncPlaybackOperationLifetimeAuditTest {
             SyncPlaybackCoordinator(
                 scope = scope,
                 monotonicNowUs = { clock.nowUs() },
-                localPeerId = SyncTestValues.leaderPeerId,
+                localPeerId = localPeerId,
                 session = session,
                 player = player,
                 content = content,
@@ -339,15 +342,21 @@ class SyncPlaybackOperationLifetimeAuditTest {
     @Test
     fun `a correction parked inside its only player call has no effect on the session that replaced it`() =
         runTest(StandardTestDispatcher()) {
-            build(backgroundScope)
-            connectAsLeader(this)
-            val deadlineA = playAndStart(this, HASH_A)
+            // ADR-004 Amendment A1: only a follower corrects — the leader's output is the reference —
+            // so the correction that parks across the boundary is a follower's.
+            build(backgroundScope, localPeerId = SyncTestValues.followerPeerId)
+            followerConnects(this, generation = 1)
+            val anchorA = clock.nowUs()
+            session.deliver(followerPlay(HASH_A, anchorA))
+            runCurrent()
 
             val gateA = CompletableDeferred<Unit>()
             player.gate = gateA
             player.gateOn = { it is FakeSyncPlayer.Call.SetRate }
-            val tickAtUs = clock.nowUs() + POSITION_REPORT_US
-            val expectedMs = (tickAtUs - deadlineA) / 1_000
+            val tickAtUs = clock.pendingDeadlines.max()
+            session.deliverLeaderReport(HASH_A, anchorA, tickAtUs - 1_000_000)
+            runCurrent()
+            val expectedMs = (tickAtUs - anchorA) / 1_000
             player.setState(
                 PlayerState(positionMs = expectedMs + NUDGE_DRIFT_MS, durationMs = TRACK_DURATION_MS, playing = true),
             )
@@ -359,8 +368,12 @@ class SyncPlaybackOperationLifetimeAuditTest {
                 "the correction parked inside its rate nudge",
             )
 
-            boundary(this, generation = 2)
-            establishSessionB(this)
+            session.emit(ControlEvent.LinkLost(LinkLossReason.NETWORK))
+            runCurrent()
+            followerConnects(this, generation = 2)
+            session.deliver(followerPlay(HASH_X, clock.nowUs()))
+            runCurrent()
+            player.setState(PlayerState(positionMs = 0, durationMs = TRACK_DURATION_MS, playing = true))
 
             val callsBefore = player.calls.toList()
             val diagnosticsBefore = coordinator.diagnostics.value
@@ -377,6 +390,30 @@ class SyncPlaybackOperationLifetimeAuditTest {
             )
             assertEquals(sentBefore, session.sent.size, "and puts nothing on Session B's wire")
         }
+
+    private suspend fun followerConnects(
+        scope: TestScope,
+        generation: Long,
+    ) {
+        scope.runCurrent()
+        session.setClock(SessionClockEstimate(offsetToLeaderUs = 0, rttP95Us = 8_000, ready = true))
+        session.currentAuthGeneration = generation
+        session.emit(ControlEvent.Connected(SyncTestValues.leaderPeerId, SessionId("S$generation"), false, generation))
+        scope.runCurrent()
+        content.localHashes.add(HASH_A.value)
+        content.localHashes.add(HASH_X.value)
+    }
+
+    private fun followerPlay(
+        hash: ContentHash,
+        effectiveAtUs: Long,
+    ) = PlaybackMessage.Play(
+        com.ridelink.core.playback
+            .PlaybackCommandHeader(1, effectiveAtUs, SyncTestValues.leaderPeerId, 0),
+        hash,
+        positionMs = 0,
+        queueItemId = SyncTestValues.ulid(hash.value.takeLast(2).toInt(16)),
+    )
 
     // --- same-session controls ------------------------------------------------------------------
 

@@ -5,6 +5,7 @@ import com.ridelink.app.music.MusicCoordinator
 import com.ridelink.core.library.LocalTrackLocation
 import com.ridelink.core.model.ContentHash
 import com.ridelink.core.model.LocalEntryId
+import com.ridelink.core.player.PlayerPositionSample
 import com.ridelink.core.player.PlayerState
 import com.ridelink.data.library.LibraryRepository
 import kotlinx.coroutines.CoroutineScope
@@ -30,6 +31,8 @@ internal class MusicCoordinatorPlayerPort(
     private val music: MusicCoordinator,
 ) : SyncPlayerPort {
     override val playerState: StateFlow<PlayerState> get() = music.playerState
+
+    override suspend fun samplePosition(monotonicNowUs: () -> Long): PlayerPositionSample = music.syncSamplePosition(monotonicNowUs)
 
     override suspend fun select(content: SyncPlayableContent) =
         music.syncSelect(content.contentHash, content.localEntryId, content.location, content.title, content.artist)

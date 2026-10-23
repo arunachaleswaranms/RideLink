@@ -11,6 +11,7 @@ import com.ridelink.core.playback.CommandOrderGate
 import com.ridelink.core.playback.DriftAction
 import com.ridelink.core.playback.DriftController
 import com.ridelink.core.playback.DriftInput
+import com.ridelink.core.playback.DriftReference
 import com.ridelink.core.playback.DriftState
 import com.ridelink.core.playback.HoldAdmission
 import com.ridelink.core.playback.IngressAdmission
@@ -119,9 +120,10 @@ import kotlinx.coroutines.sync.withLock
  *   held a command whose clock was untrusted but let a later `QUEUE_SNAPSHOT` apply straight past
  *   it, so the held `NEXT` resolved against a revision it was never authored against. The whole
  *   authoritative stream is now held in arrival order and replayed in it (Finding D).
- * - **A correction's snapshot keeps the correction's own identity**
- *   ([emitPlaybackStateIfOwned]). Reading the *live* generation inside the emit meant a snapshot
- *   caused by a correction in Session A could be enqueued into Session B (Finding E).
+ * - **A correction's snapshot kept the correction's own identity** (Finding E). Reading the *live*
+ *   generation inside the emit meant a snapshot caused by a correction in Session A could be
+ *   enqueued into Session B. ADR-024 Amendment A16 removed the snapshot itself: since ADR-004
+ *   Amendment A1 a leader never corrects, so no correction re-states authoritative state.
  */
 @Suppress("TooManyFunctions", "LongParameterList", "LargeClass")
 class SyncPlaybackCoordinator(
@@ -143,6 +145,13 @@ class SyncPlaybackCoordinator(
      * and call site that has no resync channel at all; [emitStateSnapshot] is Phase 7's only caller.
      */
     private val resync: ResyncChannelPort? = null,
+    /**
+     * This device's own count of route transitions begun ([com.ridelink.core.audiopolicy.AudioRouteSnapshot.transitionBeganCount]).
+     * ADR-004 Amendment A1 decision 4: read every tick so a transition that began and settled between
+     * two ticks still forgets the learned restart compensation. Defaults to a route that never
+     * changes, for tests that do not exercise it.
+     */
+    private val localRouteChangeCount: () -> Long = { 0 },
     /** Injectable purely so a test can force the ingress edge at 1 or 2 rather than racing 256 frames. */
     inboundCapacity: Int = Phase5GateBounds.DEFAULT_INBOUND_CAPACITY,
     /** Injectable for the same reason: how many authoritative events may wait for a trustworthy clock. */
@@ -548,6 +557,13 @@ class SyncPlaybackCoordinator(
             }
 
     private var driftState: DriftState = DriftController.reset()
+
+    /**
+     * ADR-004 Amendment A1 decision 2: the leader's latest `POSITION_REPORT` for the current epoch, as
+     * its drift against this device's timeline. Read only by a follower; whether it is still usable
+     * is `DriftController`'s question, not this field's.
+     */
+    private var peerReference: DriftReference? = null
     private var tickJob: Job? = null
 
     /**
@@ -1376,6 +1392,7 @@ class SyncPlaybackCoordinator(
         deferredDrainJob?.cancel()
         deferredDrainJob = null
         driftState = DriftController.reset()
+        peerReference = null
         scope.launch { restoreRate() }
         _diagnostics.update {
             it.copy(
@@ -1384,6 +1401,7 @@ class SyncPlaybackCoordinator(
                 deferredCommandCount = 0,
                 localDriftMs = null,
                 peerDriftMs = null,
+                syncErrorMs = null,
                 playbackRate = DriftController.RATE_NORMAL,
                 cancelledPendingPlayCount = it.cancelledPendingPlayCount + cancelled,
             )
@@ -1630,6 +1648,7 @@ class SyncPlaybackCoordinator(
         nextSeq = PlaybackBounds.FIRST_COMMAND_SEQ
         timeline = null
         driftState = DriftController.reset()
+        peerReference = null
         playbackDesynchronized = false
         queueDesynchronized = false
         // ADR-024 Amendment A8: `queueState` is deliberately NOT reset here. It used to be wiped
@@ -1664,6 +1683,7 @@ class SyncPlaybackCoordinator(
                 currentTrackHash = currentPlaybackIdentity?.trackHash,
                 localDriftMs = null,
                 peerDriftMs = null,
+                syncErrorMs = null,
                 lastCorrection = SyncCorrection.NONE,
                 playbackRate = DriftController.RATE_NORMAL,
                 hardSeekCount = 0,
@@ -2396,6 +2416,7 @@ class SyncPlaybackCoordinator(
         // `currentPlaybackIdentity` above -- the two answer "what is standing" and "whose it is".
         if (!keepDelivered) rideAuthorityEpoch = 0
         driftState = DriftController.reset()
+        peerReference = null
         scope.launch { restoreRate() }
         _diagnostics.update {
             it.copy(
@@ -2407,6 +2428,7 @@ class SyncPlaybackCoordinator(
                 currentTrackHash = currentPlaybackIdentity?.trackHash,
                 localDriftMs = null,
                 peerDriftMs = null,
+                syncErrorMs = null,
                 deferredCommandCount = deferredEvents.size,
                 // The held reconciliation was just discarded with the rest of `deferredEvents`, so
                 // the obligation genuinely no longer exists. It did not *converge* — which is why
@@ -3452,7 +3474,9 @@ class SyncPlaybackCoordinator(
         if (!mayRepresent(ride, delivered)) return StateSnapshotOutcome.REJECTED_RIDE
         val token = playbackFence.begin()
         currentEpochToken = token
-        driftState = DriftController.reset()
+        // ADR-004 Amendment A1: a new epoch keeps only what was learned about this device's output.
+        driftState = DriftController.newEpoch(driftState)
+        peerReference = null
         _queueState.update { SharedQueue.select(it, queueItemId) }
         timeline = PlaybackTimeline(trackHash, queueItemId, positionMs, header.effectiveAtSessionUs, playing, generation = token)
         currentPlaybackIdentity = PlaybackIdentity(trackHash, queueItemId)
@@ -3527,6 +3551,7 @@ class SyncPlaybackCoordinator(
         if (!mayRepresent(ride, delivered)) return
         val token = currentEpochToken
         timeline = timeline?.copy(anchorPositionMs = positionMs, anchorSessionUs = header.effectiveAtSessionUs, playing = playing)
+        peerReference = null // PR #32 review round 2: measured against the anchor just replaced
         // Amendment A4 Finding A: these are two effects, and they used to sit inside one lambda
         // behind one ownership proof. As a step list, the fence is re-proved between them.
         val steps =
@@ -3554,6 +3579,7 @@ class SyncPlaybackCoordinator(
         if (!mayRepresent(ride, delivered)) return // round 4, §17; round 7 adds the second half
         val token = currentEpochToken
         timeline = timeline?.copy(anchorPositionMs = targetPositionMs, anchorSessionUs = header.effectiveAtSessionUs)
+        peerReference = null // PR #32 review round 2: measured against the anchor just replaced
         representDelivered(delivered, token)
         scheduleAt(
             header.effectiveAtSessionUs,
@@ -3604,6 +3630,7 @@ class SyncPlaybackCoordinator(
             val token = playbackFence.begin()
             currentEpochToken = token
             timeline = null
+            peerReference = null
             // Stepping past the end of the queue is genuinely "nothing selected" -- ride-segment
             // identity clears with the timeline here, not only the queue selection.
             currentPlaybackIdentity = null
@@ -3782,9 +3809,14 @@ class SyncPlaybackCoordinator(
             }
             return
         }
-        val nowSessionUs = sessionNowUs(estimate)
-        val state = player.playerState.value
-        val durationMs = state.durationMs.takeIf { it > 0 }
+        // ADR-004 Amendment A1 decision 1 (STATUS problem 131): a live read, measured at the instant
+        // it was taken. `playerState`'s position is published by a 250 ms loop, and pairing it with
+        // a fresh instant reported up to 250 ms of drift that did not exist.
+        val sample = player.samplePosition(monotonicNowUs)
+        val nowSessionUs = estimate.sessionUs(sample.atMonoUs)
+        // A5's rule: the read suspends, so everything below is proved again before it is used.
+        if (!owns(generation, token)) return
+        val durationMs = sample.durationMs.takeIf { it > 0 }
         // ADVISORY (Amendment A2): one diagnostics number on the peer's screen. A failed report is
         // one missing sample, superseded by the next tick 5 s later — never a divergence.
         enqueueOutbound(
@@ -3794,25 +3826,33 @@ class SyncPlaybackCoordinator(
                 Outbound.Frame.Playback(
                     PlaybackMessage.PositionReport(
                         active.trackHash,
-                        state.positionMs.coerceAtLeast(0),
+                        sample.positionMs.coerceAtLeast(0),
                         nowSessionUs,
-                        state.playing,
-                        state.rate,
+                        sample.playing,
+                        sample.rate,
                     ),
                 ),
             ),
         )
         if (!owns(generation, token)) return
         val transitioning = routeTransitioning()
+        val routeChanges = localRouteChangeCount()
+        val driftMs = active.driftMs(sample.positionMs, nowSessionUs, durationMs)
         val outcome =
             DriftController.evaluate(
                 driftState,
                 DriftInput(
-                    driftMs = active.driftMs(state.positionMs, nowSessionUs, durationMs),
+                    driftMs = driftMs,
                     nowSessionUs = nowSessionUs,
                     expectedPositionMs = active.expectedPositionMs(nowSessionUs, durationMs),
-                    playing = active.playing && state.playing,
+                    playing = active.playing && sample.playing,
                     routeTransitioning = transitioning,
+                    anchorSessionUs = active.anchorSessionUs,
+                    // ADR-004 Amendment A1 decision 2: the leader's output is the reference, so the
+                    // leader has none to match and never corrects for drift.
+                    reference = if (role == PlaybackRole.FOLLOWER) peerReference else null,
+                    routeChangeCount = routeChanges,
+                    anchorPositionMs = active.anchorPositionMs,
                 ),
             )
         driftState = outcome.state
@@ -3822,7 +3862,9 @@ class SyncPlaybackCoordinator(
                 clockOffsetUs = estimate.offsetToLeaderUs,
                 rttP95Us = estimate.rttP95Us,
                 leadUs = estimate.leadUs,
-                localDriftMs = active.driftMs(state.positionMs, nowSessionUs, durationMs),
+                localDriftMs = driftMs,
+                syncErrorMs = outcome.errorMs,
+                restartCompensationMs = outcome.state.restartCompensationMs,
                 routeTransitioning = transitioning,
             )
         }
@@ -3871,9 +3913,9 @@ class SyncPlaybackCoordinator(
                 _diagnostics.update {
                     it.copy(lastCorrection = SyncCorrection.HARD_SEEK, hardSeekCount = it.hardSeekCount + 1)
                 }
-                // Amendment A2 Finding E: the correction's *own* generation and epoch, carried to
-                // the enqueue rather than replaced there by whatever is live by then.
-                emitPlaybackStateIfOwned(generation, token)
+                // No `PLAYBACK_STATE` follows any more (ADR-024 Amendment A16): only a leader emits
+                // one, and since ADR-004 Amendment A1 a leader never corrects — its output is the
+                // reference — so a correction is always a follower's and re-states nothing.
             }
             DriftAction.DeclareSyncFailure -> {
                 // ARCHITECTURE §7.3 tier four and FR-025: stop correcting, restore exactly 1.0,
@@ -3887,7 +3929,6 @@ class SyncPlaybackCoordinator(
                         playbackRate = DriftController.RATE_NORMAL,
                     )
                 }
-                emitPlaybackStateIfOwned(generation, token)
             }
         }
     }
@@ -3896,39 +3937,15 @@ class SyncPlaybackCoordinator(
      * PROTOCOL §5's authoritative snapshot, emitted **because the leader chose to re-state its
      * current state now** — the reconciliation re-broadcast, and nothing else.
      *
-     * Amendment A2 Finding E made this a separate function from [emitPlaybackStateIfOwned]. Reading
-     * the live generation is correct *here*, because "now" is what this call means; it is exactly
-     * wrong for a snapshot that exists as a consequence of some earlier operation, and one function
-     * cannot honestly serve both.
+     * Reading the live generation is correct *here*, because "now" is what this call means.
+     * Amendment A2 Finding E gave a *correction's* snapshot a separate function that carried the
+     * correction's own generation instead; ADR-024 Amendment A16 removed it with the last correction
+     * a leader could make.
      */
     private suspend fun emitCurrentPlaybackState() {
         if (role != PlaybackRole.LEADER) return
         val generation = session.currentAuthGeneration
         emitPlaybackStateFrame(generation) { stillCurrent(generation) }
-    }
-
-    /**
-     * PROTOCOL §5's authoritative snapshot, emitted **as a consequence of a correction**, and
-     * therefore carrying that correction's own authorisation all the way to the enqueue
-     * (Amendment A2 Finding E).
-     *
-     * The old shape took no arguments and read `session.currentAuthGeneration` *inside itself*. A
-     * correction that had legitimately proved `owns(generationA, tokenA)` before calling it could
-     * therefore have that proof replaced, one suspension later, by whatever generation happened to
-     * be live — so a snapshot caused by a correction in Session A could be enqueued into Session B.
-     * That is the same "authorising generation versus live generation" distinction ADR-023
-     * Amendments A3/A5 drew in Phase 4, and A1 Finding F's "a superseded correction has zero
-     * effects" was one read of the live generation short of being true.
-     *
-     * The proof is taken again *inside* the critical section, immediately before the enqueue, so
-     * neither the two reads above it nor the lock acquisition itself is a hole in it.
-     */
-    private suspend fun emitPlaybackStateIfOwned(
-        generation: Long,
-        token: Long,
-    ) {
-        if (role != PlaybackRole.LEADER) return
-        emitPlaybackStateFrame(generation) { owns(generation, token) }
     }
 
     @Suppress("ReturnCount") // one early-out per precondition: a usable estimate, then the ownership proof
@@ -3938,7 +3955,9 @@ class SyncPlaybackCoordinator(
     ) {
         if (outboundAuthorityLost) return
         val estimate = estimate() ?: return
-        val state = player.playerState.value
+        // ADR-004 Amendment A1 decision 1: the anchor this re-states is a live read at its own
+        // instant, never the 250 ms UI cache paired with "now".
+        val sample = player.samplePosition(monotonicNowUs)
         commandMutex.withLock {
             if (!stillOwned()) return
             val active = timeline
@@ -3955,9 +3974,9 @@ class SyncPlaybackCoordinator(
                             queueRevision = _queueState.value.revision,
                             trackHash = active?.trackHash,
                             queueItemId = active?.queueItemId,
-                            positionMs = state.positionMs.coerceAtLeast(0),
-                            playing = state.playing,
-                            atSessionUs = sessionNowUs(estimate),
+                            positionMs = sample.positionMs.coerceAtLeast(0),
+                            playing = sample.playing,
+                            atSessionUs = estimate.sessionUs(sample.atMonoUs),
                         ),
                     ),
                 ),
@@ -4025,7 +4044,7 @@ class SyncPlaybackCoordinator(
         if (role != PlaybackRole.LEADER) return
         if (outboundAuthorityLost) return
         val estimate = estimate() ?: return
-        val state = player.playerState.value
+        val sample = player.samplePosition(monotonicNowUs) // ADR-004 Amendment A1 decision 1
         commandMutex.withLock {
             if (!stillCurrent(generation)) return
             // Blocker 2B: identity comes from `currentPlaybackIdentity`, not `timeline` --
@@ -4044,9 +4063,9 @@ class SyncPlaybackCoordinator(
                         ResyncPlaybackSnapshot(
                             trackHash = identity?.trackHash,
                             queueItemId = identity?.queueItemId,
-                            positionMs = state.positionMs.coerceAtLeast(0),
-                            playing = state.playing,
-                            atSessionUs = sessionNowUs(estimate),
+                            positionMs = sample.positionMs.coerceAtLeast(0),
+                            playing = sample.playing,
+                            atSessionUs = estimate.sessionUs(sample.atMonoUs),
                         ),
                     queueItems = queue.items,
                     queueCurrentIndex = queue.currentIndex,
@@ -4121,8 +4140,10 @@ class SyncPlaybackCoordinator(
      * carries a session instant before this epoch's anchor, which is what makes `content_hash`
      * alone insufficient (brief §32) without adding a generation field to the wire.
      *
-     * It is never a command and can never outrank one — the only thing it produces is a number on
-     * the diagnostics screen.
+     * It is never a command and can never outrank one. It produces the diagnostics number and, on a
+     * follower, the drift reference (ADR-004 Amendment A1 decision 2): the leader's drift against
+     * **this** device's timeline at the instant the leader sampled it. `DriftController` alone
+     * decides whether that reference is still usable; nothing is filtered here beyond the epoch.
      */
     @Suppress("ReturnCount") // one early-out per epoch-binding check
     private fun onPeerPositionReport(report: PlaybackMessage.PositionReport) {
@@ -4135,7 +4156,10 @@ class SyncPlaybackCoordinator(
                 player.playerState.value.durationMs
                     .takeIf { it > 0 },
             )
-        _diagnostics.update { it.copy(peerDriftMs = report.positionMs - expected) }
+        val peerDriftMs = report.positionMs - expected
+        peerReference =
+            DriftReference(peerDriftMs, report.atSessionUs, report.playing, active.anchorSessionUs, active.anchorPositionMs)
+        _diagnostics.update { it.copy(peerDriftMs = peerDriftMs) }
     }
 
     /**
@@ -4317,7 +4341,11 @@ class SyncPlaybackCoordinator(
                 anchorSessionUs = snapshot.atSessionUs,
                 playing = snapshot.playing,
             )
-        driftState = DriftController.reset()
+        driftState = DriftController.newEpoch(driftState)
+        // PR #32 review round 2: the leader's last report was measured against the anchor just
+        // replaced. This re-anchor can move it to an *earlier* instant, where every freshness rule
+        // would pass the old drift; `DriftController` refuses it by anchor identity regardless.
+        peerReference = null
         representAuthoritativeSequence(snapshot.commandSeq)
         return StateSnapshotOutcome.APPLIED
     }
@@ -4366,6 +4394,7 @@ class SyncPlaybackCoordinator(
             // by a reconnect -- so ride-segment identity clears here too, honestly.
             playbackFence.supersede()
             timeline = null
+            peerReference = null
             currentPlaybackIdentity = null
             // Blocker 1, as in `applyStep`'s equivalent branch: adopting the leader's "nothing
             // loaded" is this ride exercising authority, not an absence of it. Round 7: the admitted
