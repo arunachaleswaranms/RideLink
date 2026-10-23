@@ -5,6 +5,9 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.async
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withTimeoutOrNull
 import java.io.IOException
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -48,6 +51,45 @@ class PingWaitersTest {
             }
             assertEquals(0, waiters.size)
             waiters.complete(sample(100)) // late: a no-op, not a crash
+            assertEquals(0, waiters.size)
+        }
+
+    /**
+     * STATUS §4 problem 137: the timeout bounds the whole round trip, not only the wait for the `PONG`.
+     * [writeLock] stands in for a connection whose write lock a stalled write holds; a `PING` queued
+     * behind it used to wait for as long as that write did.
+     */
+    @Test
+    fun `the timeout bounds the write too, so a PING queued behind a stalled write gives up on time and leaves no waiter`() =
+        runBlocking {
+            val waiters = PingWaiters()
+            val writeLock = Mutex(locked = true)
+            val roundTrip = async { runCatching { waiters.awaitRoundTrip(t1 = 100, timeoutMs = 50) { writeLock.withLock {} } } }
+            val outcome = withTimeoutOrNull(2_000) { roundTrip.await() }
+            roundTrip.cancel()
+            assertTrue(outcome?.exceptionOrNull() is TimeoutCancellationException, "a PING behind a stalled write must time out: $outcome")
+            assertEquals(0, waiters.size, "a timed-out PING must not leave a waiter behind")
+        }
+
+    @Test
+    fun `cancelling a round trip whose write is waiting for the lock leaves no waiter`() =
+        runBlocking {
+            val waiters = PingWaiters()
+            val writeLock = Mutex(locked = true)
+            val waiting = CompletableDeferred<Unit>()
+            val roundTrip =
+                async {
+                    waiters.awaitRoundTrip(t1 = 100, timeoutMs = 60_000) {
+                        waiting.complete(Unit)
+                        writeLock.withLock {}
+                    }
+                }
+            waiting.await()
+            assertEquals(1, waiters.size)
+            roundTrip.cancel()
+            roundTrip.join()
+            assertEquals(0, waiters.size, "cancellation must not orphan the waiter")
+            waiters.complete(sample(100)) // a late PONG: a no-op, not a crash
             assertEquals(0, waiters.size)
         }
 

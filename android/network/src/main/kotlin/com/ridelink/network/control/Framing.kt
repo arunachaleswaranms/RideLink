@@ -144,6 +144,21 @@ class ControlSocket internal constructor(
         runCatching { socket.close() }
     }
 
+    /**
+     * [close] for a connection being retired while one of its writes may be stalled in the kernel
+     * (STATUS §4 problem 137). A blocking socket write ignores coroutine cancellation, and
+     * Conscrypt's `close()` first drains a TLS `close_notify` through the same socket write lock, so
+     * a plain [close] waits for the stalled writer — measured by `BlockingWriteSemanticsTest`.
+     * Shutting down the TCP send direction first needs no write lock: the stalled write fails at
+     * once, and the `close()` that follows no longer waits. The peer, if it is still there, sees a
+     * TLS stream end without `close_notify`, which both platforms' read loops already treat as a
+     * closed connection; every frame is length-prefixed, so no partial frame passes for a whole one.
+     */
+    fun abort() {
+        runCatching { socket.shutdownOutput() }
+        close()
+    }
+
     companion object {
         /**
          * CLAUDE.md rule 10 / PROTOCOL §1: `TCP_NODELAY` so clock-sync PING/PONG is not held by

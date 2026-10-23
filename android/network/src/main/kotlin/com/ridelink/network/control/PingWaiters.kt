@@ -29,6 +29,13 @@ internal class PingWaiters {
      * ordering to be reviewed against the iOS race rather than assumed. What *was* missing: a write
      * failure (not just a timeout) left the entry here forever. `catch (Throwable)` covers both,
      * always removes the entry, and always rethrows — never resumes-then-throws twice.
+     *
+     * [timeoutMs] bounds the **whole** round trip — waiting for the connection's write lock, the
+     * write, and the `PONG` — not only the `PONG` (STATUS §4 problem 137). With the write outside
+     * it, a `PING` queued behind a stalled write waited for as long as that write did. One limit
+     * remains and is deliberate: a write already inside a blocking socket call does not observe the
+     * timeout (`BlockingWriteSemanticsTest`), so a caller that must decide on time — the keepalive —
+     * does not wait for this to return before deciding.
      */
     @Suppress("TooGenericExceptionCaught")
     suspend fun awaitRoundTrip(
@@ -39,8 +46,10 @@ internal class PingWaiters {
         val deferred = CompletableDeferred<ClockSync.Sample>()
         pending[t1] = deferred
         try {
-            write()
-            return withTimeout(timeoutMs) { deferred.await() }
+            return withTimeout(timeoutMs) {
+                write()
+                deferred.await()
+            }
         } catch (t: Throwable) {
             pending.remove(t1)
             throw t
