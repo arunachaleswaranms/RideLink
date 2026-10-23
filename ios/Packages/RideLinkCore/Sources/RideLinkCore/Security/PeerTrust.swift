@@ -77,6 +77,23 @@ public enum PeerTrust {
         return storedPin == presentedSpki ? .trusted : .pinMismatch
     }
 
+    /// The pin half of `decide`, asked **again**, at the instant a connection is about to pass the
+    /// trust gate on a `.trusted` verdict (ADR-012 Amendment A1, STATUS §4 problem 126).
+    ///
+    /// `decide` runs inside the `HELLO` exchange, and a connection is promoted only after duplicate
+    /// resolution's grace period. A user's *Forget peer* can land in between, so the verdict the
+    /// handshake reached is a statement about a trust store that no longer exists. The certificate and
+    /// `HELLO` checks are properties of the connection and cannot have changed; only the stored pin
+    /// can, so only the pin is re-asked: no pin any more is `.pairingRequired` (the forgotten peer gets
+    /// PROTOCOL §4.5's code, never a silent connect), the same pin is `.trusted`, and a different pin
+    /// is `.pinMismatch`, exactly as `decide` would have said.
+    ///
+    /// `com.ridelink.core.security.PeerTrust.recheck` is the mirror.
+    public static func recheck(storedPin: SpkiHash?, presentedSpki: SpkiHash) -> PinDecision {
+        guard let storedPin else { return .pairingRequired }
+        return storedPin == presentedSpki ? .trusted : .pinMismatch
+    }
+
     /// Whether `value` is a well-formed `identity_spki_sha256` (ADR-012): `"sha256:"` followed by
     /// exactly 64 **lowercase** hex characters. Lowercase is required rather than normalised, so
     /// two peers cannot disagree about case and produce two different-looking pins for one key.

@@ -726,32 +726,76 @@ public actor ControlSessionManager {
             $0.negotiatedProtocol = candidate.socket.security?.negotiatedProtocolDescription
         }
 
-        // PROTOCOL §4.5: pairing runs only on the surviving connection, so this is decided here —
-        // after duplicate resolution — and never in the handshake itself. That is what guarantees
-        // exactly one six-digit code is ever displayed, even on a simultaneous first meeting.
-        //
-        // The exchange is armed *before* the read loop starts, so a PAIR_REQUEST that arrives
-        // immediately cannot be dropped for want of an exchange to hand it to.
-        var pairingRequired = false
-        if case .pairingRequired = pinDecision { pairingRequired = true }
-        if pairingRequired {
+        // ADR-012 Amendment A1 (STATUS §4 problem 126): a `.trusted` verdict was read from the store
+        // during the HELLO exchange, and duplicate resolution's grace period — and the `await`s above —
+        // have passed since. A *Forget peer* that landed in between must win, so the pin is asked again
+        // here, after the last suspension, and the trusted path then runs to
+        // `activateAuthenticatedSession` without another one. `forgetTrustedPeer` is isolated to this
+        // actor, so a forget is either before this check (and the peer gets PROTOCOL §4.5's code
+        // instead of a silent connect) or after the activation (which only a live session can contain,
+        // and the coordinator refuses to forget a live session's peer — across the hop to this actor
+        // too, because the write needs a `ForgetPeerAdmission` that a session start has not spent,
+        // ADR-012 Amendment A2).
+        let decision: PinDecision
+        if case .trusted = pinDecision {
+            decision = PeerTrust.recheck(
+                storedPin: trustedPeers.byPeerId(remotePeerId)?.identitySpkiSha256, presentedSpki: peerSpki)
+        } else {
+            decision = pinDecision
+        }
+
+        switch decision {
+        case .trusted:
+            startTransportLoops(socket: candidate.socket, sessionId: sessionId)
+            emit(.peerTrusted(remotePeerId: remotePeerId))
+            activateAuthenticatedSession()
+        case .pairingRequired:
+            // PROTOCOL §4.5: pairing runs only on the surviving connection, so this is decided here —
+            // after duplicate resolution — and never in the handshake itself. That is what guarantees
+            // exactly one six-digit code is ever displayed, even on a simultaneous first meeting.
+            //
+            // The exchange is armed *before* the read loop starts, so a PAIR_REQUEST that arrives
+            // immediately cannot be dropped for want of an exchange to hand it to.
             await beginPairing(socket: candidate.socket, remotePeerId: remotePeerId, peerSpki: peerSpki)
             // `beginPairing` fails closed when the exporter is unavailable, and that closes the
             // connection. There is nothing left to run loops over.
             guard activeSocket === candidate.socket else { return }
+            startTransportLoops(socket: candidate.socket, sessionId: sessionId)
+        case .refused(let code):
+            // Only the re-check can produce this: the pin was replaced between the handshake and now.
+            // Refused exactly as the handshake would have refused it — never re-paired (ADR-012).
+            await failPairing(socket: candidate.socket, code: code)
         }
+    }
 
-        // The read loop and keepalive belong to the **transport**: PROTOCOL §4.5's pairing frames
-        // arrive on this same connection, and a link that dies mid-pairing still has to be noticed.
-        // Everything that presumes an authenticated peer — the ARCHITECTURE §7.1 clock burst —
-        // waits for the trust gate instead.
-        readLoopTask = Task { await self.readLoop(socket: candidate.socket, sessionId: sessionId) }
-        keepaliveTask = Task { await self.keepaliveLoop(socket: candidate.socket) }
+    /// The read loop and keepalive belong to the **transport**: PROTOCOL §4.5's pairing frames arrive on
+    /// this same connection, and a link that dies mid-pairing still has to be noticed. Everything that
+    /// presumes an authenticated peer — the ARCHITECTURE §7.1 clock burst — waits for the trust gate
+    /// instead.
+    private func startTransportLoops(socket: ControlConnection, sessionId: SessionId) {
+        readLoopTask = Task { await self.readLoop(socket: socket, sessionId: sessionId) }
+        keepaliveTask = Task { await self.keepaliveLoop(socket: socket) }
+    }
 
-        if !pairingRequired {
-            emit(.peerTrusted(remotePeerId: remotePeerId))
-            activateAuthenticatedSession()
-        }
+    /// The *Forget peer* action's one write path (ADR-012 Amendment A1, STATUS §4 problem 126).
+    ///
+    /// Removes `peerId`'s pin, and only that record, from the store this manager checks. Isolated to
+    /// this actor, so it is serialised with the trusted half of `promote`: a connection whose `HELLO`
+    /// exchange read the pin before this call cannot pass the trust gate on it afterwards. A dial that
+    /// starts later reads the store afresh in its own handshake and is offered PROTOCOL §4.5's code.
+    ///
+    /// It deliberately does **not** end a connection that is already authenticated: ending a live
+    /// session has exactly one owner (ADR-026), so the coordinator refuses to forget outside `.idle`
+    /// (`ForgetPeerPolicy`) rather than this growing a second teardown path.
+    ///
+    /// The coordinator's policy read happens on the main actor, before the hop to this actor, so the
+    /// write also needs `admission` (ADR-012 Amendment A2): it runs only if no session has begun since
+    /// the forget was admitted in `.idle`. Returns false, with nothing changed, when one has.
+    ///
+    /// Throws when the store could not make the removal durable; the peer is then still trusted, and
+    /// the caller must say so rather than report success.
+    public func forgetTrustedPeer(_ peerId: PeerId, admittedBy admission: ForgetPeerAdmission) throws -> Bool {
+        try admission.perform { try trustedPeers.forget(peerId) }
     }
 
     /// The one place a connection becomes an authenticated RideLink session, and therefore the one

@@ -1,5 +1,6 @@
 package com.ridelink.app.ui
 
+import com.ridelink.app.session.ForgetPeerResult
 import com.ridelink.app.sync.SyncState
 import com.ridelink.core.audiopolicy.IntercomPolicy
 import com.ridelink.core.audiopolicy.VoiceFailure
@@ -53,5 +54,22 @@ class UiLabelsTest {
         listOf("pin_mismatch", "certificate_invalid", "identity_mismatch", "other").forEach {
             assertFalse(securityAlertExplanation(it).contains("peer", ignoreCase = true), it)
         }
+    }
+
+    /** STATUS §4 problem 126: the button and the coordinator read one policy, and the copy says what forgetting costs. */
+    @Test
+    fun `forget is offered only in IDLE and its confirmation names the six-digit code`() {
+        SessionStatus.entries.forEach { status ->
+            val hint = forgetPeerUnavailableHint(status)
+            assertEquals(status == SessionStatus.IDLE, hint == null, status.name)
+            hint?.let { assertFalse(it.contains("peer", ignoreCase = true), status.name) }
+        }
+        val confirmation = forgetPeerConfirmation("Rider")
+        assertTrue(confirmation.contains("six-digit code"))
+        assertTrue(confirmation.contains("identity"), "it says the identity is kept")
+        assertFalse(confirmation.contains("peer", ignoreCase = true))
+        assertEquals(null, forgetPeerResultLabel(ForgetPeerResult.FORGOTTEN))
+        assertTrue(forgetPeerResultLabel(ForgetPeerResult.FAILED)!!.contains("still trusted"))
+        assertTrue(securityAlertExplanation("pin_mismatch").contains("Paired phones"))
     }
 }

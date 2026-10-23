@@ -14,7 +14,6 @@ import com.ridelink.network.resync.ResyncRelay
 import com.ridelink.network.transfer.TransferRelay
 import com.ridelink.network.voice.AuthenticatedFrameWriter
 import com.ridelink.network.voice.VoiceSignalRelay
-import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -32,13 +31,11 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
-import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.longOrNull
 import java.io.IOException
-import java.util.concurrent.ConcurrentHashMap
 import kotlin.random.Random
 
 enum class ControlState { IDLE, CONNECTING, CONNECTED, RECONNECTING, DISCONNECTED, ENDED }
@@ -235,8 +232,16 @@ class ControlSessionManager(
      */
     @Volatile
     private var isShutDown = false
+
+    /**
+     * The *Forget peer* action's one write path (ADR-012 Amendment A1, STATUS §4 problem 126):
+     * [TrustRevocationGate.forget] removes one pin, serialised with the trusted half of [promote].
+     * A property rather than a method here for the reason `config/detekt/detekt.yml` gives this
+     * class: extract rather than raise a threshold.
+     */
+    val trustGate: TrustRevocationGate = TrustRevocationGate(trustedPeers)
     private val stateLock = Mutex()
-    private val pendingPings = ConcurrentHashMap<Long, CompletableDeferred<ClockSync.Sample>>()
+    private val pingWaiters = PingWaiters()
 
     private val _diagnostics = MutableStateFlow(ControlDiagnostics())
     val diagnostics: StateFlow<ControlDiagnostics> = _diagnostics.asStateFlow()
@@ -693,30 +698,41 @@ class ControlSessionManager(
             )
         }
 
-        // PROTOCOL §4.5: pairing runs only on the surviving connection, so this is decided here —
-        // after duplicate resolution — and never in the handshake itself. That is what guarantees
-        // exactly one six-digit code is ever displayed, even on a simultaneous first meeting.
-        //
-        // The exchange is armed *before* the read loop starts, so a PAIR_REQUEST that arrives
-        // immediately cannot be dropped for want of an exchange to hand it to.
-        val pairingRequired = candidate.outcome.pinDecision is PinDecision.PairingRequired
-        if (pairingRequired) {
-            beginPairing(candidate)
-            // beginPairing fails closed when the exporter is unavailable, and that closes the
-            // socket. There is nothing left to run loops over.
-            if (activeSocket !== candidate.socket) return
-        }
+        // ADR-012 Amendment A1 (STATUS §4 problem 126): the handshake's `Trusted` verdict is re-asked
+        // against the store as it is *now*, serialised with [TrustRevocationGate.forget], and the trusted path
+        // runs to [activateAuthenticatedSession] on that same lock without suspending — so a forget
+        // that landed after the HELLO exchange read the pin sends this peer to the six-digit code.
+        val decision =
+            trustGate.admit(candidate.outcome) {
+                // The read loop and keepalive belong to the **transport**: PROTOCOL §4.5's pairing
+                // frames arrive on this same connection, and a link that dies mid-pairing still has to
+                // be noticed. Everything that presumes an authenticated peer — the ARCHITECTURE §7.1
+                // clock burst — waits for the trust gate instead.
+                readLoopJob = scope.launch { readLoop(candidate.socket, candidate.outcome.sessionId) }
+                keepaliveJob = scope.launch { keepaliveLoop(candidate.socket) }
+                _events.tryEmit(ControlEvent.PeerTrusted(candidate.outcome.remotePeerId))
+                activateAuthenticatedSession()
+            }
 
-        // The read loop and keepalive belong to the **transport**: PROTOCOL §4.5's pairing frames
-        // arrive on this same connection, and a link that dies mid-pairing still has to be
-        // noticed. Everything that presumes an authenticated peer — the ARCHITECTURE §7.1 clock
-        // burst — waits for the trust gate instead.
-        readLoopJob = scope.launch { readLoop(candidate.socket, candidate.outcome.sessionId) }
-        keepaliveJob = scope.launch { keepaliveLoop(candidate.socket) }
-
-        if (!pairingRequired) {
-            _events.tryEmit(ControlEvent.PeerTrusted(candidate.outcome.remotePeerId))
-            activateAuthenticatedSession()
+        when (decision) {
+            PinDecision.Trusted -> Unit
+            // PROTOCOL §4.5: pairing runs only on the surviving connection, so this is decided here —
+            // after duplicate resolution — and never in the handshake itself. That is what guarantees
+            // exactly one six-digit code is ever displayed, even on a simultaneous first meeting.
+            //
+            // The exchange is armed *before* the read loop starts, so a PAIR_REQUEST that arrives
+            // immediately cannot be dropped for want of an exchange to hand it to.
+            PinDecision.PairingRequired -> {
+                beginPairing(candidate)
+                // beginPairing fails closed when the exporter is unavailable, and that closes the
+                // socket. There is nothing left to run loops over.
+                if (activeSocket !== candidate.socket) return
+                readLoopJob = scope.launch { readLoop(candidate.socket, candidate.outcome.sessionId) }
+                keepaliveJob = scope.launch { keepaliveLoop(candidate.socket) }
+            }
+            // Only the re-check can produce this: the pin was replaced between the handshake and now.
+            // Refused exactly as the handshake would have refused it — never re-paired (ADR-012).
+            is PinDecision.Refused -> failPairing(candidate.socket, decision.code)
         }
     }
 
@@ -1092,7 +1108,7 @@ class ControlSessionManager(
         val t4 = monotonicNowUs()
         if (!isPlausibleClockSample(t1, t2, t3, t4)) return
         lastPongAtMonoUs = t4
-        pendingPings.remove(t1)?.complete(ClockSync.Sample(t1, t2, t3, t4))
+        pingWaiters.complete(ClockSync.Sample(t1, t2, t3, t4))
         val rttUs = (t4 - t1) - (t3 - t2)
         // Every PONG feeds the RTT window, keepalive ones included: ARCHITECTURE §7.2's
         // `4 x rtt_p95` wants all the history the link has produced, while the *offset* estimate
@@ -1165,7 +1181,7 @@ class ControlSessionManager(
         keepaliveJob?.cancel()
         clockSyncJob?.cancel()
         socket.close()
-        failAllPendingPings()
+        pingWaiters.failAll()
 
         when (reason) {
             LinkLossReason.NETWORK -> {
@@ -1217,48 +1233,14 @@ class ControlSessionManager(
         }
     }
 
-    /**
-     * The waiter is registered before the frame is written, which is already correct here (the
-     * write and the registration happen without an intervening suspension a `PONG` could race
-     * through) — see this session's brief §2, which asked for this ordering to be reviewed
-     * against the iOS race rather than assumed. What *was* missing: a write failure (not just a
-     * timeout) left the entry in [pendingPings] forever. `catch (Throwable)` covers both, always
-     * removes the entry, and always rethrows — never resumes-then-throws twice.
-     */
-    @Suppress("TooGenericExceptionCaught")
+    /** One PROTOCOL §6 round trip on [socket]; [PingWaiters] registers the waiter before the write. */
     private suspend fun sendPingAndAwait(
         socket: ControlSocket,
         timeoutMs: Long,
     ): ClockSync.Sample {
         val t1 = monotonicNowUs()
-        val deferred = CompletableDeferred<ClockSync.Sample>()
-        pendingPings[t1] = deferred
-        try {
+        return pingWaiters.awaitRoundTrip(t1, timeoutMs) {
             socket.writeFrame(ControlMessages.ping(localPeerId, activeSessionId, seqCounter.nextSeq(), t1, t1))
-            return withTimeout(timeoutMs) { deferred.await() }
-        } catch (t: Throwable) {
-            pendingPings.remove(t1)
-            throw t
-        }
-    }
-
-    /**
-     * Teardown must fail every outstanding waiter rather than leave it to time out on a socket
-     * that is already dead (this session's brief §10). `pendingPings.keys.toList()` (the first
-     * version of this) could throw `NoSuchElementException` from `ConcurrentHashMap`'s iterator:
-     * a keepalive/clock-sync coroutine can still be mid-`sendPingAndAwait`, inserting a new
-     * entry, in the window between `keepaliveJob?.cancel()`/`clockSyncJob?.cancel()` being
-     * requested and those coroutines actually reaching a suspension point that observes the
-     * cancellation. `ConcurrentHashMap`'s own bulk
-     * [java.util.concurrent.ConcurrentHashMap.forEach] is the JDK-documented concurrent-safe way
-     * to traverse under exactly this kind of racing structural modification.
-     */
-    private fun failAllPendingPings() {
-        val toFail = mutableListOf<Pair<Long, CompletableDeferred<ClockSync.Sample>>>()
-        pendingPings.forEach { key, value -> toFail.add(key to value) }
-        for ((key, deferred) in toFail) {
-            pendingPings.remove(key)
-            deferred.completeExceptionally(IOException("connection ended"))
         }
     }
 
@@ -1356,7 +1338,7 @@ class ControlSessionManager(
         }
         activeSocket = null
         listener?.close()
-        failAllPendingPings()
+        pingWaiters.failAll()
         _diagnostics.update { ControlDiagnostics(controlState = ControlState.ENDED) }
     }
 

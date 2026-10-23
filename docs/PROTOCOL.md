@@ -573,7 +573,14 @@ The pin is the **SPKI hash**, not the certificate. That distinction has concrete
 
 Recovering from a genuine key change requires the user to explicitly forget the peer and pair
 again, which means a fresh SAS confirmation on both screens. There is no signed key-rotation
-message in v1 and none is planned for it; §12 lists it as reserved. Identity certificates are
+message in v1 and none is planned for it; §12 lists it as reserved.
+
+Forgetting is a **local** action and puts nothing on the wire
+([ADR-012 Amendment A1](DECISIONS/ADR-012-spki-peer-identity.md#amendment-a1--19-october-2026--forget-peer-is-a-user-visible-control-and-it-cannot-be-bypassed)).
+A pin forgotten while a handshake is in flight is honoured: the §4.1 pin check is re-asked at the
+moment the surviving connection would pass the trust gate. If only one phone forgets, the other
+still passes its own pin check. The phone that forgot shows the code and never authenticates, so
+both phones forget before re-pairing. Identity certificates are
 issued with a 10-year validity window so that expiry never masquerades as rotation.
 
 ### 4.6 `ERROR` and `BYE`

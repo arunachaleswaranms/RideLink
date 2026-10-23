@@ -39,7 +39,18 @@ interface TrustedPeerStore {
      */
     fun remember(peer: TrustedPeer)
 
-    /** The explicit user action that makes a re-pair (and a fresh SAS on both screens) possible. */
+    /**
+     * The explicit user action that makes a re-pair (and a fresh SAS on both screens) possible.
+     *
+     * Removes **only** [peerId]'s record: never another peer's, and never anything that is not a
+     * trusted-peer record (the identity key, the local `peer_id`, the library and settings live
+     * elsewhere and are not reachable from here). A no-op for an unknown [peerId].
+     *
+     * An implementation that cannot make the removal durable must **throw** rather than return, and
+     * must leave the record trusted in memory too: a forget that silently fails would report success
+     * to a user who then trusts a code that was never asked for. Production code reaches this only
+     * through `ControlSessionManager.trustGate`, which serialises it with the trust gate.
+     */
     fun forget(peerId: PeerId)
 }
 
