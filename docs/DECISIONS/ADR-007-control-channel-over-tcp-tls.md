@@ -121,3 +121,45 @@ already closed is never promoted.
 **Consequences.** No wire change, no vector, no state-machine change: the FSM already handles a
 failed connection attempt. PROTOCOL §1 records the value. STATUS §4 problem 103 holds the
 reproduction, and the regressions are `HelloExchangeDeadlineTest` / `HelloExchangeDeadlineTests`.
+
+## Amendment A3 — 23 October 2026 — a stalled write cannot hold off the keepalive's loss decision
+
+**Decision.** PROTOCOL §1's keepalive (a `PING` every 2 s, the link lost after 6 s without a `PONG`)
+is unchanged. What changes is how Android applies it, so that the 6 s bound holds while a write on
+the same connection is stalled. Three rules, each needed:
+
+1. **A keepalive `PING`'s timeout bounds the whole round trip**: waiting for the connection's write
+   lock, the write, and the `PONG`. The write used to run outside it.
+2. **The loss decision never waits for a `PING`.** The keepalive loop reads only the time of the
+   last `PONG`, every 2 s. Each `PING` runs beside it, at most one at a time.
+3. **A network-loss retirement is abortive.** It shuts down the TCP send direction, then closes. Every
+   other ending is unchanged and still graceful: a duplicate-connection loser still gets `BYE`, then
+   `close_notify`, then FIN (PROTOCOL §4.2), and a `BYE` or user end still closes normally.
+
+**Why.** A peer that goes silent mid-write — a `MANIFEST_PAGE` of up to 256 KiB when the Wi-Fi
+drops — leaves one write blocked in the kernel. Measured on a real Conscrypt TLS 1.3 socket
+(STATUS §4 problem 137, `BlockingWriteSemanticsTest`):
+
+- A writer waiting for the write lock honours a coroutine timeout.
+- A writer inside the blocking write does not. Cancellation is only a request, and `withContext`
+  cannot return until the blocking call does. A `PING` that is itself the stalled write therefore
+  never returns, so rule 1 alone is not enough and rule 2 is needed.
+- `close()` does not release that writer either, and on Conscrypt's engine socket it waits for it,
+  because it first drains a `close_notify` through the same socket write lock. The loss is reported
+  only after the close returns, so a stalled write could stop it from ever being reported.
+- `shutdownOutput()` needs no write lock. The stalled write fails at once ("Broken pipe"), and a
+  close waiting behind it returns.
+
+Before this, the keepalive on Android wrote its `PING` behind the stalled write, outside its timeout.
+The read loop answers a `PING` inline and was parked behind the same write. Nothing noticed the
+silence until TCP itself gave up, which takes minutes.
+
+**What a silent peer loses.** Nothing it could have received: without `close_notify` it sees a
+truncated TLS stream, which both platforms' read loops already treat as a closed connection. The
+framing is length-prefixed, so no partial frame can be taken for a whole one.
+
+**Consequences.** No wire change, no vector, no state-machine change. iOS is not changed: its
+`NWConnection.send` blocks no thread and holds no lock, and its `PING` timeout is armed independently
+of the write's completion, so its keepalive is not exposed to this class (STATUS §4 problem 137).
+The regressions are `WriteStallLivenessTest` (one case per rule, each failing with its rule reverted)
+and `PingWaitersTest`.

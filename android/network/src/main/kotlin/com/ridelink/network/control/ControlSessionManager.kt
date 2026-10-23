@@ -19,6 +19,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -1180,7 +1181,12 @@ class ControlSessionManager(
         _pairingPrompt.value = null
         keepaliveJob?.cancel()
         clockSyncJob?.cancel()
-        socket.close()
+        // A network loss can find one of this connection's writes stalled in the kernel — a peer that
+        // went silent mid-`MANIFEST_PAGE` — and a plain close() waits for that writer (STATUS §4
+        // problem 137), so the loss below would never be reported. abort() releases it first. Every
+        // other ending keeps the graceful close, which PROTOCOL §4.2 requires of a duplicate-connection
+        // loser (`BYE`, then `close_notify`, then FIN); a silent peer has no use for a `close_notify`.
+        if (reason == LinkLossReason.NETWORK) socket.abort() else socket.close()
         pingWaiters.failAll()
 
         when (reason) {
@@ -1196,16 +1202,30 @@ class ControlSessionManager(
         }
     }
 
-    private suspend fun keepaliveLoop(socket: ControlSocket) {
-        while (true) {
-            delay(KEEPALIVE_INTERVAL_MS)
-            if (monotonicNowUs() - lastPongAtMonoUs > KEEPALIVE_LOST_THRESHOLD_US) {
-                endConnection(socket, LinkLossReason.NETWORK)
-                return
+    /**
+     * PROTOCOL §1: a `PING` every 2 s, and the link declared lost after 6 s without a `PONG`.
+     *
+     * The loss decision never waits for a `PING` (STATUS §4 problem 137). Each `PING` runs as a child,
+     * at most one at a time, and the loop only reads the time of the last `PONG`. It used to await
+     * each round trip inline, so a `PING` stuck behind a stalled write stopped the decision too. A
+     * timeout cannot fix that alone: a write already inside a blocking socket call ignores
+     * cancellation, so the `PING` that holds the stalled write would itself never return. The loss
+     * then retires the connection with [ControlSocket.abort], which is what releases that write.
+     */
+    private suspend fun keepaliveLoop(socket: ControlSocket): Unit =
+        coroutineScope {
+            var ping: Job? = null
+            while (true) {
+                delay(KEEPALIVE_INTERVAL_MS)
+                if (monotonicNowUs() - lastPongAtMonoUs > KEEPALIVE_LOST_THRESHOLD_US) {
+                    endConnection(socket, LinkLossReason.NETWORK)
+                    return@coroutineScope
+                }
+                if (ping?.isActive != true) {
+                    ping = launch { runCatching { sendPingAndAwait(socket, timeoutMs = KEEPALIVE_INTERVAL_MS) } }
+                }
             }
-            runCatching { sendPingAndAwait(socket, timeoutMs = KEEPALIVE_INTERVAL_MS) }
         }
-    }
 
     private suspend fun clockSyncLoop(socket: ControlSocket) {
         runClockBurst(socket) // ARCHITECTURE §7.1: 11 samples at CONNECTING

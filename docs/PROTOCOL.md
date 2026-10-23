@@ -46,7 +46,7 @@ sync, playback commands, queue replication, catalogue manifests and transfer neg
 | `MAX_VOICE_CANDIDATE_BYTES` | **512** — one `VOICE_ICE` `candidate`, §7.5 |
 | `MAX_QUEUE_ITEMS` | **1 000** — the shared queue's cap, §9 ([ADR-024 §6](DECISIONS/ADR-024-synchronized-playback-integration.md)) |
 | `MAX_WIRE_INT` | **9 007 199 254 740 991** (2^53 − 1) — every `uint64` field's bound, §5 |
-| Keepalive | `PING` every 2 s; peer declared lost after 6 s of silence |
+| Keepalive | `PING` every 2 s; peer declared lost after 6 s of silence. The bound holds while a write on the same connection is stalled: the loss decision never waits for a write, and a network-loss retirement shuts the TCP send direction before it closes, so no `close_notify` is sent on that path. Local behaviour; no wire change ([ADR-007 Amendment A3](DECISIONS/ADR-007-control-channel-over-tcp-tls.md), STATUS §4 problem 137) |
 | `HELLO` exchange deadline | **6 s** from the end of the TLS handshake to a complete `HELLO`/`HELLO_ACK` exchange, on both sides; the connection is then closed. The same silence rule as the keepalive, applied before the keepalive exists. It bounds `HELLO` only — the §4.5 pairing wait that follows stays deliberately unbounded. Local behaviour; no wire change ([ADR-007 Amendment A2](DECISIONS/ADR-007-control-channel-over-tcp-tls.md), STATUS §4 problem 103) |
 
 `MAX_CONTROL_FRAME_BYTES` is a defensive limit and does **not** move: a control message larger
