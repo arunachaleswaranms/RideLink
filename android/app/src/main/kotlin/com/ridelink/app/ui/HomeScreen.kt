@@ -57,6 +57,7 @@ internal fun HomeContent(
     val diagnostics by coordinator.controlDiagnostics.collectAsState()
     val pairingPrompt by coordinator.pairingPrompt.collectAsState()
     val securityAlert by coordinator.securityAlert.collectAsState()
+    val pairedPhones by coordinator.trustedPeerList.collectAsState()
     val voice by coordinator.voiceDiagnostics.collectAsState()
     val coexistence by coordinator.coexistenceDiagnostics.collectAsState()
     val policy by coordinator.intercomPolicy.collectAsState()
@@ -141,6 +142,12 @@ internal fun HomeContent(
                     sync = syncPlaybackCoordinator,
                     titles = remoteEntries.associate { it.contentHash?.value.orEmpty() to it.title },
                 )
+            }
+        }
+
+        if (pairedPhones.isNotEmpty()) {
+            HomeSection("Paired phones") {
+                PairedPhonesSection(peers = pairedPhones, status = state.status, onForget = coordinator::forgetPeer)
             }
         }
 

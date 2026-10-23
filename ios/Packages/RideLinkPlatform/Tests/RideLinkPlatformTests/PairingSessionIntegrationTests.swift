@@ -210,8 +210,8 @@ final class PairingSessionIntegrationTests: XCTestCase {
 
     func testForgettingATrustedPeerMakesTheNextConnectionAskForACodeAgain() async throws {
         let (a, b) = try TestSessions.pairedPeers("0123456789abcdef", "fedcba9876543210")
-        a.trustedPeers.forget(b.peerId)
-        b.trustedPeers.forget(a.peerId)
+        try a.trustedPeers.forget(b.peerId)
+        try b.trustedPeers.forget(a.peerId)
         try await withPhones(a, b) { sessionA, sessionB, _ in
             try await sessionA.awaitPairingPrompt()
             try await sessionB.awaitPairingPrompt()
