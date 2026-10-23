@@ -1,5 +1,16 @@
 # RideLink — Status
 
+**23 October 2026 — Problem 137 investigated: a stalled control-plane write blocks link-loss
+detection (Android). Production defect confirmed; not fixed; reproduction only, on its own branch,
+separate from PR #32.** The CI timeout in `PongWriteFailureTest` is not just test scheduling.
+- **The read loop** answers `PING` inline, so its `PONG` waits behind the stalled write and it never
+  reads the close.
+- **The keepalive**, which should catch that within 6 s, writes its own `PING` behind the same lock,
+  outside its timeout.
+- **Reproduction:** `WriteStallLivenessTest` fails 3 of 3, unloaded. Bounding only the keepalive's
+  write makes it pass at 6.9 s (scratch experiment, not committed).
+- **Details:** [analysis](test-results/problem137-write-stall-liveness-20261023.md); §4 problem 137.
+
 **22 October 2026 — PR #27 review round (request changes): Android `ControlSessionManager` size
 fixed by extraction; no security behaviour changed; not installed on any phone.**
 - **Problem:** merged with `main` (#24's reconnect-ladder fix), the class crossed detekt's
@@ -8865,6 +8876,7 @@ as of this write-up — see §7.
 | 134 | **OPEN. Found 20 October 2026 (Phase 9B-A run 2; Android, physical).** A follower's *Play on both phones* for a track in the **leader's own library** leaves the leader at `WAITING_FOR_CONTENT` (*"Waiting for the track to download…"*) with no `command_seq` allocated, and nothing plays until the leader presses Next/Previous. Reproduced 2 of 2, in two sessions. The same track played normally when reached through a leader-ordered Next |
 | 135 | **OPEN. Found 20 October 2026 (Phase 9B-A run 2; Android 17, physical).** AF-07 fails on the moto g57 power: mid-ride, swiping RideLink from Recents removed the task, but 46 s later the process, the `mediaPlayback` foreground service, its notification, the music and the control session were all still running. ARCHITECTURE requires `onTaskRemoved → ENDING`. Whether the callback is not delivered or not handled is not established. (The OnePlus kills the process instead, Phase 9A.) |
 | 136 | **FIXED IN SOFTWARE (test only) 22 October 2026, branch `fix/ios-obligation-test-retry-race`, PR #31, code approved by independent review. Found 21 October 2026 in CI (iOS; pre-existing since Phase 8, `2aa728f`).** `SyncPlaybackAcceptedObligationTests.advanceRetries` advanced the virtual clock after a fixed number of yields. A deferred drain that had not yet parked then parked on a deadline computed from the advanced instant, which nothing reached: a 5 s timeout, or 4 retry passes counted instead of 6. It failed 3 of 4 iOS CI runs on PRs #24/#26, and 1 run in 12 under local CPU load on unmodified main | Low (CI-only; no product defect; blocks green CI on unrelated PRs) | The two tests that require a running drain advance only once it is parked on its cadence (`advanceParkedRetries`), and the capacity test waits for the re-park before reading counts. Measured under load: 118 of 120 runs clean, and the 2 failing runs' assertions were not recorded, so a residual sensitivity is not ruled out |
+| 137 | **OPEN — PRODUCTION DEFECT CONFIRMED (JVM transport), not fixed; investigation on branch `investigate/problem-137-pong-reconnect`, draft PR (23 October 2026). Found 22 October 2026 in CI (Android); pre-existing.** A stalled control-plane write blocks link-loss detection. The read loop answers `PING` inline, so its `PONG` waits on the connection's write lock behind the stalled write and it never reads the close. The keepalive's own `PING` write waits on the same lock, outside its timeout, so PROTOCOL §1's 6 s loss bound is never applied. This is why `PongWriteFailureTest > a stale PONG write failure never retires the successor connection` times out under CPU load: the peer's clock-burst `PING` lands while that test's write is parked. Measured under 12 busy processes: 7 of 8 failures on unmodified `main` `413cb51`, 2 of 2 in CI on PR #32 | Medium (on a phone: a large control frame — a manifest page — to a peer that went silent could defer loss detection from 6 s to TCP's own timeout, minutes; inferred, not measured on a device) | [Analysis](test-results/problem137-write-stall-liveness-20261023.md). Deterministic reproduction `WriteStallLivenessTest`: 3 of 3 failures unloaded; still `CONNECTED` 9 s after the peer left. With only the keepalive's write moved inside its timeout (scratch experiment, reverted), it passes at 6.9 s. `PongWriteFailureTest` is not changed, skipped or masked. Next: review the fix candidates in the analysis, one at a time |
 
 Resolved 26 Aug 2026 session: `CLAUDE.md` in `.gitignore` (was problem 1); `.DS_Store` tracking
 (was problem 7 — the claim was incorrect; the files are untracked and now ignored); the ADR-015/
