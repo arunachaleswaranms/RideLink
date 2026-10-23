@@ -826,7 +826,8 @@ instant:
   share is never chased. A differential lag, such as one phone's Bluetooth path, is corrected as any
   other error.
 - **A leader report is usable only when it is settled.** It must be `playing`, sampled ≥ 1.5 s after
-  the anchor, ≤ 12 s old, and stamped no later than this device's own sample. The local sample must
+  the anchor, ≤ 12 s old, stamped no later than this device's own sample, and measured against the
+  timeline's current anchor (a re-anchor makes an earlier drift meaningless). The local sample must
   also be ≥ 1.5 s past the anchor and past this
   device's last hard seek. Without such a report the ladder decides nothing and releases any nudge
   to 1.0.

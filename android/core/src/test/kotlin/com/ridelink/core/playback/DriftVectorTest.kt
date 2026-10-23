@@ -123,9 +123,12 @@ class DriftVectorTest {
                         driftMs = it["drift_ms"]!!.jsonPrimitive.long,
                         atSessionUs = it["at_session_us"]!!.jsonPrimitive.long,
                         playing = it["playing"]!!.jsonPrimitive.content.toBoolean(),
+                        anchorSessionUs = it["anchor_session_us"]!!.jsonPrimitive.long,
+                        anchorPositionMs = it["anchor_position_ms"]!!.jsonPrimitive.long,
                     )
                 },
             routeChangeCount = json["route_change_count"]!!.jsonPrimitive.long,
+            anchorPositionMs = json["anchor_position_ms"]!!.jsonPrimitive.long,
         )
 
     private fun assertAction(

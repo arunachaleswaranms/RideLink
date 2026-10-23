@@ -286,6 +286,72 @@ class SyncPlaybackDriftTest {
             assertNull(coordinator.diagnostics.value.syncErrorMs, "a future-dated reference is no reference")
         }
 
+    /**
+     * PR #32 review round 2. A drift is measured against one particular anchor. A same-track
+     * `PLAYBACK_STATE` re-anchors the follower's timeline — here to an instant **earlier** than the
+     * leader's last report, so that report still passes every freshness rule (settled after the new
+     * anchor, 1 s old, sampled before this device's own sample). Only its anchor is wrong, and it must
+     * not be used. The leader's first report against the new anchor resumes ordinary correction.
+     */
+    @Test
+    fun `a reference measured against a replaced anchor is never used, and correction resumes on a new one`() =
+        runTest(StandardTestDispatcher()) {
+            build(backgroundScope)
+            startPlaying(this)
+
+            // 1. A settled leader report, exactly on the original timeline.
+            val firstTickUs = clock.pendingDeadlines.max()
+            session.deliverLeaderReport(SyncTestValues.hash(1), ANCHOR_US, firstTickUs - 1_000_000)
+            runCurrent()
+
+            // 2. The authoritative timeline is re-anchored, 300 ms ahead of the old one.
+            val newAnchorUs = ANCHOR_US + 500_000
+            val newAnchorPositionMs = 800L
+
+            fun newExpectedMs(atUs: Long) = newAnchorPositionMs + (atUs - newAnchorUs) / 1_000
+            session.deliver(
+                PlaybackMessage.PlaybackStateSnapshot(
+                    commandSeq = 1,
+                    queueRevision = 0,
+                    trackHash = SyncTestValues.hash(1),
+                    queueItemId = SyncTestValues.ulid(1),
+                    positionMs = newAnchorPositionMs,
+                    playing = true,
+                    atSessionUs = newAnchorUs,
+                ),
+            )
+            runCurrent()
+
+            // 3 and 4. 500 ms behind the new timeline. The old reference would make that a seek; it is
+            // settled, fresh and in the past, so only the anchor rule can refuse it.
+            player.setState(PlayerState(positionMs = newExpectedMs(firstTickUs) - 500, durationMs = 600_000, playing = true))
+            clock.advanceTo(firstTickUs)
+            runCurrent()
+            assertEquals(-500, coordinator.diagnostics.value.localDriftMs, "the premise: measured against the new anchor")
+            assertNull(coordinator.diagnostics.value.syncErrorMs, "the old reference is no reference")
+            assertTrue(player.calls.none { it is FakeSyncPlayer.Call.Seek || it is FakeSyncPlayer.Call.SetRate })
+
+            // 5. The leader's first report against the new anchor: 300 ms behind it.
+            val secondTickUs = clock.pendingDeadlines.max()
+            session.deliverLeaderReport(
+                SyncTestValues.hash(1),
+                newAnchorUs,
+                secondTickUs - 1_000_000,
+                anchorPositionMs = newAnchorPositionMs,
+                driftMs = -300,
+            )
+            runCurrent()
+            player.setState(PlayerState(positionMs = newExpectedMs(secondTickUs) - 500, durationMs = 600_000, playing = true))
+            clock.advanceTo(secondTickUs)
+            runCurrent()
+
+            // 6. Ordinary follower correction: a 200 ms error, a seek to where the leader is.
+            assertEquals(-200, coordinator.diagnostics.value.syncErrorMs)
+            val seek = player.calls.filterIsInstance<FakeSyncPlayer.Call.Seek>().single()
+            assertEquals(newExpectedMs(secondTickUs) - 300, seek.positionMs)
+            assertEquals(1, coordinator.diagnostics.value.hardSeekCount)
+        }
+
     @Test
     fun `a route transition suspends correction entirely and does not spend the seek budget`() =
         runTest(StandardTestDispatcher()) {

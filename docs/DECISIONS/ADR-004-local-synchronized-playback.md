@@ -119,6 +119,9 @@ That is why the decision below learns the restart latency rather than assuming o
    - it was sampled at least `REFERENCE_SETTLE_US` (1.5 s) after the timeline's anchor;
    - it is at most `MAX_REFERENCE_AGE_US` (12 s) old, and it was sampled **no later** than this
      device's own sample (a future-dated reference is never usable while it is still ahead);
+   - it was measured against the timeline's **current anchor** (both `anchorSessionUs` and
+     `anchorPositionMs`). A drift is a difference from one anchor, so it means nothing after a
+     re-anchor;
    - the local sample is also at least 1.5 s after the anchor and after this device's last hard seek.
    The settle window excludes the frozen-position stretch while output starts. 1.5 s is more than
    twice the largest lag observed (about 650 ms, staleness included).
@@ -220,6 +223,29 @@ model and every lifetime guard are unchanged.
 New vector rows (`a1r-*`, 7 sequences, 2 epoch rows updated) pin each case. Mirrored coordinator
 regressions on both platforms prove the count is fed through. `AudioSessionLifecycle` tests pin the
 counter itself.
+
+### Review round 2 (23 October 2026, PR #32): a reference belongs to the anchor it was measured against
+
+All five round-1 findings were accepted. One new finding: a `DriftReference` computed under an earlier
+anchor survived a same-track authoritative re-anchor. Both platforms reset the drift state with
+`newEpoch` there and kept `peerReference`.
+- A `PLAYBACK_STATE` (or a `STATE_SNAPSHOT`, which reconciles through the same path) can re-anchor to
+  an instant **earlier** than the leader's last report. That stale report then passes every freshness
+  rule: it is settled after the new anchor, recent, and sampled before the local sample.
+- PAUSE, RESUME and SEEK re-anchor at a future `effective_at`, so the 1.5 s settle rule already
+  refused older reports there. That was safe, but only by coincidence.
+
+**Fix:**
+- A `DriftReference` now records the anchor (`anchorSessionUs`, `anchorPositionMs`) its drift was
+  measured against. The table uses it only while that is still the input's anchor. This covers every
+  timeline mutation by construction, including future ones, and is pinned by the `a1t-*` vector rows.
+- Both coordinators also clear the stored reference wherever the timeline is re-anchored or dropped:
+  PAUSE, RESUME, SEEK, same-track `PLAYBACK_STATE`, step-to-nothing, and "nothing loaded". A new `PLAY`
+  and every session or ride reset already cleared it.
+- The table check is the guarantee; the clearing keeps the stored state honest.
+
+**Unchanged:** leader as reference, live sampling, route-change protection, the learned compensation,
+the tiers, and every lifetime and generation guard. No existing vector row changed outcome.
 
 **Known limit, recorded rather than solved.** The count, like ARCHITECTURE §7.3's existing
 `transitioning` suspension, comes from the voice audio session's route tracking. While the intercom is

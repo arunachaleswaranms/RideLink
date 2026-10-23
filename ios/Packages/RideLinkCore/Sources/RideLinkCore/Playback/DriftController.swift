@@ -92,15 +92,24 @@ public struct DriftState: Sendable, Equatable {
 /// The output this device must match (ADR-004 Amendment A1 decision 2): the leader's latest
 /// `POSITION_REPORT`, as its drift against the **same** `PlaybackTimeline` at the session instant it
 /// was sampled. A leader has none — its own output is the reference.
+///
+/// `anchorSessionUs` and `anchorPositionMs` are the anchor of the timeline `driftMs` was measured
+/// against. A drift is a difference from one particular anchor, so it means nothing once the timeline
+/// has been re-anchored — even to an earlier instant, which a same-track `PLAYBACK_STATE` can do and
+/// which every freshness check would otherwise pass (PR #32 review round 2).
 public struct DriftReference: Sendable, Equatable {
     public let driftMs: Int64
     public let atSessionUs: Int64
     public let playing: Bool
+    public let anchorSessionUs: Int64
+    public let anchorPositionMs: Int64
 
-    public init(driftMs: Int64, atSessionUs: Int64, playing: Bool) {
+    public init(driftMs: Int64, atSessionUs: Int64, playing: Bool, anchorSessionUs: Int64, anchorPositionMs: Int64) {
         self.driftMs = driftMs
         self.atSessionUs = atSessionUs
         self.playing = playing
+        self.anchorSessionUs = anchorSessionUs
+        self.anchorPositionMs = anchorPositionMs
     }
 }
 
@@ -120,6 +129,8 @@ public struct DriftInput: Sendable, Equatable {
     public let anchorSessionUs: Int64
     public let reference: DriftReference?
     public let routeChangeCount: Int64
+    /// The position half of the timeline's anchor, which `DriftReference.anchorPositionMs` must match.
+    public let anchorPositionMs: Int64
 
     public init(
         driftMs: Int64,
@@ -129,7 +140,8 @@ public struct DriftInput: Sendable, Equatable {
         routeTransitioning: Bool,
         anchorSessionUs: Int64,
         reference: DriftReference?,
-        routeChangeCount: Int64
+        routeChangeCount: Int64,
+        anchorPositionMs: Int64
     ) {
         self.driftMs = driftMs
         self.nowSessionUs = nowSessionUs
@@ -139,6 +151,7 @@ public struct DriftInput: Sendable, Equatable {
         self.anchorSessionUs = anchorSessionUs
         self.reference = reference
         self.routeChangeCount = routeChangeCount
+        self.anchorPositionMs = anchorPositionMs
     }
 }
 
@@ -282,6 +295,8 @@ public enum DriftController {
         // that merely arrived early is usable on the next tick; one stamped implausibly far ahead
         // never becomes usable while it is still ahead.
         return reference.playing &&
+            reference.anchorSessionUs == input.anchorSessionUs &&
+            reference.anchorPositionMs == input.anchorPositionMs &&
             reference.atSessionUs >= settledFrom &&
             reference.atSessionUs <= input.nowSessionUs &&
             input.nowSessionUs - reference.atSessionUs <= maxReferenceAgeUs &&

@@ -1455,6 +1455,7 @@ extension SyncPlaybackCoordinator {
         guard mayRepresent(ride, delivered: delivered) else { return }
         let token = currentEpochToken
         timeline = timeline?.reanchored(positionMs: positionMs, sessionUs: header.effectiveAtSessionUs, playing: playing)
+        peerReference = nil // PR #32 review round 2: measured against the anchor just replaced
         representDelivered(delivered, token: token)
         // Amendment A4 Finding A: these are two effects, and they used to sit inside one closure
         // behind one ownership proof. `player.pause()` suspends — the hop to `MusicCoordinator` and
@@ -1485,6 +1486,7 @@ extension SyncPlaybackCoordinator {
         guard mayRepresent(ride, delivered: delivered) else { return }
         let token = currentEpochToken
         timeline = timeline?.reanchored(positionMs: targetPositionMs, sessionUs: header.effectiveAtSessionUs)
+        peerReference = nil // PR #32 review round 2: measured against the anchor just replaced
         representDelivered(delivered, token: token)
         scheduleAt(
             header.effectiveAtSessionUs, estimate: estimate, generation: generation, token: token,
@@ -1532,6 +1534,7 @@ extension SyncPlaybackCoordinator {
             let token = epoch.begin()
             currentEpochToken = token
             timeline = nil
+            peerReference = nil
             // Independent review, Blocker 2B: authoritative "nothing loaded", not merely a
             // control-lifetime reset — the identity genuinely has nothing to report now.
             currentPlaybackIdentity = nil
@@ -1782,7 +1785,8 @@ extension SyncPlaybackCoordinator {
                 // ADR-004 Amendment A1 decision 2: the leader's output is the reference, so the leader
                 // has none to match and never corrects for drift.
                 reference: role == .follower ? peerReference : nil,
-                routeChangeCount: route.localChangeCount
+                routeChangeCount: route.localChangeCount,
+                anchorPositionMs: active.anchorPositionMs
             )
         )
         driftState = outcome.state
@@ -1936,7 +1940,10 @@ extension SyncPlaybackCoordinator {
         let durationMs: Int64? = state.durationMs > 0 ? state.durationMs : nil
         let expected = active.expectedPositionMs(atSessionUs: atSessionUs, durationMs: durationMs)
         let peerDriftMs = positionMs - expected
-        peerReference = DriftReference(driftMs: peerDriftMs, atSessionUs: atSessionUs, playing: playing)
+        peerReference = DriftReference(
+            driftMs: peerDriftMs, atSessionUs: atSessionUs, playing: playing,
+            anchorSessionUs: active.anchorSessionUs, anchorPositionMs: active.anchorPositionMs
+        )
         diagnostics.peerDriftMs = peerDriftMs
         publishDiagnostics()
     }
@@ -2106,6 +2113,10 @@ extension SyncPlaybackCoordinator {
         guard let active = timeline, fields.trackHash == active.trackHash else { return .applied }
         timeline = active.reanchored(positionMs: fields.positionMs, sessionUs: fields.atSessionUs, playing: fields.playing)
         driftState = DriftController.newEpoch(driftState)
+        // PR #32 review round 2: the leader's last report was measured against the anchor just
+        // replaced. This re-anchor can move it to an *earlier* instant, where every freshness rule
+        // would pass the old drift; `DriftController` refuses it by anchor identity regardless.
+        peerReference = nil
         representAuthoritativeSequence(commandSeq)
         return .applied
     }
@@ -2132,6 +2143,7 @@ extension SyncPlaybackCoordinator {
             // scheduled effect from the epoch we lost track of is superseded, and nothing replaces it.
             epoch.supersede()
             timeline = nil
+            peerReference = nil
             // Independent review, Blocker 2B/2D: the *leader's own* authoritative say-so that
             // nothing is loaded — genuinely different from this device merely having lost track of
             // its own identity across a reconnect (which is what the caller's routing fix now keeps

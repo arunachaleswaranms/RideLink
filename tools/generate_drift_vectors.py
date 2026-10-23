@@ -42,6 +42,11 @@ PR #32's review (22 October 2026) added three rules on top:
   - a reference stamped after this device's own sample (`at_session_us > now_session_us`) is not
     usable.
 
+PR #32 review round 2 (23 October 2026): a reference records the anchor of the timeline its drift
+was measured against (`anchor_session_us`, `anchor_position_ms`), and is usable only while that is
+still the timeline's anchor. A same-track re-anchor can move the anchor to an earlier instant, where
+every freshness rule above would otherwise pass a drift measured against the old one.
+
 An independent third transcription, not a port of either platform's `DriftController`. Edit this
 generator, never the JSON.
 
@@ -88,8 +93,10 @@ def follow_route(state: dict, t: dict) -> dict:
     return {**state, "route_change_count": t["route_change_count"]}
 
 
-def settled_reference(now_session_us: int, drift_ms: int = 0) -> dict:
-    return {"drift_ms": drift_ms, "at_session_us": now_session_us - 1_000_000, "playing": True}
+def settled_reference(now_session_us: int, drift_ms: int = 0, anchor_us: int = ANCHOR_US,
+                      anchor_pos: int = 0) -> dict:
+    return {"drift_ms": drift_ms, "at_session_us": now_session_us - 1_000_000, "playing": True,
+            "anchor_session_us": anchor_us, "anchor_position_ms": anchor_pos}
 
 
 def release_if_nudging(state: dict) -> tuple[dict, dict]:
@@ -101,6 +108,8 @@ def release_if_nudging(state: dict) -> tuple[dict, dict]:
 def reference_usable(state: dict, t: dict) -> bool:
     ref = t["reference"]
     if ref is None or not ref["playing"]:
+        return False
+    if ref["anchor_session_us"] != t["anchor_session_us"] or ref["anchor_position_ms"] != t["anchor_position_ms"]:
         return False
     now = t["now_session_us"]
     earliest = t["anchor_session_us"] + REFERENCE_SETTLE_US
@@ -193,7 +202,7 @@ def single_rows() -> list[dict]:
             drift = magnitude * sign
             t = {"drift_ms": drift, "now_session_us": BASE_US, "expected_position_ms": 45_000,
                  "playing": True, "route_transitioning": False, "anchor_session_us": ANCHOR_US,
-                 "reference": settled_reference(BASE_US), "route_change_count": 0}
+                 "reference": settled_reference(BASE_US), "route_change_count": 0, "anchor_position_ms": 0}
             rows.append(row(f"fresh-drift-{drift}ms", initial_state(), t))
 
     # ADR-004 Amendment A1: the target is where the reference output is, plus the learned restart
@@ -201,7 +210,8 @@ def single_rows() -> list[dict]:
     def at(drift, ref_drift, expected=45_000, state=None):
         t = {"drift_ms": drift, "now_session_us": BASE_US, "expected_position_ms": expected,
              "playing": True, "route_transitioning": False, "anchor_session_us": ANCHOR_US,
-             "reference": settled_reference(BASE_US, ref_drift), "route_change_count": 0}
+             "reference": settled_reference(BASE_US, ref_drift), "route_change_count": 0,
+             "anchor_position_ms": 0}
         return state or initial_state(), t
 
     rows.append(row("a1-common-mode-lag-is-not-chased", *at(-375, -375)))
@@ -217,12 +227,15 @@ def single_rows() -> list[dict]:
 
 
 def tick(drift, at_s, playing=True, transitioning=False, expected=45_000, ref_drift=0,
-         reference="settled", anchor_us=ANCHOR_US, routes=0):
+         reference="settled", anchor_us=ANCHOR_US, routes=0, anchor_pos=0):
     now = BASE_US + at_s * 1_000_000
     if reference == "settled":
-        ref = settled_reference(now, ref_drift)
+        ref = settled_reference(now, ref_drift, anchor_us, anchor_pos)
+    elif reference is None:
+        ref = None
     else:
-        ref = reference
+        # Measured against this tick's own timeline unless the row says otherwise.
+        ref = {"anchor_session_us": anchor_us, "anchor_position_ms": anchor_pos, **reference}
     return {
         "drift_ms": drift,
         "now_session_us": now,
@@ -232,6 +245,7 @@ def tick(drift, at_s, playing=True, transitioning=False, expected=45_000, ref_dr
         "anchor_session_us": anchor_us,
         "reference": ref,
         "route_change_count": routes,
+        "anchor_position_ms": anchor_pos,
     }
 
 
@@ -406,6 +420,30 @@ def sequence_rows() -> list[dict]:
              tick(400, 0, reference={"drift_ms": 0, "at_session_us": BASE_US + 3_600_000_000, "playing": True}),
              tick(400, 0, reference={"drift_ms": 0, "at_session_us": BASE_US, "playing": True})],
         ),
+        # --- PR #32 review round 2: a reference belongs to the anchor it was measured against ------
+        (
+            "a1t-a-reference-measured-against-an-earlier-anchor-instant-is-not-usable",
+            # The timeline was re-anchored to an *earlier* instant (a same-track PLAYBACK_STATE can):
+            # the old reference is settled, fresh and playing, and still says nothing about this one.
+            [tick(-500, 0, anchor_us=ANCHOR_US + 500_000, anchor_pos=300,
+                  reference={"drift_ms": 0, "at_session_us": BASE_US - 1_000_000, "playing": True,
+                             "anchor_session_us": ANCHOR_US + 2_000_000, "anchor_position_ms": 0})],
+        ),
+        (
+            "a1t-a-reference-measured-against-an-earlier-anchor-position-is-not-usable",
+            [tick(-500, 0, anchor_pos=300,
+                  reference={"drift_ms": 0, "at_session_us": BASE_US - 1_000_000, "playing": True,
+                             "anchor_session_us": ANCHOR_US, "anchor_position_ms": 0})],
+        ),
+        (
+            "a1t-correction-resumes-on-the-first-reference-for-the-new-anchor",
+            # Stale reference: nothing. The leader's first report against the new anchor: a 200 ms
+            # differential, corrected exactly as before.
+            [tick(-500, 0, anchor_us=ANCHOR_US + 500_000, anchor_pos=300,
+                  reference={"drift_ms": 0, "at_session_us": BASE_US - 1_000_000, "playing": True,
+                             "anchor_session_us": ANCHOR_US, "anchor_position_ms": 0}),
+             tick(-500, 5, anchor_us=ANCHOR_US + 500_000, anchor_pos=300, ref_drift=-300)],
+        ),
         (
             "a1-a-pause-forgets-a-pending-seek",
             [tick(-575, 0, ref_drift=-375), tick(-925, 5, ref_drift=-375, playing=False),
@@ -469,6 +507,8 @@ def main() -> None:
             "route_change_count before it, leaves restart_compensation_ms 0 and pending_seek null — "
             "whether playing, paused or failed (PR #32 review).",
             "A reference with at_session_us > now_session_us is never usable: error_ms is null.",
+            "A reference whose anchor_session_us or anchor_position_ms differs from the input's is "
+            "never usable: error_ms is null (PR #32 review round 2).",
         ],
         "constants": {
             "dead_band_ms": DEAD_BAND_MS,

@@ -301,6 +301,61 @@ final class SyncPlaybackDriftTests: XCTestCase {
         XCTAssertNil(syncError, "a future-dated reference is no reference")
     }
 
+    /// PR #32 review round 2. A drift is measured against one particular anchor. A same-track
+    /// `PLAYBACK_STATE` re-anchors the follower's timeline — here to an instant **earlier** than the
+    /// leader's last report, so that report still passes every freshness rule. Only its anchor is
+    /// wrong, and it must not be used. The leader's first report against the new anchor resumes
+    /// ordinary correction. Mirrors Android's case of the same name.
+    func testAReferenceMeasuredAgainstAReplacedAnchorIsNeverUsedAndCorrectionResumesOnANewOne() async {
+        await startPlaying()
+        await awaitTickArmed()
+        guard let firstTickUs = clock.pendingDeadlines().max() else { return XCTFail("no tick is armed") }
+
+        // 1. A settled leader report, exactly on the original timeline.
+        await deliverAndAwait(.positionReport(
+            trackHash: SyncTestValues.hash(1), positionMs: (firstTickUs - 1_000_000 - anchorUs) / 1_000,
+            atSessionUs: firstTickUs - 1_000_000, playing: true, playbackRate: 1.0
+        ))
+
+        // 2. The authoritative timeline is re-anchored, 300 ms ahead of the old one.
+        let newAnchorUs = anchorUs + 500_000
+        let newAnchorPositionMs: Int64 = 800
+        func newExpectedMs(_ atUs: Int64) -> Int64 { newAnchorPositionMs + (atUs - newAnchorUs) / 1_000 }
+        await deliverAndAwait(.playbackState(
+            commandSeq: 1, queueRevision: 0, trackHash: SyncTestValues.hash(1), queueItemId: SyncTestValues.ulid(1),
+            positionMs: newAnchorPositionMs, playing: true, atSessionUs: newAnchorUs
+        ))
+
+        // 3 and 4. 500 ms behind the new timeline. The old reference is settled, fresh and in the past,
+        // so only the anchor rule can refuse it.
+        await tick(driftMs: newExpectedMs(firstTickUs) - (firstTickUs - anchorUs) / 1_000 - 500, withReference: false)
+        var diagnostics = await coordinator.diagnostics
+        XCTAssertEqual(diagnostics.localDriftMs, -500, "the premise: measured against the new anchor")
+        XCTAssertNil(diagnostics.syncErrorMs, "the old reference is no reference")
+        var calls = await player.calls
+        XCTAssertFalse(calls.contains { if case .seek = $0 { return true }; if case .setRate = $0 { return true }; return false })
+
+        // 5. The leader's first report against the new anchor: 300 ms behind it.
+        await awaitTickArmed()
+        guard let secondTickUs = clock.pendingDeadlines().max() else { return XCTFail("no tick is armed") }
+        await deliverAndAwait(.positionReport(
+            trackHash: SyncTestValues.hash(1), positionMs: newExpectedMs(secondTickUs - 1_000_000) - 300,
+            atSessionUs: secondTickUs - 1_000_000, playing: true, playbackRate: 1.0
+        ))
+        await tick(driftMs: newExpectedMs(secondTickUs) - (secondTickUs - anchorUs) / 1_000 - 500, withReference: false)
+
+        // 6. Ordinary follower correction: a 200 ms error, a seek to where the leader is.
+        diagnostics = await coordinator.diagnostics
+        XCTAssertEqual(diagnostics.syncErrorMs, -200)
+        calls = await player.calls
+        let seeks = calls.compactMap { call -> Int64? in
+            if case .seek(let position) = call { return position }
+            return nil
+        }
+        XCTAssertEqual(seeks, [newExpectedMs(secondTickUs) - 300])
+        XCTAssertEqual(diagnostics.hardSeekCount, 1)
+    }
+
     func testARouteTransitionSuspendsCorrectionEntirelyAndDoesNotSpendTheSeekBudget() async {
         await startPlaying()
         await routeState.set(true)

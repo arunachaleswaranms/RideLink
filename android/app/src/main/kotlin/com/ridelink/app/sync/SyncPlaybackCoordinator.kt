@@ -3551,6 +3551,7 @@ class SyncPlaybackCoordinator(
         if (!mayRepresent(ride, delivered)) return
         val token = currentEpochToken
         timeline = timeline?.copy(anchorPositionMs = positionMs, anchorSessionUs = header.effectiveAtSessionUs, playing = playing)
+        peerReference = null // PR #32 review round 2: measured against the anchor just replaced
         // Amendment A4 Finding A: these are two effects, and they used to sit inside one lambda
         // behind one ownership proof. As a step list, the fence is re-proved between them.
         val steps =
@@ -3578,6 +3579,7 @@ class SyncPlaybackCoordinator(
         if (!mayRepresent(ride, delivered)) return // round 4, §17; round 7 adds the second half
         val token = currentEpochToken
         timeline = timeline?.copy(anchorPositionMs = targetPositionMs, anchorSessionUs = header.effectiveAtSessionUs)
+        peerReference = null // PR #32 review round 2: measured against the anchor just replaced
         representDelivered(delivered, token)
         scheduleAt(
             header.effectiveAtSessionUs,
@@ -3628,6 +3630,7 @@ class SyncPlaybackCoordinator(
             val token = playbackFence.begin()
             currentEpochToken = token
             timeline = null
+            peerReference = null
             // Stepping past the end of the queue is genuinely "nothing selected" -- ride-segment
             // identity clears with the timeline here, not only the queue selection.
             currentPlaybackIdentity = null
@@ -3849,6 +3852,7 @@ class SyncPlaybackCoordinator(
                     // leader has none to match and never corrects for drift.
                     reference = if (role == PlaybackRole.FOLLOWER) peerReference else null,
                     routeChangeCount = routeChanges,
+                    anchorPositionMs = active.anchorPositionMs,
                 ),
             )
         driftState = outcome.state
@@ -4153,7 +4157,8 @@ class SyncPlaybackCoordinator(
                     .takeIf { it > 0 },
             )
         val peerDriftMs = report.positionMs - expected
-        peerReference = DriftReference(peerDriftMs, report.atSessionUs, report.playing)
+        peerReference =
+            DriftReference(peerDriftMs, report.atSessionUs, report.playing, active.anchorSessionUs, active.anchorPositionMs)
         _diagnostics.update { it.copy(peerDriftMs = peerDriftMs) }
     }
 
@@ -4337,6 +4342,10 @@ class SyncPlaybackCoordinator(
                 playing = snapshot.playing,
             )
         driftState = DriftController.newEpoch(driftState)
+        // PR #32 review round 2: the leader's last report was measured against the anchor just
+        // replaced. This re-anchor can move it to an *earlier* instant, where every freshness rule
+        // would pass the old drift; `DriftController` refuses it by anchor identity regardless.
+        peerReference = null
         representAuthoritativeSequence(snapshot.commandSeq)
         return StateSnapshotOutcome.APPLIED
     }
@@ -4385,6 +4394,7 @@ class SyncPlaybackCoordinator(
             // by a reconnect -- so ride-segment identity clears here too, honestly.
             playbackFence.supersede()
             timeline = null
+            peerReference = null
             currentPlaybackIdentity = null
             // Blocker 1, as in `applyStep`'s equivalent branch: adopting the leader's "nothing
             // loaded" is this ride exercising authority, not an absence of it. Round 7: the admitted

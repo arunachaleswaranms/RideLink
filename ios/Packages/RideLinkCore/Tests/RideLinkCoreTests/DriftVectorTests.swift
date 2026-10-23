@@ -107,9 +107,13 @@ final class DriftVectorTests: XCTestCase {
             routeTransitioning: json.boolVal("route_transitioning"),
             anchorSessionUs: json.int64("anchor_session_us"),
             reference: reference.map {
-                DriftReference(driftMs: $0.int64("drift_ms"), atSessionUs: $0.int64("at_session_us"), playing: $0.boolVal("playing"))
+                DriftReference(
+                    driftMs: $0.int64("drift_ms"), atSessionUs: $0.int64("at_session_us"), playing: $0.boolVal("playing"),
+                    anchorSessionUs: $0.int64("anchor_session_us"), anchorPositionMs: $0.int64("anchor_position_ms")
+                )
             },
-            routeChangeCount: json.int64("route_change_count")
+            routeChangeCount: json.int64("route_change_count"),
+            anchorPositionMs: json.int64("anchor_position_ms")
         )
     }
 

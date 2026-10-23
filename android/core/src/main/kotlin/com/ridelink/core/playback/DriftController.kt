@@ -70,11 +70,18 @@ data class DriftState(
  * The output this device must match (ADR-004 Amendment A1 decision 2): the leader's latest
  * `POSITION_REPORT`, as its drift against the **same** [PlaybackTimeline] at the session instant it
  * was sampled. A leader has none — its own output is the reference.
+ *
+ * [anchorSessionUs] and [anchorPositionMs] are the anchor of the timeline [driftMs] was measured
+ * against. A drift is a difference from one particular anchor, so it means nothing once the timeline
+ * has been re-anchored — even to an earlier instant, which a same-track `PLAYBACK_STATE` can do and
+ * which every freshness check would otherwise pass (PR #32 review round 2).
  */
 data class DriftReference(
     val driftMs: Long,
     val atSessionUs: Long,
     val playing: Boolean,
+    val anchorSessionUs: Long,
+    val anchorPositionMs: Long,
 )
 
 /**
@@ -95,6 +102,8 @@ data class DriftInput(
     val anchorSessionUs: Long,
     val reference: DriftReference?,
     val routeChangeCount: Long,
+    /** The position half of the timeline's anchor, which [DriftReference.anchorPositionMs] must match. */
+    val anchorPositionMs: Long,
 )
 
 /** [errorMs] is the inter-phone error the ladder acted on, or null when it had no usable reference. */
@@ -247,6 +256,8 @@ object DriftController {
         // one that merely arrived early is usable on the next tick; one stamped implausibly far
         // ahead never becomes usable while it is still ahead.
         return reference.playing &&
+            reference.anchorSessionUs == input.anchorSessionUs &&
+            reference.anchorPositionMs == input.anchorPositionMs &&
             reference.atSessionUs >= settledFrom &&
             reference.atSessionUs <= input.nowSessionUs &&
             input.nowSessionUs - reference.atSessionUs <= MAX_REFERENCE_AGE_US &&

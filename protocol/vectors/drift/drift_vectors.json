@@ -10,7 +10,8 @@
     "Without a usable reference the action is NONE or RESTORE_RATE, never a seek, a nudge or a failure, and error_ms is null: a leader, which has no reference, never corrects.",
     "restart_compensation_ms is always within 0..max_restart_compensation_ms.",
     "Any step with route_transitioning, or whose route_change_count differs from the state's route_change_count before it, leaves restart_compensation_ms 0 and pending_seek null — whether playing, paused or failed (PR #32 review).",
-    "A reference with at_session_us > now_session_us is never usable: error_ms is null."
+    "A reference with at_session_us > now_session_us is never usable: error_ms is null.",
+    "A reference whose anchor_session_us or anchor_position_ms differs from the input's is never usable: error_ms is null (PR #32 review round 2)."
   ],
   "constants": {
     "dead_band_ms": 25,
@@ -48,9 +49,12 @@
         "reference": {
           "drift_ms": 0,
           "at_session_us": 9000000,
-          "playing": true
+          "playing": true,
+          "anchor_session_us": 1000000,
+          "anchor_position_ms": 0
         },
-        "route_change_count": 0
+        "route_change_count": 0,
+        "anchor_position_ms": 0
       },
       "expected": {
         "action": {
@@ -89,9 +93,12 @@
         "reference": {
           "drift_ms": 0,
           "at_session_us": 9000000,
-          "playing": true
+          "playing": true,
+          "anchor_session_us": 1000000,
+          "anchor_position_ms": 0
         },
-        "route_change_count": 0
+        "route_change_count": 0,
+        "anchor_position_ms": 0
       },
       "expected": {
         "action": {
@@ -130,9 +137,12 @@
         "reference": {
           "drift_ms": 0,
           "at_session_us": 9000000,
-          "playing": true
+          "playing": true,
+          "anchor_session_us": 1000000,
+          "anchor_position_ms": 0
         },
-        "route_change_count": 0
+        "route_change_count": 0,
+        "anchor_position_ms": 0
       },
       "expected": {
         "action": {
@@ -171,9 +181,12 @@
         "reference": {
           "drift_ms": 0,
           "at_session_us": 9000000,
-          "playing": true
+          "playing": true,
+          "anchor_session_us": 1000000,
+          "anchor_position_ms": 0
         },
-        "route_change_count": 0
+        "route_change_count": 0,
+        "anchor_position_ms": 0
       },
       "expected": {
         "action": {
@@ -212,9 +225,12 @@
         "reference": {
           "drift_ms": 0,
           "at_session_us": 9000000,
-          "playing": true
+          "playing": true,
+          "anchor_session_us": 1000000,
+          "anchor_position_ms": 0
         },
-        "route_change_count": 0
+        "route_change_count": 0,
+        "anchor_position_ms": 0
       },
       "expected": {
         "action": {
@@ -253,9 +269,12 @@
         "reference": {
           "drift_ms": 0,
           "at_session_us": 9000000,
-          "playing": true
+          "playing": true,
+          "anchor_session_us": 1000000,
+          "anchor_position_ms": 0
         },
-        "route_change_count": 0
+        "route_change_count": 0,
+        "anchor_position_ms": 0
       },
       "expected": {
         "action": {
@@ -294,9 +313,12 @@
         "reference": {
           "drift_ms": 0,
           "at_session_us": 9000000,
-          "playing": true
+          "playing": true,
+          "anchor_session_us": 1000000,
+          "anchor_position_ms": 0
         },
-        "route_change_count": 0
+        "route_change_count": 0,
+        "anchor_position_ms": 0
       },
       "expected": {
         "action": {
@@ -335,9 +357,12 @@
         "reference": {
           "drift_ms": 0,
           "at_session_us": 9000000,
-          "playing": true
+          "playing": true,
+          "anchor_session_us": 1000000,
+          "anchor_position_ms": 0
         },
-        "route_change_count": 0
+        "route_change_count": 0,
+        "anchor_position_ms": 0
       },
       "expected": {
         "action": {
@@ -376,9 +401,12 @@
         "reference": {
           "drift_ms": 0,
           "at_session_us": 9000000,
-          "playing": true
+          "playing": true,
+          "anchor_session_us": 1000000,
+          "anchor_position_ms": 0
         },
-        "route_change_count": 0
+        "route_change_count": 0,
+        "anchor_position_ms": 0
       },
       "expected": {
         "action": {
@@ -417,9 +445,12 @@
         "reference": {
           "drift_ms": 0,
           "at_session_us": 9000000,
-          "playing": true
+          "playing": true,
+          "anchor_session_us": 1000000,
+          "anchor_position_ms": 0
         },
-        "route_change_count": 0
+        "route_change_count": 0,
+        "anchor_position_ms": 0
       },
       "expected": {
         "action": {
@@ -459,9 +490,12 @@
         "reference": {
           "drift_ms": 0,
           "at_session_us": 9000000,
-          "playing": true
+          "playing": true,
+          "anchor_session_us": 1000000,
+          "anchor_position_ms": 0
         },
-        "route_change_count": 0
+        "route_change_count": 0,
+        "anchor_position_ms": 0
       },
       "expected": {
         "action": {
@@ -501,9 +535,12 @@
         "reference": {
           "drift_ms": 0,
           "at_session_us": 9000000,
-          "playing": true
+          "playing": true,
+          "anchor_session_us": 1000000,
+          "anchor_position_ms": 0
         },
-        "route_change_count": 0
+        "route_change_count": 0,
+        "anchor_position_ms": 0
       },
       "expected": {
         "action": {
@@ -543,9 +580,12 @@
         "reference": {
           "drift_ms": 0,
           "at_session_us": 9000000,
-          "playing": true
+          "playing": true,
+          "anchor_session_us": 1000000,
+          "anchor_position_ms": 0
         },
-        "route_change_count": 0
+        "route_change_count": 0,
+        "anchor_position_ms": 0
       },
       "expected": {
         "action": {
@@ -585,9 +625,12 @@
         "reference": {
           "drift_ms": 0,
           "at_session_us": 9000000,
-          "playing": true
+          "playing": true,
+          "anchor_session_us": 1000000,
+          "anchor_position_ms": 0
         },
-        "route_change_count": 0
+        "route_change_count": 0,
+        "anchor_position_ms": 0
       },
       "expected": {
         "action": {
@@ -627,9 +670,12 @@
         "reference": {
           "drift_ms": 0,
           "at_session_us": 9000000,
-          "playing": true
+          "playing": true,
+          "anchor_session_us": 1000000,
+          "anchor_position_ms": 0
         },
-        "route_change_count": 0
+        "route_change_count": 0,
+        "anchor_position_ms": 0
       },
       "expected": {
         "action": {
@@ -669,9 +715,12 @@
         "reference": {
           "drift_ms": 0,
           "at_session_us": 9000000,
-          "playing": true
+          "playing": true,
+          "anchor_session_us": 1000000,
+          "anchor_position_ms": 0
         },
-        "route_change_count": 0
+        "route_change_count": 0,
+        "anchor_position_ms": 0
       },
       "expected": {
         "action": {
@@ -711,9 +760,12 @@
         "reference": {
           "drift_ms": 0,
           "at_session_us": 9000000,
-          "playing": true
+          "playing": true,
+          "anchor_session_us": 1000000,
+          "anchor_position_ms": 0
         },
-        "route_change_count": 0
+        "route_change_count": 0,
+        "anchor_position_ms": 0
       },
       "expected": {
         "action": {
@@ -753,9 +805,12 @@
         "reference": {
           "drift_ms": 0,
           "at_session_us": 9000000,
-          "playing": true
+          "playing": true,
+          "anchor_session_us": 1000000,
+          "anchor_position_ms": 0
         },
-        "route_change_count": 0
+        "route_change_count": 0,
+        "anchor_position_ms": 0
       },
       "expected": {
         "action": {
@@ -800,9 +855,12 @@
         "reference": {
           "drift_ms": 0,
           "at_session_us": 9000000,
-          "playing": true
+          "playing": true,
+          "anchor_session_us": 1000000,
+          "anchor_position_ms": 0
         },
-        "route_change_count": 0
+        "route_change_count": 0,
+        "anchor_position_ms": 0
       },
       "expected": {
         "action": {
@@ -847,9 +905,12 @@
         "reference": {
           "drift_ms": 0,
           "at_session_us": 9000000,
-          "playing": true
+          "playing": true,
+          "anchor_session_us": 1000000,
+          "anchor_position_ms": 0
         },
-        "route_change_count": 0
+        "route_change_count": 0,
+        "anchor_position_ms": 0
       },
       "expected": {
         "action": {
@@ -894,9 +955,12 @@
         "reference": {
           "drift_ms": 0,
           "at_session_us": 9000000,
-          "playing": true
+          "playing": true,
+          "anchor_session_us": 1000000,
+          "anchor_position_ms": 0
         },
-        "route_change_count": 0
+        "route_change_count": 0,
+        "anchor_position_ms": 0
       },
       "expected": {
         "action": {
@@ -941,9 +1005,12 @@
         "reference": {
           "drift_ms": 0,
           "at_session_us": 9000000,
-          "playing": true
+          "playing": true,
+          "anchor_session_us": 1000000,
+          "anchor_position_ms": 0
         },
-        "route_change_count": 0
+        "route_change_count": 0,
+        "anchor_position_ms": 0
       },
       "expected": {
         "action": {
@@ -988,9 +1055,12 @@
         "reference": {
           "drift_ms": 0,
           "at_session_us": 9000000,
-          "playing": true
+          "playing": true,
+          "anchor_session_us": 1000000,
+          "anchor_position_ms": 0
         },
-        "route_change_count": 0
+        "route_change_count": 0,
+        "anchor_position_ms": 0
       },
       "expected": {
         "action": {
@@ -1035,9 +1105,12 @@
         "reference": {
           "drift_ms": 0,
           "at_session_us": 9000000,
-          "playing": true
+          "playing": true,
+          "anchor_session_us": 1000000,
+          "anchor_position_ms": 0
         },
-        "route_change_count": 0
+        "route_change_count": 0,
+        "anchor_position_ms": 0
       },
       "expected": {
         "action": {
@@ -1076,9 +1149,12 @@
         "reference": {
           "drift_ms": 0,
           "at_session_us": 9000000,
-          "playing": true
+          "playing": true,
+          "anchor_session_us": 1000000,
+          "anchor_position_ms": 0
         },
-        "route_change_count": 0
+        "route_change_count": 0,
+        "anchor_position_ms": 0
       },
       "expected": {
         "action": {
@@ -1117,9 +1193,12 @@
         "reference": {
           "drift_ms": 0,
           "at_session_us": 9000000,
-          "playing": true
+          "playing": true,
+          "anchor_session_us": 1000000,
+          "anchor_position_ms": 0
         },
-        "route_change_count": 0
+        "route_change_count": 0,
+        "anchor_position_ms": 0
       },
       "expected": {
         "action": {
@@ -1158,9 +1237,12 @@
         "reference": {
           "drift_ms": 0,
           "at_session_us": 9000000,
-          "playing": true
+          "playing": true,
+          "anchor_session_us": 1000000,
+          "anchor_position_ms": 0
         },
-        "route_change_count": 0
+        "route_change_count": 0,
+        "anchor_position_ms": 0
       },
       "expected": {
         "action": {
@@ -1199,9 +1281,12 @@
         "reference": {
           "drift_ms": -375,
           "at_session_us": 9000000,
-          "playing": true
+          "playing": true,
+          "anchor_session_us": 1000000,
+          "anchor_position_ms": 0
         },
-        "route_change_count": 0
+        "route_change_count": 0,
+        "anchor_position_ms": 0
       },
       "expected": {
         "action": {
@@ -1240,9 +1325,12 @@
         "reference": {
           "drift_ms": -372,
           "at_session_us": 9000000,
-          "playing": true
+          "playing": true,
+          "anchor_session_us": 1000000,
+          "anchor_position_ms": 0
         },
-        "route_change_count": 0
+        "route_change_count": 0,
+        "anchor_position_ms": 0
       },
       "expected": {
         "action": {
@@ -1281,9 +1369,12 @@
         "reference": {
           "drift_ms": -375,
           "at_session_us": 9000000,
-          "playing": true
+          "playing": true,
+          "anchor_session_us": 1000000,
+          "anchor_position_ms": 0
         },
-        "route_change_count": 0
+        "route_change_count": 0,
+        "anchor_position_ms": 0
       },
       "expected": {
         "action": {
@@ -1328,9 +1419,12 @@
         "reference": {
           "drift_ms": -375,
           "at_session_us": 9000000,
-          "playing": true
+          "playing": true,
+          "anchor_session_us": 1000000,
+          "anchor_position_ms": 0
         },
-        "route_change_count": 0
+        "route_change_count": 0,
+        "anchor_position_ms": 0
       },
       "expected": {
         "action": {
@@ -1370,9 +1464,12 @@
         "reference": {
           "drift_ms": -375,
           "at_session_us": 9000000,
-          "playing": true
+          "playing": true,
+          "anchor_session_us": 1000000,
+          "anchor_position_ms": 0
         },
-        "route_change_count": 0
+        "route_change_count": 0,
+        "anchor_position_ms": 0
       },
       "expected": {
         "action": {
@@ -1417,9 +1514,12 @@
         "reference": {
           "drift_ms": -375,
           "at_session_us": 9000000,
-          "playing": true
+          "playing": true,
+          "anchor_session_us": 1000000,
+          "anchor_position_ms": 0
         },
-        "route_change_count": 0
+        "route_change_count": 0,
+        "anchor_position_ms": 0
       },
       "expected": {
         "action": {
@@ -1464,9 +1564,12 @@
         "reference": {
           "drift_ms": -3000,
           "at_session_us": 9000000,
-          "playing": true
+          "playing": true,
+          "anchor_session_us": 1000000,
+          "anchor_position_ms": 0
         },
-        "route_change_count": 0
+        "route_change_count": 0,
+        "anchor_position_ms": 0
       },
       "expected": {
         "action": {
@@ -1505,9 +1608,12 @@
         "reference": {
           "drift_ms": -375,
           "at_session_us": 9000000,
-          "playing": true
+          "playing": true,
+          "anchor_session_us": 1000000,
+          "anchor_position_ms": 0
         },
-        "route_change_count": 0
+        "route_change_count": 0,
+        "anchor_position_ms": 0
       },
       "expected": {
         "action": {
@@ -1541,9 +1647,12 @@
             "reference": {
               "drift_ms": 0,
               "at_session_us": 9000000,
-              "playing": true
+              "playing": true,
+              "anchor_session_us": 1000000,
+              "anchor_position_ms": 0
             },
-            "route_change_count": 0
+            "route_change_count": 0,
+            "anchor_position_ms": 0
           },
           "action": {
             "kind": "NUDGE",
@@ -1571,9 +1680,12 @@
             "reference": {
               "drift_ms": 0,
               "at_session_us": 14000000,
-              "playing": true
+              "playing": true,
+              "anchor_session_us": 1000000,
+              "anchor_position_ms": 0
             },
-            "route_change_count": 0
+            "route_change_count": 0,
+            "anchor_position_ms": 0
           },
           "action": {
             "kind": "NONE"
@@ -1600,9 +1712,12 @@
             "reference": {
               "drift_ms": 0,
               "at_session_us": 19000000,
-              "playing": true
+              "playing": true,
+              "anchor_session_us": 1000000,
+              "anchor_position_ms": 0
             },
-            "route_change_count": 0
+            "route_change_count": 0,
+            "anchor_position_ms": 0
           },
           "action": {
             "kind": "NONE"
@@ -1629,9 +1744,12 @@
             "reference": {
               "drift_ms": 0,
               "at_session_us": 24000000,
-              "playing": true
+              "playing": true,
+              "anchor_session_us": 1000000,
+              "anchor_position_ms": 0
             },
-            "route_change_count": 0
+            "route_change_count": 0,
+            "anchor_position_ms": 0
           },
           "action": {
             "kind": "NONE"
@@ -1658,9 +1776,12 @@
             "reference": {
               "drift_ms": 0,
               "at_session_us": 29000000,
-              "playing": true
+              "playing": true,
+              "anchor_session_us": 1000000,
+              "anchor_position_ms": 0
             },
-            "route_change_count": 0
+            "route_change_count": 0,
+            "anchor_position_ms": 0
           },
           "action": {
             "kind": "RESTORE_RATE"
@@ -1687,9 +1808,12 @@
             "reference": {
               "drift_ms": 0,
               "at_session_us": 34000000,
-              "playing": true
+              "playing": true,
+              "anchor_session_us": 1000000,
+              "anchor_position_ms": 0
             },
-            "route_change_count": 0
+            "route_change_count": 0,
+            "anchor_position_ms": 0
           },
           "action": {
             "kind": "NONE"
@@ -1721,9 +1845,12 @@
             "reference": {
               "drift_ms": 0,
               "at_session_us": 9000000,
-              "playing": true
+              "playing": true,
+              "anchor_session_us": 1000000,
+              "anchor_position_ms": 0
             },
-            "route_change_count": 0
+            "route_change_count": 0,
+            "anchor_position_ms": 0
           },
           "action": {
             "kind": "NUDGE",
@@ -1751,9 +1878,12 @@
             "reference": {
               "drift_ms": 0,
               "at_session_us": 14000000,
-              "playing": true
+              "playing": true,
+              "anchor_session_us": 1000000,
+              "anchor_position_ms": 0
             },
-            "route_change_count": 0
+            "route_change_count": 0,
+            "anchor_position_ms": 0
           },
           "action": {
             "kind": "NONE"
@@ -1780,9 +1910,12 @@
             "reference": {
               "drift_ms": 0,
               "at_session_us": 19000000,
-              "playing": true
+              "playing": true,
+              "anchor_session_us": 1000000,
+              "anchor_position_ms": 0
             },
-            "route_change_count": 0
+            "route_change_count": 0,
+            "anchor_position_ms": 0
           },
           "action": {
             "kind": "NONE"
@@ -1814,9 +1947,12 @@
             "reference": {
               "drift_ms": 0,
               "at_session_us": 9000000,
-              "playing": true
+              "playing": true,
+              "anchor_session_us": 1000000,
+              "anchor_position_ms": 0
             },
-            "route_change_count": 0
+            "route_change_count": 0,
+            "anchor_position_ms": 0
           },
           "action": {
             "kind": "NUDGE",
@@ -1844,9 +1980,12 @@
             "reference": {
               "drift_ms": 0,
               "at_session_us": 14000000,
-              "playing": true
+              "playing": true,
+              "anchor_session_us": 1000000,
+              "anchor_position_ms": 0
             },
-            "route_change_count": 0
+            "route_change_count": 0,
+            "anchor_position_ms": 0
           },
           "action": {
             "kind": "NUDGE",
@@ -1874,9 +2013,12 @@
             "reference": {
               "drift_ms": 0,
               "at_session_us": 19000000,
-              "playing": true
+              "playing": true,
+              "anchor_session_us": 1000000,
+              "anchor_position_ms": 0
             },
-            "route_change_count": 0
+            "route_change_count": 0,
+            "anchor_position_ms": 0
           },
           "action": {
             "kind": "NONE"
@@ -1908,9 +2050,12 @@
             "reference": {
               "drift_ms": 0,
               "at_session_us": 9000000,
-              "playing": true
+              "playing": true,
+              "anchor_session_us": 1000000,
+              "anchor_position_ms": 0
             },
-            "route_change_count": 0
+            "route_change_count": 0,
+            "anchor_position_ms": 0
           },
           "action": {
             "kind": "HARD_SEEK",
@@ -1943,9 +2088,12 @@
             "reference": {
               "drift_ms": 0,
               "at_session_us": 19000000,
-              "playing": true
+              "playing": true,
+              "anchor_session_us": 1000000,
+              "anchor_position_ms": 0
             },
-            "route_change_count": 0
+            "route_change_count": 0,
+            "anchor_position_ms": 0
           },
           "action": {
             "kind": "HARD_SEEK",
@@ -1979,9 +2127,12 @@
             "reference": {
               "drift_ms": 0,
               "at_session_us": 29000000,
-              "playing": true
+              "playing": true,
+              "anchor_session_us": 1000000,
+              "anchor_position_ms": 0
             },
-            "route_change_count": 0
+            "route_change_count": 0,
+            "anchor_position_ms": 0
           },
           "action": {
             "kind": "DECLARE_SYNC_FAILURE"
@@ -2012,9 +2163,12 @@
             "reference": {
               "drift_ms": 0,
               "at_session_us": 39000000,
-              "playing": true
+              "playing": true,
+              "anchor_session_us": 1000000,
+              "anchor_position_ms": 0
             },
-            "route_change_count": 0
+            "route_change_count": 0,
+            "anchor_position_ms": 0
           },
           "action": {
             "kind": "NONE"
@@ -2050,9 +2204,12 @@
             "reference": {
               "drift_ms": 0,
               "at_session_us": 9000000,
-              "playing": true
+              "playing": true,
+              "anchor_session_us": 1000000,
+              "anchor_position_ms": 0
             },
-            "route_change_count": 0
+            "route_change_count": 0,
+            "anchor_position_ms": 0
           },
           "action": {
             "kind": "HARD_SEEK",
@@ -2085,9 +2242,12 @@
             "reference": {
               "drift_ms": 0,
               "at_session_us": 19000000,
-              "playing": true
+              "playing": true,
+              "anchor_session_us": 1000000,
+              "anchor_position_ms": 0
             },
-            "route_change_count": 0
+            "route_change_count": 0,
+            "anchor_position_ms": 0
           },
           "action": {
             "kind": "HARD_SEEK",
@@ -2121,9 +2281,12 @@
             "reference": {
               "drift_ms": 0,
               "at_session_us": 84000000,
-              "playing": true
+              "playing": true,
+              "anchor_session_us": 1000000,
+              "anchor_position_ms": 0
             },
-            "route_change_count": 0
+            "route_change_count": 0,
+            "anchor_position_ms": 0
           },
           "action": {
             "kind": "HARD_SEEK",
@@ -2156,9 +2319,12 @@
             "reference": {
               "drift_ms": 0,
               "at_session_us": 89000000,
-              "playing": true
+              "playing": true,
+              "anchor_session_us": 1000000,
+              "anchor_position_ms": 0
             },
-            "route_change_count": 0
+            "route_change_count": 0,
+            "anchor_position_ms": 0
           },
           "action": {
             "kind": "HARD_SEEK",
@@ -2197,9 +2363,12 @@
             "reference": {
               "drift_ms": 0,
               "at_session_us": 9000000,
-              "playing": true
+              "playing": true,
+              "anchor_session_us": 1000000,
+              "anchor_position_ms": 0
             },
-            "route_change_count": 0
+            "route_change_count": 0,
+            "anchor_position_ms": 0
           },
           "action": {
             "kind": "NONE"
@@ -2226,9 +2395,12 @@
             "reference": {
               "drift_ms": 0,
               "at_session_us": 14000000,
-              "playing": true
+              "playing": true,
+              "anchor_session_us": 1000000,
+              "anchor_position_ms": 0
             },
-            "route_change_count": 0
+            "route_change_count": 0,
+            "anchor_position_ms": 0
           },
           "action": {
             "kind": "NONE"
@@ -2255,9 +2427,12 @@
             "reference": {
               "drift_ms": 0,
               "at_session_us": 19000000,
-              "playing": true
+              "playing": true,
+              "anchor_session_us": 1000000,
+              "anchor_position_ms": 0
             },
-            "route_change_count": 0
+            "route_change_count": 0,
+            "anchor_position_ms": 0
           },
           "action": {
             "kind": "NONE"
@@ -2289,9 +2464,12 @@
             "reference": {
               "drift_ms": 0,
               "at_session_us": 9000000,
-              "playing": true
+              "playing": true,
+              "anchor_session_us": 1000000,
+              "anchor_position_ms": 0
             },
-            "route_change_count": 0
+            "route_change_count": 0,
+            "anchor_position_ms": 0
           },
           "action": {
             "kind": "HARD_SEEK",
@@ -2324,9 +2502,12 @@
             "reference": {
               "drift_ms": 0,
               "at_session_us": 14000000,
-              "playing": true
+              "playing": true,
+              "anchor_session_us": 1000000,
+              "anchor_position_ms": 0
             },
-            "route_change_count": 0
+            "route_change_count": 0,
+            "anchor_position_ms": 0
           },
           "action": {
             "kind": "NONE"
@@ -2355,9 +2536,12 @@
             "reference": {
               "drift_ms": 0,
               "at_session_us": 19000000,
-              "playing": true
+              "playing": true,
+              "anchor_session_us": 1000000,
+              "anchor_position_ms": 0
             },
-            "route_change_count": 0
+            "route_change_count": 0,
+            "anchor_position_ms": 0
           },
           "action": {
             "kind": "NONE"
@@ -2386,9 +2570,12 @@
             "reference": {
               "drift_ms": 0,
               "at_session_us": 24000000,
-              "playing": true
+              "playing": true,
+              "anchor_session_us": 1000000,
+              "anchor_position_ms": 0
             },
-            "route_change_count": 0
+            "route_change_count": 0,
+            "anchor_position_ms": 0
           },
           "action": {
             "kind": "HARD_SEEK",
@@ -2422,9 +2609,12 @@
             "reference": {
               "drift_ms": 0,
               "at_session_us": 29000000,
-              "playing": true
+              "playing": true,
+              "anchor_session_us": 1000000,
+              "anchor_position_ms": 0
             },
-            "route_change_count": 0
+            "route_change_count": 0,
+            "anchor_position_ms": 0
           },
           "action": {
             "kind": "DECLARE_SYNC_FAILURE"
@@ -2460,9 +2650,12 @@
             "reference": {
               "drift_ms": 0,
               "at_session_us": 9000000,
-              "playing": true
+              "playing": true,
+              "anchor_session_us": 1000000,
+              "anchor_position_ms": 0
             },
-            "route_change_count": 0
+            "route_change_count": 0,
+            "anchor_position_ms": 0
           },
           "action": {
             "kind": "NUDGE",
@@ -2490,9 +2683,12 @@
             "reference": {
               "drift_ms": 0,
               "at_session_us": 14000000,
-              "playing": true
+              "playing": true,
+              "anchor_session_us": 1000000,
+              "anchor_position_ms": 0
             },
-            "route_change_count": 0
+            "route_change_count": 0,
+            "anchor_position_ms": 0
           },
           "action": {
             "kind": "NONE"
@@ -2519,9 +2715,12 @@
             "reference": {
               "drift_ms": 0,
               "at_session_us": 19000000,
-              "playing": true
+              "playing": true,
+              "anchor_session_us": 1000000,
+              "anchor_position_ms": 0
             },
-            "route_change_count": 0
+            "route_change_count": 0,
+            "anchor_position_ms": 0
           },
           "action": {
             "kind": "RESTORE_RATE"
@@ -2553,9 +2752,12 @@
             "reference": {
               "drift_ms": 0,
               "at_session_us": 9000000,
-              "playing": true
+              "playing": true,
+              "anchor_session_us": 1000000,
+              "anchor_position_ms": 0
             },
-            "route_change_count": 0
+            "route_change_count": 0,
+            "anchor_position_ms": 0
           },
           "action": {
             "kind": "NUDGE",
@@ -2583,9 +2785,12 @@
             "reference": {
               "drift_ms": 0,
               "at_session_us": 14000000,
-              "playing": true
+              "playing": true,
+              "anchor_session_us": 1000000,
+              "anchor_position_ms": 0
             },
-            "route_change_count": 0
+            "route_change_count": 0,
+            "anchor_position_ms": 0
           },
           "action": {
             "kind": "RESTORE_RATE"
@@ -2612,9 +2817,12 @@
             "reference": {
               "drift_ms": 0,
               "at_session_us": 19000000,
-              "playing": true
+              "playing": true,
+              "anchor_session_us": 1000000,
+              "anchor_position_ms": 0
             },
-            "route_change_count": 0
+            "route_change_count": 0,
+            "anchor_position_ms": 0
           },
           "action": {
             "kind": "NONE"
@@ -2646,9 +2854,12 @@
             "reference": {
               "drift_ms": 0,
               "at_session_us": 9000000,
-              "playing": true
+              "playing": true,
+              "anchor_session_us": 1000000,
+              "anchor_position_ms": 0
             },
-            "route_change_count": 0
+            "route_change_count": 0,
+            "anchor_position_ms": 0
           },
           "action": {
             "kind": "DECLARE_SYNC_FAILURE"
@@ -2675,9 +2886,12 @@
             "reference": {
               "drift_ms": 0,
               "at_session_us": 14000000,
-              "playing": true
+              "playing": true,
+              "anchor_session_us": 1000000,
+              "anchor_position_ms": 0
             },
-            "route_change_count": 0
+            "route_change_count": 0,
+            "anchor_position_ms": 0
           },
           "action": {
             "kind": "NONE"
@@ -2704,9 +2918,12 @@
             "reference": {
               "drift_ms": 0,
               "at_session_us": 19000000,
-              "playing": true
+              "playing": true,
+              "anchor_session_us": 1000000,
+              "anchor_position_ms": 0
             },
-            "route_change_count": 0
+            "route_change_count": 0,
+            "anchor_position_ms": 0
           },
           "action": {
             "kind": "NONE"
@@ -2738,9 +2955,12 @@
             "reference": {
               "drift_ms": 0,
               "at_session_us": 9000000,
-              "playing": true
+              "playing": true,
+              "anchor_session_us": 1000000,
+              "anchor_position_ms": 0
             },
-            "route_change_count": 0
+            "route_change_count": 0,
+            "anchor_position_ms": 0
           },
           "action": {
             "kind": "NUDGE",
@@ -2768,9 +2988,12 @@
             "reference": {
               "drift_ms": 0,
               "at_session_us": 14000000,
-              "playing": true
+              "playing": true,
+              "anchor_session_us": 1000000,
+              "anchor_position_ms": 0
             },
-            "route_change_count": 0
+            "route_change_count": 0,
+            "anchor_position_ms": 0
           },
           "action": {
             "kind": "HARD_SEEK",
@@ -2803,9 +3026,12 @@
             "reference": {
               "drift_ms": 0,
               "at_session_us": 19000000,
-              "playing": true
+              "playing": true,
+              "anchor_session_us": 1000000,
+              "anchor_position_ms": 0
             },
-            "route_change_count": 0
+            "route_change_count": 0,
+            "anchor_position_ms": 0
           },
           "action": {
             "kind": "NONE"
@@ -2839,9 +3065,12 @@
             "reference": {
               "drift_ms": 0,
               "at_session_us": 9000000,
-              "playing": true
+              "playing": true,
+              "anchor_session_us": 1000000,
+              "anchor_position_ms": 0
             },
-            "route_change_count": 0
+            "route_change_count": 0,
+            "anchor_position_ms": 0
           },
           "action": {
             "kind": "NONE"
@@ -2868,9 +3097,12 @@
             "reference": {
               "drift_ms": 0,
               "at_session_us": 14000000,
-              "playing": true
+              "playing": true,
+              "anchor_session_us": 1000000,
+              "anchor_position_ms": 0
             },
-            "route_change_count": 0
+            "route_change_count": 0,
+            "anchor_position_ms": 0
           },
           "action": {
             "kind": "NONE"
@@ -2897,9 +3129,12 @@
             "reference": {
               "drift_ms": 0,
               "at_session_us": 19000000,
-              "playing": true
+              "playing": true,
+              "anchor_session_us": 1000000,
+              "anchor_position_ms": 0
             },
-            "route_change_count": 0
+            "route_change_count": 0,
+            "anchor_position_ms": 0
           },
           "action": {
             "kind": "NONE"
@@ -2931,9 +3166,12 @@
             "reference": {
               "drift_ms": 0,
               "at_session_us": 9000000,
-              "playing": true
+              "playing": true,
+              "anchor_session_us": 1000000,
+              "anchor_position_ms": 0
             },
-            "route_change_count": 0
+            "route_change_count": 0,
+            "anchor_position_ms": 0
           },
           "action": {
             "kind": "NONE"
@@ -2960,9 +3198,12 @@
             "reference": {
               "drift_ms": 0,
               "at_session_us": 14000000,
-              "playing": true
+              "playing": true,
+              "anchor_session_us": 1000000,
+              "anchor_position_ms": 0
             },
-            "route_change_count": 0
+            "route_change_count": 0,
+            "anchor_position_ms": 0
           },
           "action": {
             "kind": "NONE"
@@ -2992,7 +3233,8 @@
             "route_transitioning": false,
             "anchor_session_us": 1000000,
             "reference": null,
-            "route_change_count": 0
+            "route_change_count": 0,
+            "anchor_position_ms": 0
           },
           "action": {
             "kind": "NONE"
@@ -3017,7 +3259,8 @@
             "route_transitioning": false,
             "anchor_session_us": 1000000,
             "reference": null,
-            "route_change_count": 0
+            "route_change_count": 0,
+            "anchor_position_ms": 0
           },
           "action": {
             "kind": "NONE"
@@ -3042,7 +3285,8 @@
             "route_transitioning": false,
             "anchor_session_us": 1000000,
             "reference": null,
-            "route_change_count": 0
+            "route_change_count": 0,
+            "anchor_position_ms": 0
           },
           "action": {
             "kind": "NONE"
@@ -3074,9 +3318,12 @@
             "reference": {
               "drift_ms": 0,
               "at_session_us": 9000000,
-              "playing": true
+              "playing": true,
+              "anchor_session_us": 1000000,
+              "anchor_position_ms": 0
             },
-            "route_change_count": 0
+            "route_change_count": 0,
+            "anchor_position_ms": 0
           },
           "action": {
             "kind": "NUDGE",
@@ -3102,7 +3349,8 @@
             "route_transitioning": false,
             "anchor_session_us": 1000000,
             "reference": null,
-            "route_change_count": 0
+            "route_change_count": 0,
+            "anchor_position_ms": 0
           },
           "action": {
             "kind": "RESTORE_RATE"
@@ -3129,9 +3377,12 @@
             "reference": {
               "drift_ms": 0,
               "at_session_us": 19000000,
-              "playing": true
+              "playing": true,
+              "anchor_session_us": 1000000,
+              "anchor_position_ms": 0
             },
-            "route_change_count": 0
+            "route_change_count": 0,
+            "anchor_position_ms": 0
           },
           "action": {
             "kind": "NUDGE",
@@ -3162,11 +3413,14 @@
             "route_transitioning": false,
             "anchor_session_us": 1000000,
             "reference": {
+              "anchor_session_us": 1000000,
+              "anchor_position_ms": 0,
               "drift_ms": 0,
               "at_session_us": 9000000,
               "playing": false
             },
-            "route_change_count": 0
+            "route_change_count": 0,
+            "anchor_position_ms": 0
           },
           "action": {
             "kind": "NONE"
@@ -3196,11 +3450,14 @@
             "route_transitioning": false,
             "anchor_session_us": 1000000,
             "reference": {
+              "anchor_session_us": 1000000,
+              "anchor_position_ms": 0,
               "drift_ms": 0,
               "at_session_us": 2000000,
               "playing": true
             },
-            "route_change_count": 0
+            "route_change_count": 0,
+            "anchor_position_ms": 0
           },
           "action": {
             "kind": "NONE"
@@ -3225,11 +3482,14 @@
             "route_transitioning": false,
             "anchor_session_us": 1000000,
             "reference": {
+              "anchor_session_us": 1000000,
+              "anchor_position_ms": 0,
               "drift_ms": 0,
               "at_session_us": 2500000,
               "playing": true
             },
-            "route_change_count": 0
+            "route_change_count": 0,
+            "anchor_position_ms": 0
           },
           "action": {
             "kind": "HARD_SEEK",
@@ -3265,11 +3525,14 @@
             "route_transitioning": false,
             "anchor_session_us": 1000000,
             "reference": {
+              "anchor_session_us": 1000000,
+              "anchor_position_ms": 0,
               "drift_ms": 0,
               "at_session_us": 12999999,
               "playing": true
             },
-            "route_change_count": 0
+            "route_change_count": 0,
+            "anchor_position_ms": 0
           },
           "action": {
             "kind": "NONE"
@@ -3294,11 +3557,14 @@
             "route_transitioning": false,
             "anchor_session_us": 1000000,
             "reference": {
+              "anchor_session_us": 1000000,
+              "anchor_position_ms": 0,
               "drift_ms": 0,
               "at_session_us": 13000000,
               "playing": true
             },
-            "route_change_count": 0
+            "route_change_count": 0,
+            "anchor_position_ms": 0
           },
           "action": {
             "kind": "HARD_SEEK",
@@ -3334,11 +3600,14 @@
             "route_transitioning": false,
             "anchor_session_us": 9000000,
             "reference": {
+              "anchor_session_us": 9000000,
+              "anchor_position_ms": 0,
               "drift_ms": 0,
               "at_session_us": 10000000,
               "playing": true
             },
-            "route_change_count": 0
+            "route_change_count": 0,
+            "anchor_position_ms": 0
           },
           "action": {
             "kind": "NONE"
@@ -3370,9 +3639,12 @@
             "reference": {
               "drift_ms": -375,
               "at_session_us": 9000000,
-              "playing": true
+              "playing": true,
+              "anchor_session_us": 1000000,
+              "anchor_position_ms": 0
             },
-            "route_change_count": 0
+            "route_change_count": 0,
+            "anchor_position_ms": 0
           },
           "action": {
             "kind": "NONE"
@@ -3399,9 +3671,12 @@
             "reference": {
               "drift_ms": -371,
               "at_session_us": 14000000,
-              "playing": true
+              "playing": true,
+              "anchor_session_us": 1000000,
+              "anchor_position_ms": 0
             },
-            "route_change_count": 0
+            "route_change_count": 0,
+            "anchor_position_ms": 0
           },
           "action": {
             "kind": "NONE"
@@ -3428,9 +3703,12 @@
             "reference": {
               "drift_ms": -640,
               "at_session_us": 19000000,
-              "playing": true
+              "playing": true,
+              "anchor_session_us": 1000000,
+              "anchor_position_ms": 0
             },
-            "route_change_count": 0
+            "route_change_count": 0,
+            "anchor_position_ms": 0
           },
           "action": {
             "kind": "NONE"
@@ -3457,9 +3735,12 @@
             "reference": {
               "drift_ms": -380,
               "at_session_us": 24000000,
-              "playing": true
+              "playing": true,
+              "anchor_session_us": 1000000,
+              "anchor_position_ms": 0
             },
-            "route_change_count": 0
+            "route_change_count": 0,
+            "anchor_position_ms": 0
           },
           "action": {
             "kind": "NONE"
@@ -3491,9 +3772,12 @@
             "reference": {
               "drift_ms": -375,
               "at_session_us": 9000000,
-              "playing": true
+              "playing": true,
+              "anchor_session_us": 1000000,
+              "anchor_position_ms": 0
             },
-            "route_change_count": 0
+            "route_change_count": 0,
+            "anchor_position_ms": 0
           },
           "action": {
             "kind": "HARD_SEEK",
@@ -3526,9 +3810,12 @@
             "reference": {
               "drift_ms": -375,
               "at_session_us": 14000000,
-              "playing": true
+              "playing": true,
+              "anchor_session_us": 1000000,
+              "anchor_position_ms": 0
             },
-            "route_change_count": 0
+            "route_change_count": 0,
+            "anchor_position_ms": 0
           },
           "action": {
             "kind": "HARD_SEEK",
@@ -3562,9 +3849,12 @@
             "reference": {
               "drift_ms": -375,
               "at_session_us": 19000000,
-              "playing": true
+              "playing": true,
+              "anchor_session_us": 1000000,
+              "anchor_position_ms": 0
             },
-            "route_change_count": 0
+            "route_change_count": 0,
+            "anchor_position_ms": 0
           },
           "action": {
             "kind": "NONE"
@@ -3594,9 +3884,12 @@
             "reference": {
               "drift_ms": -375,
               "at_session_us": 24000000,
-              "playing": true
+              "playing": true,
+              "anchor_session_us": 1000000,
+              "anchor_position_ms": 0
             },
-            "route_change_count": 0
+            "route_change_count": 0,
+            "anchor_position_ms": 0
           },
           "action": {
             "kind": "NONE"
@@ -3631,9 +3924,12 @@
             "reference": {
               "drift_ms": -375,
               "at_session_us": 9000000,
-              "playing": true
+              "playing": true,
+              "anchor_session_us": 1000000,
+              "anchor_position_ms": 0
             },
-            "route_change_count": 0
+            "route_change_count": 0,
+            "anchor_position_ms": 0
           },
           "action": {
             "kind": "HARD_SEEK",
@@ -3666,9 +3962,12 @@
             "reference": {
               "drift_ms": -375,
               "at_session_us": 10000000,
-              "playing": true
+              "playing": true,
+              "anchor_session_us": 1000000,
+              "anchor_position_ms": 0
             },
-            "route_change_count": 0
+            "route_change_count": 0,
+            "anchor_position_ms": 0
           },
           "action": {
             "kind": "NONE"
@@ -3700,9 +3999,12 @@
             "reference": {
               "drift_ms": -375,
               "at_session_us": 14000000,
-              "playing": true
+              "playing": true,
+              "anchor_session_us": 1000000,
+              "anchor_position_ms": 0
             },
-            "route_change_count": 0
+            "route_change_count": 0,
+            "anchor_position_ms": 0
           },
           "action": {
             "kind": "HARD_SEEK",
@@ -3741,9 +4043,12 @@
             "reference": {
               "drift_ms": -375,
               "at_session_us": 9000000,
-              "playing": true
+              "playing": true,
+              "anchor_session_us": 1000000,
+              "anchor_position_ms": 0
             },
-            "route_change_count": 0
+            "route_change_count": 0,
+            "anchor_position_ms": 0
           },
           "action": {
             "kind": "HARD_SEEK",
@@ -3776,9 +4081,12 @@
             "reference": {
               "drift_ms": -375,
               "at_session_us": 14000000,
-              "playing": true
+              "playing": true,
+              "anchor_session_us": 1000000,
+              "anchor_position_ms": 0
             },
-            "route_change_count": 0
+            "route_change_count": 0,
+            "anchor_position_ms": 0
           },
           "action": {
             "kind": "HARD_SEEK",
@@ -3817,9 +4125,12 @@
             "reference": {
               "drift_ms": -375,
               "at_session_us": 9000000,
-              "playing": true
+              "playing": true,
+              "anchor_session_us": 1000000,
+              "anchor_position_ms": 0
             },
-            "route_change_count": 0
+            "route_change_count": 0,
+            "anchor_position_ms": 0
           },
           "action": {
             "kind": "HARD_SEEK",
@@ -3852,9 +4163,12 @@
             "reference": {
               "drift_ms": -375,
               "at_session_us": 14000000,
-              "playing": true
+              "playing": true,
+              "anchor_session_us": 1000000,
+              "anchor_position_ms": 0
             },
-            "route_change_count": 0
+            "route_change_count": 0,
+            "anchor_position_ms": 0
           },
           "action": {
             "kind": "HARD_SEEK",
@@ -3893,9 +4207,12 @@
             "reference": {
               "drift_ms": -375,
               "at_session_us": 9000000,
-              "playing": true
+              "playing": true,
+              "anchor_session_us": 1000000,
+              "anchor_position_ms": 0
             },
-            "route_change_count": 0
+            "route_change_count": 0,
+            "anchor_position_ms": 0
           },
           "action": {
             "kind": "HARD_SEEK",
@@ -3928,9 +4245,12 @@
             "reference": {
               "drift_ms": -375,
               "at_session_us": 14000000,
-              "playing": true
+              "playing": true,
+              "anchor_session_us": 12000000,
+              "anchor_position_ms": 0
             },
-            "route_change_count": 0
+            "route_change_count": 0,
+            "anchor_position_ms": 0
           },
           "action": {
             "kind": "HARD_SEEK",
@@ -3969,9 +4289,12 @@
             "reference": {
               "drift_ms": -375,
               "at_session_us": 9000000,
-              "playing": true
+              "playing": true,
+              "anchor_session_us": 1000000,
+              "anchor_position_ms": 0
             },
-            "route_change_count": 0
+            "route_change_count": 0,
+            "anchor_position_ms": 0
           },
           "action": {
             "kind": "HARD_SEEK",
@@ -4004,9 +4327,12 @@
             "reference": {
               "drift_ms": -375,
               "at_session_us": 14000000,
-              "playing": true
+              "playing": true,
+              "anchor_session_us": 1000000,
+              "anchor_position_ms": 0
             },
-            "route_change_count": 0
+            "route_change_count": 0,
+            "anchor_position_ms": 0
           },
           "action": {
             "kind": "HARD_SEEK",
@@ -4040,9 +4366,12 @@
             "reference": {
               "drift_ms": 0,
               "at_session_us": 19000000,
-              "playing": true
+              "playing": true,
+              "anchor_session_us": 1000000,
+              "anchor_position_ms": 0
             },
-            "route_change_count": 0
+            "route_change_count": 0,
+            "anchor_position_ms": 0
           },
           "action": {
             "kind": "NONE"
@@ -4072,9 +4401,12 @@
             "reference": {
               "drift_ms": -375,
               "at_session_us": 79000000,
-              "playing": true
+              "playing": true,
+              "anchor_session_us": 1000000,
+              "anchor_position_ms": 0
             },
-            "route_change_count": 0
+            "route_change_count": 0,
+            "anchor_position_ms": 0
           },
           "action": {
             "kind": "HARD_SEEK",
@@ -4112,9 +4444,12 @@
             "reference": {
               "drift_ms": -375,
               "at_session_us": 9000000,
-              "playing": true
+              "playing": true,
+              "anchor_session_us": 1000000,
+              "anchor_position_ms": 0
             },
-            "route_change_count": 0
+            "route_change_count": 0,
+            "anchor_position_ms": 0
           },
           "action": {
             "kind": "HARD_SEEK",
@@ -4147,9 +4482,12 @@
             "reference": {
               "drift_ms": -375,
               "at_session_us": 14000000,
-              "playing": true
+              "playing": true,
+              "anchor_session_us": 1000000,
+              "anchor_position_ms": 0
             },
-            "route_change_count": 0
+            "route_change_count": 0,
+            "anchor_position_ms": 0
           },
           "action": {
             "kind": "HARD_SEEK",
@@ -4183,9 +4521,12 @@
             "reference": {
               "drift_ms": -375,
               "at_session_us": 19000000,
-              "playing": true
+              "playing": true,
+              "anchor_session_us": 1000000,
+              "anchor_position_ms": 0
             },
-            "route_change_count": 0
+            "route_change_count": 0,
+            "anchor_position_ms": 0
           },
           "action": {
             "kind": "NONE"
@@ -4215,9 +4556,12 @@
             "reference": {
               "drift_ms": -375,
               "at_session_us": 79000000,
-              "playing": true
+              "playing": true,
+              "anchor_session_us": 1000000,
+              "anchor_position_ms": 0
             },
-            "route_change_count": 1
+            "route_change_count": 1,
+            "anchor_position_ms": 0
           },
           "action": {
             "kind": "HARD_SEEK",
@@ -4255,9 +4599,12 @@
             "reference": {
               "drift_ms": -375,
               "at_session_us": 9000000,
-              "playing": true
+              "playing": true,
+              "anchor_session_us": 1000000,
+              "anchor_position_ms": 0
             },
-            "route_change_count": 0
+            "route_change_count": 0,
+            "anchor_position_ms": 0
           },
           "action": {
             "kind": "HARD_SEEK",
@@ -4290,9 +4637,12 @@
             "reference": {
               "drift_ms": -375,
               "at_session_us": 14000000,
-              "playing": true
+              "playing": true,
+              "anchor_session_us": 1000000,
+              "anchor_position_ms": 0
             },
-            "route_change_count": 0
+            "route_change_count": 0,
+            "anchor_position_ms": 0
           },
           "action": {
             "kind": "HARD_SEEK",
@@ -4326,9 +4676,12 @@
             "reference": {
               "drift_ms": 0,
               "at_session_us": 19000000,
-              "playing": true
+              "playing": true,
+              "anchor_session_us": 1000000,
+              "anchor_position_ms": 0
             },
-            "route_change_count": 0
+            "route_change_count": 0,
+            "anchor_position_ms": 0
           },
           "action": {
             "kind": "NONE"
@@ -4358,9 +4711,12 @@
             "reference": {
               "drift_ms": -375,
               "at_session_us": 79000000,
-              "playing": true
+              "playing": true,
+              "anchor_session_us": 1000000,
+              "anchor_position_ms": 0
             },
-            "route_change_count": 0
+            "route_change_count": 0,
+            "anchor_position_ms": 0
           },
           "action": {
             "kind": "HARD_SEEK",
@@ -4398,9 +4754,12 @@
             "reference": {
               "drift_ms": -375,
               "at_session_us": 9000000,
-              "playing": true
+              "playing": true,
+              "anchor_session_us": 1000000,
+              "anchor_position_ms": 0
             },
-            "route_change_count": 0
+            "route_change_count": 0,
+            "anchor_position_ms": 0
           },
           "action": {
             "kind": "HARD_SEEK",
@@ -4433,9 +4792,12 @@
             "reference": {
               "drift_ms": -375,
               "at_session_us": 14000000,
-              "playing": true
+              "playing": true,
+              "anchor_session_us": 1000000,
+              "anchor_position_ms": 0
             },
-            "route_change_count": 0
+            "route_change_count": 0,
+            "anchor_position_ms": 0
           },
           "action": {
             "kind": "HARD_SEEK",
@@ -4469,9 +4831,12 @@
             "reference": {
               "drift_ms": 0,
               "at_session_us": 19000000,
-              "playing": true
+              "playing": true,
+              "anchor_session_us": 1000000,
+              "anchor_position_ms": 0
             },
-            "route_change_count": 1
+            "route_change_count": 1,
+            "anchor_position_ms": 0
           },
           "action": {
             "kind": "NONE"
@@ -4501,9 +4866,12 @@
             "reference": {
               "drift_ms": -375,
               "at_session_us": 79000000,
-              "playing": true
+              "playing": true,
+              "anchor_session_us": 1000000,
+              "anchor_position_ms": 0
             },
-            "route_change_count": 1
+            "route_change_count": 1,
+            "anchor_position_ms": 0
           },
           "action": {
             "kind": "HARD_SEEK",
@@ -4541,9 +4909,12 @@
             "reference": {
               "drift_ms": -375,
               "at_session_us": 9000000,
-              "playing": true
+              "playing": true,
+              "anchor_session_us": 1000000,
+              "anchor_position_ms": 0
             },
-            "route_change_count": 0
+            "route_change_count": 0,
+            "anchor_position_ms": 0
           },
           "action": {
             "kind": "HARD_SEEK",
@@ -4576,9 +4947,12 @@
             "reference": {
               "drift_ms": -375,
               "at_session_us": 14000000,
-              "playing": true
+              "playing": true,
+              "anchor_session_us": 1000000,
+              "anchor_position_ms": 0
             },
-            "route_change_count": 0
+            "route_change_count": 0,
+            "anchor_position_ms": 0
           },
           "action": {
             "kind": "HARD_SEEK",
@@ -4612,9 +4986,12 @@
             "reference": {
               "drift_ms": -375,
               "at_session_us": 19000000,
-              "playing": true
+              "playing": true,
+              "anchor_session_us": 1000000,
+              "anchor_position_ms": 0
             },
-            "route_change_count": 0
+            "route_change_count": 0,
+            "anchor_position_ms": 0
           },
           "action": {
             "kind": "DECLARE_SYNC_FAILURE"
@@ -4644,9 +5021,12 @@
             "reference": {
               "drift_ms": 0,
               "at_session_us": 24000000,
-              "playing": true
+              "playing": true,
+              "anchor_session_us": 1000000,
+              "anchor_position_ms": 0
             },
-            "route_change_count": 1
+            "route_change_count": 1,
+            "anchor_position_ms": 0
           },
           "action": {
             "kind": "NONE"
@@ -4676,9 +5056,12 @@
             "reference": {
               "drift_ms": 0,
               "at_session_us": 29000000,
-              "playing": true
+              "playing": true,
+              "anchor_session_us": 1000000,
+              "anchor_position_ms": 0
             },
-            "route_change_count": 2
+            "route_change_count": 2,
+            "anchor_position_ms": 0
           },
           "action": {
             "kind": "NONE"
@@ -4713,9 +5096,12 @@
             "reference": {
               "drift_ms": -375,
               "at_session_us": 9000000,
-              "playing": true
+              "playing": true,
+              "anchor_session_us": 1000000,
+              "anchor_position_ms": 0
             },
-            "route_change_count": 4
+            "route_change_count": 4,
+            "anchor_position_ms": 0
           },
           "action": {
             "kind": "HARD_SEEK",
@@ -4748,9 +5134,12 @@
             "reference": {
               "drift_ms": -375,
               "at_session_us": 14000000,
-              "playing": true
+              "playing": true,
+              "anchor_session_us": 1000000,
+              "anchor_position_ms": 0
             },
-            "route_change_count": 4
+            "route_change_count": 4,
+            "anchor_position_ms": 0
           },
           "action": {
             "kind": "HARD_SEEK",
@@ -4784,9 +5173,12 @@
             "reference": {
               "drift_ms": -375,
               "at_session_us": 19000000,
-              "playing": true
+              "playing": true,
+              "anchor_session_us": 1000000,
+              "anchor_position_ms": 0
             },
-            "route_change_count": 4
+            "route_change_count": 4,
+            "anchor_position_ms": 0
           },
           "action": {
             "kind": "NONE"
@@ -4816,9 +5208,12 @@
             "reference": {
               "drift_ms": -375,
               "at_session_us": 24000000,
-              "playing": true
+              "playing": true,
+              "anchor_session_us": 1000000,
+              "anchor_position_ms": 0
             },
-            "route_change_count": 5
+            "route_change_count": 5,
+            "anchor_position_ms": 0
           },
           "action": {
             "kind": "NONE"
@@ -4853,9 +5248,12 @@
             "reference": {
               "drift_ms": -375,
               "at_session_us": 9000000,
-              "playing": true
+              "playing": true,
+              "anchor_session_us": 1000000,
+              "anchor_position_ms": 0
             },
-            "route_change_count": 0
+            "route_change_count": 0,
+            "anchor_position_ms": 0
           },
           "action": {
             "kind": "HARD_SEEK",
@@ -4888,9 +5286,12 @@
             "reference": {
               "drift_ms": -375,
               "at_session_us": 14000000,
-              "playing": true
+              "playing": true,
+              "anchor_session_us": 1000000,
+              "anchor_position_ms": 0
             },
-            "route_change_count": 1
+            "route_change_count": 1,
+            "anchor_position_ms": 0
           },
           "action": {
             "kind": "HARD_SEEK",
@@ -4927,11 +5328,14 @@
             "route_transitioning": false,
             "anchor_session_us": 1000000,
             "reference": {
+              "anchor_session_us": 1000000,
+              "anchor_position_ms": 0,
               "drift_ms": 0,
               "at_session_us": 10000001,
               "playing": true
             },
-            "route_change_count": 0
+            "route_change_count": 0,
+            "anchor_position_ms": 0
           },
           "action": {
             "kind": "NONE"
@@ -4956,11 +5360,14 @@
             "route_transitioning": false,
             "anchor_session_us": 1000000,
             "reference": {
+              "anchor_session_us": 1000000,
+              "anchor_position_ms": 0,
               "drift_ms": 0,
               "at_session_us": 3610000000,
               "playing": true
             },
-            "route_change_count": 0
+            "route_change_count": 0,
+            "anchor_position_ms": 0
           },
           "action": {
             "kind": "NONE"
@@ -4985,11 +5392,14 @@
             "route_transitioning": false,
             "anchor_session_us": 1000000,
             "reference": {
+              "anchor_session_us": 1000000,
+              "anchor_position_ms": 0,
               "drift_ms": 0,
               "at_session_us": 10000000,
               "playing": true
             },
-            "route_change_count": 0
+            "route_change_count": 0,
+            "anchor_position_ms": 0
           },
           "action": {
             "kind": "HARD_SEEK",
@@ -5014,6 +5424,155 @@
       ]
     },
     {
+      "name": "a1t-a-reference-measured-against-an-earlier-anchor-instant-is-not-usable",
+      "steps": [
+        {
+          "input": {
+            "drift_ms": -500,
+            "now_session_us": 10000000,
+            "expected_position_ms": 45000,
+            "playing": true,
+            "route_transitioning": false,
+            "anchor_session_us": 1500000,
+            "reference": {
+              "anchor_session_us": 3000000,
+              "anchor_position_ms": 0,
+              "drift_ms": 0,
+              "at_session_us": 9000000,
+              "playing": true
+            },
+            "route_change_count": 0,
+            "anchor_position_ms": 300
+          },
+          "action": {
+            "kind": "NONE"
+          },
+          "state_after": {
+            "nudging": false,
+            "nudge_rate": 1.0,
+            "hard_seek_at_session_us": [],
+            "failed": false,
+            "restart_compensation_ms": 0,
+            "pending_seek": null,
+            "route_change_count": 0
+          },
+          "error_ms": null
+        }
+      ]
+    },
+    {
+      "name": "a1t-a-reference-measured-against-an-earlier-anchor-position-is-not-usable",
+      "steps": [
+        {
+          "input": {
+            "drift_ms": -500,
+            "now_session_us": 10000000,
+            "expected_position_ms": 45000,
+            "playing": true,
+            "route_transitioning": false,
+            "anchor_session_us": 1000000,
+            "reference": {
+              "anchor_session_us": 1000000,
+              "anchor_position_ms": 0,
+              "drift_ms": 0,
+              "at_session_us": 9000000,
+              "playing": true
+            },
+            "route_change_count": 0,
+            "anchor_position_ms": 300
+          },
+          "action": {
+            "kind": "NONE"
+          },
+          "state_after": {
+            "nudging": false,
+            "nudge_rate": 1.0,
+            "hard_seek_at_session_us": [],
+            "failed": false,
+            "restart_compensation_ms": 0,
+            "pending_seek": null,
+            "route_change_count": 0
+          },
+          "error_ms": null
+        }
+      ]
+    },
+    {
+      "name": "a1t-correction-resumes-on-the-first-reference-for-the-new-anchor",
+      "steps": [
+        {
+          "input": {
+            "drift_ms": -500,
+            "now_session_us": 10000000,
+            "expected_position_ms": 45000,
+            "playing": true,
+            "route_transitioning": false,
+            "anchor_session_us": 1500000,
+            "reference": {
+              "anchor_session_us": 1000000,
+              "anchor_position_ms": 0,
+              "drift_ms": 0,
+              "at_session_us": 9000000,
+              "playing": true
+            },
+            "route_change_count": 0,
+            "anchor_position_ms": 300
+          },
+          "action": {
+            "kind": "NONE"
+          },
+          "state_after": {
+            "nudging": false,
+            "nudge_rate": 1.0,
+            "hard_seek_at_session_us": [],
+            "failed": false,
+            "restart_compensation_ms": 0,
+            "pending_seek": null,
+            "route_change_count": 0
+          },
+          "error_ms": null
+        },
+        {
+          "input": {
+            "drift_ms": -500,
+            "now_session_us": 15000000,
+            "expected_position_ms": 45000,
+            "playing": true,
+            "route_transitioning": false,
+            "anchor_session_us": 1500000,
+            "reference": {
+              "drift_ms": -300,
+              "at_session_us": 14000000,
+              "playing": true,
+              "anchor_session_us": 1500000,
+              "anchor_position_ms": 300
+            },
+            "route_change_count": 0,
+            "anchor_position_ms": 300
+          },
+          "action": {
+            "kind": "HARD_SEEK",
+            "position_ms": 44700
+          },
+          "state_after": {
+            "nudging": false,
+            "nudge_rate": 1.0,
+            "hard_seek_at_session_us": [
+              15000000
+            ],
+            "failed": false,
+            "restart_compensation_ms": 0,
+            "pending_seek": {
+              "compensation_ms": 0,
+              "anchor_session_us": 1500000
+            },
+            "route_change_count": 0
+          },
+          "error_ms": -200
+        }
+      ]
+    },
+    {
       "name": "a1-a-pause-forgets-a-pending-seek",
       "steps": [
         {
@@ -5027,9 +5586,12 @@
             "reference": {
               "drift_ms": -375,
               "at_session_us": 9000000,
-              "playing": true
+              "playing": true,
+              "anchor_session_us": 1000000,
+              "anchor_position_ms": 0
             },
-            "route_change_count": 0
+            "route_change_count": 0,
+            "anchor_position_ms": 0
           },
           "action": {
             "kind": "HARD_SEEK",
@@ -5062,9 +5624,12 @@
             "reference": {
               "drift_ms": -375,
               "at_session_us": 14000000,
-              "playing": true
+              "playing": true,
+              "anchor_session_us": 1000000,
+              "anchor_position_ms": 0
             },
-            "route_change_count": 0
+            "route_change_count": 0,
+            "anchor_position_ms": 0
           },
           "action": {
             "kind": "NONE"
@@ -5093,9 +5658,12 @@
             "reference": {
               "drift_ms": -375,
               "at_session_us": 19000000,
-              "playing": true
+              "playing": true,
+              "anchor_session_us": 1000000,
+              "anchor_position_ms": 0
             },
-            "route_change_count": 0
+            "route_change_count": 0,
+            "anchor_position_ms": 0
           },
           "action": {
             "kind": "HARD_SEEK",
