@@ -144,9 +144,10 @@ drops — leaves one write blocked in the kernel. Measured on a real Conscrypt T
 - A writer inside the blocking write does not. Cancellation is only a request, and `withContext`
   cannot return until the blocking call does. A `PING` that is itself the stalled write therefore
   never returns, so rule 1 alone is not enough and rule 2 is needed.
-- `close()` does not release that writer either, and on Conscrypt's engine socket it waits for it,
-  because it first drains a `close_notify` through the same socket write lock. The loss is reported
-  only after the close returns, so a stalled write could stop it from ever being reported.
+- `close()` does not release that writer either (none of 26 observations, on the JVM and the API 36
+  emulator), and on Conscrypt's engine socket it often waits for it (18 of 26), because it first
+  drains a `close_notify` through the same socket write lock. The loss was reported only after the
+  close returned, so a stalled write could stop it from ever being reported.
 - `shutdownOutput()` needs no write lock. The stalled write fails at once ("Broken pipe"), and a
   close waiting behind it returns.
 

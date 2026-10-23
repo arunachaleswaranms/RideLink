@@ -183,6 +183,34 @@ iOS mirrors the fix with the same guards, but has no deterministic test. Every w
 `NWConnection` send also ends its receive, so the read loop would always retire the connection
 first.
 
+**Problem 137 — ADR-007 Amendment A3 (`:network`, JVM, real loopback TLS 1.3)**
+
+PROTOCOL §1's 6 s keepalive bound must hold while a write on the same connection is stalled.
+`WriteStallLivenessTest` asserts `RECONNECTING` within 9 s of the peer going silent, in three cases:
+
+1. A write (this side's `PONG`) is parked; the read loop waits behind it; the peer leaves.
+2. The keepalive's **own** `PING` is the parked write, which ignores cancellation like a kernel
+   write; the read loop waits behind it; the peer leaves.
+3. A real TLS write is blocked in the kernel because the peer stopped reading. The peer does not
+   close: its writes park and its clock is frozen, so its own keepalive never closes for it.
+
+`PingWaitersTest` adds: a `PING` queued behind a held write lock times out on its own bound and
+leaves no waiter; cancelling one leaves no waiter. `BlockingWriteSemanticsTest` (JVM) and
+`BlockingWriteSemanticsDeviceTest` (instrumented; run on the API 36 emulator, not a phone) measure
+the facts the fix depends on, on both the accepted and dialled sockets.
+
+| Mutant | Effect |
+|---|---|
+| `PING` write back outside its timeout | `PingWaitersTest`'s bounded-write case fails (the liveness cases still pass, because the decision no longer waits for the `PING`) |
+| Keepalive awaits each `PING` inline again | Case 2 fails |
+| Network-loss retirement uses `close()` instead of `abort()` | Case 3 fails |
+| All three reverted | All three cases fail, and the bounded-write case |
+
+Under 12 busy processes (8 runs), every case of `WriteStallLivenessTest`, `PongWriteFailureTest` and
+`PingRaceAndReconnectTest` passed; with the fix reverted (4 runs) every liveness case and
+`PongWriteFailureTest`'s successor case failed. **MANUAL REQUIRED:** the same on a phone, with a
+peer whose Wi-Fi is cut during a large manifest transfer; not run.
+
 **Problem 124 — ADR-019 Amendment A2**
 
 - `session-gate` vectors: two rows moved (`peer-trusted-in-discovering`,

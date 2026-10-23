@@ -66,15 +66,38 @@ class BlockingWriteSemanticsDeviceTest {
     }
 
     @Test
-    fun onTheAcceptedSocketAbortReleasesAStalledWrite() = withTlsPair { scope, accepted, _ -> measure(scope, accepted, "accepted") }
+    fun onTheAcceptedSocketAbortReleasesAStalledWrite() =
+        withTlsPair {
+            scope,
+            accepted,
+            _,
+            ->
+            measure(scope, accepted, "accepted", closeFirst = false)
+        }
 
     @Test
-    fun onTheDialledSocketAbortReleasesAStalledWrite() = withTlsPair { scope, _, dialled -> measure(scope, dialled, "dialled") }
+    fun onTheDialledSocketAbortReleasesAStalledWrite() =
+        withTlsPair {
+            scope,
+            _,
+            dialled,
+            ->
+            measure(scope, dialled, "dialled", closeFirst = false)
+        }
+
+    @Test
+    fun onTheAcceptedSocketCloseAloneIsRecordedThenAbortReleases() =
+        withTlsPair { scope, accepted, _ -> measure(scope, accepted, "accepted, close first", closeFirst = true) }
+
+    @Test
+    fun onTheDialledSocketCloseAloneIsRecordedThenAbortReleases() =
+        withTlsPair { scope, _, dialled -> measure(scope, dialled, "dialled, close first", closeFirst = true) }
 
     private suspend fun measure(
         scope: CoroutineScope,
         writerSide: ControlSocket,
         label: String,
+        closeFirst: Boolean,
     ) {
         report(label, "TLS socket class = ${sslSocketClassOf(writerSide)}")
         val completed = AtomicInteger()
@@ -116,12 +139,16 @@ class BlockingWriteSemanticsDeviceTest {
 
         val closeReturned = CountDownLatch(1)
         val closeStart = System.nanoTime()
-        thread(name = "problem-137-close", isDaemon = true) {
-            writerSide.close()
+        if (closeFirst) {
+            thread(name = "problem-137-close", isDaemon = true) {
+                writerSide.close()
+                closeReturned.countDown()
+            }
+            val returned = closeReturned.await(OBSERVE_MS, TimeUnit.MILLISECONDS)
+            report(label, "$OBSERVE_MS ms after close(): close() returned = $returned, blocked writer completed = ${writer.isCompleted}")
+        } else {
             closeReturned.countDown()
         }
-        val closeReturnedAlone = closeReturned.await(OBSERVE_MS, TimeUnit.MILLISECONDS)
-        report(label, "$OBSERVE_MS ms after close(): close() returned = $closeReturnedAlone, blocked writer completed = ${writer.isCompleted}")
 
         val abortStart = System.nanoTime()
         writerSide.abort()
