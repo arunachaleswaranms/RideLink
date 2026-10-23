@@ -449,6 +449,7 @@ class AndroidVoiceAudioSession(
                 lastTransitionDurationUs = lifecycle.transition.lastDurationUs,
                 transitionTimedOutCount = lifecycle.transition.timedOutCount,
                 lastTransitionTimedOut = lifecycle.transition.lastSettlementTimedOut,
+                transitionBeganCount = lifecycle.transition.beganCount,
             )
         snapshot = next
         sink?.invoke(next)

@@ -143,8 +143,8 @@ sealed class PlaybackMessage {
     ) : PlaybackMessage()
 
     /**
-     * PROTOCOL §5's "full authoritative snapshot the leader emits after any correction or reconnect
-     * — the reconciliation anchor, not an incremental update." Its payload was likewise unspecified;
+     * PROTOCOL §5's "full authoritative snapshot the leader emits on reconnect and reconciliation —
+     * the reconciliation anchor, not an incremental update." Its payload was likewise unspecified;
      * ADR-024 §4 derives it from §10's `STATE_SNAPSHOT.playback` so the two agree field for field.
      *
      * [trackHash] is nullable because "nothing is loaded" is a representable authoritative state.

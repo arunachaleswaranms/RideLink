@@ -939,69 +939,68 @@ class SyncPlaybackDeliveryAuditTest {
             assertEquals(1, diagnostics.refusedHeldCommandCount, "…and the refusal is counted rather than hidden")
         }
 
-    // --- Finding E: a correction's snapshot keeps the correction's own identity --------------------
+    // --- Finding E: a correction's snapshot kept the correction's own identity --------------------
 
     /**
-     * **The defect.** `emitPlaybackState()` read `session.currentAuthGeneration` *inside itself*, so
-     * a correction that had proved ownership of generation A handed the enqueue whatever generation
-     * happened to be live by then. The proof and the act were about different sessions.
-     *
-     * On this platform the window is between two statements the test dispatcher cannot interleave,
-     * so this asserts the contract rather than reproducing the interleaving: the emit is refused
-     * because the *correction's* generation is no longer current, not because a freshly-read one
-     * happens to be. `SyncPlaybackDeliveryAuditTests.testACorrectionSupersededBeforeItsSnapshot…` on
-     * iOS reproduces the interleaving itself, where every `await` is an actor re-entrancy point.
+     * Finding E was that a correction's `PLAYBACK_STATE` read the *live* generation instead of the
+     * correction's own. ADR-024 Amendment A16 removed that snapshot: only a leader emits one, and
+     * since ADR-004 Amendment A1 a leader never corrects — its output is the drift reference. A
+     * leader drifting well into the hard-seek band therefore neither seeks nor re-states anything.
      */
     @Test
-    fun `a correction whose session ends inside its player call emits no snapshot`() =
+    fun `a leader never corrects its own drift, so no correction re-states authoritative state`() =
         runTest(StandardTestDispatcher()) {
             build(backgroundScope)
             leaderPlaying(this)
-            val gate = CompletableDeferred<Unit>()
-            player.gate = gate
-            player.gateOn = { it is FakeSyncPlayer.Call.Seek }
-            // A drift inside ADR-004's hard-seek band: the tier that emits an authoritative
-            // PLAYBACK_STATE, and the only tier that does.
             driftIntoHardSeekBand()
 
             clock.advanceBy(POSITION_REPORT_US)
             runCurrent()
+
+            assertEquals(500, coordinator.diagnostics.value.localDriftMs, "the premise: the leader measured its drift")
+            assertTrue(player.calls.none { it is FakeSyncPlayer.Call.Seek || it is FakeSyncPlayer.Call.SetRate })
+            assertEquals(0, coordinator.diagnostics.value.hardSeekCount)
+            assertTrue(session.sentOfType<PlaybackMessage.PlaybackStateSnapshot>().isEmpty())
+        }
+
+    /**
+     * What Finding E's tests also pinned, and still holds for the follower that now does all the
+     * correcting: a correction whose session ends while it is inside the player has no effect.
+     */
+    @Test
+    fun `a follower correction whose session ends inside its player call has no effect`() =
+        runTest(StandardTestDispatcher()) {
+            build(backgroundScope)
+            val anchor = followerPlaying(this)
+            val gate = CompletableDeferred<Unit>()
+            player.gate = gate
+            player.gateOn = { it is FakeSyncPlayer.Call.Seek }
+            followerDriftsIntoHardSeekBand(this, anchor)
             assertTrue(player.calls.any { it is FakeSyncPlayer.Call.Seek }, "the ladder reached the hard-seek tier")
 
             session.currentAuthGeneration = 2
             gate.complete(Unit)
             runCurrent()
 
-            assertTrue(
-                session.sentOfType<PlaybackMessage.PlaybackStateSnapshot>().isEmpty(),
-                "a correction from a dead session emits nothing",
-            )
-            assertEquals(0, coordinator.diagnostics.value.hardSeekCount, "and spends none of the seek budget either")
+            assertEquals(0, coordinator.diagnostics.value.hardSeekCount, "a correction from a dead session spends nothing")
+            assertTrue(session.sentOfType<PlaybackMessage.PlaybackStateSnapshot>().isEmpty())
         }
 
-    /**
-     * The epoch half, which the old `emitPlaybackState()` could not check at all: it took no token,
-     * so a snapshot caused by a correction belonging to a superseded playback epoch was
-     * indistinguishable from a current one.
-     */
+    /** The epoch half: a new `PLAY` while the correction is inside the player. */
     @Test
-    fun `a correction whose playback epoch is superseded inside its player call emits no snapshot`() =
+    fun `a follower correction whose playback epoch is superseded inside its player call has no effect`() =
         runTest(StandardTestDispatcher()) {
             build(backgroundScope)
-            leaderPlaying(this)
+            val anchor = followerPlaying(this)
             val gate = CompletableDeferred<Unit>()
             player.gate = gate
             player.gateOn = { it is FakeSyncPlayer.Call.Seek }
-            driftIntoHardSeekBand()
-
-            clock.advanceBy(POSITION_REPORT_US)
-            runCurrent()
+            followerDriftsIntoHardSeekBand(this, anchor)
             assertTrue(player.calls.any { it is FakeSyncPlayer.Call.Seek })
 
-            // A new epoch begins while the correction is inside the player.
+            player.gateOn = null
             content.localHashes.add(HASH_B.value)
-            content.peerHashes.add(HASH_B.value)
-            coordinator.playSynchronized(HASH_B)
+            session.deliver(followerPlay(seq = 2, hash = HASH_B, effectiveAtUs = clock.nowUs() + LEAD_US))
             runCurrent()
             gate.complete(Unit)
             runCurrent()
@@ -1009,24 +1008,41 @@ class SyncPlaybackDeliveryAuditTest {
             assertEquals(0, coordinator.diagnostics.value.hardSeekCount, "the superseded correction had zero effects")
         }
 
-    /** And the control: a correction that is still current does emit exactly one snapshot. */
-    @Test
-    fun `a current correction still emits exactly one authoritative snapshot`() =
-        runTest(StandardTestDispatcher()) {
-            build(backgroundScope)
-            leaderPlaying(this)
-            driftIntoHardSeekBand()
+    /** A follower playing track A from its anchor; returns the anchor's session instant. */
+    private suspend fun followerPlaying(scope: TestScope): Long {
+        connect(scope, asLeader = false)
+        content.localHashes.add(HASH_A.value)
+        val anchor = clock.nowUs()
+        session.deliver(followerPlay(seq = 1, hash = HASH_A, effectiveAtUs = anchor))
+        scope.runCurrent()
+        player.calls.clear()
+        session.sent.clear()
+        return anchor
+    }
 
-            clock.advanceBy(POSITION_REPORT_US)
-            runCurrent()
+    /** One tick later, 500 ms ahead of a leader that has reported itself exactly on time. */
+    private fun followerDriftsIntoHardSeekBand(
+        scope: TestScope,
+        anchor: Long,
+    ) {
+        val tickAt = clock.pendingDeadlines.max()
+        session.deliverLeaderReport(HASH_A, anchor, tickAt - 1_000_000)
+        scope.runCurrent()
+        player.setState(PlayerState(positionMs = (tickAt - anchor) / 1_000 + 500, durationMs = 3_600_000, playing = true))
+        clock.advanceTo(tickAt)
+        scope.runCurrent()
+    }
 
-            assertEquals(1, coordinator.diagnostics.value.hardSeekCount)
-            assertEquals(
-                1,
-                session.sentOfType<PlaybackMessage.PlaybackStateSnapshot>().size,
-                "the ordinary path is untouched by the ownership work",
-            )
-        }
+    private fun followerPlay(
+        seq: Long,
+        hash: ContentHash,
+        effectiveAtUs: Long,
+    ) = PlaybackMessage.Play(
+        PlaybackCommandHeader(seq, effectiveAtUs, SyncTestValues.leaderPeerId, queueRevision = 0),
+        hash,
+        positionMs = 0,
+        queueItemId = SyncTestValues.ulid(seq.toInt()),
+    )
 
     private fun item(
         queueItemId: String,

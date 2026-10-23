@@ -31,6 +31,16 @@ sealed class DriftAction {
 }
 
 /**
+ * A hard seek whose residual has not been observed yet (ADR-004 Amendment A1 decision 4): the
+ * compensation it was made with, and the timeline anchor it was made under. A residual observed
+ * under a different anchor belongs to a different restart and teaches nothing.
+ */
+data class PendingSeek(
+    val compensationMs: Long,
+    val anchorSessionUs: Long,
+)
+
+/**
  * The ladder's carried state. [nudgeRate] is what makes the hysteresis real rather than nominal:
  * an evaluation that would ask for a rate already in force emits [DriftAction.None], so a drift
  * hovering at the 25 ms boundary cannot produce a stream of identical rate commands.
@@ -41,12 +51,47 @@ data class DriftState(
     /** Session instants of the hard seeks still inside the 60 s window. Bounded by that window. */
     val hardSeekAtSessionUs: List<Long> = emptyList(),
     val failed: Boolean = false,
+    /**
+     * ADR-004 Amendment A1: how long this device's output takes to restart after a seek, learned
+     * from its own seeks' residuals. A property of the device and its route, so [DriftController.newEpoch]
+     * keeps it.
+     */
+    val restartCompensationMs: Long = 0,
+    val pendingSeek: PendingSeek? = null,
+    /**
+     * The [DriftInput.routeChangeCount] that [restartCompensationMs] and [pendingSeek] belong to.
+     * Null until the first evaluation. Any other count means this device's route has changed since —
+     * possibly and briefly between two ticks — so both are forgotten.
+     */
+    val routeChangeCount: Long? = null,
+)
+
+/**
+ * The output this device must match (ADR-004 Amendment A1 decision 2): the leader's latest
+ * `POSITION_REPORT`, as its drift against the **same** [PlaybackTimeline] at the session instant it
+ * was sampled. A leader has none — its own output is the reference.
+ *
+ * [anchorSessionUs] and [anchorPositionMs] are the anchor of the timeline [driftMs] was measured
+ * against. A drift is a difference from one particular anchor, so it means nothing once the timeline
+ * has been re-anchored — even to an earlier instant, which a same-track `PLAYBACK_STATE` can do and
+ * which every freshness check would otherwise pass (PR #32 review round 2).
+ */
+data class DriftReference(
+    val driftMs: Long,
+    val atSessionUs: Long,
+    val playing: Boolean,
+    val anchorSessionUs: Long,
+    val anchorPositionMs: Long,
 )
 
 /**
  * One tick of input. [driftMs] is always `actual - expected` against the authoritative
- * [PlaybackTimeline]; [routeTransitioning] is true while **either** peer reports
- * `AUDIO_STATE.route_state: "transitioning"` (PROTOCOL §4.4).
+ * [PlaybackTimeline], sampled at [nowSessionUs]; [routeTransitioning] is true while **either** peer
+ * reports `AUDIO_STATE.route_state: "transitioning"` (PROTOCOL §4.4). [anchorSessionUs] is that
+ * timeline's anchor — the last instant this device's output restarted because a command said so.
+ * [routeChangeCount] is this device's own count of route transitions begun, as its route layer
+ * reports it. It only ever matters whether it *changed*, so a route layer that restarts its count
+ * when the audio session is recreated is still read correctly.
  */
 data class DriftInput(
     val driftMs: Long,
@@ -54,11 +99,18 @@ data class DriftInput(
     val expectedPositionMs: Long,
     val playing: Boolean,
     val routeTransitioning: Boolean,
+    val anchorSessionUs: Long,
+    val reference: DriftReference?,
+    val routeChangeCount: Long,
+    /** The position half of the timeline's anchor, which [DriftReference.anchorPositionMs] must match. */
+    val anchorPositionMs: Long,
 )
 
+/** [errorMs] is the inter-phone error the ladder acted on, or null when it had no usable reference. */
 data class DriftOutcome(
     val action: DriftAction,
     val state: DriftState,
+    val errorMs: Long? = null,
 )
 
 /**
@@ -76,6 +128,11 @@ data class DriftOutcome(
  * | `25 .. 120` | rate nudge |
  * | `121 .. 2000` | hard seek |
  * | `> 2000` | sync failure |
+ *
+ * The magnitude is the **inter-phone error** (ADR-004 Amendment A1): this device's drift minus its
+ * [DriftReference]'s, both against the same timeline. A lag both phones share is never chased, and a
+ * differential one — one phone's Bluetooth path — is corrected exactly as any other error. With no
+ * usable reference the ladder makes no new decision and releases any nudge.
  *
  * Suspension, hysteresis and the seek budget sit on top of that table:
  * - while [DriftInput.routeTransitioning], **nothing** happens — no nudge, no seek, and the
@@ -106,34 +163,128 @@ object DriftController {
     const val MAX_HARD_SEEKS_IN_WINDOW: Int = 3
     const val HARD_SEEK_WINDOW_US: Long = 60_000_000
 
+    /**
+     * ADR-004 Amendment A1 decision 3: a sample taken this soon after a restart may still be inside
+     * the stretch where the position is frozen because output has not begun. More than twice the
+     * largest lag measured on a phone (about 650 ms).
+     */
+    const val REFERENCE_SETTLE_US: Long = 1_500_000
+
+    /** Two and a bit `POSITION_REPORT` intervals: an older reference is a lost link, not a sample. */
+    const val MAX_REFERENCE_AGE_US: Long = 12_000_000
+
+    /** A restart longer than this is a stall, not a latency, and must not be learned as one. */
+    const val MAX_RESTART_COMPENSATION_MS: Long = 1_000
+
     @Suppress("ReturnCount") // one early-out per ladder tier reads far clearer than nested whens
     fun evaluate(
         state: DriftState,
         input: DriftInput,
     ): DriftOutcome {
+        // ADR-004 Amendment A1 decision 4: a new route has a new restart latency, so what was learned
+        // about the old one is forgotten — first, before any early return, so it holds while failed
+        // and while paused too, and for a transition that came and went between two ticks.
+        val current = followRoute(state, input)
+
         // Already failed: correction is over until the caller resets this state for a new timeline
         // or a new session. The rate was restored when the failure was declared.
-        if (state.failed) return DriftOutcome(DriftAction.None, state)
+        if (current.failed) return DriftOutcome(DriftAction.None, current)
 
-        // Not playing: nothing to correct, but a nudge left in force must not survive the pause.
-        if (!input.playing) return releaseNudgeIfActive(state)
+        // Not playing: nothing to correct, but a nudge left in force must not survive the pause, and
+        // a seek's residual can no longer be told apart from the pause's.
+        if (!input.playing) return releaseNudgeIfActive(current.copy(pendingSeek = null))
 
         // ARCHITECTURE §7.3: the ladder is suspended while either peer's route is transitioning.
         // Deliberately *before* every tier, and deliberately leaving `nudging` untouched — suspended
         // means "make no new decision", not "undo the last one".
-        if (input.routeTransitioning) return DriftOutcome(DriftAction.None, state)
+        if (input.routeTransitioning) return DriftOutcome(DriftAction.None, current)
 
-        val magnitude = if (input.driftMs < 0) -input.driftMs else input.driftMs
+        val reference = input.reference
+        if (reference == null || !usable(current, input, reference)) return releaseNudgeIfActive(current)
 
-        if (magnitude > FAIL_MS) return fail(state)
-        if (magnitude > NUDGE_MAX_MS) return hardSeek(state, input)
-        if (magnitude >= DEAD_BAND_MS) return nudge(state, input)
-        if (state.nudging && magnitude < CONVERGED_MS) return releaseNudge(state)
-        return DriftOutcome(DriftAction.None, state)
+        val errorMs = input.driftMs - reference.driftMs
+        val learned = learn(current, input, errorMs)
+        val magnitude = if (errorMs < 0) -errorMs else errorMs
+
+        val outcome =
+            when {
+                magnitude > FAIL_MS -> fail(learned)
+                magnitude > NUDGE_MAX_MS -> hardSeek(learned, input, reference)
+                magnitude >= DEAD_BAND_MS -> nudge(learned, errorMs)
+                learned.nudging && magnitude < CONVERGED_MS -> releaseNudge(learned)
+                else -> DriftOutcome(DriftAction.None, learned)
+            }
+        return outcome.copy(errorMs = errorMs)
     }
 
-    /** Everything a new playback epoch, a new session, or a user cancellation resets. */
+    /** Everything a new session or a user cancellation resets. */
     fun reset(): DriftState = DriftState()
+
+    /**
+     * A new playback epoch: a fresh ladder and a fresh seek budget, but this device's output still
+     * restarts as slowly as it did (ADR-004 Amendment A1 decision 4).
+     */
+    fun newEpoch(state: DriftState): DriftState =
+        DriftState(restartCompensationMs = state.restartCompensationMs, routeChangeCount = state.routeChangeCount)
+
+    /**
+     * ADR-004 Amendment A1 decision 4. Either peer transitioning, or this device's count of route
+     * transitions differing from the one the compensation was learned under, forgets it.
+     */
+    private fun followRoute(
+        state: DriftState,
+        input: DriftInput,
+    ): DriftState {
+        val known = state.routeChangeCount
+        val changed = input.routeTransitioning || (known != null && known != input.routeChangeCount)
+        return if (changed) {
+            state.copy(restartCompensationMs = 0, pendingSeek = null, routeChangeCount = input.routeChangeCount)
+        } else {
+            state.copy(routeChangeCount = input.routeChangeCount)
+        }
+    }
+
+    /** ADR-004 Amendment A1 decision 3: every reason a reference or a local sample cannot be compared. */
+    private fun usable(
+        state: DriftState,
+        input: DriftInput,
+        reference: DriftReference,
+    ): Boolean {
+        val settledFrom = input.anchorSessionUs + REFERENCE_SETTLE_US
+        val lastSeekUs = state.hardSeekAtSessionUs.lastOrNull()
+        // A reference sampled after this device's own sample cannot be compared with it. A genuine
+        // one that merely arrived early is usable on the next tick; one stamped implausibly far
+        // ahead never becomes usable while it is still ahead.
+        return reference.playing &&
+            reference.anchorSessionUs == input.anchorSessionUs &&
+            reference.anchorPositionMs == input.anchorPositionMs &&
+            reference.atSessionUs >= settledFrom &&
+            reference.atSessionUs <= input.nowSessionUs &&
+            input.nowSessionUs - reference.atSessionUs <= MAX_REFERENCE_AGE_US &&
+            input.nowSessionUs >= settledFrom &&
+            (lastSeekUs == null || input.nowSessionUs - lastSeekUs >= REFERENCE_SETTLE_US)
+    }
+
+    /**
+     * ADR-004 Amendment A1 decision 4. After a seek made with compensation `c`, the output restarts
+     * `L` later, so the first settled error is `c - L`: the latency is `c - error`.
+     */
+    private fun learn(
+        state: DriftState,
+        input: DriftInput,
+        errorMs: Long,
+    ): DriftState {
+        val pending = state.pendingSeek ?: return state
+        // A residual under a different anchor belongs to a different restart: forget the seek, keep
+        // what was learned before it.
+        val latencyMs =
+            if (pending.anchorSessionUs == input.anchorSessionUs) {
+                (pending.compensationMs - errorMs).coerceIn(0, MAX_RESTART_COMPENSATION_MS)
+            } else {
+                state.restartCompensationMs
+            }
+        return state.copy(restartCompensationMs = latencyMs, pendingSeek = null)
+    }
 
     private fun fail(state: DriftState): DriftOutcome =
         DriftOutcome(
@@ -144,6 +295,7 @@ object DriftController {
     private fun hardSeek(
         state: DriftState,
         input: DriftInput,
+        reference: DriftReference,
     ): DriftOutcome {
         val recent = state.hardSeekAtSessionUs.filter { input.nowSessionUs - it <= HARD_SEEK_WINDOW_US }
         val withThisOne = recent + input.nowSessionUs
@@ -155,18 +307,27 @@ object DriftController {
         }
         // A hard seek also ends any nudge in force: the player is being placed exactly where it
         // should be, so there is nothing left to slew toward and rate 1.0 is the correct baseline.
+        // "Where it should be" is where the reference output is, plus the time this device's output
+        // takes to restart — a seek re-incurs that latency (ADR-004 Amendment A1 decision 4).
+        val compensationMs = state.restartCompensationMs
+        val targetMs = (input.expectedPositionMs + reference.driftMs + compensationMs).coerceAtLeast(0)
         return DriftOutcome(
-            DriftAction.HardSeek(input.expectedPositionMs),
-            state.copy(nudging = false, nudgeRate = RATE_NORMAL, hardSeekAtSessionUs = withThisOne),
+            DriftAction.HardSeek(targetMs),
+            state.copy(
+                nudging = false,
+                nudgeRate = RATE_NORMAL,
+                hardSeekAtSessionUs = withThisOne,
+                pendingSeek = PendingSeek(compensationMs, input.anchorSessionUs),
+            ),
         )
     }
 
     private fun nudge(
         state: DriftState,
-        input: DriftInput,
+        errorMs: Long,
     ): DriftOutcome {
-        // Ahead of the timeline (positive drift) means play slower; behind means play faster.
-        val target = if (input.driftMs > 0) RATE_SLOWER else RATE_FASTER
+        // Ahead of the reference (positive error) means play slower; behind means play faster.
+        val target = if (errorMs > 0) RATE_SLOWER else RATE_FASTER
         if (state.nudging && state.nudgeRate == target) return DriftOutcome(DriftAction.None, state)
         return DriftOutcome(DriftAction.Nudge(target), state.copy(nudging = true, nudgeRate = target))
     }

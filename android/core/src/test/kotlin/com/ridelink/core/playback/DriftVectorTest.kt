@@ -1,6 +1,8 @@
 package com.ridelink.core.playback
 
 import com.ridelink.core.testutil.Vectors
+import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.double
 import kotlinx.serialization.json.jsonArray
@@ -30,6 +32,12 @@ class DriftVectorTest {
         assertEquals(constants["rate_faster"]!!.jsonPrimitive.double, DriftController.RATE_FASTER)
         assertEquals(constants["max_hard_seeks_in_window"]!!.jsonPrimitive.content.toInt(), DriftController.MAX_HARD_SEEKS_IN_WINDOW)
         assertEquals(constants["hard_seek_window_us"]!!.jsonPrimitive.long, DriftController.HARD_SEEK_WINDOW_US)
+        assertEquals(constants["reference_settle_us"]!!.jsonPrimitive.long, DriftController.REFERENCE_SETTLE_US)
+        assertEquals(constants["max_reference_age_us"]!!.jsonPrimitive.long, DriftController.MAX_REFERENCE_AGE_US)
+        assertEquals(
+            constants["max_restart_compensation_ms"]!!.jsonPrimitive.long,
+            DriftController.MAX_RESTART_COMPENSATION_MS,
+        )
     }
 
     @Test
@@ -43,6 +51,7 @@ class DriftVectorTest {
             val expected = row["expected"]!!.jsonObject
             assertAction(name, expected["action"]!!.jsonObject, outcome.action)
             assertState(name, expected["state"]!!.jsonObject, outcome.state)
+            assertEquals(nullableLong(expected["error_ms"]!!), outcome.errorMs, "$name: error")
         }
         assertTrue(rows.isNotEmpty())
     }
@@ -59,11 +68,32 @@ class DriftVectorTest {
                 val outcome = DriftController.evaluate(state, inputOf(step["input"]!!.jsonObject))
                 assertAction(name, step["action"]!!.jsonObject, outcome.action)
                 assertState(name, step["state_after"]!!.jsonObject, outcome.state)
+                assertEquals(nullableLong(step["error_ms"]!!), outcome.errorMs, "$name: error")
                 state = outcome.state
             }
         }
         assertTrue(sequences.isNotEmpty())
     }
+
+    @Test
+    fun epochs() {
+        val rows = doc["epochs"]!!.jsonArray
+        for (element in rows) {
+            val row = element.jsonObject
+            val name = row["name"]!!.jsonPrimitive.content
+            val before = stateOf(row["state"]!!.jsonObject)
+            val after =
+                when (val op = row["op"]!!.jsonPrimitive.content) {
+                    "new_epoch" -> DriftController.newEpoch(before)
+                    "reset" -> DriftController.reset()
+                    else -> error("$name: unknown op $op")
+                }
+            assertState(name, row["expected"]!!.jsonObject, after)
+        }
+        assertTrue(rows.isNotEmpty())
+    }
+
+    private fun nullableLong(json: JsonElement): Long? = if (json is JsonNull) null else json.jsonPrimitive.long
 
     private fun stateOf(json: JsonObject): DriftState =
         DriftState(
@@ -71,6 +101,12 @@ class DriftVectorTest {
             nudgeRate = json["nudge_rate"]!!.jsonPrimitive.double,
             hardSeekAtSessionUs = json["hard_seek_at_session_us"]!!.jsonArray.map { it.jsonPrimitive.long },
             failed = json["failed"]!!.jsonPrimitive.content.toBoolean(),
+            restartCompensationMs = json["restart_compensation_ms"]!!.jsonPrimitive.long,
+            pendingSeek =
+                (json["pending_seek"] as? JsonObject)?.let {
+                    PendingSeek(it["compensation_ms"]!!.jsonPrimitive.long, it["anchor_session_us"]!!.jsonPrimitive.long)
+                },
+            routeChangeCount = nullableLong(json["route_change_count"]!!),
         )
 
     private fun inputOf(json: JsonObject): DriftInput =
@@ -80,6 +116,19 @@ class DriftVectorTest {
             expectedPositionMs = json["expected_position_ms"]!!.jsonPrimitive.long,
             playing = json["playing"]!!.jsonPrimitive.content.toBoolean(),
             routeTransitioning = json["route_transitioning"]!!.jsonPrimitive.content.toBoolean(),
+            anchorSessionUs = json["anchor_session_us"]!!.jsonPrimitive.long,
+            reference =
+                (json["reference"] as? JsonObject)?.let {
+                    DriftReference(
+                        driftMs = it["drift_ms"]!!.jsonPrimitive.long,
+                        atSessionUs = it["at_session_us"]!!.jsonPrimitive.long,
+                        playing = it["playing"]!!.jsonPrimitive.content.toBoolean(),
+                        anchorSessionUs = it["anchor_session_us"]!!.jsonPrimitive.long,
+                        anchorPositionMs = it["anchor_position_ms"]!!.jsonPrimitive.long,
+                    )
+                },
+            routeChangeCount = json["route_change_count"]!!.jsonPrimitive.long,
+            anchorPositionMs = json["anchor_position_ms"]!!.jsonPrimitive.long,
         )
 
     private fun assertAction(

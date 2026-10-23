@@ -179,6 +179,9 @@ public struct AudioRouteSnapshot: Sendable, Equatable {
     public var transitionTimedOutCount: Int
     /// True until a new transition begins after the most recent timeout settlement. Local only.
     public var lastTransitionTimedOut: Bool
+    /// `RouteTransitionState.beganCount`: route transitions begun on this device. Local only and never
+    /// encoded; the drift ladder reads whether it changed (ADR-004 Amendment A1 decision 4).
+    public var transitionBeganCount: Int64
 
     public init(
         endpointClass: EndpointClass = .unknown,
@@ -194,7 +197,8 @@ public struct AudioRouteSnapshot: Sendable, Equatable {
         lastChangeReason: AudioRouteChangeReason = .unknown,
         lastTransitionDurationUs: Int64? = nil,
         transitionTimedOutCount: Int = 0,
-        lastTransitionTimedOut: Bool = false
+        lastTransitionTimedOut: Bool = false,
+        transitionBeganCount: Int64 = 0
     ) {
         self.endpointClass = endpointClass
         self.microphoneOpen = microphoneOpen
@@ -210,6 +214,7 @@ public struct AudioRouteSnapshot: Sendable, Equatable {
         self.lastTransitionDurationUs = lastTransitionDurationUs
         self.transitionTimedOutCount = transitionTimedOutCount
         self.lastTransitionTimedOut = lastTransitionTimedOut
+        self.transitionBeganCount = transitionBeganCount
     }
 
     /// ADR-016, as corrected by its Amendment A1: `reduced` whenever the effective output profile is a

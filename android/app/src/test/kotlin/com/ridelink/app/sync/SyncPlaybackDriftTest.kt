@@ -35,6 +35,7 @@ class SyncPlaybackDriftTest {
     private lateinit var clock: FakeMonotonicClock
     private lateinit var coordinator: SyncPlaybackCoordinator
     private var routeTransitioning = false
+    private var routeChanges = 0L
     private var idSeed = 200
 
     private fun build(scope: CoroutineScope) {
@@ -54,6 +55,7 @@ class SyncPlaybackDriftTest {
                 sleeper = clock.sleeper,
                 routeTransitioning = { routeTransitioning },
                 nextQueueItemId = { SyncTestValues.ulid(idSeed++) },
+                localRouteChangeCount = { routeChanges },
             )
     }
 
@@ -77,13 +79,21 @@ class SyncPlaybackDriftTest {
         session.sent.clear()
     }
 
-    /** Advances to the next 5 s report tick with the player reporting `expected + driftMs`. */
+    /**
+     * Advances to the next 5 s report tick with the player reporting `expected + driftMs`, after the
+     * leader has reported itself exactly on the timeline one second earlier — the settled reference
+     * ADR-004 Amendment A1 requires before a follower's ladder acts, so `driftMs` is the inter-phone
+     * error too.
+     */
     private fun tick(
         scope: TestScope,
         driftMs: Long,
         playing: Boolean = true,
+        referenceDriftMs: Long = 0,
     ) {
         val nextTickUs = clock.pendingDeadlines.max()
+        session.deliverLeaderReport(SyncTestValues.hash(1), ANCHOR_US, nextTickUs - 1_000_000, driftMs = referenceDriftMs)
+        scope.runCurrent()
         val elapsedMs = (nextTickUs - ANCHOR_US) / 1_000
         player.setState(PlayerState(positionMs = elapsedMs + driftMs, durationMs = 600_000, playing = playing))
         clock.advanceTo(nextTickUs)
@@ -158,14 +168,187 @@ class SyncPlaybackDriftTest {
         }
 
     @Test
-    fun `drift past the nudge band hard-seeks to the expected position and counts it`() =
+    fun `drift past the nudge band hard-seeks to the reference position and counts it`() =
         runTest(StandardTestDispatcher()) {
             build(backgroundScope)
             startPlaying(this)
             tick(this, driftMs = 400)
             val seek = player.calls.filterIsInstance<FakeSyncPlayer.Call.Seek>().single()
             val expectedMs = (clock.nowUs() - ANCHOR_US) / 1_000
-            assertEquals(expectedMs, seek.positionMs, "the seek target is the authoritative timeline's position")
+            assertEquals(
+                expectedMs,
+                seek.positionMs,
+                "the seek target is the reference's position on the authoritative timeline, plus nothing learned yet",
+            )
+            assertEquals(1, coordinator.diagnostics.value.hardSeekCount)
+        }
+
+    /**
+     * STATUS problem 131 (b), at this layer: the published state is up to 250 ms stale, and the tick
+     * must measure the engine's live position at the instant it read it. Here the published value
+     * says 200 ms behind — a hard seek, had it been used — and the engine says exactly on time.
+     */
+    @Test
+    fun `a tick measures the live position, never the published one`() =
+        runTest(StandardTestDispatcher()) {
+            build(backgroundScope)
+            startPlaying(this)
+            val nextTickUs = clock.pendingDeadlines.max()
+            player.livePositionMs = (nextTickUs - ANCHOR_US) / 1_000
+            tick(this, driftMs = -200)
+            assertEquals(0, coordinator.diagnostics.value.localDriftMs, "the drift is the live read's")
+            assertEquals(0, coordinator.diagnostics.value.hardSeekCount, "and nothing was corrected for the stale one")
+            assertEquals(
+                (nextTickUs - ANCHOR_US) / 1_000,
+                session.sentOfType<PlaybackMessage.PositionReport>().last().positionMs,
+                "the report carries the live read too",
+            )
+        }
+
+    /** ADR-004 Amendment A1 decision 3: no settled leader report, no decision — at any drift. */
+    @Test
+    fun `a follower with no reference from the leader corrects nothing`() =
+        runTest(StandardTestDispatcher()) {
+            build(backgroundScope)
+            startPlaying(this)
+            val nextTickUs = clock.pendingDeadlines.max()
+            player.setState(PlayerState(positionMs = (nextTickUs - ANCHOR_US) / 1_000 + 400, durationMs = 600_000, playing = true))
+            clock.advanceTo(nextTickUs)
+            runCurrent()
+            assertTrue(player.calls.none { it is FakeSyncPlayer.Call.Seek || it is FakeSyncPlayer.Call.SetRate })
+            assertEquals(400, coordinator.diagnostics.value.localDriftMs, "its own drift is still measured and shown")
+            assertNull(coordinator.diagnostics.value.syncErrorMs, "but there is no inter-phone error to act on")
+        }
+
+    /**
+     * ADR-004 Amendment A1 decision 2, the case STATUS problem 131 found on two phones: both
+     * outputs ~375 ms behind the timeline and aligned with each other. The follower reads its drift
+     * honestly and corrects nothing, because the error between the phones is inside the dead band.
+     */
+    @Test
+    fun `a lag the leader shares is measured and never chased`() =
+        runTest(StandardTestDispatcher()) {
+            build(backgroundScope)
+            startPlaying(this)
+            repeat(3) {
+                val nextTickUs = clock.pendingDeadlines.max()
+                session.deliverLeaderReport(SyncTestValues.hash(1), ANCHOR_US, nextTickUs - 1_000_000, driftMs = -375)
+                runCurrent()
+                player.setState(PlayerState(positionMs = (nextTickUs - ANCHOR_US) / 1_000 - 380, durationMs = 600_000, playing = true))
+                clock.advanceTo(nextTickUs)
+                runCurrent()
+            }
+            val diagnostics = coordinator.diagnostics.value
+            assertEquals(-380, diagnostics.localDriftMs)
+            assertEquals(-375, diagnostics.peerDriftMs)
+            assertEquals(-5, diagnostics.syncErrorMs, "the error the ladder acts on is the difference")
+            assertEquals(0, diagnostics.hardSeekCount)
+            assertTrue(player.calls.none { it is FakeSyncPlayer.Call.Seek || it is FakeSyncPlayer.Call.SetRate })
+        }
+
+    /**
+     * PR #32 review, at this layer: the learned restart compensation is forgotten when this device's
+     * route-transition count moves between two ticks, with no tick ever seeing `transitioning`. The
+     * table decides that (`protocol/vectors/drift/`); this proves the coordinator feeds it the count.
+     */
+    @Test
+    fun `a route change between two ticks forgets the learned restart compensation`() =
+        runTest(StandardTestDispatcher()) {
+            build(backgroundScope)
+            startPlaying(this)
+            tick(this, driftMs = -575, referenceDriftMs = -375) // a 200 ms differential: seek, uncompensated
+            tick(this, driftMs = -925, referenceDriftMs = -375) // its residual teaches 550 ms; seek again
+            tick(this, driftMs = -375, referenceDriftMs = -375) // converged
+            assertEquals(550, coordinator.diagnostics.value.restartCompensationMs, "the premise: 550 ms was learned")
+
+            routeChanges += 1 // a transition began and settled while no tick was looking
+            tick(this, driftMs = -375, referenceDriftMs = -375)
+            assertEquals(0, coordinator.diagnostics.value.restartCompensationMs, "a new route has a new restart latency")
+            assertEquals(2, coordinator.diagnostics.value.hardSeekCount, "and forgetting it is not itself a correction")
+        }
+
+    /**
+     * PR #32 review: a leader report stamped after this device's own sample — here an hour after —
+     * cannot be compared with it, so the ladder makes no decision on it, however large the error.
+     */
+    @Test
+    fun `a leader report stamped after this device's sample is not acted on`() =
+        runTest(StandardTestDispatcher()) {
+            build(backgroundScope)
+            startPlaying(this)
+            val nextTickUs = clock.pendingDeadlines.max()
+            session.deliverLeaderReport(SyncTestValues.hash(1), ANCHOR_US, nextTickUs + 3_600_000_000)
+            runCurrent()
+            player.setState(PlayerState(positionMs = (nextTickUs - ANCHOR_US) / 1_000 + 400, durationMs = 600_000, playing = true))
+            clock.advanceTo(nextTickUs)
+            runCurrent()
+            assertTrue(player.calls.none { it is FakeSyncPlayer.Call.Seek || it is FakeSyncPlayer.Call.SetRate })
+            assertNull(coordinator.diagnostics.value.syncErrorMs, "a future-dated reference is no reference")
+        }
+
+    /**
+     * PR #32 review round 2. A drift is measured against one particular anchor. A same-track
+     * `PLAYBACK_STATE` re-anchors the follower's timeline — here to an instant **earlier** than the
+     * leader's last report, so that report still passes every freshness rule (settled after the new
+     * anchor, 1 s old, sampled before this device's own sample). Only its anchor is wrong, and it must
+     * not be used. The leader's first report against the new anchor resumes ordinary correction.
+     */
+    @Test
+    fun `a reference measured against a replaced anchor is never used, and correction resumes on a new one`() =
+        runTest(StandardTestDispatcher()) {
+            build(backgroundScope)
+            startPlaying(this)
+
+            // 1. A settled leader report, exactly on the original timeline.
+            val firstTickUs = clock.pendingDeadlines.max()
+            session.deliverLeaderReport(SyncTestValues.hash(1), ANCHOR_US, firstTickUs - 1_000_000)
+            runCurrent()
+
+            // 2. The authoritative timeline is re-anchored, 300 ms ahead of the old one.
+            val newAnchorUs = ANCHOR_US + 500_000
+            val newAnchorPositionMs = 800L
+
+            fun newExpectedMs(atUs: Long) = newAnchorPositionMs + (atUs - newAnchorUs) / 1_000
+            session.deliver(
+                PlaybackMessage.PlaybackStateSnapshot(
+                    commandSeq = 1,
+                    queueRevision = 0,
+                    trackHash = SyncTestValues.hash(1),
+                    queueItemId = SyncTestValues.ulid(1),
+                    positionMs = newAnchorPositionMs,
+                    playing = true,
+                    atSessionUs = newAnchorUs,
+                ),
+            )
+            runCurrent()
+
+            // 3 and 4. 500 ms behind the new timeline. The old reference would make that a seek; it is
+            // settled, fresh and in the past, so only the anchor rule can refuse it.
+            player.setState(PlayerState(positionMs = newExpectedMs(firstTickUs) - 500, durationMs = 600_000, playing = true))
+            clock.advanceTo(firstTickUs)
+            runCurrent()
+            assertEquals(-500, coordinator.diagnostics.value.localDriftMs, "the premise: measured against the new anchor")
+            assertNull(coordinator.diagnostics.value.syncErrorMs, "the old reference is no reference")
+            assertTrue(player.calls.none { it is FakeSyncPlayer.Call.Seek || it is FakeSyncPlayer.Call.SetRate })
+
+            // 5. The leader's first report against the new anchor: 300 ms behind it.
+            val secondTickUs = clock.pendingDeadlines.max()
+            session.deliverLeaderReport(
+                SyncTestValues.hash(1),
+                newAnchorUs,
+                secondTickUs - 1_000_000,
+                anchorPositionMs = newAnchorPositionMs,
+                driftMs = -300,
+            )
+            runCurrent()
+            player.setState(PlayerState(positionMs = newExpectedMs(secondTickUs) - 500, durationMs = 600_000, playing = true))
+            clock.advanceTo(secondTickUs)
+            runCurrent()
+
+            // 6. Ordinary follower correction: a 200 ms error, a seek to where the leader is.
+            assertEquals(-200, coordinator.diagnostics.value.syncErrorMs)
+            val seek = player.calls.filterIsInstance<FakeSyncPlayer.Call.Seek>().single()
+            assertEquals(newExpectedMs(secondTickUs) - 300, seek.positionMs)
             assertEquals(1, coordinator.diagnostics.value.hardSeekCount)
         }
 

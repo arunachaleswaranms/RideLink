@@ -100,8 +100,8 @@ public enum PlaybackMessage: Sendable, Equatable {
     /// PROTOCOL §5's drift input, sent every 5 s in both directions. Diagnostics and corrective
     /// *input* only — it is not a command, has no `command_seq`, and can never supersede one.
     case positionReport(trackHash: ContentHash, positionMs: Int64, atSessionUs: Int64, playing: Bool, playbackRate: Double)
-    /// PROTOCOL §5's "full authoritative snapshot the leader emits after any correction or reconnect
-    /// — the reconciliation anchor, not an incremental update." Its payload was likewise
+    /// PROTOCOL §5's "full authoritative snapshot the leader emits on reconnect and reconciliation —
+    /// the reconciliation anchor, not an incremental update." Its payload was likewise
     /// unspecified; ADR-024 §4 derives it from §10's `STATE_SNAPSHOT.playback` so the two agree
     /// field for field. `trackHash` is nullable because "nothing is loaded" is a representable
     /// authoritative state.

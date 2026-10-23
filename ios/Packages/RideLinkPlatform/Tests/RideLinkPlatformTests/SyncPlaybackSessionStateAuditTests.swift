@@ -465,6 +465,7 @@ final class SyncPlaybackSessionStateAuditTests: XCTestCase {
         }
         // Past ADR-004's nudge threshold, so the route-state case has a real correction to suppress.
         let anchorUs = await coordinator.timeline?.anchorSessionUs ?? Self.anchorUs
+        await deliverSettledLeaderReference(anchorUs: anchorUs, tickAtUs: nextTickUs)
         let elapsedMs = (nextTickUs - anchorUs) / 1_000
         await player.setState(
             PlayerState(
@@ -523,6 +524,7 @@ final class SyncPlaybackSessionStateAuditTests: XCTestCase {
         }
         let before = await coordinator.diagnostics.correctionTickCount
         let anchorUs = await coordinator.timeline?.anchorSessionUs ?? Self.anchorUs
+        await deliverSettledLeaderReference(anchorUs: anchorUs, tickAtUs: nextTickUs)
         let elapsedMs = (nextTickUs - anchorUs) / 1_000
         await player.setState(
             PlayerState(
@@ -534,6 +536,22 @@ final class SyncPlaybackSessionStateAuditTests: XCTestCase {
             await coordinator.diagnostics.correctionTickCount > before
         }
         await awaitOutboundQuiescent()
+    }
+
+    /// ADR-004 Amendment A1: a follower's ladder acts only against a settled leader report, so the
+    /// leader reports itself exactly on the timeline one second before the tick. Delivered under the
+    /// session's current generation.
+    private func deliverSettledLeaderReference(anchorUs: Int64, tickAtUs: Int64) async {
+        guard let active = await coordinator.timeline else { return XCTFail("no live timeline to report against") }
+        let atUs = tickAtUs - 1_000_000
+        let before = await coordinator.diagnostics.inboundProcessedCount
+        await session.deliver(.positionReport(
+            trackHash: active.trackHash, positionMs: active.anchorPositionMs + (atUs - anchorUs) / 1_000,
+            atSessionUs: atUs, playing: true, playbackRate: 1.0
+        ))
+        await expect("the leader's report was considered") { [self] in
+            await coordinator.diagnostics.inboundProcessedCount > before
+        }
     }
 
     private func deliverPeerReport(positionMs: Int64, generation: Int64) async {

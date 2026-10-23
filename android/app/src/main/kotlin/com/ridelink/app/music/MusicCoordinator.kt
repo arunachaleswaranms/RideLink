@@ -14,6 +14,7 @@ import com.ridelink.core.player.LocalQueueState
 import com.ridelink.core.player.MusicFailure
 import com.ridelink.core.player.PlaybackCommand
 import com.ridelink.core.player.Player
+import com.ridelink.core.player.PlayerPositionSample
 import com.ridelink.core.player.PlayerState
 import com.ridelink.core.player.TrackEndEdge
 import com.ridelink.data.library.LibraryIndexer
@@ -404,6 +405,9 @@ class MusicCoordinator(
     suspend fun syncSeek(positionMs: Long) {
         player.execute(PlaybackCommand.Seek(positionMs))
     }
+
+    /** ADR-004 Amendment A1 decision 1: the live position, stamped by the caller's clock. A read, not an effect. */
+    suspend fun syncSamplePosition(monotonicNowUs: () -> Long): PlayerPositionSample = player.samplePosition(monotonicNowUs)
 
     /** ADR-004's rate-nudge tier. Always exactly 1.0 when correction ends (brief §38). */
     suspend fun syncSetRate(rate: Double) {

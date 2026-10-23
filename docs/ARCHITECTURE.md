@@ -799,9 +799,10 @@ correct — but the brief is explicit that constant seeking for tiny errors is w
 Every 5 s both devices report `POSITION_REPORT { track_hash, position_ms, at_session_us, playing,
 playback_rate }`.
 
-**Each device measures its own drift against the authoritative timeline, and corrects itself**
+**Each device measures its own drift against the authoritative timeline**
 (Phase 5, [ADR-024 §10](DECISIONS/ADR-024-synchronized-playback-integration.md), refining this
-section's earlier "the leader computes and applies"). Drift is
+section's earlier "the leader computes and applies"; who then corrects is ADR-004 Amendment A1's
+rule, below). Drift is
 `actual local position − expected position at the current session time`, where "expected" comes from
 the anchor the last accepted command set — never one phone's reported position minus the other's,
 because those two numbers are sampled at different session instants and separated by a network delay,
@@ -815,7 +816,33 @@ input, never a command, and it can never outrank one. It is bound to the current
 `track_hash` **and** `at_session_us >= ` the timeline's anchor, so a report from a previous play of
 the same track is inert.
 
-Whichever device measures it, the **dead-band ladder** is the same:
+**The ladder corrects the inter-phone error, and only the follower corrects**
+([ADR-004 Amendment A1](DECISIONS/ADR-004-local-synchronized-playback.md#amendment-a1--22-october-2026--correct-the-inter-phone-error-not-a-lag-both-phones-share),
+STATUS problem 131). Both phones' outputs lag the timeline by about the same output latency (two
+Android phones measured ≤ 2 ms apart while each read about −0.5 s). So the ladder's input is **this
+device's drift minus the leader's**, both against the same timeline, each at its own sampled
+instant:
+- **The leader's output is the reference**, so the leader never corrects for drift. A lag both phones
+  share is never chased. A differential lag, such as one phone's Bluetooth path, is corrected as any
+  other error.
+- **A leader report is usable only when it is settled.** It must be `playing`, sampled ≥ 1.5 s after
+  the anchor, ≤ 12 s old, stamped no later than this device's own sample, and measured against the
+  timeline's current anchor (a re-anchor makes an earlier drift meaningless). The local sample must
+  also be ≥ 1.5 s past the anchor and past this
+  device's last hard seek. Without such a report the ladder decides nothing and releases any nudge
+  to 1.0.
+- **A hard seek lands where the reference output will be once this device's output has restarted.**
+  The target is `expected + leader drift + restartCompensationMs`. Media3's position stands still
+  while an `AudioTrack` restarts, so a seek re-incurs the latency it was meant to remove. The
+  compensation is learned from each seek's own residual, clamped to 0–1 000 ms, kept across playback
+  epochs, and forgotten on any route change. A route change is either peer transitioning, or this
+  device's own count of route transitions begun having moved, which catches one that came and went
+  between two ticks. The route is checked before every early return, so this holds while paused and
+  after a sync failure too.
+- **Every position used for synchronisation is a live read at its own instant**
+  (`SyncPlayerPort.samplePosition`), never the 250 ms UI cache paired with "now".
+
+The ladder below is unchanged. Its input is that inter-phone error:
 
 | \|drift\| | Action | Why |
 |---|---|---|

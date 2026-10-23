@@ -8,7 +8,7 @@ Consequences · Alternatives considered.
 | [001](ADR-001-native-android-and-ios.md) | Native Android and iOS, no cross-platform UI framework | Accepted |
 | [002](ADR-002-lan-mdns-discovery.md) | LAN/hotspot transport with mDNS/DNS-SD discovery | Accepted · **amended A1** (26 Aug 2026 — no stable identity in TXT records) |
 | [003](ADR-003-webrtc-voice-transport.md) | WebRTC for the voice plane only | Accepted |
-| [004](ADR-004-local-synchronized-playback.md) | Replicate files, synchronise playback — never restream | Accepted |
+| [004](ADR-004-local-synchronized-playback.md) | Replicate files, synchronise playback — never restream | Accepted · **amended A1** (22 Oct 2026 — the ladder corrects the inter-phone error, not a common-mode lag; STATUS problem 131) |
 | [005](ADR-005-content-hash-track-identity.md) | Two-tier content hashing for track identity | Accepted |
 | [006](ADR-006-json-control-encoding.md) | JSON for control messages in V1 | Accepted · manifest cost resolved by ADR-013 |
 | [007](ADR-007-control-channel-over-tcp-tls.md) | Control plane on TCP+TLS 1.3, not a WebRTC DataChannel | Accepted · **amended A1** (26 Aug 2026 — secure-transport contingency; TLS-PSK fallback withdrawn) |
@@ -28,7 +28,7 @@ Consequences · Alternatives considered.
 | [021](ADR-021-intercom-transmission-and-capture-ownership.md) | Phase 2b intercom: one capture owner, one policy object, transmission gated at the audio track and never at the device | Accepted · **amended A1–A5** (4–5 Sep 2026) · **A6** (12 Sep 2026 — `AUDIO_STATE` carries its control-session provenance) · **A7** (12 Sep 2026 — an `AUDIO_STATE` revision floor belongs to one sender lifetime; **adds `revision_epoch` to the wire**) |
 | [022](ADR-022-media-session-without-mediasessionservice.md) | A real `MediaSession`, owned by the existing ride foreground service, without subclassing `MediaSessionService` | Accepted |
 | [023](ADR-023-bulk-transfer-session-binding.md) | Bulk transfer session binding, listener lifecycle and cache trust model | Accepted · **amended A1–A6** (5–12 Sep 2026 — six closure audits) |
-| [024](ADR-024-synchronized-playback-integration.md) | Phase 5 synchronized-playback integration | Accepted · **amended A1–A7** (8–12 Sep 2026 — seven closure audits) |
+| [024](ADR-024-synchronized-playback-integration.md) | Phase 5 synchronized-playback integration | Accepted · **amended A1–A16** (A1–A7, 8–12 Sep 2026: seven closure audits; … A16, 22 Oct 2026: §10's drift is measured against the leader's) |
 | [025](ADR-025-inbound-control-frame-provenance.md) | An inbound control frame keeps the authority of the connection it was read from — for every message family, not just Phase 5 | Accepted |
 
 ADRs 011–016 and the three amendments came out of the pre-Phase-1 correction pass recorded in
@@ -72,7 +72,9 @@ and `PLAYBACK_STATE` had no payload; §9's 2 000-item queue cap does not actuall
 `MAX_CONTROL_FRAME_BYTES`, so **the cap moved and the frame limit did not**; and §9 put `status` on
 the wire in the same paragraph that called it untrusted, so it is gone. It deliberately does **not**
 re-open ADR-004 (the drift ladder and the never-restream decision) or ADR-010 (leadership) — it
-records only what integrating them found unanswered.
+records only what integrating them found unanswered. Its Amendment A16 records what ADR-004 Amendment
+A1 changed here: the leader's output is the drift reference, so only a follower corrects, and the
+correction-caused `PLAYBACK_STATE` is gone.
 
 ADR-025 finishes the sweep ADR-024 Amendment A7 started and deliberately stopped short of. A7 proved
 that an inbound frame's authority must come from the connection it was read from and threaded that

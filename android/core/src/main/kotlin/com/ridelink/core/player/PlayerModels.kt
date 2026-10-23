@@ -124,3 +124,18 @@ data class PlayerState(
      *  signal a queue owner turns into [com.ridelink.core.player.LocalQueueAction.Next]. */
     val ended: Boolean get() = localEntryId != null && durationMs > 0 && positionMs >= durationMs && !playing
 }
+
+/**
+ * One position read and the monotonic instant it was taken (ADR-004 Amendment A1 decision 1).
+ *
+ * [PlayerState.positionMs] is published by a 250 ms loop for the UI. Pairing that cached value with
+ * a fresh instant reports up to 250 ms of drift that does not exist (STATUS problem 131), so
+ * synchronisation reads this instead and measures at [atMonoUs], never at "now".
+ */
+data class PlayerPositionSample(
+    val positionMs: Long,
+    val durationMs: Long,
+    val playing: Boolean,
+    val rate: Double,
+    val atMonoUs: Long,
+)

@@ -68,6 +68,12 @@ data class RouteTransitionState(
     val timedOutCount: Int = 0,
     /** Whether the most recent settlement was the failure timeout rather than a platform callback. */
     val lastSettlementTimedOut: Boolean = false,
+    /**
+     * How many transitions have **begun** — never decreases for the life of this state. A transition
+     * that starts and settles between two drift ticks leaves this changed when `transitioning` no
+     * longer shows it (ADR-004 Amendment A1 decision 4, PR #32 review).
+     */
+    val beganCount: Long = 0,
 ) {
     val lastDurationMs: Double? get() = lastDurationUs?.let { it / MICROS_PER_MS }
 
@@ -102,6 +108,7 @@ object RouteTransitionTracker {
                 transitioning = true,
                 startedAtMonoUs = nowMonoUs,
                 lastSettlementTimedOut = false,
+                beganCount = state.beganCount + 1,
             )
         }
 
@@ -117,6 +124,7 @@ object RouteTransitionTracker {
             lastDurationUs = if (started == null) state.lastDurationUs else (nowMonoUs - started).coerceAtLeast(0),
             timedOutCount = state.timedOutCount,
             lastSettlementTimedOut = false,
+            beganCount = state.beganCount,
         )
     }
 
@@ -453,7 +461,10 @@ object AudioSessionLifecycle {
                 // Timed from when the app *learned* of the reset, which is the only instant it
                 // observed: the media server died at some earlier moment nothing measured, and
                 // pretending otherwise would fabricate the IA-03 number this type exists to record.
-                transition = RouteTransitionTracker.begin(RouteTransitionState(), nowMonoUs),
+                // The count of transitions begun survives the reset: it is what tells the drift
+                // ladder that the route moved, and restarting it could repeat a value it already saw.
+                transition =
+                    RouteTransitionTracker.begin(RouteTransitionState(beganCount = state.transition.beganCount), nowMonoUs),
                 lastFailure = VoiceFailure.MEDIA_SERVICES_RESET,
             ),
             listOf(

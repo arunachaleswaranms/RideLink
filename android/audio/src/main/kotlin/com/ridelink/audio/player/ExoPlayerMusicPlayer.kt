@@ -12,6 +12,7 @@ import com.ridelink.core.model.LocalEntryId
 import com.ridelink.core.player.MusicFailure
 import com.ridelink.core.player.PlaybackCommand
 import com.ridelink.core.player.Player
+import com.ridelink.core.player.PlayerPositionSample
 import com.ridelink.core.player.PlayerState
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -150,6 +151,23 @@ class ExoPlayerMusicPlayer(
     }
 
     override val state: PlayerState get() = cachedState
+
+    /**
+     * ADR-004 Amendment A1 decision 1: `currentPosition` read on the player's thread and stamped in
+     * the same step, so the instant is the read's and not that of whatever runs after it. Media3's
+     * audio position follows `AudioTrack` presentation, so it already stands still while output
+     * restarts — that is the drift ladder's business, not this read's.
+     */
+    override suspend fun samplePosition(monotonicNowUs: () -> Long): PlayerPositionSample =
+        withContext(Dispatchers.Main.immediate) {
+            PlayerPositionSample(
+                exoPlayer.currentPosition,
+                currentDurationMs(),
+                exoPlayer.isPlaying,
+                cachedState.rate,
+                monotonicNowUs(),
+            )
+        }
 
     override fun setStateSink(sink: (PlayerState) -> Unit) {
         stateSink = sink

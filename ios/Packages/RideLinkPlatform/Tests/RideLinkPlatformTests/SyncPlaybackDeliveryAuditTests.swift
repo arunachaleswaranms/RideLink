@@ -865,131 +865,99 @@ final class SyncPlaybackDeliveryAuditTests: XCTestCase {
         XCTAssertEqual(probe28, 5, "and the snapshot that overflowed did not apply")
     }
 
-    // MARK: - Finding E — a correction's snapshot keeps the correction's own identity
+    // MARK: - Finding E — a correction's snapshot kept the correction's own identity
 
-    /// **The defect.** `emitPlaybackState()` read `session.currentAuthGeneration()` *inside itself*,
-    /// so a correction that had proved ownership of generation A handed the enqueue whatever
-    /// generation happened to be live by then. On an actor that window is not theoretical: the two
-    /// reads before it are both `await`s, and each is a re-entrancy point.
-    ///
-    /// This lands the boundary **inside** `player.playerState()`, which the emit awaits — the exact
-    /// interleaving the pre-A2 code would have written a Session A snapshot into Session B on.
-    func testACorrectionSupersededBeforeItsSnapshotEnqueueEmitsNothing() async {
-        await build()
-        await leaderPlaying()
-        // The cadence tick reads `playerState()` once for the drift measurement; the emit reads it
-        // again. Parking the **second** read puts the boundary strictly between the correction's
-        // successful ownership proof and the enqueue — the window the pre-A2 code closed by reading
-        // the *live* generation there, and therefore did not close at all.
-        await player.armStateGate(skipping: 1)
-        await driftIntoHardSeekBand()
-        let enqueuedBefore = await coordinator.diagnostics.outboundEnqueuedCount
-
-        clock.advance(to: clock.now() + Self.positionReportUs)
-        await expect("the emit is parked on its own player read") { [self] in await player.isStateGateParked }
-
-        await session.setGeneration(2)
-        await player.releaseStateGate()
-        await settle()
-
-        let snapshots = await session.playbackMessages().filter {
-            if case .playbackState = $0 { return true } else { return false }
-        }
-        XCTAssertTrue(snapshots.isEmpty, "a snapshot caused by a correction in Session A never reaches Session B")
-        let enqueued = await coordinator.diagnostics.outboundEnqueuedCount
-        XCTAssertEqual(enqueued, enqueuedBefore + 1,
-                       "only the tick's own POSITION_REPORT — nothing attributable to the correction")
-    }
-
-    /// The same window, closed by the *epoch* half rather than the session half: the pre-A2 emit
-    /// took no token at all, so a snapshot caused by a correction belonging to a superseded playback
-    /// epoch was indistinguishable from a current one.
-    func testACorrectionWhoseEpochIsSupersededBeforeItsSnapshotEnqueueEmitsNothing() async {
-        await build()
-        await leaderPlaying()
-        await player.armStateGate(skipping: 1)
-        await driftIntoHardSeekBand()
-
-        clock.advance(to: clock.now() + Self.positionReportUs)
-        await expect("the emit is parked on its own player read") { [self] in await player.isStateGateParked }
-
-        await content.addLocal(SyncTestValues.hash(2))
-        await content.addPeer(SyncTestValues.hash(2))
-        await coordinator.playSynchronized(SyncTestValues.hash(2))
-        // **The supersession is waited for, not settled for** (ADR-024 Amendment A3's stress run).
-        // `playSynchronized` reaches `epoch.begin()` only at the end of a long chain — queue add,
-        // send, commit hook, apply chain, content resolve — and a fixed number of yields is a bet on
-        // how many actor hops that takes. `currentTrackHash` is written immediately after
-        // `epoch.begin()` with no `await` between, so it *is* the observable "the new epoch exists".
-        // Releasing the gate before that happens makes the correction legitimately still current,
-        // and the test then fails for the one reason it must never fail: the code was right.
-        await expect("the new playback epoch began") { [self] in
-            await coordinator.diagnostics.currentTrackHash == SyncTestValues.hash(2)
-        }
-        await player.releaseStateGate()
-        await settle()
-
-        let snapshots = await session.playbackMessages().filter {
-            if case .playbackState = $0 { return true } else { return false }
-        }
-        XCTAssertTrue(snapshots.isEmpty, "a snapshot caused by a superseded epoch's correction is never emitted")
-    }
-
-    /// The epoch half, which the old `emitPlaybackState()` could not check at all: it took no token.
-    func testACorrectionWhosePlaybackEpochIsSupersededEmitsNothing() async {
-        await build()
-        await leaderPlaying()
-        await player.gateCalls { call in if case .seek = call { return true } else { return false } }
-        await driftIntoHardSeekBand()
-
-        clock.advance(to: clock.now() + Self.positionReportUs)
-        await expect("the ladder reached the hard-seek tier") { [self] in await player.isGateParked }
-
-        // A new epoch begins while the correction is inside the player.
-        await content.addLocal(SyncTestValues.hash(2))
-        await content.addPeer(SyncTestValues.hash(2))
-        await coordinator.playSynchronized(SyncTestValues.hash(2))
-        // **The supersession is waited for, not settled for** (ADR-024 Amendment A3's stress run).
-        // `playSynchronized` reaches `epoch.begin()` only at the end of a long chain — queue add,
-        // send, commit hook, apply chain, content resolve — and a fixed number of yields is a bet on
-        // how many actor hops that takes. `currentTrackHash` is written immediately after
-        // `epoch.begin()` with no `await` between, so it *is* the observable "the new epoch exists".
-        // Releasing the gate before that happens makes the correction legitimately still current,
-        // and the test then fails for the one reason it must never fail: the code was right.
-        await expect("the new playback epoch began") { [self] in
-            await coordinator.diagnostics.currentTrackHash == SyncTestValues.hash(2)
-        }
-        await player.releaseGate()
-        await settle()
-
-        let probe30 = await coordinator.diagnostics.hardSeekCount
-        XCTAssertEqual(probe30, 0,
-                       "the superseded correction had zero effects")
-    }
-
-    /// And the control: a correction that is still current does emit exactly one snapshot.
-    func testACurrentCorrectionStillEmitsExactlyOneAuthoritativeSnapshot() async {
+    /// Finding E was that a correction's `PLAYBACK_STATE` read the *live* generation instead of the
+    /// correction's own. ADR-024 Amendment A16 removed that snapshot: only a leader emits one, and
+    /// since ADR-004 Amendment A1 a leader never corrects — its output is the drift reference. A
+    /// leader drifting well into the hard-seek band therefore neither seeks nor re-states anything.
+    /// Mirrors Android's `a leader never corrects its own drift, so no correction re-states
+    /// authoritative state`.
+    func testALeaderNeverCorrectsItsOwnDriftSoNoCorrectionRestatesAuthoritativeState() async {
         await build()
         await leaderPlaying()
         await driftIntoHardSeekBand()
+        let ticksBefore = await coordinator.diagnostics.correctionTickCount
 
         clock.advance(to: clock.now() + Self.positionReportUs)
-        // The snapshot itself is the signal: `hardSeekCount` moves one statement before the emit, so
-        // waiting on the counter and then reading the wire is a race the A1 suites already learned
-        // about the hard way.
-        await expect("the correction emitted its authoritative snapshot") { [self] in
-            await session.playbackMessages().contains {
-                if case .playbackState = $0 { return true } else { return false }
-            }
+        await expect("the leader's tick finished") { [self] in
+            await coordinator.diagnostics.correctionTickCount > ticksBefore
         }
         await awaitOutboundQuiescent()
 
+        let diagnostics = await coordinator.diagnostics
+        XCTAssertEqual(diagnostics.localDriftMs, 500, "the premise: the leader measured its drift")
+        XCTAssertEqual(diagnostics.hardSeekCount, 0)
+        XCTAssertNil(diagnostics.syncErrorMs, "a leader has no reference to be in error against")
+        let calls = await player.calls
+        XCTAssertFalse(calls.contains { if case .seek = $0 { return true }; if case .setRate = $0 { return true }; return false })
         let snapshots = await session.playbackMessages().filter {
             if case .playbackState = $0 { return true } else { return false }
         }
-        XCTAssertEqual(snapshots.count, 1, "the ordinary path is untouched by the ownership work")
-        let finalHardSeeks = await coordinator.diagnostics.hardSeekCount
-        XCTAssertEqual(finalHardSeeks, 1)
+        XCTAssertTrue(snapshots.isEmpty)
+    }
+
+    /// What Finding E's tests also pinned, and still holds for the follower that now does all the
+    /// correcting: a correction whose session ends while it is inside the player has no effect.
+    func testAFollowerCorrectionWhoseSessionEndsInsideItsPlayerCallHasNoEffect() async {
+        await build()
+        let anchor = await followerPlaying()
+        await player.gateCalls { call in if case .seek = call { return true } else { return false } }
+        await followerDriftsIntoHardSeekBand(anchor: anchor)
+        await expect("the ladder reached the hard-seek tier") { [self] in await player.isGateParked }
+
+        await session.setGeneration(2)
+        await player.releaseGate()
+        await settle()
+
+        let hardSeeks = await coordinator.diagnostics.hardSeekCount
+        XCTAssertEqual(hardSeeks, 0, "a correction from a dead session spends nothing")
+        let snapshots = await session.playbackMessages().filter {
+            if case .playbackState = $0 { return true } else { return false }
+        }
+        XCTAssertTrue(snapshots.isEmpty)
+    }
+
+    /// The epoch half: a new `PLAY` while the correction is inside the player.
+    func testAFollowerCorrectionWhosePlaybackEpochIsSupersededInsideItsPlayerCallHasNoEffect() async {
+        await build()
+        let anchor = await followerPlaying()
+        await player.gateCalls { call in if case .seek = call { return true } else { return false } }
+        await followerDriftsIntoHardSeekBand(anchor: anchor)
+        await expect("the ladder reached the hard-seek tier") { [self] in await player.isGateParked }
+
+        await deliverAndAwait(playCommand(seq: 2, effectiveAt: clock.now() + Self.leadUs, queueRevision: 0))
+        await player.releaseGate()
+        await settle()
+
+        let hardSeeks = await coordinator.diagnostics.hardSeekCount
+        XCTAssertEqual(hardSeeks, 0, "the superseded correction had zero effects")
+    }
+
+    /// A follower playing track 1 from its anchor; returns the anchor's session instant.
+    private func followerPlaying() async -> Int64 {
+        await connect(asLeader: false)
+        await content.addLocal(SyncTestValues.hash(1))
+        let anchor = clock.now()
+        await deliverAndAwait(playCommand(seq: 1, effectiveAt: anchor, queueRevision: 0))
+        await expect("playback started") { [self] in await player.calls.contains(.start) }
+        await awaitTickArmed()
+        await player.clearCalls()
+        await session.clearSent()
+        return anchor
+    }
+
+    /// One tick later, 500 ms ahead of a leader that has reported itself exactly on time.
+    private func followerDriftsIntoHardSeekBand(anchor: Int64) async {
+        let tickAt = clock.pendingDeadlines().max() ?? clock.now()
+        await deliverAndAwait(.positionReport(
+            trackHash: SyncTestValues.hash(1), positionMs: (tickAt - 1_000_000 - anchor) / 1_000,
+            atSessionUs: tickAt - 1_000_000, playing: true, playbackRate: 1.0
+        ))
+        await player.setState(
+            PlayerState(positionMs: (tickAt - anchor) / 1_000 + 500, durationMs: 3_600_000, playing: true, rate: 1.0)
+        )
+        clock.advance(to: tickAt)
     }
 
     // MARK: - Helpers
